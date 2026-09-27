@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.packaging]
+pytestmark = [pytest.mark.packaging, pytest.mark.timeout(180)]
 
 _REPO = Path(__file__).resolve().parents[2]
+_SDIST_SMOKE_TEST_TIMEOUT_SECONDS = 180
 
 
 def _isolated_process_env(root: Path) -> dict[str, str]:
@@ -119,7 +120,9 @@ def test_isolated_wheel_import_and_odcli_help(tmp_path: Path) -> None:
     _install_and_smoke(wheel, tmp_path)
 
 
+@pytest.mark.timeout(_SDIST_SMOKE_TEST_TIMEOUT_SECONDS)
 def test_isolated_sdist_import_and_odcli_help(tmp_path: Path) -> None:
+    """Allow the isolated sdist install and cold CLI import to finish."""
     _wheel, sdist = _dist()
     _install_and_smoke(sdist, tmp_path)
 

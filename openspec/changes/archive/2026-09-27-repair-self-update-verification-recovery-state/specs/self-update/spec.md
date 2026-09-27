@@ -1,9 +1,4 @@
-# self-update Specification
-
-## Purpose
-Define a provenance-aware, recoverable self-upgrade flow for OdCLI uv-tool installations, including immutable revision resolution, migration, verification, and rollback contracts.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: `odcli update` supported scope
 
@@ -76,55 +71,6 @@ Inspect SHALL be in-process ActionSteps. `PUBLIC_LEAF_CASES` SHALL contain two r
 - **WHEN** execution stops after install or migrate and before successful verify and commit
 - **THEN** the journal and rollback snapshot remain present
 - **AND** matching installed and target SHAs do not convert that state into `already_current`
-
-### Requirement: Coordinator over existing Alembic and storage migrations
-
-A coordinator SHALL call existing Alembic revisions and `internal/storage_migration.py` in order. A parallel competing version scheme or extra from/to registry type SHALL NOT be created. Update-specific calls SHALL NOT be scattered across CLI commands. Expression SHALL NOT be used for lock, rollback, compensation, or lifecycle.
-
-Migrations SHALL run forward only and strictly in order. A missing step, an unknown newer schema, or an absent migration path SHALL block the update before data changes. Each step SHALL be transactional where possible and resumably safe after interruption; multi-step file operations SHALL use existing lock/journal/verification patterns. Repository-local `.odcli` of another project SHALL NOT be migrated without explicit need; if project-local migration is required, the plan SHALL enumerate the projects and SHALL NOT scan all of home unboundedly.
-
-The package update SHALL be considered incomplete until ProcessStep 2 has finished migrations and verify. With an unfinished journal, `odcli update` SHALL resume; every other command SHALL fail with `update_incomplete` and SHALL NOT resume. Commands SHALL NOT run on a partially migrated state.
-
-#### Scenario: missing migration path blocks update
-
-- **WHEN** the target schema is unknown or no migration path exists
-- **THEN** the update is blocked before data changes
-
-#### Scenario: resumable after interruption
-
-- **WHEN** a migration step is interrupted
-- **THEN** re-running the coordinator resumes the step safely via its idempotency/resume policy
-
-#### Scenario: normal commands refuse partially migrated state
-
-- **WHEN** a normal command other than `odcli update` runs with an unfinished migration journal
-- **THEN** it fails with `update_incomplete` and does not resume
-
-#### Scenario: update resumes unfinished journal
-
-- **WHEN** `odcli update` runs with an unfinished migration journal
-- **THEN** it resumes through the coordinator
-
-### Requirement: `odcli update` rollback and unknown outcome
-
-Before install, any error SHALL leave the system unchanged. After install: a failure before the first irreversible migration SHALL restore the previous exact uv-tool revision and snapshot metadata and verify the old version starts. A migration step SHALL NOT declare itself rollback-safe without an implemented and tested reverse action or snapshot restore. If safe automatic rollback is impossible, the command SHALL preserve journal and snapshot and return `update_incomplete` with a frozen recovery `ProcessStep` whose argv is `("uv", "tool", "install", "--force", "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@<snapshot-sha>")` through `internal/proc`, `shell=False`. That recovery SHALL NOT be an `ActionStep` and SHALL NOT be an invented shell string.
-
-A timeout or network loss during `uv` SHALL NOT automatically mean the install failed: the command SHALL first re-determine the actual installed revision. A downgrade SHALL NOT be performed without an explicit `--allow-downgrade`; downgrade SHALL only be allowed with a proven reverse migration path or a compatible snapshot restore. `sudo`, shell-profile changes, and deletion of previous data/rollback snapshot before successful verify SHALL NOT be used.
-
-#### Scenario: install failure leaves old version working
-
-- **WHEN** the install phase fails
-- **THEN** the previous working version is unchanged and starts normally
-
-#### Scenario: migration failure rolls back or reports incomplete
-
-- **WHEN** a migration step fails
-- **THEN** either an automatic rollback restores and verifies the old version, or the command returns `update_incomplete` with the snapshot, journal, and the frozen recovery `ProcessStep` uv argv
-
-#### Scenario: timeout re-checks revision
-
-- **WHEN** `uv` times out after a potential install
-- **THEN** the command re-determines the actual installed revision before any re-install
 
 ### Requirement: `odcli update` UX and typed result
 

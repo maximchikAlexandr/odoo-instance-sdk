@@ -4,266 +4,109 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import msgspec
 import pytest
 
 from odoo_instance_sdk.exceptions import (
     LockConflictError,
     UpdateError,
-    UpdateIncompleteError,
 )
-from odoo_instance_sdk.execution import Command, ProcessStep
-from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
+from odoo_instance_sdk.execution import ProcessStep
+from odoo_instance_sdk.internal.proc import RecordingExecutor
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
-    assert_update_not_blocking,
     read_uv_tool_direct_url,
-    unfinished_update_journal,
     update,
     update_command,
 )
-from odoo_instance_sdk.models.update import UpdateResult
 
-_SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-_SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-_SHA_OLD = "0000000000000000000000000000000000000000"
-_ANCESTRY_STEPS = [
-    "update.inspect.ancestry-init",
-    "update.inspect.ancestry-fetch",
-    "update.inspect.ancestry-installed",
-    "update.inspect.ancestry-target",
-]
-_VCS_DIRECT_URL = json.dumps(
-    {
-        "url": f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{_SHA_A}",
-        "vcs_info": {
-            "vcs": "git",
-            "commit_id": _SHA_A,
-            "requested_revision": "main",
-        },
-    }
-)
-_MAINTENANCE_JSON = json.dumps(
-    msgspec.to_builtins(
-        UpdateResult(
-            outcome="updated",
-            source_repo="https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
-            previous_version="0.1.0",
-            target_version="0.1.0",
-            final_version="0.1.0",
-            previous_sha=_SHA_B,
-            target_sha=_SHA_B,
-            final_sha=_SHA_B,
-            executed_migration_ids=("catalog:head",),
-            final_schema_versions={"catalog": "head", "storage": "complete"},
-        )
-    )
+from .self_update_test_support import (
+    _ANCESTRY_STEPS,
+    _SHA_A,
+    _SHA_B,
+    _SHA_OLD,
+    _executor_factory,
+    _FakeDist,
+    _patch_distribution,
+    _patch_provenance,
+    _prepare_update_case,
+    _provenance,
 )
 
 
-class _FakeDist:
-    def __init__(self, *, version: str = "0.1.0", direct_url: str | None = _VCS_DIRECT_URL) -> None:
-        self.version = version
-        self._direct_url = direct_url
-        self.files = None
-
-    def read_text(self, filename: str) -> str | None:
-        if filename == "direct_url.json":
-            return self._direct_url
-        return None
-
-
-def _provenance(
-    *,
-    commit_id: str = _SHA_A,
-    executable: Path | None = None,
-) -> InstalledProvenance:
-    return InstalledProvenance(
-        version="0.1.0",
-        source_repo="https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
-        commit_id=commit_id,
-        requested_revision="main",
-        is_uv_tool_vcs=True,
-        uv_tool_bin_path=executable,
-        uv_tool_env_path=Path("/tmp/uv-tool-env"),
-        manual_argv=None,
-    )
-
-
-def _patch_provenance(
-    monkeypatch: pytest.MonkeyPatch,
-    provenance: InstalledProvenance,
-) -> None:
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update.read_uv_tool_direct_url",
-        lambda *_args, **_kwargs: provenance,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands.read_uv_tool_direct_url",
-        lambda *_args, **_kwargs: provenance,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._assert_runtime_environment",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._verify_installed_revision",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
-
-
-def _patch_distribution(monkeypatch: pytest.MonkeyPatch, dist: _FakeDist) -> None:
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update.distribution",
-        lambda _name: dist,
-    )
-
-
-@pytest.fixture
-def user_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / ".odcli"
-    root.mkdir()
-    locks = root / "locks"
-    locks.mkdir()
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.get_user_root", lambda **_: root)
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.get_locks_dir", lambda **_: locks)
-    return root
-
-
-def _process_result(
-    step: PreparedStep,
-    *,
-    returncode: int = 0,
-    stdout: str = "",
-    stderr: str = "",
-) -> ProcessResult:
-    return ProcessResult(
-        argv=step.argv,
-        returncode=returncode,
-        stdout=stdout,
-        stderr=stderr,
-        duration=0.0,
-        cwd=None,
-        environment=(),
-    )
-
-
-def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
-    def factory(step):
-        if step.step_id == "update.resolve":
-            return _process_result(
-                step,
-                returncode=cast("int", effects.get("resolve_rc", 0)),
-                stdout=str(effects.get("resolve_stdout", f"{_SHA_B}\trefs/heads/main")),
-                stderr=str(effects.get("resolve_stderr", "")),
-            )
-        if step.step_id == "update.resolve.check":
-            return _process_result(
-                step,
-                returncode=cast("int", effects.get("resolve_rc", 0)),
-                stdout=str(effects.get("resolve_stdout", f"{_SHA_B}\trefs/heads/main")),
-                stderr=str(effects.get("resolve_stderr", "")),
-            )
-        if step.step_id == "update.inspect.ancestry-installed":
-            relation = effects.get("ancestry_relation", "descendant")
-            return _process_result(
-                step,
-                returncode=0 if relation in {"descendant", "same"} else 1,
-            )
-        if step.step_id == "update.inspect.ancestry-target":
-            relation = effects.get("ancestry_relation", "descendant")
-            return _process_result(step, returncode=0 if relation == "ancestor" else 1)
-        if step.step_id == "update.install":
-            return _process_result(step, returncode=cast("int", effects.get("install_rc", 0)))
-        if step.step_id == "update.migrate":
-            return _process_result(
-                step,
-                returncode=cast("int", effects.get("maintenance_rc", 0)),
-                stdout=_MAINTENANCE_JSON
-                if cast("int", effects.get("maintenance_rc", 0)) == 0
-                else "",
-            )
-        if step.step_id == "update.recovery":
-            return _process_result(step, returncode=cast("int", effects.get("rollback_rc", 0)))
-        return _process_result(step)
-
-    return RecordingExecutor(result_factory=factory)
+@dataclass(frozen=True)
+class _UpdateCase:
+    id: str
+    command_kwargs: dict[str, str | bool]
+    effects: dict[str, object]
+    expected_outcome: str | None
+    expected_errors: tuple[type[Exception], ...] = ()
+    expected_steps: tuple[str, ...] | None = None
+    expected_install_arg: str | None = None
 
 
 _UPDATE_COMMAND_MATRIX = (
-    pytest.param(
-        {"ref": _SHA_A},
-        {},
-        "already_current",
-        (),
-        id="already-current-sha",
-    ),
-    pytest.param(
+    _UpdateCase("already-current-sha", {"ref": _SHA_A}, {}, "already_current", expected_steps=()),
+    _UpdateCase(
+        "check-resolve",
         {"ref": "main", "check": True},
         {"resolve_stdout": f"{_SHA_B}\trefs/heads/main\n"},
         "updated",
-        (),
-        id="check-resolve",
     ),
-    pytest.param(
+    _UpdateCase(
+        "check-already-current",
         {"ref": "main", "check": True},
         {"resolve_stdout": f"{_SHA_A}\trefs/heads/main\n"},
         "already_current",
-        (),
-        id="check-already-current",
     ),
-    pytest.param(
+    _UpdateCase(
+        "check-annotated-tag",
         {"ref": "v0.2.0", "check": True},
-        {"resolve_stdout": (f"{_SHA_A}\trefs/tags/v0.2.0\n{_SHA_B}\trefs/tags/v0.2.0^{{}}\n")},
+        {"resolve_stdout": f"{_SHA_A}\trefs/tags/v0.2.0\n{_SHA_B}\trefs/tags/v0.2.0^{{}}\n"},
         "updated",
-        (),
-        id="check-annotated-tag",
     ),
-    pytest.param(
-        {"ref": _SHA_B, "check": True},
-        {},
-        "updated",
-        (),
-        id="check-exact-sha",
-    ),
-    pytest.param(
+    _UpdateCase("check-exact-sha", {"ref": _SHA_B, "check": True}, {}, "updated"),
+    _UpdateCase(
+        "check-ref-unavailable",
         {"ref": "main", "check": True},
         {"resolve_rc": 2, "resolve_stderr": "fatal: remote ref not found"},
         "unsupported_install",
-        (),
-        id="check-ref-unavailable",
     ),
-    pytest.param(
+    _UpdateCase(
+        "preflight-downgrade-refused",
         {"ref": _SHA_OLD, "allow_downgrade": False},
         {"ancestry_relation": "ancestor"},
         "preflight_failed",
-        (),
-        id="preflight-downgrade-refused",
     ),
-    pytest.param(
+    _UpdateCase(
+        "downgrade-allowed",
         {"ref": _SHA_OLD, "allow_downgrade": True},
         {"install_rc": 0, "maintenance_rc": 0, "ancestry_relation": "ancestor"},
         "updated",
-        (),
-        id="downgrade-allowed",
+        expected_steps=(
+            *_ANCESTRY_STEPS,
+            "update.install",
+            "update.migrate",
+            "update.verify.version",
+        ),
+        expected_install_arg=_SHA_OLD,
     ),
 )
 
 
 _UPDATE_COORDINATOR_MATRIX = (
-    pytest.param(
+    _UpdateCase(
+        "unsupported-wheel",
         {"ref": "main"},
         {"direct_url": json.dumps({"url": "https://example.com/pkg.whl"})},
         "unsupported_install",
-        (),
-        id="unsupported-wheel",
     ),
-    pytest.param(
+    _UpdateCase(
+        "unsupported-repo",
         {"ref": "main"},
         {
             "direct_url": json.dumps(
@@ -274,159 +117,180 @@ _UPDATE_COORDINATOR_MATRIX = (
             )
         },
         "unsupported_install",
-        (),
-        id="unsupported-repo",
     ),
-    pytest.param(
-        {"ref": "main"},
-        {"install_rc": 1},
-        None,
-        (UpdateError,),
-        id="install-failure",
-    ),
-    pytest.param(
+    _UpdateCase("install-failure", {"ref": "main"}, {"install_rc": 1}, None, (UpdateError,)),
+    _UpdateCase(
+        "migration-failure-incomplete",
         {"ref": "main"},
         {"install_rc": 0, "maintenance_rc": 1, "rollback_rc": 1},
         "update_incomplete",
-        (),
-        id="migration-failure-incomplete",
     ),
-    pytest.param(
+    _UpdateCase(
+        "migration-failure-rollback",
         {"ref": "main"},
         {"install_rc": 0, "maintenance_rc": 1, "rollback_rc": 0},
         "rolled_back",
-        (),
-        id="migration-failure-rollback",
+        expected_steps=(
+            "update.resolve",
+            *_ANCESTRY_STEPS,
+            "update.install",
+            "update.migrate",
+            "update.recovery",
+        ),
+        expected_install_arg=_SHA_B,
     ),
-    pytest.param(
+    _UpdateCase(
+        "successful-update",
         {"ref": "main"},
         {"install_rc": 0, "maintenance_rc": 0},
         "updated",
-        (),
-        id="successful-update",
+        expected_steps=(
+            "update.resolve",
+            *_ANCESTRY_STEPS,
+            "update.install",
+            "update.migrate",
+            "update.verify.version",
+        ),
+        expected_install_arg=_SHA_B,
     ),
 )
 
 
-def _prepare_update_case(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    effects: dict[str, object],
-) -> RecordingExecutor:
-    executable = tmp_path / "odcli"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    executable.chmod(0o755)
-    provenance = _provenance(commit_id=_SHA_A, executable=executable)
-    direct_url = effects.get("direct_url", _VCS_DIRECT_URL)
-    _patch_distribution(monkeypatch, _FakeDist(direct_url=cast("str | None", direct_url)))
-    if "direct_url" not in effects:
-        _patch_provenance(monkeypatch, provenance)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
-        lambda _p: type("U", (), {"free": 10 * 1024**3})(),
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._catalog_schema_version",
-        lambda: "head",
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._verify_installed_revision",
-        lambda *_args, **_kwargs: None,
-    )
-    return _executor_factory(effects)
+def _assert_expected_command_result(
+    case: _UpdateCase, result: Any, executor: RecordingExecutor
+) -> None:
+    assert result.outcome == case.expected_outcome
+    if case.expected_steps is not None:
+        assert [step.step_id for step in executor.executed] == list(case.expected_steps)
+    if case.expected_install_arg is not None:
+        install = next(
+            (step for step in executor.executed if step.step_id == "update.install"), None
+        )
+        assert install is not None and any(case.expected_install_arg in arg for arg in install.argv)
+
+
+def _validate_command_already_current(
+    case: _UpdateCase, result: Any, executor: RecordingExecutor
+) -> None:
+    _assert_expected_command_result(case, result, executor)
+    assert not any(step.step_id.startswith("update.install") for step in executor.executed)
+
+
+def _validate_command_unavailable(
+    case: _UpdateCase, result: Any, executor: RecordingExecutor
+) -> None:
+    _assert_expected_command_result(case, result, executor)
+    assert result.manual_argv is not None
+    assert "remote ref not found" in (result.next_step or "")
+
+
+_CommandCaseValidator = Callable[[_UpdateCase, Any, RecordingExecutor], None]
+
+
+_COMMAND_CASE_VALIDATORS: dict[str, _CommandCaseValidator] = {
+    "already-current-sha": _validate_command_already_current,
+    "check-ref-unavailable": _validate_command_unavailable,
+}
+
+
+def _validate_coordinator_error(
+    case: _UpdateCase, executor: RecordingExecutor, _user_root: Path
+) -> None:
+    with pytest.raises(case.expected_errors):
+        update(**cast("Any", case.command_kwargs), executor=executor)
+
+
+def _run_coordinator_result(case: _UpdateCase, executor: RecordingExecutor) -> Any:
+    return update(**cast("Any", case.command_kwargs), executor=executor)
+
+
+def _assert_expected_coordinator_result(
+    case: _UpdateCase, result: Any, executor: RecordingExecutor
+) -> None:
+    if case.expected_steps is not None:
+        assert [step.step_id for step in executor.executed] == list(case.expected_steps)
+    if case.expected_install_arg is not None:
+        install = next(step for step in executor.executed if step.step_id == "update.install")
+        assert any(case.expected_install_arg in arg for arg in install.argv)
+
+
+def _validate_coordinator_unsupported(
+    case: _UpdateCase, executor: RecordingExecutor, _user_root: Path
+) -> None:
+    result = _run_coordinator_result(case, executor)
+    assert result.outcome == "unsupported_install"
+    assert result.manual_argv is not None
+
+
+def _validate_coordinator_incomplete(
+    case: _UpdateCase, executor: RecordingExecutor, _user_root: Path
+) -> None:
+    result = _run_coordinator_result(case, executor)
+    assert result.outcome == "update_incomplete"
+    assert result.recovery_argv is not None
+    assert result.journal_state == "present"
+
+
+def _validate_coordinator_rollback(
+    case: _UpdateCase, executor: RecordingExecutor, _user_root: Path
+) -> None:
+    result = _run_coordinator_result(case, executor)
+    assert result.outcome == "rolled_back"
+    assert result.rollback_outcome == "restored"
+    _assert_expected_coordinator_result(case, result, executor)
+
+
+def _validate_coordinator_success(
+    case: _UpdateCase, executor: RecordingExecutor, user_root: Path
+) -> None:
+    result = _run_coordinator_result(case, executor)
+    assert result.outcome == "updated"
+    assert not (user_root / "update" / "journal.json").exists()
+    assert not (user_root / "update" / "snapshot").exists()
+    _assert_expected_coordinator_result(case, result, executor)
+
+
+_CoordinatorCaseValidator = Callable[[_UpdateCase, RecordingExecutor, Path], None]
+
+
+_COORDINATOR_CASE_VALIDATORS: dict[str, _CoordinatorCaseValidator] = {
+    "unsupported-wheel": _validate_coordinator_unsupported,
+    "unsupported-repo": _validate_coordinator_unsupported,
+    "install-failure": _validate_coordinator_error,
+    "migration-failure-incomplete": _validate_coordinator_incomplete,
+    "migration-failure-rollback": _validate_coordinator_rollback,
+    "successful-update": _validate_coordinator_success,
+}
 
 
 @pytest.mark.parametrize(
-    ("command_kwargs", "effects", "expected_outcome", "expected_errors"),
-    _UPDATE_COMMAND_MATRIX,
+    "case",
+    [pytest.param(case, id=case.id) for case in _UPDATE_COMMAND_MATRIX],
 )
 def test_update_command_matrix(
     monkeypatch: pytest.MonkeyPatch,
     user_root: Path,
     tmp_path: Path,
-    command_kwargs: dict[str, str | bool],
-    effects: dict[str, object],
-    expected_outcome: str | None,
-    expected_errors: tuple[type[Exception], ...],
+    case: _UpdateCase,
 ) -> None:
-    executor = _prepare_update_case(monkeypatch, tmp_path, effects)
-    command = update_command(**cast("Any", command_kwargs), executor=executor)
-    if expected_errors:
-        with pytest.raises(expected_errors):
-            command.run()
-        return
-
-    result = command.run()
-    assert result.outcome == expected_outcome
-    if expected_outcome == "unsupported_install":
-        assert result.manual_argv is not None
-        if command_kwargs.get("check") and effects.get("resolve_stderr"):
-            assert "remote ref not found" in (result.next_step or "")
-    if expected_outcome == "update_incomplete":
-        assert result.recovery_argv is not None
-        assert result.journal_state == "present"
-    if expected_outcome == "rolled_back":
-        assert result.rollback_outcome == "restored"
-    if expected_outcome == "already_current":
-        assert not any(step.step_id.startswith("update.install") for step in executor.executed)
-    if expected_outcome == "updated" and not command_kwargs.get("check"):
-        expected_steps = [*_ANCESTRY_STEPS, "update.install", "update.migrate"]
-        if str(command_kwargs.get("ref", "")).lower() != _SHA_OLD:
-            expected_steps.insert(0, "update.resolve")
-        assert [step.step_id for step in executor.executed] == expected_steps
-        install = next(
-            (step for step in executor.executed if step.step_id == "update.install"), None
-        )
-        assert command_kwargs.get("ref") != "main" or (
-            install is not None and any(_SHA_B in arg for arg in install.argv)
-        )
+    executor = _prepare_update_case(monkeypatch, tmp_path, case.effects)
+    command = update_command(**cast("Any", case.command_kwargs), executor=executor)
+    validator = _COMMAND_CASE_VALIDATORS.get(case.id, _assert_expected_command_result)
+    validator(case, command.run(), executor)
 
 
 @pytest.mark.parametrize(
-    ("command_kwargs", "effects", "expected_outcome", "expected_errors"),
-    _UPDATE_COORDINATOR_MATRIX,
+    "case",
+    [pytest.param(case, id=case.id) for case in _UPDATE_COORDINATOR_MATRIX],
 )
 def test_update_coordinator_matrix(
     monkeypatch: pytest.MonkeyPatch,
     user_root: Path,
     tmp_path: Path,
-    command_kwargs: dict[str, str | bool],
-    effects: dict[str, object],
-    expected_outcome: str | None,
-    expected_errors: tuple[type[Exception], ...],
+    case: _UpdateCase,
 ) -> None:
-    executor = _prepare_update_case(monkeypatch, tmp_path, effects)
-    if expected_errors:
-        with pytest.raises(expected_errors):
-            update(**cast("Any", command_kwargs), executor=executor)
-        return
-
-    result = update(**cast("Any", command_kwargs), executor=executor)
-    assert result.outcome == expected_outcome
-    if expected_outcome == "unsupported_install":
-        assert result.manual_argv is not None
-    if expected_outcome == "update_incomplete":
-        assert result.recovery_argv is not None
-        assert result.journal_state == "present"
-    if expected_outcome == "rolled_back":
-        assert result.rollback_outcome == "restored"
-    if expected_outcome == "updated":
-        assert [step.step_id for step in executor.executed] == [
-            "update.resolve",
-            *_ANCESTRY_STEPS,
-            "update.install",
-            "update.migrate",
-        ]
-        install = next(step for step in executor.executed if step.step_id == "update.install")
-        assert any(_SHA_B in arg for arg in install.argv)
+    executor = _prepare_update_case(monkeypatch, tmp_path, case.effects)
+    _COORDINATOR_CASE_VALIDATORS[case.id](case, executor, user_root)
 
 
 def test_read_uv_tool_direct_url_uses_pep610_metadata(
@@ -488,26 +352,6 @@ def test_read_uv_tool_direct_url_accepts_uv_bare_vcs_url(
     assert provenance.commit_id == _SHA_A
 
 
-def test_unfinished_journal_blocks_other_commands(user_root: Path) -> None:
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "migrate",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert unfinished_update_journal() is not None
-    with pytest.raises(UpdateIncompleteError, match="doctor"):
-        assert_update_not_blocking("doctor")
-
-
 def test_mutually_exclusive_check_and_dry_run_cli() -> None:
     from click.testing import CliRunner
 
@@ -521,7 +365,7 @@ def test_mutually_exclusive_check_and_dry_run_cli() -> None:
     assert result.exit_code == 2
 
 
-def test_dry_run_command_has_frozen_process_steps(
+def test_dry_run_resolves_target_without_execution(
     monkeypatch: pytest.MonkeyPatch,
     user_root: Path,
     tmp_path: Path,
@@ -547,17 +391,37 @@ def test_dry_run_command_has_frozen_process_steps(
     )
     resolution = command.run()
     assert resolution.target_sha == _SHA_B
+    assert command.plan.steps == tuple(
+        step.public_projection() for step in command._prepared().steps
+    )
+    assert executor.executed[0].step_id == "update.resolve"
+
+
+def test_update_plan_contains_frozen_mutation_steps(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    _patch_distribution(monkeypatch, _FakeDist())
+    _patch_provenance(monkeypatch, _provenance(executable=executable))
+    executor = _executor_factory({})
     mutation = update_command(ref=_SHA_B, executor=executor)
     mutation_steps = [step for step in mutation.plan.steps if isinstance(step, ProcessStep)]
     assert [step.step_id for step in mutation_steps] == [
         *_ANCESTRY_STEPS,
         "update.install",
         "update.migrate",
+        "update.verify.version",
     ]
     install = next(step for step in mutation_steps if step.step_id == "update.install")
     assert install.argv[0] == "uv"
     assert any(_SHA_B in arg for arg in install.argv)
-    assert executor.executed[0].step_id == "update.resolve"
+    verify = next(step for step in mutation_steps if step.step_id == "update.verify.version")
+    assert verify.argv == (str(executable.absolute()), "--version")
+    assert verify.read_only is True
 
 
 def test_update_lock_conflict_propagates(
@@ -657,117 +521,6 @@ def test_preflight_failed_reports_disk_bytes(
     assert str(reserve) in message
 
 
-def _snapshot_resume_command(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-    *,
-    installed_sha: str,
-    executor: RecordingExecutor,
-) -> Command[UpdateResult]:
-    executable = tmp_path / "odcli"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    executable.chmod(0o755)
-    _patch_provenance(monkeypatch, _provenance(commit_id=installed_sha, executable=executable))
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
-        lambda _p: type("U", (), {"free": 10 * 1024**3})(),
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._catalog_schema_version",
-        lambda: "head",
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._verify_installed_revision",
-        lambda *_args, **_kwargs: None,
-    )
-
-    def fail_snapshot(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("snapshot overwritten")
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._write_snapshot", fail_snapshot
-    )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "snapshot",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return update_command(ref="main", executor=executor)
-
-
-def test_snapshot_resume_installs_after_crash_before_install(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-) -> None:
-    executor = _executor_factory({"maintenance_rc": 0})
-    command = _snapshot_resume_command(
-        monkeypatch,
-        user_root,
-        tmp_path,
-        installed_sha=_SHA_A,
-        executor=executor,
-    )
-    result = command.run()
-    assert result.outcome == "updated"
-    install = next(step for step in executor.executed if step.step_id == "update.install")
-    assert any(_SHA_B in arg for arg in install.argv)
-
-
-def test_snapshot_resume_skips_install_after_crash_before_journal_write(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-) -> None:
-    executor = _executor_factory({"maintenance_rc": 0})
-    command = _snapshot_resume_command(
-        monkeypatch,
-        user_root,
-        tmp_path,
-        installed_sha=_SHA_B,
-        executor=executor,
-    )
-    result = command.run()
-    assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == ["update.migrate"]
-
-
-def test_snapshot_resume_rejects_unexpected_installed_revision(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-) -> None:
-    executor = _executor_factory({"maintenance_rc": 0})
-    command = _snapshot_resume_command(
-        monkeypatch,
-        user_root,
-        tmp_path,
-        installed_sha=_SHA_OLD,
-        executor=executor,
-    )
-    with pytest.raises(UpdateError, match="unexpected installed revision"):
-        command.run()
-    assert [step.step_id for step in executor.executed] == _ANCESTRY_STEPS
-
-
 def test_install_failure_rechecks_revision_before_failing(
     monkeypatch: pytest.MonkeyPatch,
     user_root: Path,
@@ -823,154 +576,3 @@ def test_install_failure_rechecks_revision_before_failing(
     result = update(ref="main", executor=executor)
     assert result.outcome == "updated"
     assert result.final_sha == _SHA_B
-
-
-def test_update_resumes_from_migrate_journal(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-) -> None:
-    executable = tmp_path / "odcli"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    executable.chmod(0o755)
-    _patch_provenance(monkeypatch, _provenance(executable=executable))
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
-        lambda _p: type("U", (), {"free": 10 * 1024**3})(),
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._catalog_schema_version",
-        lambda: "head",
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._verify_installed_revision",
-        lambda *_args, **_kwargs: None,
-    )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "migrate",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    executor = _executor_factory({"maintenance_rc": 0})
-    result = update_command(ref=_SHA_B, executor=executor).run()
-    assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
-
-
-def test_migrate_resume_rollback_uses_journal_snapshot_sha(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-) -> None:
-    executable = tmp_path / "odcli"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    executable.chmod(0o755)
-    _patch_provenance(monkeypatch, _provenance(commit_id=_SHA_B, executable=executable))
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
-        lambda _p: type("U", (), {"free": 10 * 1024**3})(),
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._catalog_schema_version",
-        lambda: "head",
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._verify_installed_revision",
-        lambda *_args, **_kwargs: None,
-    )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "migrate",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    executor = _executor_factory({"maintenance_rc": 1, "rollback_rc": 0})
-    result = update_command(ref=_SHA_B, executor=executor).run()
-    assert result.outcome == "rolled_back"
-    recovery_steps = [step for step in executor.executed if step.step_id == "update.recovery"]
-    assert len(recovery_steps) == 1
-    recovery_argv = " ".join(recovery_steps[0].argv)
-    assert _SHA_A in recovery_argv
-    assert _SHA_B not in recovery_argv
-
-
-def test_update_resumes_from_install_journal(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-) -> None:
-    executable = tmp_path / "odcli"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    executable.chmod(0o755)
-    _patch_provenance(monkeypatch, _provenance(executable=executable))
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
-        lambda _p: type("U", (), {"free": 10 * 1024**3})(),
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._catalog_schema_version",
-        lambda: "head",
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._verify_installed_revision",
-        lambda *_args, **_kwargs: None,
-    )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "install",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
-    )
-    executor = _executor_factory({"install_rc": 0, "maintenance_rc": 0})
-    result = update_command(ref="main", executor=executor).run()
-    assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
