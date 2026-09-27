@@ -26,4 +26,4 @@
 
 - [x] 5.1 Update `CONTRIBUTING.md` with frozen dependency setup, unchanged five-file scope, full and single-target invocation, shard/summary artifact locations, terminal-completeness failures, diagnostic/non-required policy, and the reviewed baseline-lowering rule.
 - [x] 5.2 Run focused helper/runner/CI/documentation tests, formatting, lint and strict typing for changed Python, strict OpenSpec validation, and confirm no production/public API file changed.
-- [ ] 5.3 Dispatch the implemented workflow manually, retain its URL and artifacts, and verify every canonical target has one terminal shard within 45 minutes, aggregate `not checked` is zero, totals reconcile, baseline comparison passes, and infrastructure/bootstrap/collection failures remain non-zero.
+- [x] 5.3 Dispatch the implemented workflow manually, retain its URL and artifacts, and verify every canonical target has one terminal shard within 45 minutes, aggregate `not checked` is zero, totals reconcile, baseline comparison passes, and infrastructure/bootstrap/collection failures remain non-zero.

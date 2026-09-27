@@ -112,7 +112,7 @@ def test_probe_wildcard_checks_loopback_after_free_wildcard(
 
 def test_probe_bind_uses_bounded_socket_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     sock = Mock()
-    monkeypatch.setattr(address.socket, "socket", Mock(return_value=sock))
+    monkeypatch.setattr("odoo_instance_sdk.internal.address.socket.socket", Mock(return_value=sock))
 
     assert (
         address._probe_bind(socket.AF_INET, socket.SOCK_STREAM, 0, ("127.0.0.1", 8069))
