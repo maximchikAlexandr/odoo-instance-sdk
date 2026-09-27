@@ -89,6 +89,11 @@ Every event MUST contain monotonic SQLite sequence, backup UUID, UTC timestamp a
 
 `client.backups.history()` MUST return events by `sequence DESC` and MUST support filters `backup_id`, `source_base_url`, `database_name`.
 
+#### Scenario: Полная история lifecycle
+
+- **WHEN** backup скачан, проверен и удалён
+- **THEN** history содержит success download, validation и deletion events для одного backup UUID
+
 #### Scenario: Complete lifecycle history
 
 - **WHEN** a backup is downloaded, validated, pinned, unpinned and deleted
