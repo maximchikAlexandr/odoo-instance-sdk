@@ -56,23 +56,13 @@ from odoo_instance_sdk.internal.self_update import (
 )
 from odoo_instance_sdk.internal.self_update_ancestry import (
     RevisionRelation,
-)
-from odoo_instance_sdk.internal.self_update_ancestry import (
     revision_probe_steps as _revision_probe_steps,
-)
-from odoo_instance_sdk.internal.self_update_ancestry import (
     run_revision_probe as _run_revision_probe,
 )
 from odoo_instance_sdk.internal.self_update_policy import (
     preflight_error as _policy_preflight_error,
-)
-from odoo_instance_sdk.internal.self_update_policy import (
     probe_source_repo as _probe_source_repo,
-)
-from odoo_instance_sdk.internal.self_update_policy import (
     skip_revision_probe as _skip_revision_probe,
-)
-from odoo_instance_sdk.internal.self_update_policy import (
     source_origin_step as _source_origin_step,
 )
 from odoo_instance_sdk.internal.self_update_recovery import (

@@ -660,8 +660,8 @@ the command's plan and execution use that same snapshot:
 command = instance.run_foreground_command(
     args=("--dev=reload", "--log-level", "debug", "--stop-after-init")
 )
-print(command.plan)       # redacted argv, including native arguments
-result = command.run()    # native inherited stdin/stdout/stderr
+print(command.plan)  # redacted argv, including native arguments
+result = command.run()  # native inherited stdin/stdout/stderr
 print(result)
 ```
 

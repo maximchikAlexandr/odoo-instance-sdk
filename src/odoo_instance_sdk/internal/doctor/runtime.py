@@ -33,8 +33,10 @@ if TYPE_CHECKING:
 def _project_environment_drift(
     env: DevelopmentEnvironment, applied_settings_json: str | None
 ) -> _EnvironmentDrift:
-    from odoo_instance_sdk.internal.doctor import manifest as _manifest
-    from odoo_instance_sdk.internal.doctor import manifest_drift as _manifest_drift
+    from odoo_instance_sdk.internal.doctor import (
+        manifest as _manifest,
+        manifest_drift as _manifest_drift,
+    )
 
     try:
         evidence = _manifest._current_drift_components(env)

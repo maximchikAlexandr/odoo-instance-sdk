@@ -10,6 +10,7 @@ class RuntimeState(enum.StrEnum):
     READY = "ready"
     NOT_READY = "not_ready"
 
+
 class GitActivityState(enum.StrEnum):
     CLEAN = "clean"
     AHEAD = "ahead"
@@ -17,15 +18,18 @@ class GitActivityState(enum.StrEnum):
     DIVERGED = "diverged"
     ORPHAN = "orphan"
 
+
 class PidScope(enum.StrEnum):
     HOST = "host"
     DOCKER_VM = "docker_vm"
     UNAVAILABLE = "unavailable"
 
+
 class PortObservation(enum.StrEnum):
     FREE = "free"
     OCCUPIED = "occupied"
     UNKNOWN = "unknown"
+
 
 class PgAdminEligibilityState(enum.StrEnum):
     ELIGIBLE = "eligible"
@@ -34,12 +38,15 @@ class PgAdminEligibilityState(enum.StrEnum):
     CLUSTER_NOT_OWNED = "cluster_not_owned"
     CLUSTER_UNHEALTHY = "cluster_unhealthy"
 
+
 class PgAdminEligibility:
     state: PgAdminEligibilityState
+
 
 class GitDiff:
     added: int
     deleted: int
+
 
 class GitActivity:
     default_branch: str
@@ -51,15 +58,18 @@ class GitActivity:
     diff: GitDiff | None
     state: GitActivityState
 
+
 class PythonEnvFootprint:
     owned: bool
     bytes: int | None
+
 
 class DatabaseFootprint:
     owned: bool
     postgres_bytes: int | None
     filestore_bytes: int | None
     total_bytes: int | None
+
 
 class StorageFootprint:
     total_bytes: int
@@ -68,6 +78,7 @@ class StorageFootprint:
     python_environment: PythonEnvFootprint
     database: DatabaseFootprint
     other_files_bytes: int | None
+
 
 class RuntimeMetrics:
     state: RuntimeState
@@ -83,12 +94,14 @@ class RuntimeMetrics:
     commit_sha: str | None
     branch: str | None
 
+
 class ClusterContainer:
     id: str | None
     name: str | None
     image: str | None
     pid: int | None
     pid_scope: PidScope
+
 
 class ClusterMetrics:
     cpu_percent: float | None
@@ -97,15 +110,18 @@ class ClusterMetrics:
     volume_usage_bytes: int | None
     sampled_at: datetime | None
 
+
 class ClusterEndpoint:
     host: str
     port: int
+
 
 class ClusterResourceSnapshot:
     container: ClusterContainer | None
     metrics: ClusterMetrics | None
     unavailability_reason: str | None
     sampled_at: datetime | None
+
 
 class ClusterSnapshot:
     mode: Literal["external", "compose"]
@@ -117,6 +133,7 @@ class ClusterSnapshot:
     unavailability_reason: str | None
     sampled_at: datetime | None
 
+
 class EnvironmentArtifacts:
     worktree_exists: bool
     worktree_registered: bool
@@ -125,6 +142,7 @@ class EnvironmentArtifacts:
     python_contained: bool
     dependency_lock_exists: bool
     backup_exists: bool | None
+
 
 class EnvironmentSnapshot:
     id: str
@@ -143,12 +161,14 @@ class EnvironmentSnapshot:
     storage: StorageFootprint
     pgadmin: PgAdminEligibility
 
+
 class ProjectSummary:
     id: str
     name: str
     display_hint: str
     environment_count: int
     cluster: ClusterSnapshot | None
+
 
 class Snapshot:
     schema_version: int

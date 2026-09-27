@@ -1,9 +1,10 @@
 target-version = "py312"
 line-length = 100
+required-version = ">=0.16.7,<0.17"
 
 [lint]
 select = [
-    "BLE", "C", "E", "F", "FA", "FLY", "G", "I", "ICN", "ISC",
+    "B007", "B023", "B904", "B905", "BLE", "C", "DTZ", "E", "F", "FA", "FLY", "G", "I", "ICN", "ISC",
     "LOG", "PGH", "PIE", "PLC", "PLE", "PLW", "PYI", "RET", "RUF",
     "SIM", "SLOT", "T", "TC", "TID", "TRY", "UP", "W", "YTT",
 ]
@@ -54,6 +55,7 @@ ignore = [
 "src/odoo_instance_sdk/storage/catalog/environment.py" = ["PLC0414"]
 
 [lint.isort]
+combine-as-imports = true
 known-first-party = ["odoo_instance_sdk"]
 
 [format]

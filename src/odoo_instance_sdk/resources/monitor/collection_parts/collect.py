@@ -135,8 +135,7 @@ class _CollectMixin:
         ``CheckoutInventory`` model. The action is read-only and never spawns a
         process outside the bounded Git facts collector.
         """
-        from odoo_instance_sdk.execution import Command as _Command
-        from odoo_instance_sdk.execution import ExecutionPlan
+        from odoo_instance_sdk.execution import Command as _Command, ExecutionPlan
         from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
         from odoo_instance_sdk.internal.proc import (
             PreparedAction,
@@ -271,8 +270,7 @@ class _CollectMixin:
         read-only and never spawns a process outside the shared PostgreSQL
         backend attribution boundary.
         """
-        from odoo_instance_sdk.execution import Command as _Command
-        from odoo_instance_sdk.execution import ExecutionPlan
+        from odoo_instance_sdk.execution import Command as _Command, ExecutionPlan
         from odoo_instance_sdk.internal.proc import (
             PreparedAction,
             prepared_command,

@@ -20,14 +20,8 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
 from odoo_instance_sdk.internal.git_policy import (
     check_log as _check_log,
-)
-from odoo_instance_sdk.internal.git_policy import (
     module_scope as _module_scope,
-)
-from odoo_instance_sdk.internal.git_policy import (
     semantic_tag as _semantic_tag,
-)
-from odoo_instance_sdk.internal.git_policy import (
     ticket as _ticket,
 )
 from odoo_instance_sdk.internal.git_sync import SyncSteps, execute_sync

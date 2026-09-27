@@ -125,13 +125,13 @@ class ExecutionDeadline:
 
 
 type PrivateJsonValue = (
-    None
-    | bool
+    bool
     | int
     | float
     | str
     | tuple["PrivateJsonValue", ...]
     | Mapping[str, "PrivateJsonValue"]
+    | None
 )
 
 # The only private compatibility projection currently stored with a command is

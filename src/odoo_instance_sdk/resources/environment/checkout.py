@@ -468,8 +468,7 @@ class _CheckoutMixin:
         if comparison.status is BackupProvenanceStatus.UNKNOWN:
             if options.source_database is not None and source_database is not None:
                 warnings = (
-                    f"Backup provenance is unknown for explicit source database "
-                    f"{source_database!r}; branch compatibility could not be verified.",
+                    f"Backup provenance is unknown for explicit source database {source_database!r}; branch compatibility could not be verified.",
                 )
             else:
                 raise EnvironmentConflictError(
@@ -823,10 +822,10 @@ class _CheckoutMixin:
                 host=plan.http_interface,
                 exclude_project=plan.repo_root,
             )
-        except EnvironmentConflictError:
+        except EnvironmentConflictError as exc:
             raise EnvironmentConflictError(
                 "port_in_use", f"Port {plan.http_port} is no longer available"
-            )
+            ) from exc
 
     def _do_checkout(  # noqa: C901
         self,

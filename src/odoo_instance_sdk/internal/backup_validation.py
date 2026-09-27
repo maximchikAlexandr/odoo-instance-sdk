@@ -439,7 +439,7 @@ def validate_dump(
         if exc.__class__.__name__ == "ProcessTimeoutError":
             return DumpValidationResult(valid=False, errors=("pg_restore timed out",))
         return DumpValidationResult(valid=False, unavailable=True)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         if raise_if_unavailable:
-            raise BackupValidationUnavailableError(f"pg_restore not found at {exe}")
+            raise BackupValidationUnavailableError(f"pg_restore not found at {exe}") from exc
         return DumpValidationResult(valid=False, unavailable=True)

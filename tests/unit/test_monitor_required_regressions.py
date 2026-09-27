@@ -40,7 +40,7 @@ def test_projects_sort_by_id_even_when_paths_sort_inversely(
 ) -> None:
     """Project display paths are deliberately opposite to their stable IDs."""
     catalog = make_catalog(tmp_path)
-    for name, key in (("z-path", "aaa"), ("a-path", "zzz")):
+    for name, _key in (("z-path", "aaa"), ("a-path", "zzz")):
         root = tmp_path / name
         root.mkdir()
         worktree = root / "wt"

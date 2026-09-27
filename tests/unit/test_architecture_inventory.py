@@ -249,12 +249,14 @@ def _discover_public_process_methods() -> dict[str, int]:  # noqa: C901
         if path.is_relative_to(_SOURCE_ROOT / "internal" / "proc"):
             continue
 
-        def visit(body: list[ast.stmt], prefix: str = "") -> None:
+        def visit(body: list[ast.stmt], prefix: str = "", source_path: Path = path) -> None:
             for node in body:
                 if isinstance(node, ast.ClassDef):
                     visit(node.body, f"{prefix}{node.name}.")
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    qualified = f"{path.relative_to(_REPO_ROOT).as_posix()}:{prefix}{node.name}"
+                    qualified = (
+                        f"{source_path.relative_to(_REPO_ROOT).as_posix()}:{prefix}{node.name}"
+                    )
                     functions[qualified] = node
                     calls[qualified] = {
                         call.func.id

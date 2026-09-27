@@ -330,7 +330,7 @@ def test_ps_watch_recalculates_layout_for_each_successful_refresh(  # noqa: C901
     assert [column.width for column in first_tables[0].columns] != [
         column.width for column in second_tables[0].columns
     ]
-    for frame, width in zip(live.frames, (80, 120)):
+    for frame, width in zip(live.frames, (80, 120), strict=True):
         _assert_process_table_boundaries(render_rich_text(frame, width=width))
 
 

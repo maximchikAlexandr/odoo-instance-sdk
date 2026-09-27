@@ -34,7 +34,7 @@ from odoo_instance_sdk.internal.proc import (
     prepared_command,
 )
 
-type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
+type JsonValue = bool | int | float | str | list[JsonValue] | dict[str, JsonValue] | None
 
 
 class _PlanObservation(

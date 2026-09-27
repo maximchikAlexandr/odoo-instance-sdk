@@ -381,7 +381,7 @@ def _run_pump(  # noqa: C901
                 drain_after_termination()
                 raise timeout_error()  # noqa: TRY301
             ready.sort(key=lambda item: 0 if item[0].data == "stdout" else 1)
-            for key, mask in ready:
+            for key, _mask in ready:
                 stream = cast("IO[bytes]", key.fileobj)
                 if key.data == "stdin":
                     payload = prepared.stdin

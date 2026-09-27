@@ -84,8 +84,10 @@ REDACT_CASES: tuple[tuple[str, str], ...] = (
 
 SANITIZE_SECRET_CASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
-        'password="my secret" token=abc123\n'
-        'postgresql://alice:secret@example.test/db api_key="another key"',
+        (
+            'password="my secret" token=abc123\n'
+            'postgresql://alice:secret@example.test/db api_key="another key"'
+        ),
         ("my secret", "abc123", "alice:secret", "another key"),
     ),
 )

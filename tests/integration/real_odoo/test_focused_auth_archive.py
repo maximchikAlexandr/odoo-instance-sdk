@@ -22,8 +22,6 @@ from tests.integration.real_odoo.failures import (
 )
 from tests.integration.real_odoo.focused_support import (
     BACKUP_ID as _BACKUP_ID,
-)
-from tests.integration.real_odoo.focused_support import (
     _approve_project_postgres,
     _bind_catalog_path,
     _catalog_for_project,
@@ -31,27 +29,13 @@ from tests.integration.real_odoo.focused_support import (
     _isolated_catalog,
     _project,
     _project_database_probe,
-    project_filestore,
-)
-from tests.integration.real_odoo.focused_support import (
     catalog_state as _catalog_state,
-)
-from tests.integration.real_odoo.focused_support import (
     focused_catalog as _focused_catalog_fixture,
-)
-from tests.integration.real_odoo.focused_support import (
     focused_project as _focused_project_fixture,
-)
-from tests.integration.real_odoo.focused_support import (
     invoke_in_registered_worktree as _invoke_in_registered_worktree,
-)
-from tests.integration.real_odoo.focused_support import (
     observe_failure as _observe_failure,
-)
-from tests.integration.real_odoo.focused_support import (
+    project_filestore,
     record as _record,
-)
-from tests.integration.real_odoo.focused_support import (
     seed_backup as _seed_backup,
 )
 

@@ -745,8 +745,10 @@ class TestBackupProvenance:
     ) -> None:
         from odoo_instance_sdk.internal.dbprep import materialize as preparation
         from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
-        from odoo_instance_sdk.project import ProjectConfig
-        from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
+        from odoo_instance_sdk.project import (
+            ProjectConfig,
+            TestInstanceProjectConfig as ConfigTestInstance,
+        )
 
         root = tmp_path
         common = git_common_dir(root)
@@ -1408,7 +1410,7 @@ def test_remote_restore_rejected(instance_remote: OdooInstance, tmp_path: Path) 
         filename="x.zip",
         size_bytes=0,
         sha256="",
-        downloaded_at=datetime.now(),
+        downloaded_at=datetime.now(UTC),
     )
     with pytest.raises(NonLocalInstanceError):
         instance_remote.databases.restore(backup, "testdb")

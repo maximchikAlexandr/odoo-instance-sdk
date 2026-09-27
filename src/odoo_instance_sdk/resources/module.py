@@ -40,14 +40,14 @@ if TYPE_CHECKING:
 
 
 type _LiteralValue = (
-    None
-    | bool
+    bool
     | int
     | float
     | str
     | list["_LiteralValue"]
     | tuple["_LiteralValue", ...]
     | dict[str, "_LiteralValue"]
+    | None
 )
 
 

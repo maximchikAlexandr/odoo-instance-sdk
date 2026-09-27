@@ -15,11 +15,7 @@ from tests.integration.real_odoo.focused_support import (
     _bind_catalog_path,
     _ensure_isolated_environment,
     _isolated_catalog,
-)
-from tests.integration.real_odoo.focused_support import (
     focused_catalog as _focused_catalog_fixture,
-)
-from tests.integration.real_odoo.focused_support import (
     focused_project as _focused_project_fixture,
 )
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES, PublicLeafCase

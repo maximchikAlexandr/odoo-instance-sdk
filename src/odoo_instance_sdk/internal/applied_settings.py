@@ -14,8 +14,7 @@ if TYPE_CHECKING:
 
 APPLIED_SETTINGS_VERSION = 1
 type SettingsValue = (
-    None
-    | bool
+    bool
     | int
     | float
     | str
@@ -24,6 +23,7 @@ type SettingsValue = (
     | Path
     | Mapping[str, SettingsValue]
     | Sequence[SettingsValue]
+    | None
 )
 
 

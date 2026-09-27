@@ -127,6 +127,7 @@ def checkout(
     options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
 ) -> DevelopmentEnvironment: ...
 
+
 def sync_python(
     self,
     selector: EnvironmentSelector,
@@ -135,6 +136,7 @@ def sync_python(
     hash_lock: Path | None = None,
     hash_lock_sha256: str | None = None,
 ) -> DevelopmentEnvironment: ...
+
 
 def sync_python_command(
     self,
@@ -145,7 +147,9 @@ def sync_python_command(
     hash_lock_sha256: str | None = None,
 ) -> Command[DevelopmentEnvironment]: ...
 
+
 def get(self, selector: EnvironmentSelector) -> DevelopmentEnvironment: ...
+
 
 def list(
     self,
@@ -153,6 +157,7 @@ def list(
     project: ProjectConfig | Path | None = None,
     include_removed: bool = False,
 ) -> list[DevelopmentEnvironment]: ...
+
 
 def remove(self, selector: EnvironmentSelector) -> None: ...
 ```

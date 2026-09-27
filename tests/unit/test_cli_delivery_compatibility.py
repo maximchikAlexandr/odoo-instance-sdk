@@ -10,11 +10,9 @@ import pytest
 if TYPE_CHECKING:
     from rich.console import RenderableType
 
-from odoo_instance_sdk.commands import output as output_commands
-from odoo_instance_sdk.commands import ps as ps_commands
+from odoo_instance_sdk.commands import output as output_commands, ps as ps_commands
 from odoo_instance_sdk.commands.cli_parts.callbacks import _print_doctor
-from odoo_instance_sdk.commands.env import checkout as env_checkout
-from odoo_instance_sdk.commands.env import display as env_display
+from odoo_instance_sdk.commands.env import checkout as env_checkout, display as env_display
 from odoo_instance_sdk.commands.multi_target import _rich_multi_target
 from odoo_instance_sdk.commands.output import (
     JsonObject,

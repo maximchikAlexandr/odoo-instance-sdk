@@ -103,6 +103,7 @@ def checkout(
     options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
 ) -> DevelopmentEnvironment: ...
 
+
 def sync_python(
     self,
     selector: EnvironmentSelector,
@@ -110,7 +111,9 @@ def sync_python(
     upgrade: bool = False,
 ) -> DevelopmentEnvironment: ...
 
+
 def get(self, selector: EnvironmentSelector) -> DevelopmentEnvironment: ...
+
 
 def list(
     self,
@@ -118,6 +121,7 @@ def list(
     project: ProjectConfig | Path | None = None,
     include_removed: bool = False,
 ) -> list[DevelopmentEnvironment]: ...
+
 
 def remove(self, selector: EnvironmentSelector) -> None: ...
 ```

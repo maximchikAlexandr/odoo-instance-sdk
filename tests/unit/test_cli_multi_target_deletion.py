@@ -71,7 +71,7 @@ def _seed_two_backups(tmp_path: Path) -> tuple[Path, Path, Path]:
     db_path = tmp_path / "catalog.sqlite3"
     backup_a = tmp_path / f"backup-{BACKUP_ID_A}.zip"
     backup_b = tmp_path / f"backup-{BACKUP_ID_B}.zip"
-    for backup_id, path in ((BACKUP_ID_A, backup_a), (BACKUP_ID_B, backup_b)):
+    for _backup_id, path in ((BACKUP_ID_A, backup_a), (BACKUP_ID_B, backup_b)):
         with ZipFile(path, "w") as archive:
             archive.writestr("manifest.json", json.dumps({"db_name": "demo"}))
             archive.writestr("dump.sql", "-- test")

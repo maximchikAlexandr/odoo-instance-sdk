@@ -46,7 +46,7 @@ def wait_tcp(port: int, *, container: str, timeout: float = 90.0) -> None:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return
-        except OSError:
+        except OSError as exc:
             state = run(
                 "docker", "inspect", "--format", "{{.State.Running}}", container
             ).stdout.strip()
@@ -57,7 +57,7 @@ def wait_tcp(port: int, *, container: str, timeout: float = 90.0) -> None:
                     capture_output=True,
                     check=False,
                 )
-                raise RuntimeError((logs.stdout + logs.stderr)[-10000:])
+                raise RuntimeError((logs.stdout + logs.stderr)[-10000:]) from exc
             time.sleep(0.25)
     raise TimeoutError(f"port {port} was not ready")
 
@@ -82,7 +82,7 @@ def wait_http(port: int, *, container: str, timeout: float = 120.0) -> None:
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/web/health", timeout=2):
                 return
-        except OSError:
+        except OSError as exc:
             state = run(
                 "docker", "inspect", "--format", "{{.State.Running}}", container
             ).stdout.strip()
@@ -93,7 +93,7 @@ def wait_http(port: int, *, container: str, timeout: float = 120.0) -> None:
                     capture_output=True,
                     check=False,
                 )
-                raise RuntimeError((logs.stdout + logs.stderr)[-10000:])
+                raise RuntimeError((logs.stdout + logs.stderr)[-10000:]) from exc
             time.sleep(0.5)
     raise TimeoutError(f"Odoo on port {port} was not ready")
 

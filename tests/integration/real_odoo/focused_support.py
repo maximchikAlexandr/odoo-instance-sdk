@@ -673,8 +673,7 @@ def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> N
         "odoo_instance_sdk.commands.env.checkout.get_catalog_path",
     ):
         monkeypatch.setattr(target, provider)
-    from odoo_instance_sdk.commands import backup as backup_commands
-    from odoo_instance_sdk.commands import resource as resource_commands
+    from odoo_instance_sdk.commands import backup as backup_commands, resource as resource_commands
 
     monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", provider)
     monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", provider)

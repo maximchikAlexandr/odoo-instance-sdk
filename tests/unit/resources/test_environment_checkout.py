@@ -546,8 +546,10 @@ class TestCheckoutPreflight:
         )
         assert explicit.provenance.status is BackupProvenanceStatus.UNKNOWN
         assert explicit.warnings == (
-            "Backup provenance is unknown for explicit source database 'comerta'; "
-            "branch compatibility could not be verified.",
+            (
+                "Backup provenance is unknown for explicit source database 'comerta'; "
+                "branch compatibility could not be verified."
+            ),
         )
 
         with pytest.raises(EnvironmentConflictError, match="--source-db"):
