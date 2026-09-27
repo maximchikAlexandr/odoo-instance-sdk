@@ -60,8 +60,8 @@ Topological level 1 содержит независимые `WP-01` и `WP-04`. 
 - **depends_on:** none.
 - **Stage / topological level:** 1.
 - **Owned responsibility scope:** shared runtime/listener identity helper, auxiliary restore consumer adaptation, detached planning/execution and focused lifecycle tests. Critical shared files include `resources/instance/auxiliary_restore_identity.py`, the extracted shared identity module, `resources/instance/auxiliary_restore.py`, `resources/instance/planning.py`, runtime identity helpers, `tests/unit/test_run_detached.py` and auxiliary restore identity tests. CLI callback edits belong to `WP-07`.
-- **Contract surface:** exact PID/create-time/argv/cwd/config/socket proof; health plus expected environment/database binding; finite timeout; immutable wait/cleanup actions; terminate only owned process group; conditional runtime-row clear; retained logfile/tail and surviving-process identity.
-- **DoD / evidence:** disabled compatibility, success, early exit, timeout, wrong listener/binding, unavailable inspection, inert preview, confirmed cleanup and cleanup-failure evidence pass on supported platform seams; auxiliary restore keeps the same proof.
+- **Contract surface:** exact PID/create-time/argv/cwd/config/socket proof, with the injected effective `--logfile` retained in expected argv; health plus expected environment/database binding; finite timeout; immutable wait/cleanup actions; terminate only owned process group; conditional runtime-row clear; retained logfile/tail and surviving-process identity.
+- **DoD / evidence:** disabled compatibility, success, early exit, timeout, wrong listener/binding, effective-logfile argv mismatch, unavailable inspection, inert preview, confirmed cleanup and cleanup-failure evidence pass on supported platform seams; auxiliary restore keeps the same proof.
 - **Parallel-safety rationale:** runtime lifecycle files are disjoint from `WP-01` persisted configuration/catalog foundation and all later retention/COPY packages.
 
 ## WP-05 — Pinning, protected deletion and manual prune

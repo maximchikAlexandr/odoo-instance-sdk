@@ -22,7 +22,7 @@
 
 ## 4. Environment-bound detached readiness
 
-- [ ] 4.1 Extract the existing runtime/listener ownership proof into one shared internal helper used by auxiliary restore and detached readiness; retain exact PID/create-time/argv/cwd/config/socket checks and fail closed on unavailable inspection.
+- [ ] 4.1 Extract the existing runtime/listener ownership proof into one shared internal helper used by auxiliary restore and detached readiness; retain exact PID/create-time/argv/cwd/config/socket checks, including the injected effective `--logfile` in expected argv, and fail closed on unavailable inspection.
 - [ ] 4.2 Extend detached command/convenience APIs with opt-in readiness and finite positive timeout/default 60 seconds; represent wait and cleanup in the immutable plan and verify disabled compatibility, success, timeout, early exit, wrong binding/listener and inert preview.
 - [ ] 4.3 Reuse owned process-group termination and identity-conditional catalog cleanup; verify confirmed cleanup, preserved logfile/tail/environment/database evidence, and retained runtime identity plus typed surviving-process error when cleanup cannot be proven.
 
