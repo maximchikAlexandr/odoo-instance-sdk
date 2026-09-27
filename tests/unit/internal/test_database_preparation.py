@@ -11,6 +11,7 @@ import warnings
 import zipfile
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import TYPE_CHECKING, cast
@@ -43,8 +44,11 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
     ProjectConfig,
+    RemoteSourceConfig,
     TestInstanceProjectConfig as ConfigTestInstance,
 )
+
+FIXED_NOW = datetime(2026, 12, 31, tzinfo=UTC)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -179,7 +183,7 @@ def test_selected_native_dump_uses_pg_restore_process_boundary(
         filename=dump_path.name,
         size_bytes=dump_path.stat().st_size,
         sha256=hashlib.sha256(dump_path.read_bytes()).hexdigest(),
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.backup_validation.validate_dump",
@@ -237,7 +241,7 @@ def test_selected_native_dump_uses_verified_snapshot_after_source_path_swap(
         filename=dump_path.name,
         size_bytes=len(original),
         sha256=hashlib.sha256(original).hexdigest(),
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.backup_validation.validate_dump",
@@ -304,7 +308,7 @@ def test_selected_odoo_zip_executes_real_psql_plain_sql_transport(tmp_path: Path
         filename=archive_path.name,
         size_bytes=archive_path.stat().st_size,
         sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
     payload = capture_selected_backup_restore(backup)
     materialize_selected_backup_dump(payload)
@@ -355,7 +359,7 @@ def test_selected_odoo_zip_rejects_manifest_database_mismatch(tmp_path: Path) ->
         filename=archive_path.name,
         size_bytes=archive_path.stat().st_size,
         sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
 
     with pytest.raises(ConfigError, match="database name does not match"):
@@ -569,7 +573,7 @@ def test_selected_dump_stream_counter_cleans_up_lying_metadata(
         filename=archive_path.name,
         size_bytes=archive_path.stat().st_size,
         sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
     payload = database_preparation.capture_selected_backup_restore(backup)
     real_open = database_preparation._open_verified_zip
@@ -617,7 +621,7 @@ def test_selected_filestore_stream_counter_removes_partial_destination(
         filename=archive_path.name,
         size_bytes=archive_path.stat().st_size,
         sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
     payload = database_preparation.capture_selected_backup_restore(backup)
     real_open = database_preparation._open_verified_zip
@@ -680,7 +684,7 @@ def test_selected_restore_consumes_verified_snapshot_after_source_path_swap(
         filename=archive_path.name,
         size_bytes=archive_path.stat().st_size,
         sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
     payload = database_preparation.capture_selected_backup_restore(backup)
     real_open = os.open
@@ -1168,7 +1172,7 @@ def test_preparation_command_runs_captured_git_steps_once(
     from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
     from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult, RecordingExecutor
 
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     remote = MagicMock()
     remote.databases.backup.return_value = backup
     client = MagicMock()
@@ -1208,6 +1212,8 @@ def _production_restore_command(
     *,
     odoo_returncode: int = 0,
     python_value: str | Path | None = None,
+    remote_name: str | None = None,
+    observed: dict[str, object] | None = None,
 ) -> tuple[
     Command[DatabasePreparationResult],
     RecordingExecutor,
@@ -1264,13 +1270,44 @@ def _production_restore_command(
             mode="compose", image="postgres:16", port=55432, user="odoo"
         ),
         default_source_database="old",
-        test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
+        test_instance=(
+            ConfigTestInstance(base_url="https://example.test", database="remote")
+            if remote_name is None
+            else None
+        ),
+        remote_instances=(
+            RemoteSourceConfig(
+                name=remote_name,
+                base_url="https://staging.example",
+                database="staging_db",
+                git_branch="staging",
+            ),
+        )
+        if remote_name is not None
+        else (),
     )
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
+    if remote_name is not None:
+        backup = Backup(
+            id=backup.id,
+            source_base_url="https://staging.example",
+            database_name="staging_db",
+            format=backup.format,
+            filestore_requested=backup.filestore_requested,
+            path=backup.path,
+            filename=backup.filename,
+            size_bytes=backup.size_bytes,
+            sha256=backup.sha256,
+            downloaded_at=backup.downloaded_at,
+            source_git_branch="staging",
+            source_name=remote_name,
+        )
     remote = MagicMock()
     remote.databases.backup.return_value = backup
     client = MagicMock()
     client.instance.return_value = remote
+    if observed is not None:
+        observed.update(client=client, remote=remote)
     local = MagicMock()
     local.databases.restore.side_effect = _consume_restore_probes
     cluster = PostgresCluster._from_config(
@@ -1279,7 +1316,9 @@ def _production_restore_command(
         compose_runner=None,
         project_id="<runtime>",
     )
-    options = DatabaseRefreshOptions(restore=True, reset_admin_password=True)
+    options = DatabaseRefreshOptions(
+        restore=True, reset_admin_password=True, remote_name=remote_name
+    )
     source_resolution = resolve_test_source(project, options)
     runtime = preparation.resolve_runtime_binding(project, tmp_path)
 
@@ -1332,7 +1371,12 @@ def _production_restore_command(
     monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
     monkeypatch.setattr(ProjectConfig, "load", MagicMock(return_value=project))
     monkeypatch.setattr(preparation, "write_manifest", write, raising=False)
-    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    monkeypatch.setenv(
+        "ODCLI_TEST_MASTER_PASSWORD"
+        if remote_name is None
+        else "ODCLI_REMOTE_STAGING_MASTER_PASSWORD",
+        "remote-secret",
+    )
     command = preparation.DatabasePreparationCoordinator(client).prepare_command(
         project, options=options, executor=executor, admin_password="test-secret"
     )
@@ -1377,6 +1421,38 @@ def test_production_restore_command_consumes_compose_psql_and_odoo_steps(
     assert executor.executed[-1].wrapper_nonce is not None
     assert executor.executed[-1].wrapper_nonce.encode() in (executor.executed[-1].stdin or b"")
     assert len(executor.executed) == len({step.step_id for step in executor.executed})
+    assert write.called
+
+
+def test_named_production_restore_uses_named_secret_and_switches_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+    command, _executor, project, backup, write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        remote_name="staging",
+        observed=observed,
+    )
+
+    result = command.run()
+
+    client = cast("MagicMock", observed["client"])
+    remote = cast("MagicMock", observed["remote"])
+    client.instance.assert_called_once_with(
+        "https://staging.example", master_password="remote-secret"
+    )
+    remote.databases.backup.assert_called_once_with(
+        "staging_db",
+        source_git_branch="staging",
+        project_id="project_<runtime>",
+        source_name="staging",
+    )
+    assert result.backup == backup
+    assert result.default_switched is True
+    assert result.effective_default == result.restored_database
+    assert result.branch_origin is BackupBranchOrigin.CONFIGURED
+    assert project.default_source_database == "old"
     assert write.called
 
 
@@ -1677,7 +1753,7 @@ def test_download_preparation_reads_secret_before_lock_and_never_requires_local_
     monkeypatch.setattr(preparation, "exclusive_lock", lambda _: contextlib.nullcontext())
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
     client = MagicMock()
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     client.instance.return_value.databases.backup.return_value = backup
 
     result = preparation.prepare_download(client, project)
@@ -1732,46 +1808,28 @@ def test_restore_missing_remote_secret_fails_before_preparation_work(
     cluster.assert_not_called()
 
 
-def test_unpinned_download_preparation_fails_before_lock_or_catalog(
+def test_legacy_origin_variable_is_ignored_for_download_source_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
-    monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
-    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
-    client = MagicMock()
-    lock = MagicMock()
-    monkeypatch.setattr(preparation, "exclusive_lock", lock)
+    monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "not an origin,%%%")
 
-    with pytest.raises(ConfigError, match="not approved outside the repository"):
-        preparation.prepare_download(client, _project(tmp_path))
+    source = preparation.resolve_test_source(_project(tmp_path))
 
-    client.instance.assert_not_called()
-    client.get_catalog.assert_not_called()
-    lock.assert_not_called()
+    assert source.config.base_url == "https://example.test"
 
 
-def test_unpinned_restore_preflight_fails_before_lock_or_local_manager(
+def test_legacy_origin_variable_is_ignored_for_restore_source_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
-    monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
-    client = MagicMock()
-    lock = MagicMock()
-    cluster = MagicMock()
-    monkeypatch.setattr(preparation, "exclusive_lock", lock)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project", cluster
-    )
+    monkeypatch.setenv("ODCLI_REMOTE_STAGING_ORIGIN", "not a URL")
 
-    with pytest.raises(ConfigError, match="not approved outside the repository"):
-        preparation.preflight_restore(client, _project(tmp_path))
+    source = preparation.resolve_test_source(_project(tmp_path))
 
-    client.instance.assert_not_called()
-    client.get_catalog.assert_not_called()
-    lock.assert_not_called()
-    cluster.assert_not_called()
+    assert source.config.base_url == "https://example.test"
 
 
 def test_project_runtime_executable_cannot_read_remote_master_password(
@@ -2007,7 +2065,7 @@ def test_restore_coordinator_switches_default_only_after_restore(
         default_source_database="old",
         test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
     )
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     local = MagicMock()
     local.databases.names.return_value = ("source",)
     local.databases.exists.return_value = False
@@ -2074,7 +2132,7 @@ def test_restore_failure_retains_backup_and_does_not_write_manifest(
         default_source_database="old",
         test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
     )
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     local = MagicMock()
     local.databases.names.return_value = ("source",)
     local.databases.exists.return_value = False
@@ -2138,7 +2196,7 @@ def test_restore_admin_reset_failure_retains_target_and_removes_config(
         default_source_database="old",
         test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
     )
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     local = MagicMock()
     local.databases.names.return_value = ("source",)
     local.databases.exists.return_value = False
@@ -2254,7 +2312,7 @@ def test_catalogue_restore_uses_common_restore_stages_without_remote_call(
         default_source_database="old",
         test_instance=ConfigTestInstance(base_url="https://example.test", database="remote_test"),
     )
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     local = MagicMock()
     local.databases.names.return_value = ("source",)
     local.databases.exists.return_value = False
@@ -2529,7 +2587,7 @@ def test_pinned_http_download_reaches_remote_database_operation(
             database="remote_test",
         ),
     )
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     client = MagicMock()
     client.instance.return_value.databases.backup.return_value = backup
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
@@ -2569,11 +2627,11 @@ def test_checkout_coalesces_fresh_result_under_preparation_lock(
             base_url="https://example.test", database="remote", git_branch="develop"
         ),
     )
-    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     backup = Backup(
         id=backup.id,
         source_base_url=backup.source_base_url,
-        database_name=backup.database_name,
+        database_name="remote",
         format=backup.format,
         filestore_requested=backup.filestore_requested,
         path=backup.path,

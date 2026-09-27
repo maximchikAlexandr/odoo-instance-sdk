@@ -742,6 +742,7 @@ class _QueriesMixin:
         destination: str | Path | None = None,
         timeout: float | None = None,
         source_git_branch: str | None = None,
+        source_name: str | None = None,
         project_id: str | None = None,
     ) -> Backup:
         return self.backup_command(
@@ -751,6 +752,7 @@ class _QueriesMixin:
             destination=destination,
             timeout=timeout,
             source_git_branch=source_git_branch,
+            source_name=source_name,
             project_id=project_id,
         ).run()
 
@@ -763,12 +765,13 @@ class _QueriesMixin:
         destination: str | Path | None = None,
         timeout: float | None = None,
         source_git_branch: str | None = None,
+        source_name: str | None = None,
         project_id: str | None = None,
         executor: ProcessExecutor | None = None,
     ) -> Command[Backup]:
         from odoo_instance_sdk.internal.proc import PreparedAction
 
-        return self._action_command(
+        command = self._action_command(
             "database.backup",
             "Create a database backup",
             lambda: self._backup_impl(
@@ -778,6 +781,7 @@ class _QueriesMixin:
                 destination=destination,
                 timeout=timeout,
                 source_git_branch=source_git_branch,
+                source_name=source_name,
                 project_id=project_id,
             ),
             executor=executor,
@@ -797,6 +801,14 @@ class _QueriesMixin:
                 ),
             ),
         )
+        from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
+
+        binding = self._instance._runtime_binding
+        return attach_auto_prune(
+            command,
+            backups=self._instance._client.backups,
+            project=binding.repository_root if binding is not None else None,
+        )
 
     def _backup_impl(  # noqa: C901
         self,
@@ -807,6 +819,7 @@ class _QueriesMixin:
         destination: str | Path | None,
         timeout: float | None,
         source_git_branch: str | None,
+        source_name: str | None,
         project_id: str | None = None,
     ) -> Backup:
         source_git_branch = _normalize_source_git_branch(source_git_branch)
@@ -843,6 +856,7 @@ class _QueriesMixin:
             filestore_requested=filestore,
             path=part_path,
             source_git_branch=source_git_branch,
+            source_name=source_name,
             project_id=resolved_project_id,
         )
 
@@ -893,6 +907,7 @@ class _QueriesMixin:
                 sha256=sha256_hex,
                 downloaded_at=downloaded_at,
                 source_git_branch=source_git_branch,
+                source_name=source_name,
             )
         except (OSError, BackupCatalogError, BackupDownloadError) as e:
             with contextlib.suppress(BackupCatalogError):

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import configparser
-import os
 import shutil
 import sqlite3
 import sys
@@ -20,15 +19,28 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.address import AddressState, probe_address
-from odoo_instance_sdk.internal.applied_settings import (
-    decode_applied_settings,
-    encode_applied_settings,
+from odoo_instance_sdk.internal.dbprep.source import remote_password_key, resolve_test_source
+from odoo_instance_sdk.internal.doctor.components import (
+    component_from_codec as _component_from_codec,
+    is_known as _is_known,
+    paired_component as _paired_component,
+    python_artifact_available as _python_artifact_available,
 )
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
 from odoo_instance_sdk.internal.generated_config import _rebase_path
+from odoo_instance_sdk.internal.git_worktree import rev_parse_verify
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.postgres_compose import docker_available
-from odoo_instance_sdk.models import DevelopmentEnvironment, PostgresClusterState, StartConfig
+from odoo_instance_sdk.internal.project_env import (
+    effective_project_environment,
+    load_project_environment,
+)
+from odoo_instance_sdk.models import (
+    DatabaseRefreshOptions,
+    DevelopmentEnvironment,
+    PostgresClusterState,
+    StartConfig,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment.checkout_planning import (
     _APPLIED_CONFIG_BINDINGS,
@@ -148,6 +160,7 @@ def run_doctor(
     project_path: Path | None,
     *,
     resolved_context: ResolvedContext | None = None,
+    remote_name: str | None = None,
 ) -> DoctorReport:
     report = DoctorReport()
 
@@ -174,6 +187,8 @@ def run_doctor(
         else:
             report.context["project_source"] = "explicit" if project_path is not None else "cwd"
         _check_manifest(report, project_root)
+        if remote_name is not None:
+            _check_remote_source(report, project_root, remote_name)
         if resolved_context is not None and not isinstance(resolved_context.source, ProjectConfig):
             selected_environment = resolved_context.source
             _check_environment_runtime(
@@ -216,6 +231,60 @@ def run_doctor(
 
     report.checks.sort(key=lambda c: _ORDER.get(c.status, 0))
     return report
+
+
+def _check_remote_source(report: DoctorReport, project_root: Path, remote_name: str) -> None:
+    """Inspect named-source readiness without contacting the remote Odoo server."""
+    try:
+        project = ProjectConfig.load(project_root)
+        source = resolve_test_source(project, DatabaseRefreshOptions(remote_name=remote_name))
+        password_key = remote_password_key(source.source_name)
+        environment = effective_project_environment(load_project_environment(project_root))
+        password_present = bool(environment.get(password_key, "").strip())
+        ref_available = False
+        if source.branch:
+            try:
+                rev_parse_verify(project_root, source.branch)
+                ref_available = True
+            except Exception:
+                ref_available = False
+        source_config = _resolve_source_config(project, project_root)
+        restore_ready = False
+        if source_config is not None and source_config.is_file():
+            try:
+                parsed = parse_odoo_config(source_config)
+                restore_ready = bool(parsed.get("admin_passwd", "").strip())
+            except Exception:
+                restore_ready = False
+        facts: dict[str, JsonValue] = {
+            "source_name": source.source_name,
+            "base_url": source.config.base_url,
+            "database": source.config.database,
+            "declared_branch": source.branch,
+            "password_key": password_key,
+            "password_present": password_present,
+            "local_ref_available": ref_available,
+            "local_restore_prerequisites": restore_ready,
+            "authentication": "unverified",
+        }
+        status = STATUS_OK if password_present and ref_available and restore_ready else STATUS_WARN
+        missing = []
+        if not password_present:
+            missing.append(f"set {password_key}")
+        if not ref_available:
+            missing.append(
+                f"make declared local ref {source.branch!r} available"
+                if source.branch
+                else "declare a local source ref"
+            )
+        if not restore_ready:
+            missing.append("configure local restore prerequisites")
+        detail = "named source configured; authentication unverified"
+        if missing:
+            detail += "; " + ", ".join(missing)
+        report.checks.append(CheckResult("remote.source", status, detail, facts=facts))
+    except Exception as exc:
+        report.checks.append(CheckResult("remote.source", STATUS_ERROR, str(exc)))
 
 
 def _check_project_runtime(
@@ -917,44 +986,3 @@ def _rebase_source_components(
     if addons is not None:
         addons = tuple(_rebase_path(item, repo_root, worktree) for item in addons)
     return config, addons
-
-
-def _python_artifact_available(path: Path, owned: bool) -> bool:
-    candidate = (
-        path / ("Scripts/python.exe" if os.name == "nt" else "bin/python") if owned else path
-    )
-    try:
-        return candidate.is_file() and os.access(candidate, os.R_OK | os.X_OK)
-    except OSError:
-        return False
-
-
-def _component_from_codec(
-    *,
-    python: Mapping[str, JsonValue] | None = None,
-    dependencies: SettingsValue | None = None,
-    managed_config: Mapping[str, JsonValue] | None = None,
-    addons: tuple[str, ...] | None = None,
-) -> dict[str, JsonValue]:
-    document = decode_applied_settings(
-        encode_applied_settings(
-            python=python,
-            dependencies=dependencies,
-            managed_config=managed_config,
-            addons=addons,
-        )
-    )
-    components = document["components"]
-    if not isinstance(components, dict):
-        return {}
-    return dict(components)
-
-
-def _is_known(value: JsonValue) -> bool:
-    return isinstance(value, dict) and value.get("status") == "known"
-
-
-def _paired_component(source: JsonValue, artifact: JsonValue) -> JsonValue | None:
-    if not _is_known(source) or not _is_known(artifact):
-        return None
-    return artifact

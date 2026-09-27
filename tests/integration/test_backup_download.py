@@ -10,7 +10,12 @@ if TYPE_CHECKING:
 
     from odoo_instance_sdk.resources.instance import OdooInstance
 
+from odoo_instance_sdk.exceptions import BackupDownloadError
+from odoo_instance_sdk.internal.dbprep import materialize as preparation
 from odoo_instance_sdk.internal.paths import get_backups_dir
+from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.models import DatabaseRefreshOptions
+from odoo_instance_sdk.project import ProjectConfig, RemoteSourceConfig
 
 
 def _patch_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -44,6 +49,54 @@ def test_successful_download(
     assert backup.source_git_branch == "main"
     assert "/" not in backup.filename
     assert Path(backup.path).is_file()
+
+
+def test_named_source_cross_origin_redirect_does_not_forward_credentials(
+    instance: OdooInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    httpx_mock: HTTPXMock,
+) -> None:
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        remote_instances=(
+            RemoteSourceConfig(
+                name="staging",
+                base_url="https://staging.example",
+                database="testdb",
+                git_branch="main",
+            ),
+        ),
+    )
+    monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "staging-secret")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
+    monkeypatch.setattr(
+        preparation,
+        "canonical_project_identity",
+        lambda _: (tmp_path, tmp_path, repo_key(tmp_path, tmp_path)),
+    )
+    _patch_catalog(monkeypatch, tmp_path)
+    instance._client._catalog = None
+    httpx_mock.add_response(
+        url="https://staging.example/web/database/backup",
+        method="POST",
+        status_code=302,
+        headers={"location": "https://other.example/web/database/backup"},
+    )
+
+    with pytest.raises(BackupDownloadError, match="302"):
+        preparation.prepare_download(
+            instance._client,
+            project,
+            options=DatabaseRefreshOptions(remote_name="staging"),
+        )
+
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://staging.example/web/database/backup"
+    assert b"staging-secret" in requests[0].content
 
 
 def test_backup_round_trips_through_catalog(
