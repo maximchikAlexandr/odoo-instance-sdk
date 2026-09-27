@@ -66,22 +66,37 @@ make live
 
 `make live` requires `ODCLI_REAL_ODOO_ENABLE=1` plus `ODCLI_REAL_PROJECT`, `ODCLI_REAL_ODOO_BIN`, `ODCLI_REAL_PYTHON`, `ODCLI_REAL_CONFIG`, and `ODCLI_REAL_DATABASE`. Do not run it on ordinary PR runners.
 
-`make mutation` needs the `mutation` group and writes `.artifacts/mutation/results.txt`. It is a scheduled diagnostic, not a PR gate.
+`make mutation` needs the frozen `mutation` and `test` groups and writes
+`.artifacts/mutation/results.txt`. It is a scheduled/manual diagnostic, not a PR
+gate. The command itself remains fail-closed: dependency bootstrap, collection,
+target validation, mutation execution, result collection, incomplete terminal
+classification, artifact publication, aggregate validation, and baseline
+regression are all non-zero failures.
 
-The mutation audit is intentionally targeted to exactly these five security and
-normalization modules: `internal/redact.py`, `internal/sanitize.py`,
-`internal/db_name.py`, `internal/urls.py`, and `internal/address.py`. The
-configuration copies the complete package so baseline tests can import the CLI,
-but no other package module is mutated. The locked `mutmut>=3,<4` dependency is
-installed with the command above; do not use a second mutation framework.
+The mutation scope is unchanged and is read only from
+`[tool.mutmut].only_mutate` in `pyproject.toml`: the five files are
+`internal/redact.py`, `internal/sanitize.py`, `internal/db_name.py`,
+`internal/urls.py`, and `internal/address.py`. The configuration copies the
+complete package so baseline tests can import the CLI, but no other package
+module is mutated. Keep the locked `mutmut>=3,<4` dependency; do not add a
+second mutation framework.
 
-`make mutation` first runs a bounded real-mutmut import/collection regression,
-then the full audit. It always creates `.artifacts/mutation/results.txt` and
-keeps stage-labelled diagnostics on both success and failure. A bootstrap,
-collection, mutation, result, or artifact-upload failure remains a non-zero
-failure; the report is diagnostic output, not a failure mask. The scheduled and
-manual workflow is non-required by repository policy, but its job conclusion is
-still honest and must be red when the command fails.
+Run the full local scope with `make mutation`. A workflow shard selects one
+canonical file with `make mutation MUTATION_TARGET=src/odoo_instance_sdk/internal/db_name.py`.
+The runner applies the target filter to execution and projects the same target
+from result collection. Each accepted shard has a positive total whose
+`killed`, `survived`, `timeout`, `suspicious`, and `not checked` counts
+reconcile exactly; `not checked` must be zero. Stage-labelled diagnostics are
+retained in `results.txt` even when a child fails.
+
+The scheduled/manual workflow stores one `mutation-results-<shard>` artifact per
+target and one `mutation-summary` aggregate artifact. The summary contains
+deterministic per-target and total counts. The committed
+`.github/mutation-baseline.json` is bound to complete current-main evidence;
+automation never rewrites it. A complete audit may lower `survived` or `timeout`
+only in a separate reviewable change backed by the retained summary and its
+source evidence. Mutation artifacts are diagnostic/non-required by repository
+policy, but every controlled failure must still make the workflow red.
 
 ## Pull requests
 
