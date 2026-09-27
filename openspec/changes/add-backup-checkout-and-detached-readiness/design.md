@@ -1,6 +1,6 @@
 ## Context
 
-The current implementation was re-inspected against `origin/main` at `e35f426cf168ab7a781941772f3207689a961ec8` in addition to the planning branch input `e0d2128443a949e148a33f7e05c3a19c99a74d55`:
+The current implementation and this planning package were reconciled after rebasing onto `origin/main` at `3d688b26b463d273e80fa46500226158d7d9fab1`:
 
 - `ProjectConfig.test_instance` and `--test-*` represent one legacy remote source. Project initialization and database preparation already use immutable commands, project locks, atomic manifest replacement, conservative `.odcli/.env` parsing, and `ODCLI_TEST_MASTER_PASSWORD`.
 - Database preparation already downloads, validates, restores, neutralizes, records project ownership/provenance, and preserves failures. COPY checkout already has one journal/recovery path and a local-source auxiliary Database Manager lifecycle.
