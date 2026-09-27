@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 
 import msgspec
 
+from odoo_instance_sdk.exceptions import ConfigError
+
 
 class BackupFormat(enum.StrEnum):
     ZIP = "zip"
@@ -45,6 +47,7 @@ class BackupEventType(enum.StrEnum):
     VALIDATION_SUCCEEDED = "validation_succeeded"
     VALIDATION_FAILED = "validation_failed"
     VALIDATION_UNAVAILABLE = "validation_unavailable"
+    PIN_SET = "pin_set"
     DELETED = "deleted"
 
 
@@ -121,6 +124,9 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     sha256: str
     downloaded_at: datetime
     source_git_branch: str | None = None
+    source_name: str | None = None
+    pinned: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 class LocalArchiveRestoreSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -174,6 +180,7 @@ class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=
     last_used_at: datetime | None = None
     removed_at: datetime | None = None
     last_error: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 class BackupProvenanceComparison(
@@ -182,11 +189,17 @@ class BackupProvenanceComparison(
     status: BackupProvenanceStatus
     expected_base_ref: str
     recorded_branch: str | None
+    source_name: str | None = None
+    source_base_url: str | None = None
+    database_name: str | None = None
+    resolved_base_revision: str | None = None
+    backup_id: uuid.UUID | None = None
 
 
 class DatabaseRefreshOptions(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     restore: bool = False
     source_branch: str | None = None
+    remote_name: str | None = None
     reset_admin_password: bool = False
 
 
@@ -237,6 +250,7 @@ class EnvironmentCheckoutResult(
 ):
     environment: DevelopmentEnvironment
     plan: EnvironmentCheckoutPlan
+    warnings: tuple[str, ...] = ()
 
 
 class Database(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -267,6 +281,31 @@ class BackupDeletionResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tr
     file_existed: bool
     already_deleted: bool
     deleted_at: datetime
+
+
+class BackupPinResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The resulting pin state for one exact catalogue UUID."""
+
+    backup_id: uuid.UUID
+    pinned: bool
+    changed: bool
+
+
+class BackupPruneSkip(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """One backup excluded from a captured prune plan or execution."""
+
+    backup_id: uuid.UUID
+    reason: str
+    size_bytes: int = 0
+
+
+class BackupPruneCandidate(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The immutable file identity captured before prune execution."""
+
+    backup_id: uuid.UUID
+    path: str
+    file_identity: tuple[int, int]
+    size_bytes: int
 
 
 class BackupRestoreLink(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -301,6 +340,8 @@ class BackupInspectResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     sha256: str
     downloaded_at: datetime
     source_git_branch: str | None
+    source_name: str | None = None
+    pinned: bool = False
     state: BackupState
     catalogue_time: datetime
     file_present: bool
@@ -309,6 +350,74 @@ class BackupInspectResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     history: tuple[BackupEvent, ...]
     restore_links: tuple[BackupRestoreLink, ...]
     environment_links: tuple[BackupEnvironmentLink, ...]
+
+
+class BackupRetentionPolicy(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Effective user-level backup retention policy."""
+
+    retention_days: int = 14
+    auto_prune: bool = False
+    path: str = ""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.retention_days, bool) or not isinstance(self.retention_days, int):
+            raise ConfigError("retention_days must be a positive integer")
+        if self.retention_days <= 0:
+            raise ConfigError("retention_days must be a positive integer")
+        if type(self.auto_prune) is not bool:
+            raise ConfigError("auto_prune must be a boolean")
+
+
+class BackupRetentionUpdateResult(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Result of reading or updating the user retention policy."""
+
+    policy: BackupRetentionPolicy
+    changed: bool = False
+
+
+class BackupPrunePlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """A project-scoped retention decision captured before any deletion."""
+
+    project_id: str
+    policy: BackupRetentionPolicy
+    policy_fingerprint: str
+    cutoff: datetime
+    candidates: tuple[BackupPruneCandidate, ...] = ()
+    protected: tuple[BackupPruneSkip, ...] = ()
+    skipped: tuple[BackupPruneSkip, ...] = ()
+
+    @property
+    def candidate_bytes(self) -> int:
+        return sum(item.size_bytes for item in self.candidates)
+
+    @property
+    def protected_ids(self) -> tuple[uuid.UUID, ...]:
+        return tuple(item.backup_id for item in self.protected)
+
+    @property
+    def skipped_ids(self) -> tuple[uuid.UUID, ...]:
+        return tuple(item.backup_id for item in self.skipped)
+
+
+class BackupPruneResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Truthful outcome of one captured prune execution."""
+
+    plan: BackupPrunePlan
+    deleted_ids: tuple[uuid.UUID, ...] = ()
+    skipped_ids: tuple[uuid.UUID, ...] = ()
+    failed_ids: tuple[uuid.UUID, ...] = ()
+    removed_bytes: int = 0
+    skipped: tuple[BackupPruneSkip, ...] = ()
+    failures: tuple[BackupPruneSkip, ...] = ()
+    dry_run: bool = False
+    policy_changed: bool = False
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def actual_removed_bytes(self) -> int:
+        return self.removed_bytes
 
 
 class CopyReplacementResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

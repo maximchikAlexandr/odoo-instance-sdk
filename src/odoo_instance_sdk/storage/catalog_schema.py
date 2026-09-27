@@ -67,6 +67,14 @@ backups = Table(
     Column("error_message", Text),
     Column("project_id", Text, ForeignKey("projects.project_id")),
     Column("source_git_branch", Text),
+    Column("source_name", Text),
+    Column(
+        "pinned",
+        Integer,
+        CheckConstraint("pinned IN (0, 1)"),
+        nullable=False,
+        server_default="0",
+    ),
     Index("backups_lookup_idx", "source_base_url", "database_name", text("downloaded_at DESC")),
     Index("backups_state_idx", "state"),
     Index(
@@ -75,6 +83,7 @@ backups = Table(
         text("id ASC"),
     ),
     Index("backups_project_idx", "project_id"),
+    Index("backups_source_group_idx", "project_id", "source_name", text("downloaded_at DESC")),
 )
 
 backup_events = Table(
@@ -87,7 +96,7 @@ backup_events = Table(
         Text,
         CheckConstraint(
             "event_type IN ('download_started', 'download_succeeded', 'download_failed', "
-            "'validation_succeeded', 'validation_failed', 'validation_unavailable', 'deleted')"
+            "'validation_succeeded', 'validation_failed', 'validation_unavailable', 'pin_set', 'deleted')"
         ),
         nullable=False,
     ),
@@ -257,6 +266,14 @@ environment_copy_journal = Table(
     Column("db_user", Text),
     Column("backup_id", Text, ForeignKey("backups.id")),
     Column(
+        "backup_ownership",
+        Text,
+        CheckConstraint(
+            "backup_ownership IS NULL OR backup_ownership IN ('owned', 'borrowed', 'unknown')"
+        ),
+        server_default="unknown",
+    ),
+    Column(
         "stage",
         Text,
         CheckConstraint(
@@ -332,6 +349,7 @@ CATALOG_INDEXES = (
     "backups_state_idx",
     "backups_point_order_idx",
     "backups_project_idx",
+    "backups_source_group_idx",
     "backup_events_backup_idx",
     "restores_cluster_idx",
     "restores_cluster_identity_idx",
