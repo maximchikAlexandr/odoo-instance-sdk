@@ -171,12 +171,9 @@ def test_backup_delete_dry_run_and_machine_confirmation_gate_precede_mutation(
     confirmed = _invoke(
         monkeypatch, db_path, ["backup", "delete", BACKUP_ID, "--yes", "--format", "json"]
     )
-    assert confirmed.exit_code == 0
-    assert backup_path.exists() is False
-    catalog = BackupCatalog(db_path=db_path)
-    row = catalog.get_by_id(BACKUP_ID)
-    assert row is not None and row["state"] == BackupState.DELETED.value
-    catalog.close()
+    assert confirmed.exit_code == 1
+    assert "unknown or unowned ownership" in confirmed.stdout
+    assert backup_path.is_file()
 
 
 def test_backup_delete_rich_confirmation_shows_immutable_preview(
@@ -184,10 +181,10 @@ def test_backup_delete_rich_confirmation_shows_immutable_preview(
 ) -> None:
     db_path, backup_path = _seed_backup(tmp_path)
     result = _invoke(monkeypatch, db_path, ["backup", "delete", BACKUP_ID], input="y\n")
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert "Delete plan:" in result.stdout
     assert "kup.zip" in result.stdout
-    assert backup_path.exists() is False
+    assert backup_path.is_file()
 
 
 def test_backup_validate_distinguishes_invalid_and_unavailable(

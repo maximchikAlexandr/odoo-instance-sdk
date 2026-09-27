@@ -355,6 +355,37 @@ ODCLI_ADMIN_PASSWORD='from-secret-store' odcli --env feature/customer-credit db 
 Refresh follows the environment's configured database policy. Destructive
 database operations are local-only and validate provenance before mutation.
 
+For two independent remote sources, keep only their non-secret connection
+metadata in the project manifest and provide passwords through the existing
+dotenv or process environment:
+
+```toml
+[remote_instances.lab]
+base_url = "https://lab.example"
+database = "lab"
+git_branch = "main"
+
+[remote_instances.staging]
+base_url = "https://staging.example"
+database = "staging"
+git_branch = "staging"
+```
+
+```bash
+odcli remote ls
+odcli remote add staging --url https://staging.example --database staging --branch staging
+ODCLI_REMOTE_STAGING_MASTER_PASSWORD='from-secret-store' \
+  odcli --project . db refresh --remote staging --dry-run --format json
+odcli remote update staging --branch release/19
+odcli remote remove staging
+```
+
+The derived keys are `ODCLI_REMOTE_LAB_MASTER_PASSWORD` and
+`ODCLI_REMOTE_STAGING_MASTER_PASSWORD`; values are never accepted as CLI
+arguments or written to the manifest. Legacy origin variables are ignored and
+do not need to be migrated. `--remote` selection is exact: there is no
+ordering or project-default fallback.
+
 ### Backups, restores, and retained-resource diagnosis
 
 Backup point commands use the exact full UUID and do not require an Odoo
@@ -381,6 +412,50 @@ postcondition, audit, and optional administrator reset succeed. On interruption
 or a later failure, the backup and any already-confirmed database are retained;
 failure documents include sanitized UUID/target/state context and Ctrl-C exits
 with `130`.
+
+COPY can acquire one named source or reuse one retained UUID without contacting
+the remote again:
+
+```bash
+odcli env checkout PROJ-123 --db-mode copy --remote staging --base staging
+odcli env checkout PROJ-123 --db-mode copy --backup 01234567-89ab-cdef-0123-456789abcdef --base staging
+```
+
+The resulting database and filestore remain local and independently writable;
+the source name, origin, database, declared branch, resolved local commit, and
+backup UUID are retained as provenance. A declared branch is metadata, not
+proof of the code deployed on the remote. Existing `stop`, `env rm`, and
+recovery commands remain the composition surface for lifecycle cleanup.
+
+Environment-bound detached launches may wait for the exact owned runtime and
+listener to become ready. Readiness is opt-in, bounded, and fails closed when
+ownership cannot be proven:
+
+```bash
+odcli --env feature/customer-credit run --detach --wait-ready --readiness-timeout 60
+```
+
+The timeout is valid only with `--wait-ready`, `--detach`, and root `--env`.
+
+Retention settings live in the user-level `user.toml`, not in project
+manifests. Automatic pruning is disabled by default. Inspect or update the
+policy, protect an archive, preview candidates, then apply a confirmed prune:
+
+```bash
+odcli backup retention
+odcli backup retention --days 14 --auto
+odcli backup pin 01234567-89ab-cdef-0123-456789abcdef
+odcli backup unpin 01234567-89ab-cdef-0123-456789abcdef
+odcli backup prune --dry-run --format json
+odcli backup prune --yes --format json
+```
+
+Pruning protects pinned, busy, referenced, unresolved-recovery, and newest per
+historical source-group archives. Unknown or external files are skipped. A
+caller-owned local archive without a catalog row is outside retention. Automatic
+maintenance runs only once after a successful outer backup, refresh, restore,
+or checkout; a maintenance failure is reported as a warning and does not tell
+callers to repeat the primary operation.
 
 The read-only resource projections inspect retained backups, databases,
 environments, logs, filestores, and owned volumes without reconciliation or
@@ -562,6 +637,10 @@ sentence; use the entry's `--help` for exact options.
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
+- `odcli remote ls` — List named remote sources without contacting them.
+- `odcli remote add` — Add one named remote source without accepting credentials.
+- `odcli remote update` — Replace selected fields of one named remote source.
+- `odcli remote remove` — Remove one named source configuration without deleting artifacts.
 - `odcli bug-report init` — Create a local bug-report draft from explicit metadata.
 - `odcli bug-report submit` — Validate and publish one local bug-report draft.
 - `odcli env show` — Show one environment's selected runtime and ownership metadata.
@@ -577,6 +656,10 @@ sentence; use the entry's `--help` for exact options.
 - `odcli backup inspect` — Show one exact backup UUID with history and relationships.
 - `odcli backup validate` — Validate one exact backup and report invalid versus unavailable.
 - `odcli backup rm` — Preview, confirm, and delete one exact retained backup UUID.
+- `odcli backup retention` — Inspect or update user-level retention settings.
+- `odcli backup pin` — Protect one retained archive from pruning.
+- `odcli backup unpin` — Release one retained archive from pruning protection.
+- `odcli backup prune` — Preview or remove eligible archives with execution-time rechecks.
 - `odcli run` — Start resolved Odoo in the foreground from a project or environment.
 - `odcli logs` — Read retained Odoo logs, optionally following new output.
 - `odcli shell` — Open an interactive Odoo shell in the selected environment.
@@ -719,10 +802,11 @@ stored secrets or absolute catalog paths.
 Secrets are never written to the project manifest. Generated secret config and
 PostgreSQL credentials use restricted user-data files; the backup catalog uses
 the canonical `~/.odcli/` root. Remote destructive database operations are
-rejected. Repository-selected remote test instances require an exact external
-origin pin. Pinned HTTP origins are permitted for legacy deployments, but emit
-a warning because the master password crosses the network in cleartext; HTTPS
-remains strongly recommended.
+rejected. Configured remote sources use the normalized project URL; legacy
+origin variables are ignored and are not rewritten. HTTP sources still emit a
+warning because the master password crosses the network in cleartext; HTTPS
+remains strongly recommended. Source-specific password keys are filtered from
+child environments and all plans, results, logs, and diagnostics.
 
 ## Contributing
 

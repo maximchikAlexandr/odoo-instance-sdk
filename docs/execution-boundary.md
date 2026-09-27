@@ -48,6 +48,8 @@ classification is bounded and whose contract requires `--dry-run`:
 | CLI leaf | canonical classification |
 | --- | --- |
 | `init` | mutating-or-spawning |
+| `remote add/update/remove` | mutating-or-spawning |
+| `backup retention/pin/unpin/prune` | mutating-or-spawning |
 | `stop` | mutating-or-spawning |
 | `env create` | mutating-or-spawning |
 | `env rm` | mutating-or-spawning |
@@ -218,13 +220,13 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:503-504` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:539-540` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:473` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:474` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/backup.py:347` — shared Rich validation
+- `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:115` — in-memory Rich serialization
   boundary; it writes only to an in-memory buffer and never to terminal output.

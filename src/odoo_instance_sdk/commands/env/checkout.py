@@ -294,7 +294,11 @@ def _ticket_checkout_command(
     options: EnvironmentCheckoutOptions,
     allocation: _TicketAllocation,
 ) -> Command[DevelopmentEnvironment]:
-    selected_options = msgspec.structs.replace(options, base_ref=allocation.base_ref)
+    selected_options = (
+        options
+        if options.remote_name is not None or options.backup_id is not None
+        else msgspec.structs.replace(options, base_ref=allocation.base_ref)
+    )
     from odoo_instance_sdk.resources.environment import EnvironmentResource
 
     environments = client.environments
@@ -354,6 +358,8 @@ def env_group() -> None:
     help="Database mode.",
 )
 @click.option("--source-db", "source_database", default=None, help="Source database name.")
+@click.option("--remote", "remote_name", default=None, help="Named remote source for COPY.")
+@click.option("--backup", "backup_id", default=None, help="Retained backup UUID for COPY.")
 @click.option("--target-db", "target_database", default=None, help="Target database name.")
 @click.option("--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin.")
 @click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
@@ -384,6 +390,8 @@ def env_checkout(
     config_path: str | None,
     db_mode: str,
     source_database: str | None,
+    remote_name: str | None,
+    backup_id: str | None,
     target_database: str | None,
     odoo_bin: str | None,
     python: str | None,
@@ -410,6 +418,8 @@ def env_checkout(
             config_path=Path(config_path) if config_path else None,
             db_mode=EnvironmentDatabaseMode(db_mode),
             source_database=source_database,
+            remote_name=remote_name,
+            backup_id=backup_id,
             target_database=target_database,
             odoo_bin=Path(odoo_bin) if odoo_bin else None,
             python=python,
