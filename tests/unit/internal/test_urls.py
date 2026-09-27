@@ -42,6 +42,35 @@ def test_canonical_origin_keeps_nondefault_port() -> None:
     assert canonical_origin("https://Example.com:8443") == "https://example.com:8443"
 
 
+def test_canonical_origin_normalizes_through_shared_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def normalize(raw: str) -> str:
+        calls.append(raw)
+        return "https://example.com"
+
+    monkeypatch.setattr(urls, "normalize_base_url", normalize)
+
+    assert canonical_origin("HTTPS://Example.com/") == "https://example.com:443"
+    assert calls == ["HTTPS://Example.com/"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("ftp://example.com", "Unsupported scheme"),
+        ("http://user@example.com", "Credentials in URL are not allowed"),
+        ("http://example.com/?query=1", "Query parameters in URL are not allowed"),
+        ("http://example.com/#fragment", "Fragment in URL is not allowed"),
+    ],
+)
+def test_normalize_base_url_rejection_messages_are_stable(raw: str, message: str) -> None:
+    with pytest.raises(InvalidBaseUrlError, match=message):
+        normalize_base_url(raw)
+
+
 @pytest.mark.parametrize("host, expected", LOOPBACK_HOST_CASES)
 def test_is_loopback_host(host: str, expected: bool) -> None:
     assert is_loopback_host(host) is expected

@@ -140,6 +140,7 @@ monitor = 70
 developer_workflow = 40
 
 [tool.mutmut]
+debug = true
 source_paths = ["src/odoo_instance_sdk"]
 also_copy = [
     "scripts",
@@ -165,7 +166,19 @@ only_mutate = [
     "src/odoo_instance_sdk/internal/urls.py",
     "src/odoo_instance_sdk/internal/address.py",
 ]
-pytest_add_cli_args = ["-x", "-q", "-m", "not real_odoo and not packaging and not serial"]
+# Mutation executes the full clean-test selection in one pytest process.  Keep
+# the repository's normal 60-second test guard for regular pytest, but give
+# this bounded shard enough room for an individual clean test under mutmut's
+# in-process runner; the workflow's 45-minute job timeout remains the outer
+# fail-closed bound.
+pytest_add_cli_args = [
+    "-x",
+    "-q",
+    "-m",
+    "not real_odoo and not packaging and not serial",
+    "-o",
+    "timeout=300",
+]
 pytest_add_cli_args_test_selection = [
     "tests/unit",
     "-m",

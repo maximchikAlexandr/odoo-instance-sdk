@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
+
+from scripts import run_mutation
 
 if TYPE_CHECKING:
     import pytest
@@ -37,6 +40,43 @@ def _dashboard_job() -> str:
     start = workflow.index("  dashboard-tests:")
     end = workflow.index("\n  compatibility:", start)
     return workflow[start:end]
+
+
+def _mutation_job(name: str) -> str:
+    workflow = _MUTATION_WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^  {re.escape(name)}:\n.*?(?=^  \w[^ ]*:|\Z)", workflow)
+    assert match is not None
+    return match.group()
+
+
+def _uses_step(job: str, action: str) -> str:
+    lines = job.splitlines()
+    start = next(index for index, line in enumerate(lines) if line == f"      - uses: {action}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _run_step(job: str, command: str) -> str:
+    lines = job.splitlines()
+    start = next(index for index, line in enumerate(lines) if line == f"      - run: {command}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def _named_step(job: str, name: str) -> str:
+    lines = job.splitlines()
+    start = next(index for index, line in enumerate(lines) if line == f"      - name: {name}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
 
 
 def test_dashboard_ci_uses_the_clean_checkout_codegen_order() -> None:
@@ -194,20 +234,79 @@ def test_mutation_command_wires_permanent_bounded_regression() -> None:
 
 
 def test_mutation_command_runs_full_configured_scope_after_smoke() -> None:
-    runner = (_REPOSITORY_ROOT / "scripts" / "run_mutation.py").read_text(encoding="utf-8")
+    commands = run_mutation._commands()
 
-    assert "AUDIT_MUTANTS" not in runner
-    assert '(sys.executable, "-m", "mutmut", "run", "--max-children", "32"),' in runner
+    assert [label for label, _ in commands] == [
+        "bounded mutmut integration",
+        "mutmut run",
+        "mutmut results",
+    ]
+    assert commands[0][1] == (
+        sys.executable,
+        str(_REPOSITORY_ROOT / "scripts" / "check_mutation_integration.py"),
+    )
+    assert commands[1][1] == (
+        sys.executable,
+        "-m",
+        "mutmut",
+        "run",
+        "--max-children",
+        "32",
+    )
+    assert commands[2][1] == (sys.executable, "-m", "mutmut", "results", "--all=true")
 
 
 def test_mutation_workflow_fails_closed_and_uploads_diagnostics() -> None:
     workflow = _MUTATION_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "schedule:" in workflow
-    assert "workflow_dispatch:" in workflow
-    assert "make mutation" in workflow
+    assert re.search(r"(?ms)^on:\n  schedule:\n.*^  workflow_dispatch:\s*$", workflow)
     assert "continue-on-error" not in workflow
-    assert "if: always()" in workflow
-    assert "name: mutation-results" in workflow
-    assert "path: .artifacts/mutation/results.txt" in workflow
-    assert "if-no-files-found: error" in workflow
+
+    prepare = _mutation_job("prepare")
+    assert "    outputs:\n      matrix: ${{ steps.targets.outputs.matrix }}" in prepare
+    prepare_checkout = _uses_step(
+        prepare, "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0"
+    )
+    assert "persist-credentials: false" in prepare_checkout
+    assert (
+        '      - id: targets\n        run: echo "matrix=$(python scripts/mutation_report.py matrix)"'
+        in prepare
+    )
+
+    mutation = _mutation_job("mutation")
+    assert re.search(r"(?m)^    needs: prepare$", mutation)
+    assert re.search(r"(?m)^    timeout-minutes: 45$", mutation)
+    assert "      fail-fast: false" in mutation
+    assert "      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}" in mutation
+    mutation_run = _run_step(mutation, "make mutation")
+    assert "MUTATION_TARGET: ${{ matrix.target }}" in mutation_run
+    mutation_upload = _uses_step(mutation, "actions/upload-artifact@v4")
+    assert "if: always()" in mutation_upload
+    assert "name: mutation-results-${{ matrix.shard }}" in mutation_upload
+    assert "path: .artifacts/mutation/results.txt" in mutation_upload
+    assert "if-no-files-found: error" in mutation_upload
+
+    aggregate = _mutation_job("aggregate")
+    assert re.search(r"(?m)^    if: always\(\)$", aggregate)
+    assert "    needs:\n      - prepare\n      - mutation" in aggregate
+    aggregate_checkout = _uses_step(
+        aggregate, "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0"
+    )
+    assert "persist-credentials: false" in aggregate_checkout
+    download = _uses_step(
+        aggregate, "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0"
+    )
+    assert "pattern: mutation-results-*" in download
+    assert "path: .artifacts/mutation/reports" in download
+    aggregate_run = _named_step(aggregate, "Validate aggregate mutation report")
+    assert "python scripts/mutation_report.py aggregate" in aggregate_run
+    assert "--reports-dir .artifacts/mutation/reports" in aggregate_run
+    assert "--summary .artifacts/mutation/summary.txt" in aggregate_run
+    assert "--baseline .github/mutation-baseline.json" in aggregate_run
+    summary_upload = _uses_step(
+        aggregate, "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2"
+    )
+    assert "if: always()" in summary_upload
+    assert "name: mutation-summary" in summary_upload
+    assert "path: .artifacts/mutation/summary.txt" in summary_upload
+    assert "if-no-files-found: error" in summary_upload
