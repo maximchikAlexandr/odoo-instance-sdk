@@ -10,16 +10,15 @@
 
 ## Топология исполнения
 
-Режим: `multi_wp_dag`.
+Режим: `dag` (multi-WP).
 
 ```text
-WP-01 persisted configuration and catalog foundation ─┬─ WP-02 named preparation ─┐
-                                                       └─ WP-05 retention core ────┼─ WP-03 explicit COPY ─┐
-WP-04 detached readiness ──────────────────────────────────────────────────────────┤                   ├─ WP-06 auto-prune composition ─ WP-07 delivery gate
-                                                                                   └───────────────────┘
+WP-01 persisted configuration and catalog foundation ─┬→ WP-02 named preparation ─┐
+                                                       └→ WP-05 retention core ────┴→ WP-03 explicit COPY → WP-06 auto-prune composition ─┐
+WP-04 detached readiness ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴→ WP-07 delivery gate
 ```
 
-Topological level 1 содержит независимые `WP-01` и `WP-04`. После `WP-01` level 2 содержит независимые `WP-02` и `WP-05`. `WP-03` ждёт оба этих контракта, потому что использует named acquisition и те же catalog projections/locks. `WP-06` соединяет COPY и retention. `WP-07` единолично владеет общими CLI callbacks, leaf inventory, документацией и интеграционными repairs.
+Topological level 1 содержит независимые `WP-01` и `WP-04`. После `WP-01` level 2 содержит независимые `WP-02` и `WP-05`. `WP-03` напрямую ждёт оба этих контракта, потому что использует named acquisition и те же catalog projections/locks. `WP-06` напрямую следует только за `WP-03`: retention contract уже достигается транзитивно через `WP-03`. `WP-07` напрямую соединяет готовую detached readiness из `WP-04` с полным source/COPY/retention потоком из `WP-06` и единолично владеет общими CLI callbacks, leaf inventory, документацией и интеграционными repairs.
 
 ## WP-01 — Persisted source, policy and catalog foundation
 
@@ -80,7 +79,7 @@ Topological level 1 содержит независимые `WP-01` и `WP-04`. 
 
 - **Task coverage:** `5.5`.
 - **Deliverable:** project-aware backup, refresh, restore and checkout commands attach exactly one captured sequential auto-prune phase without changing primary success semantics.
-- **depends_on:** `WP-03`, `WP-05`.
+- **depends_on:** `WP-03`.
 - **Stage / topological level:** 4.
 - **Owned responsibility scope:** one narrow private command composer and integration points in public backup/preparation/restore/checkout command construction, plus direct composition tests. Critical shared files are the four public command builders, the retention composer and focused nested-operation/output tests. CLI callbacks remain excluded.
 - **Contract surface:** outermost-only attachment; pre-primary captured candidates; revalidation and input/output UUID exclusions; no maintenance on failure/cancellation/read-only/dry-run; structured warning after primary success; explicit prune remains failing.
@@ -91,7 +90,7 @@ Topological level 1 содержит независимые `WP-01` и `WP-04`. 
 
 - **Task coverage:** `6.1`, `6.2`, `6.3`, `6.4`.
 - **Deliverable:** complete SDK-first CLI/documentation projection and one integrated evidence set for two named sources, retained UUID COPY, ready launch and safe pruning.
-- **depends_on:** `WP-02`, `WP-03`, `WP-04`, `WP-06`.
+- **depends_on:** `WP-04`, `WP-06`.
 - **Stage / topological level:** 5.
 - **Owned responsibility scope:** all remaining Click registration/callbacks/rendering, `PUBLIC_LEAF_CASES`, aliases/help/output/error fixtures, user/SDK documentation, real-Odoo/fake-boundary integration scenarios and final cross-domain repairs after predecessors finish. Critical shared files include CLI registration/callback modules, `commands/backup.py`, `commands/db.py`, `commands/env/`, canonical leaf/output tests, README/docs and integration fixtures.
 - **Contract surface:** thin one-delegation leaves; stable Rich/JSON/TOON/error/confirmation/dry-run behavior; source/provenance fields; readiness option validation; retention confirmations/warnings; no credential arguments, orchestration layer or new output registry.
