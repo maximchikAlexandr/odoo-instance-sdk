@@ -4,7 +4,7 @@
 
 Public SDK operations SHALL expose idempotent `set_pinned_command(backup_id, pinned)`/`set_pinned()` for an exact catalog UUID and `prune_command(project)`/`prune()` for project-scoped retention. Pin changes SHALL append `pin_set` audit events without deleting history. The prune plan SHALL capture retention-policy fingerprint, UTC cutoff, project identity, exact UUIDs/file identities, candidate bytes and protected/skipped IDs with reasons. Eligible candidates SHALL be successful available project-owned SDK-managed regular payloads strictly older than the configured age. Pinning SHALL NOT imply data approval or anonymization.
 
-Pruning SHALL protect pinned backups, backups whose lifecycle locks are busy, references from non-removed environments or unresolved COPY/replacement recovery, and the newest available backup in each historical source group. A named row SHALL group by `(project_id, source_name)`; a legacy/local row SHALL group by `(project_id, normalized source origin, database)`. Equal timestamps SHALL use the existing catalog ordering. Historical restore audit alone SHALL NOT protect all files permanently. Unknown ownership/timestamps/path identity, unowned/external payloads and other projects SHALL be skipped. Catalog records/history, databases and environments SHALL never be retention targets.
+Pruning SHALL protect pinned backups, backups whose lifecycle locks are busy, references from non-removed environments or unresolved COPY/replacement recovery, and the newest available backup in each historical source group. A named row SHALL group by `(project_id, source_name)`; a legacy/local row SHALL group by `(project_id, normalized source origin, database)`. Equal timestamps SHALL use the existing catalog ordering. Historical restore audit alone SHALL NOT protect all files permanently. Unknown ownership/timestamps/path identity, unowned/external payloads and other projects SHALL be skipped. A caller-owned local archive restored without a `Backup` row SHALL never enter a retention candidate set; deleting or moving it after successful restore SHALL NOT change the already materialized database or filestore. Catalog records/history, databases and environments SHALL never be retention targets.
 
 #### Scenario: Age and latest protection
 
@@ -25,6 +25,12 @@ Pruning SHALL protect pinned backups, backups whose lifecycle locks are busy, re
 
 - **WHEN** pruning or pinning is previewed
 - **THEN** no file, catalog state or audit entry changes
+
+#### Scenario: Caller-owned local restore file is outside retention
+
+- **WHEN** a database was restored from a caller-owned local archive and no catalog backup row was created
+- **THEN** manual and automatic pruning never select that archive
+- **AND** later moving or deleting the source file affects only future reuse of that file, not the completed restore
 
 ### Requirement: Retention execution rechecks the captured candidates
 

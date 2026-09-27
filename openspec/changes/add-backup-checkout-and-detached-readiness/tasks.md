@@ -14,9 +14,9 @@
 
 ## 3. Catalog provenance and explicit-source COPY
 
-- [ ] 3.1 Add one linear Alembic revision for nullable backup `source_name`, audited pin state and COPY journal ownership; update Core metadata/projections and verify upgrade, fresh schema, conservative legacy defaults, single-head and schema-equivalence gates.
+- [ ] 3.1 Add one linear Alembic successor to the current source-neutral restore-provenance head for nullable backup `source_name`, audited pin state and COPY journal ownership; update Core metadata/projections and verify upgrade from both prior revisions, fresh schema, conservative legacy defaults, single-head and schema-equivalence gates.
 - [ ] 3.2 Add mutually exclusive `remote_name`/`backup_id` COPY options and immutable plan/result provenance; test incompatible modes/inputs, named default base, explicit compatible base, missing ref, stale profile and legacy unknown-branch handling.
-- [ ] 3.3 Route named download and exact retained UUID through the existing COPY validation/restore/neutralization/journal pipeline; verify no intermediate database/default switch, no source HTTP for retained UUID, no fallback, separate writable filestore and postconditions.
+- [ ] 3.3 Route named download and exact retained UUID through the existing COPY validation/restore/neutralization/journal pipeline, reusing the shared source-neutral archive evidence and verified-snapshot transport; verify no intermediate database/default switch, no source HTTP for retained UUID, no fallback, no duplicate extractor/verifier, separate writable filestore and postconditions.
 - [ ] 3.4 Persist `owned` only for local-source archives and `borrowed` for named/retained input; verify rollback/removal preserves borrowed and migrated-unknown archives while existing owned cleanup remains idempotent.
 - [ ] 3.5 Reuse checksum, archive, disk, cluster, target-collision, lifecycle-lock and Odoo-major checks; cover corruption, insufficient space, busy/replaced input, known mismatch, unknown version and actionable retained recovery evidence.
 
@@ -30,7 +30,7 @@
 
 - [ ] 5.1 Add typed `client.backups.retention()` and immutable retention update using the existing `user.toml`; verify defaults, types, malformed/unreadable policy, preservation of `max_uncompressed_bytes` and unrelated content, user-only atomic write and preview.
 - [ ] 5.2 Add idempotent audited pin/unpin operations and direct-delete guards; verify pin, busy lock, non-removed environment, unresolved recovery and newest historical source-group protection with no force bypass.
-- [ ] 5.3 Add project-scoped immutable prune planning with captured policy/cutoff/file identities/bytes and deterministic named or legacy groups; test age boundary, ties, newest protection, pins/references/busy files, unknown/unowned/external rows and inert preview.
+- [ ] 5.3 Add project-scoped immutable prune planning with captured policy/cutoff/file identities/bytes and deterministic named or legacy groups; test age boundary, ties, newest protection, pins/references/busy files, unknown/unowned/external rows, caller-owned local archives without `Backup` rows and inert preview.
 - [ ] 5.4 Execute only captured candidates through the existing deletion path and lifecycle lock; test changed policy/pin/reference/file/latest state, concurrent restore, partial failure, exact bytes, audit preservation and idempotent repeat.
 - [ ] 5.5 Attach one captured sequential post-success prune phase to outermost project-aware backup, refresh, restore and checkout commands; test nested de-duplication, input/output UUID exclusions, failure/cancellation/dry-run skips and primary success with maintenance warning.
 
@@ -39,4 +39,4 @@
 - [ ] 6.1 Add thin bounded CLI adapters for remote list/add/update/remove, refresh/checkout/doctor selectors, detached wait/timeout and backup retention/pin/unpin/prune; update `PUBLIC_LEAF_CASES`, aliases/help, confirmations, dry-run and Rich/JSON/TOON/error contracts.
 - [ ] 6.2 Document two-source setup and rotation, ignored origin variables, staging and retained-backup COPY, readiness limits, retention path/policy, protected archives, manual prune and existing stop/remove/recovery composition without introducing orchestration claims.
 - [ ] 6.3 Run a two-source integration scenario with different credentials: init, select staging, COPY, ready launch, stop/remove, reuse retained UUID and prune; prove lab/project default isolation, exact provenance and absence of secrets in plans/results/logs/child environments.
-- [ ] 6.4 Run focused SDK/CLI/migration/recovery suites, current real-Odoo contract coverage where available, Ruff check/format, strict mypy, repository architecture/leaf/schema gates, `git diff --check` and strict OpenSpec validation; keep every implementation checkbox unchecked until behavior is verified.
+- [ ] 6.4 Run focused SDK/CLI/migration/recovery suites, current real-Odoo contract coverage where available, Ruff check/format, strict mypy, repository architecture/leaf/schema gates, command-plan step-parity regressions, the repository mutation gate, `git diff --check` and strict OpenSpec validation; keep every implementation checkbox unchecked until behavior is verified.

@@ -4,7 +4,7 @@
 
 The public environment checkout operation MUST accept an optional complete backup UUID for COPY mode. The input MUST be mutually exclusive with live-source backup creation and MUST be captured in the same immutable command snapshot as the rest of checkout.
 
-Planning MUST resolve the backup through the existing catalog and apply the current restore preconditions before mutation. Execution MUST reuse the existing restore and COPY-journal pipeline without contacting source Odoo or creating another backup.
+Planning MUST resolve the backup through the existing catalog and apply the current restore preconditions before mutation. Execution MUST reuse the existing source-neutral archive evidence, verified-snapshot restore transport, and COPY-journal pipeline without contacting source Odoo, creating another backup, or introducing a parallel extractor/verifier.
 
 #### Scenario: Checkout restores the selected backup
 
@@ -85,7 +85,7 @@ Before local restore, checkout SHALL check catalog/file identity, checksum, arch
 
 ### Requirement: `copy` DB mode
 
-COPY mode MUST select exactly one source: existing local source database, explicit named remote, or exact catalog backup UUID. The default local-source path MUST create a ZIP with filestore through the existing backup operation and record environment ownership. It MUST require a reachable local source HTTP endpoint; arbitrary remote URLs in a local source config remain rejected.
+COPY mode MUST select exactly one source: existing local source database, explicit named remote, or exact catalog backup UUID. The default local-source path MUST create a ZIP with filestore through the existing backup operation and record environment ownership. It MUST require a reachable local source HTTP endpoint; arbitrary remote URLs in a local source config remain rejected. The existing caller-owned local-archive restore source SHALL NOT become a fourth COPY checkout input.
 
 The explicit remote path MUST download through named-source preparation and retain that backup independently of environment ownership. The retained-backup path MUST skip source HTTP/download entirely. Both SHALL restore to the configured local project cluster, not the remote cluster. All paths MUST create a new target with copied filestore and neutralization, verify target existence and neutralization before ready, and never overwrite/reuse an existing target on retry.
 
