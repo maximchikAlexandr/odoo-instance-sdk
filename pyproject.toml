@@ -54,7 +54,7 @@ source-exclude = ["src/odoo_instance_sdk/web/node_modules/**"]
 wheel-exclude = ["src/odoo_instance_sdk/web/node_modules/**"]
 
 [dependency-groups]
-lint = ["ruff>=0.15"]
+lint = ["ruff>=0.16.7,<0.17"]
 type-check = ["mypy>=2.0", "types-psutil>=7.0"]
 test = [
     "pytest>=8.0",

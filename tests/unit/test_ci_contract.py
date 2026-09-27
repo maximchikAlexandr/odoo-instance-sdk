@@ -187,9 +187,11 @@ def test_make_test_recipe_fails_fast_between_verification_stages() -> None:
     assert "set -e" in test_recipe
 
 
-def test_ruff_combines_aliased_imports_from_the_same_module() -> None:
+def test_ruff_configuration_preserves_required_quality_rules() -> None:
     config = tomllib.loads((_REPOSITORY_ROOT / "ruff.toml").read_text(encoding="utf-8"))
 
+    assert config["required-version"] == ">=0.16.7,<0.17"
+    assert {"B007", "B023", "B904", "B905", "DTZ"} <= set(config["lint"]["select"])
     assert config["lint"]["isort"]["combine-as-imports"] is True
 
 

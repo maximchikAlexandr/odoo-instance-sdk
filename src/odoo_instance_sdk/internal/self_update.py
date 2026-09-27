@@ -38,8 +38,6 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.self_update_recovery import (
     UpdateRecoveryState,
-)
-from odoo_instance_sdk.internal.self_update_recovery import (
     inspect_update_recovery_state as _inspect_update_recovery_state,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdatePhaseDuration, UpdateResult

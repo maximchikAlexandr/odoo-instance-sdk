@@ -393,7 +393,7 @@ def reconcile_container(
     database: str,
     deadline: float,
     planned: bool = False,
-    current_container: dict[str, JsonValue] | None | _NoCapturedContainer = _UNSET,
+    current_container: dict[str, JsonValue] | _NoCapturedContainer | None = _UNSET,
 ) -> PgAdminOpenResult:
     if current_container is _UNSET:
         current = inspect_container(

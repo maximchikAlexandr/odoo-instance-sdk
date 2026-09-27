@@ -177,8 +177,10 @@ def test_downgrade_fails_when_snapshot_state_is_not_restorable(
     ("source_url", "sentinels"),
     (
         (
-            "https://user-sentinel:password-sentinel@github.com/"
-            "maximchikAlexandr/odoo-instance-sdk.git",
+            (
+                "https://user-sentinel:password-sentinel@github.com/"
+                "maximchikAlexandr/odoo-instance-sdk.git"
+            ),
             ("user-sentinel", "password-sentinel"),
         ),
         (

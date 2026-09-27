@@ -28,6 +28,7 @@ Issue #8 требует project-level PostgreSQL cluster ownership и lifecycle.
 
 ```python
 from odoo_instance_sdk import PostgresCluster
+
 cluster = PostgresCluster.from_project("[PROJECT_ROOT]")
 state: PostgresClusterState = cluster.status()
 cluster.ensure_running(timeout=60.0)
@@ -54,9 +55,9 @@ postgres: PostgresProjectConfig | None = None
 
 ```python
 mode: Literal["external", "compose"] = "external"
-image: str | None = None        # compose only
-port: int | None = None         # compose only; None = allocate free loopback port at init
-user: str | None = None          # compose only; default = source db_user or "odoo"
+image: str | None = None  # compose only
+port: int | None = None  # compose only; None = allocate free loopback port at init
+user: str | None = None  # compose only; default = source db_user or "odoo"
 ```
 
 Manifest:
@@ -128,7 +129,9 @@ volumes:
 
 ```python
 class ComposeRunner(Protocol):
-    def run(self, args: Sequence[str], *, cwd: Path | None, timeout: float | None) -> CommandResult: ...
+    def run(
+        self, args: Sequence[str], *, cwd: Path | None, timeout: float | None
+    ) -> CommandResult: ...
 ```
 
 Default impl: `subprocess.run([...], capture_output=True, text=True, timeout=...)`. Tests inject fake.
@@ -262,13 +265,17 @@ def _check_postgres(report, project_root):
         return
     docker = shutil.which("docker")
     if docker is None and cluster.owned:
-        report.checks.append(CheckResult("postgres.compose", STATUS_WARN, "docker not found in PATH"))
+        report.checks.append(
+            CheckResult("postgres.compose", STATUS_WARN, "docker not found in PATH")
+        )
     state = cluster.status()  # read-only
-    report.checks.append(CheckResult(
-        "postgres.cluster",
-        _state_to_status(state),
-        f"mode={cluster.mode} owned={cluster.owned} state={state.value} endpoint={redacted_endpoint}",
-    ))
+    report.checks.append(
+        CheckResult(
+            "postgres.cluster",
+            _state_to_status(state),
+            f"mode={cluster.mode} owned={cluster.owned} state={state.value} endpoint={redacted_endpoint}",
+        )
+    )
 ```
 
 `doctor` никогда не поднимает/не останавливает cluster. `_state_to_status`: `HEALTHY`→`ok`, `STARTING`/`STOPPED`→`info`, `UNHEALTHY`/`UNREACHABLE`→`warn`, `UNKNOWN`→`warn`.
@@ -278,14 +285,31 @@ def _check_postgres(report, project_root):
 Новые exceptions в `exceptions.py` (всё наследники `OdooInstanceSdkError`):
 
 ```python
-class PostgresClusterError(OdooInstanceSdkError): """Base for PostgresCluster errors."""
+class PostgresClusterError(OdooInstanceSdkError):
+    """Base for PostgresCluster errors."""
+
+
 class PostgresClusterNotOwnedError(PostgresClusterError): ...
+
+
 class PostgresClusterUnreachableError(PostgresClusterError): ...
+
+
 class PostgresClusterUnhealthyError(PostgresClusterError): ...
+
+
 class PostgresClusterStartError(PostgresClusterError): ...
+
+
 class PostgresClusterTimeoutError(PostgresClusterError): ...
+
+
 class PostgresComposeUnavailableError(PostgresClusterError): ...
+
+
 class PostgresComposeInvalidError(PostgresClusterError): ...
+
+
 class PostgresPortCollisionError(PostgresClusterError): ...
 ```
 

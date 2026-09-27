@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
 type PlanJsonValue = (
-    None | bool | int | float | str | list[PlanJsonValue] | dict[str, PlanJsonValue]
+    bool | int | float | str | list[PlanJsonValue] | dict[str, PlanJsonValue] | None
 )
 
 

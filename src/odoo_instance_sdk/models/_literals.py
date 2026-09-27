@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 type ModuleJsonValue = (
-    None | bool | int | float | str | list["ModuleJsonValue"] | dict[str, "ModuleJsonValue"]
+    bool | int | float | str | list["ModuleJsonValue"] | dict[str, "ModuleJsonValue"] | None
 )
 
 type ClusterUnavailabilityReason = Literal[

@@ -226,19 +226,19 @@ documented by `OUTPUT_WRITE_REASONS`:
   replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/backup.py:347` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/output.py:116` — in-memory Rich serialization
+- `src/odoo_instance_sdk/commands/output.py:115` — in-memory Rich serialization
   boundary; it writes only to an in-memory buffer and never to terminal output.
-- `src/odoo_instance_sdk/commands/output.py:288` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:287` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:457` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:456` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:459` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:458` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:466` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:465` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:468` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:467` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/internal/self_update.py:803-805` — maintenance child
+- `src/odoo_instance_sdk/internal/self_update.py:801-803` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement
   centralized emitter.
 - `src/odoo_instance_sdk/resources/instance/identity.py:503` — lifecycle cleanup
@@ -283,7 +283,7 @@ locations while the production launch inventory is empty:
 - `tests/unit/test_monitor_cache_and_docker.py:119`
 - `tests/unit/test_cluster_resources.py:188`
 - `tests/unit/test_real_odoo_ci_components.py:40,109,151`
-- `tests/unit/test_real_odoo_foundation.py:325,348,367`
+- `tests/unit/test_real_odoo_foundation.py:324,347,366`
 
 These are not production launches or public behavior exceptions. Their removal
 condition is migration of each fixture to the shared recording executor; the
