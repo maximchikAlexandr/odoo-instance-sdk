@@ -318,7 +318,7 @@ class _BackupMixin:
         before_probe = self._psql_probe_for(target_database_name, "database.restore.exists-before")
         after_probe = self._psql_probe_for(target_database_name, "database.restore.exists-after")
         probes = tuple(probe for probe in (before_probe, after_probe) if probe is not None)
-        return self._action_command(
+        command = self._action_command(
             "database.restore",
             "Restore a database backup",
             lambda: self._restore_impl(
@@ -334,6 +334,15 @@ class _BackupMixin:
             mutating=True,
             steps=probes,
             optional_steps=tuple(probe.step_id for probe in probes),
+        )
+        from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
+
+        binding = self._instance._runtime_binding
+        return attach_auto_prune(
+            command,
+            backups=self._instance._client.backups,
+            project=binding.repository_root if binding is not None else None,
+            excluded_ids=(backup.id,),
         )
 
     def _restore_after_verified_absence(

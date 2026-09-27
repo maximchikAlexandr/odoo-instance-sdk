@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
+from odoo_instance_sdk.internal.paths import get_backups_dir
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -34,6 +35,8 @@ from odoo_instance_sdk.resources.environment import (
 )
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
 
+FIXED_NOW = datetime(2026, 12, 31, tzinfo=UTC)
+
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -49,19 +52,20 @@ def _restore_instance_factory() -> object:
 
 
 def _copy_instance(*, target_exists: bool = True) -> MagicMock:
+    backup_path = get_backups_dir() / f"{uuid.uuid4()}.zip"
     backup = Backup(
         id=uuid.uuid4(),
         source_base_url="http://127.0.0.1:8069",
         database_name="comerta",
         format=BackupFormat.ZIP,
         filestore_requested=True,
-        path=str(Path("/tmp") / f"{uuid.uuid4()}.zip"),
+        path=str(backup_path),
         filename="comerta.zip",
         size_bytes=1,
         sha256="a" * 64,
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
-    Path(backup.path).write_bytes(b"backup")
+    backup_path.write_bytes(b"backup")
     instance = MagicMock()
     instance.config.db_host = "localhost"
     instance.config.db_port = 5432
@@ -519,17 +523,121 @@ class TestCopyRemoveRecovery:
             db_user="odoo",
             backup_id=str(env.backup_id),
             stage=CopyJournalStage.DROPPED,
+            backup_ownership="owned",
         )
         Path(env.generated_config_path).unlink()
         delete = MagicMock()
         from odoo_instance_sdk.resources.backup import BackupResource
 
-        monkeypatch.setattr(BackupResource, "delete", delete)
+        monkeypatch.setattr(BackupResource, "delete_owned", delete)
 
         env_client.environments.remove(env)
 
         assert delete.call_count == 1
         assert not Path(env.worktree_path).exists()
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
+
+    @pytest.mark.parametrize("ownership", ["borrowed", "unknown"])
+    def test_copy_remove_preserves_non_owned_backup_and_journal_stage(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        ownership: str,
+    ) -> None:
+        instance = _copy_instance()
+        env = _checkout_copy(
+            env_client, project_manifest, fake_python, f"feat/rm-{ownership}", instance
+        )
+        catalog = env_client.get_catalog()
+        catalog.upsert_copy_journal(
+            str(env.id),
+            target_database="copy_target",
+            db_host="localhost",
+            db_port=5432,
+            db_user="odoo",
+            backup_id=str(env.backup_id),
+            stage=CopyJournalStage.DROPPED,
+            backup_ownership=ownership,
+        )
+        Path(env.generated_config_path).unlink()
+        backup_path = Path(instance.databases.backup.return_value.path)
+
+        env_client.environments.remove(env)
+
+        row = catalog.get_by_id(str(env.backup_id))
+        journal = catalog.get_copy_journal(str(env.id))
+        assert backup_path.is_file()
+        assert row is not None and row["state"] == "available"
+        assert journal is not None and journal["stage"] == CopyJournalStage.DROPPED.value
+
+    def test_owned_copy_remove_deletes_backup_and_marks_terminal_stage(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        instance = _copy_instance()
+        env = _checkout_copy(env_client, project_manifest, fake_python, "feat/rm-owned", instance)
+        catalog = env_client.get_catalog()
+        catalog.upsert_copy_journal(
+            str(env.id),
+            target_database="copy_target",
+            db_host="localhost",
+            db_port=5432,
+            db_user="odoo",
+            backup_id=str(env.backup_id),
+            stage=CopyJournalStage.DROPPED,
+            backup_ownership="owned",
+        )
+        Path(env.generated_config_path).unlink()
+        backup_path = Path(instance.databases.backup.return_value.path)
+
+        env_client.environments.remove(env)
+
+        row = catalog.get_by_id(str(env.backup_id))
+        journal = catalog.get_copy_journal(str(env.id))
+        assert not backup_path.exists()
+        assert row is not None and row["state"] == "deleted"
+        assert journal is not None and journal["stage"] == CopyJournalStage.BACKUP_DELETED.value
+
+    def test_owned_copy_remove_preserves_pinned_backup(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        instance = _copy_instance()
+        env = _checkout_copy(env_client, project_manifest, fake_python, "feat/rm-pinned", instance)
+        catalog = env_client.get_catalog()
+        catalog.upsert_copy_journal(
+            str(env.id),
+            target_database="copy_target",
+            db_host="localhost",
+            db_port=5432,
+            db_user="odoo",
+            backup_id=str(env.backup_id),
+            stage=CopyJournalStage.DROPPED,
+            backup_ownership="owned",
+        )
+        env_client.backups.set_pinned(str(env.backup_id), True)
+        Path(env.generated_config_path).unlink()
+        backup_path = Path(instance.databases.backup.return_value.path)
+
+        with pytest.raises(EnvironmentConflictError, match="protected: pinned"):
+            env_client.environments.remove(env)
+
+        row = catalog.get_by_id(str(env.backup_id))
+        journal = catalog.get_copy_journal(str(env.id))
+        assert backup_path.is_file()
+        assert row is not None and row["state"] == "available"
+        assert journal is not None and journal["stage"] == CopyJournalStage.DROPPED.value
+        failed = env_client.environments.get(str(env.id))
+        assert failed.state is EnvironmentState.CLEANUP_FAILED
+        assert failed.last_error is not None and "protected: pinned" in failed.last_error
+
+        env_client.backups.set_pinned(str(env.backup_id), False)
+        env_client.environments.remove(env)
+
+        row = catalog.get_by_id(str(env.backup_id))
+        journal = catalog.get_copy_journal(str(env.id))
+        assert not backup_path.exists()
+        assert row is not None and row["state"] == "deleted"
+        assert journal is not None and journal["stage"] == CopyJournalStage.BACKUP_DELETED.value
         assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
 
     def test_backup_deleted_missing_config_removes_files_only(
@@ -557,7 +665,7 @@ class TestCopyRemoveRecovery:
         delete = MagicMock()
         from odoo_instance_sdk.resources.backup import BackupResource
 
-        monkeypatch.setattr(BackupResource, "delete", delete)
+        monkeypatch.setattr(BackupResource, "delete_owned", delete)
 
         env_client.environments.remove(env)
 
@@ -628,7 +736,7 @@ class TestCopyRemoveRecovery:
         delete = MagicMock(side_effect=lambda _backup: events.append("backup"))
         from odoo_instance_sdk.resources.backup import BackupResource
 
-        monkeypatch.setattr(BackupResource, "delete", delete)
+        monkeypatch.setattr(BackupResource, "delete_owned", delete)
 
         env_client.environments.remove(env)
 
@@ -847,11 +955,11 @@ class TestCopyRestoreClusterIdentity:
             database_name="comerta",
             format=BackupFormat.ZIP,
             filestore_requested=True,
-            path=str(Path("/tmp") / f"{uuid.uuid4()}.zip"),
+            path=str(get_backups_dir() / f"{uuid.uuid4()}.zip"),
             filename="comerta.zip",
             size_bytes=1,
             sha256="a" * 64,
-            downloaded_at=datetime.now(UTC),
+            downloaded_at=FIXED_NOW,
         )
         Path(backup.path).write_bytes(b"backup")
         _record_backup(env_client, backup)
@@ -1007,11 +1115,11 @@ class TestCopyRestoreClusterIdentity:
             database_name="comerta",
             format=BackupFormat.ZIP,
             filestore_requested=True,
-            path=str(Path("/tmp") / f"{uuid.uuid4()}.zip"),
+            path=str(get_backups_dir() / f"{uuid.uuid4()}.zip"),
             filename="comerta.zip",
             size_bytes=1,
             sha256="a" * 64,
-            downloaded_at=datetime.now(UTC),
+            downloaded_at=FIXED_NOW,
         )
         Path(backup.path).write_bytes(b"backup")
         _record_backup(env_client, backup)

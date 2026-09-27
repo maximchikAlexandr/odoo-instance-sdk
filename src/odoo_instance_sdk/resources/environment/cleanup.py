@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from odoo_instance_sdk.exceptions import (
+    BackupNotAvailableError,
     EnvironmentConflictError,
 )
 from odoo_instance_sdk.internal import paths as _paths
@@ -94,6 +95,14 @@ class _CleanupMixin:
             env: DevelopmentEnvironment,
             failures: list[str],
         ) -> bool: ...
+
+    @staticmethod
+    def _copy_backup_ownership(journal: sqlite3.Row) -> Literal["owned", "borrowed", "unknown"]:
+        value = journal["backup_ownership"]
+        return cast(
+            "Literal['owned', 'borrowed', 'unknown']",
+            value if value in {"owned", "borrowed", "unknown"} else "unknown",
+        )
 
     def list_command(
         self,
@@ -480,6 +489,7 @@ class _CleanupMixin:
                 db_user=instance.config.db_user,
                 backup_id=str(copy_plan.backup_id) if copy_plan.backup_id is not None else None,
                 stage=CopyJournalStage.DROPPED,
+                backup_ownership=copy_plan.backup_ownership,
             )
         else:
             cat.add_environment_event(
@@ -497,7 +507,14 @@ class _CleanupMixin:
                 )
                 cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
                 raise EnvironmentConflictError("cleanup_failed", msg)
-            if not cleanup_failed:
+            remaining_backup = (
+                cat.get_by_id(str(copy_plan.backup_id)) if copy_plan.backup_id is not None else None
+            )
+            if (
+                not cleanup_failed
+                and copy_plan.backup_ownership == "owned"
+                and not (remaining_backup is not None and remaining_backup["state"] == "available")
+            ):
                 journal = cat.get_copy_journal(str(env.id))
                 assert journal is not None
                 cleanup_instance = copy_plan.instance
@@ -521,6 +538,7 @@ class _CleanupMixin:
                     ),
                     backup_id=str(copy_plan.backup_id) if copy_plan.backup_id is not None else None,
                     stage=CopyJournalStage.BACKUP_DELETED,
+                    backup_ownership=copy_plan.backup_ownership,
                 )
         elif copy_plan is None and env.backup_id is not None:
             cleanup_failed = self._remove_backup(cat, env, failures) or cleanup_failed
@@ -659,6 +677,7 @@ class _CleanupMixin:
                 instance=None,
                 backup=recovery_backup,
                 stage=stage,
+                backup_ownership=self._copy_backup_ownership(journal),
             )
         if not config_path.is_file():
             if journal is not None:
@@ -677,6 +696,7 @@ class _CleanupMixin:
                         instance=None,
                         backup=backup,
                         stage=stage,
+                        backup_ownership=self._copy_backup_ownership(journal),
                     )
                 # Failed before restore: the durable stage proves no target
                 # database exists.  A prepared journal may legitimately have
@@ -689,6 +709,7 @@ class _CleanupMixin:
                         instance=None,
                         backup=None,
                         stage=stage,
+                        backup_ownership=self._copy_backup_ownership(journal),
                     )
                 if stage is CopyJournalStage.BACKED_UP and backup_id is not None:
                     if backup_id is None:
@@ -707,6 +728,7 @@ class _CleanupMixin:
                         instance=None,
                         backup=backup,
                         stage=stage,
+                        backup_ownership=self._copy_backup_ownership(journal),
                     )
             raise EnvironmentConflictError(
                 "copy_config_missing", "copy environment config is missing"
@@ -765,6 +787,9 @@ class _CleanupMixin:
                     instance=instance,
                     backup=_row_to_backup(backup_row) if backup_row is not None else None,
                     stage=CopyJournalStage.RESTORED,
+                    backup_ownership=(
+                        self._copy_backup_ownership(journal) if journal is not None else "unknown"
+                    ),
                     rollback_database=rollback_database,
                     rollback_filestore=rollback_filestore,
                 )
@@ -786,6 +811,7 @@ class _CleanupMixin:
                     instance=None,
                     backup=_row_to_backup(backup_row) if backup_row is not None else None,
                     stage=stage,
+                    backup_ownership=self._copy_backup_ownership(journal),
                 )
             if stage in (CopyJournalStage.RESTORE_PENDING, CopyJournalStage.RESTORED):
                 journal_backup_id = journal["backup_id"]
@@ -810,6 +836,7 @@ class _CleanupMixin:
                     instance=instance,
                     backup=backup,
                     stage=stage,
+                    backup_ownership=self._copy_backup_ownership(journal),
                 )
         restored = catalog.latest_restore(instance.config.db_host, db_port, env.target_db_name)
         if env.backup_id is None or restored is None or restored.id != env.backup_id:
@@ -832,6 +859,7 @@ class _CleanupMixin:
             instance=instance,
             backup=backup,
             stage=CopyJournalStage.RESTORED,
+            backup_ownership="unknown",
         )
 
     def _validate_copy_journal_ownership(
@@ -877,13 +905,20 @@ class _CleanupMixin:
         return False
 
     def _delete_copy_backup(self, plan: CopyCleanupPlan, failures: list[str]) -> bool:
+        if plan.backup_ownership != "owned":
+            # Named and retained inputs belong to their source/catalog owner;
+            # removal must leave both the payload and its durable stage intact.
+            return False
         if plan.backup is None:
             # The catalog still proves ownership, but the payload has already
             # disappeared.  Deletion is idempotent: advance the durable stage
             # rather than blocking filesystem cleanup forever.
             return False
         try:
-            self._client.backups.delete(plan.backup)
+            self._client.backups.delete_owned(plan.backup)
+        except BackupNotAvailableError as exc:
+            failures.append(f"backup delete: {exc}")
+            return True
         except Exception as exc:
             failures.append(f"backup delete: {exc}")
             return True
