@@ -326,6 +326,7 @@ runtime = Table(
     Column("http_url", Text, nullable=False),
     Column("http_port", Integer, nullable=False),
     Column("database_name", Text, nullable=False),
+    Column("launch_identity_json", Text),
     Column("updated_at", Text, nullable=False),
     UniqueConstraint("owner_kind", "owner_id"),
 )
@@ -364,6 +365,7 @@ CATALOG_INDEXES = (
 ENVIRONMENT_RUNTIME_VIEW_SQL = """
 CREATE VIEW environment_runtime AS
     SELECT owner_id AS environment_id, root_pid, create_time, started_at,
-           checkout_branch, commit_sha, http_url, http_port, database_name, updated_at
+           checkout_branch, commit_sha, http_url, http_port, database_name,
+           launch_identity_json, updated_at
     FROM runtime WHERE owner_kind = 'environment'
 """
