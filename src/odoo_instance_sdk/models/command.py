@@ -94,6 +94,7 @@ class ReadinessResult(msgspec.Struct):
 class RestoreResult(msgspec.Struct):
     new_db: str
     source: Backup
+    warnings: tuple[str, ...] = ()
 
 
 class DropResult(msgspec.Struct):

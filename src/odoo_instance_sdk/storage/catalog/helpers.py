@@ -115,6 +115,28 @@ class BackupProjectionPage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class BackupRetentionRecord:
+    """Typed catalogue state captured for one retention decision."""
+
+    backup_id: uuid.UUID
+    backup: Backup | None
+    state: BackupState | None
+    timestamp: datetime | None
+    source_group: tuple[str, ...] | None
+    path: Path | None
+    recorded_size: int
+    protection_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BackupRetentionSnapshot:
+    """One project-scoped retention snapshot with typed revalidation facts."""
+
+    project_id: str
+    records: tuple[BackupRetentionRecord, ...]
+
+
 def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
@@ -142,6 +164,8 @@ def _row_to_backup(row: sqlite3.Row, *, require_file: bool = True) -> Backup | N
         sha256=row["sha256"] or "",
         downloaded_at=datetime.fromisoformat(downloaded_at),
         source_git_branch=row["source_git_branch"],
+        source_name=row["source_name"],
+        pinned=bool(row["pinned"]),
     )
 
 

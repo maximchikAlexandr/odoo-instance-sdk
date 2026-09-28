@@ -6,9 +6,9 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -16,19 +16,21 @@ from odoo_instance_sdk.exceptions import (
     BackupNotFoundError,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
     BackupEvent,
     BackupEventType,
     BackupState,
     BackupValidationStatus,
-    EnvironmentState,
 )
 from odoo_instance_sdk.storage.catalog.helpers import (
     _READ_ONLY_PROJECT_SCOPE as _READ_ONLY_PROJECT_SCOPE,
     BackupEnvironmentLink as BackupEnvironmentLink,
     BackupProjection as BackupProjection,
     BackupProjectionPage as BackupProjectionPage,
+    BackupRetentionRecord as BackupRetentionRecord,
+    BackupRetentionSnapshot as BackupRetentionSnapshot,
     BackupRestoreLink as BackupRestoreLink,
     CatalogValue as CatalogValue,
     CopyJournalStage as CopyJournalStage,
@@ -40,7 +42,6 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     _translate_sqlite_error as _translate_sqlite_error,
     normalize_db_host as normalize_db_host,
 )
-from odoo_instance_sdk.storage.catalog.provenance import restore_provenance
 from odoo_instance_sdk.storage.catalog_migrate import ensure_catalog_migrated
 
 
@@ -127,10 +128,11 @@ class _BackupMixin:
         path: Path,
         *,
         source_git_branch: str | None = None,
+        source_name: str | None = None,
         project_id: str | None = None,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at, source_git_branch, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)",
+            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at, source_git_branch, source_name, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)",
             (
                 backup_id,
                 source_base_url,
@@ -140,6 +142,7 @@ class _BackupMixin:
                 str(path),
                 BackupState.DOWNLOADING.value,
                 source_git_branch,
+                source_name,
                 project_id,
             ),
         )
@@ -213,6 +216,167 @@ class _BackupMixin:
         )
         self._add_event(backup_id, "deleted")
         self._conn.commit()
+
+    @_translate_sqlite_error
+    def set_pinned(self, backup_id: str, pinned: bool) -> bool:
+        """Set one UUID's pin state and audit only actual state transitions."""
+        if type(pinned) is not bool:
+            raise TypeError("pinned must be a boolean")
+        canonical_id = self._canonical_backup_id(backup_id)
+        row = self._conn.execute(
+            "SELECT pinned FROM backups WHERE id = ?", (canonical_id,)
+        ).fetchone()
+        if row is None:
+            raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+        changed = bool(row["pinned"]) != pinned
+        if not changed:
+            return False
+        with self._conn:
+            self._conn.execute(
+                "UPDATE backups SET pinned = ? WHERE id = ?",
+                (int(pinned), canonical_id),
+            )
+            self._add_event(
+                canonical_id,
+                BackupEventType.PIN_SET.value,
+                message=f"pinned={str(pinned).lower()}",
+            )
+        return True
+
+    @_translate_sqlite_error
+    def _retention_rows(self, project_id: str) -> list[sqlite3.Row]:
+        """Return all project rows for one immutable retention snapshot."""
+        self._backfill_deterministic_backup_ownership()
+        return self._conn.execute(
+            "SELECT * FROM backups WHERE project_id = ? "
+            "ORDER BY COALESCE(downloaded_at, started_at) DESC, id ASC",
+            (project_id,),
+        ).fetchall()
+
+    def retention_snapshot(self, project_id: str) -> BackupRetentionSnapshot:
+        """Return typed retention state without exposing SQLite rows."""
+        records = tuple(
+            self._retention_record(
+                row,
+                protection_reason=self.deletion_protection_reason(str(row["id"])),
+            )
+            for row in self._retention_rows(project_id)
+        )
+        return BackupRetentionSnapshot(project_id=project_id, records=records)
+
+    def retention_revalidate(self, backup_id: str) -> BackupRetentionRecord | None:
+        """Re-read one retention target and its current protection state."""
+        canonical_id = self._canonical_backup_id(backup_id)
+        row = self._conn.execute("SELECT * FROM backups WHERE id = ?", (canonical_id,)).fetchone()
+        if row is None:
+            return None
+        return self._retention_record(
+            row,
+            protection_reason=self.deletion_protection_reason(canonical_id),
+        )
+
+    @classmethod
+    def _retention_record(
+        cls, row: sqlite3.Row, *, protection_reason: str | None = None
+    ) -> BackupRetentionRecord:
+        raw_path = row["path"]
+        path = Path(raw_path) if isinstance(raw_path, str) and raw_path else None
+        state_value = row["state"]
+        try:
+            state = BackupState(state_value)
+        except ValueError:
+            state = None
+        return BackupRetentionRecord(
+            backup_id=uuid.UUID(str(row["id"])),
+            backup=_row_to_backup(row, require_file=False),
+            state=state,
+            timestamp=cls._retention_timestamp(row),
+            source_group=cls._retention_group(row),
+            path=path,
+            recorded_size=row["size_bytes"] if isinstance(row["size_bytes"], int) else 0,
+            protection_reason=protection_reason,
+        )
+
+    @staticmethod
+    def _retention_group(row: sqlite3.Row) -> tuple[str, ...] | None:
+        source_name = row["source_name"]
+        if source_name is not None:
+            if not isinstance(source_name, str) or not source_name.strip():
+                return None
+            return ("named", source_name)
+        try:
+            source = normalize_base_url(str(row["source_base_url"]))
+        except Exception:
+            return None
+        database = row["database_name"]
+        if not isinstance(database, str) or not database.strip():
+            return None
+        return ("legacy", source, database)
+
+    @staticmethod
+    def _retention_timestamp(row: sqlite3.Row) -> datetime | None:
+        raw = row["downloaded_at"] or row["started_at"]
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    @_translate_sqlite_error
+    def deletion_protection_reason(  # noqa: C901 -- protections are checked in contract order
+        self, backup_id: str
+    ) -> str | None:
+        """Return the first durable protection preventing exact deletion."""
+        canonical_id = self._canonical_backup_id(backup_id)
+        row = self._conn.execute("SELECT * FROM backups WHERE id = ?", (canonical_id,)).fetchone()
+        if row is None:
+            raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+        if bool(row["pinned"]):
+            return "pinned"
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM environments WHERE backup_id = ? AND state <> 'removed' LIMIT 1",
+                (canonical_id,),
+            ).fetchone()
+            is not None
+        ):
+            return "referenced by a non-removed environment"
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM environment_copy_journal "
+                "WHERE backup_id = ? AND stage <> 'backup_deleted' LIMIT 1",
+                (canonical_id,),
+            ).fetchone()
+            is not None
+        ):
+            return "referenced by unresolved recovery"
+        if row["project_id"] is None:
+            return "unknown or unowned ownership"
+        timestamp = self._retention_timestamp(row)
+        group = self._retention_group(row)
+        if timestamp is None:
+            return "unknown catalogue timestamp"
+        if group is None:
+            return "unknown historical source group"
+        rows = self._conn.execute(
+            "SELECT * FROM backups WHERE project_id = ? AND state = 'available'",
+            (row["project_id"],),
+        ).fetchall()
+        same_group: list[tuple[sqlite3.Row, datetime]] = []
+        for candidate in rows:
+            if self._retention_group(candidate) != group:
+                continue
+            candidate_time = self._retention_timestamp(candidate)
+            if candidate_time is not None:
+                same_group.append((candidate, candidate_time))
+        if not same_group:
+            return "unknown historical source group"
+        newest, _ = min(same_group, key=lambda item: (-item[1].timestamp(), str(item[0]["id"])))
+        if str(newest["id"]) == canonical_id:
+            return "newest available backup in historical source group"
+        return None
 
     @_translate_sqlite_error
     def get_by_id(self, backup_id: str) -> sqlite3.Row | None:
@@ -700,298 +864,3 @@ class _BackupMixin:
             ).fetchone()
             assert activated is not None
             return _row_to_cluster_claim(activated)
-
-    @_translate_sqlite_error
-    def record_restore(
-        self,
-        db_host: str | None,
-        db_port: int,
-        database_name: str,
-        backup_id: str | None = None,
-        *,
-        source_kind: str | None = None,
-        source_sha256: str | None = None,
-        cluster_id: uuid.UUID | str | None = None,
-        data_directory: str | Path | None = None,
-    ) -> None:
-        host = normalize_db_host(db_host)
-        kind, evidence_backup_id, digest = restore_provenance(backup_id, source_kind, source_sha256)
-        identity = None if cluster_id is None else self._cluster_uuid(cluster_id)
-        data_dir = None if data_directory is None else str(data_directory)
-        if data_dir is not None and not data_dir.strip():
-            raise BackupCatalogError("data_directory must not be empty")
-        if identity is not None:
-            claim = self._get_postgres_cluster_by_id(identity)
-            if claim is None or claim.state != "active":
-                raise BackupCatalogError("restore provenance requires an active cluster claim")
-        with self._conn:
-            self._conn.execute(
-                """INSERT INTO restores
-                   (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
-                    restored_at, cluster_id, data_directory)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)""",
-                (
-                    host,
-                    db_port,
-                    database_name,
-                    evidence_backup_id,
-                    kind,
-                    digest,
-                    identity,
-                    data_dir,
-                ),
-            )
-            self._conn.execute(
-                """INSERT INTO database_events
-                   (db_host, db_port, database_name, event_type, occurred_at, backup_id,
-                    source_kind, source_sha256, cluster_id, data_directory)
-                   VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?, ?, ?)""",
-                (
-                    host,
-                    db_port,
-                    database_name,
-                    evidence_backup_id,
-                    kind,
-                    digest,
-                    identity,
-                    data_dir,
-                ),
-            )
-
-    @_translate_sqlite_error
-    def _finalize_environment_replacement(
-        self,
-        environment_id: str,
-        backup_id: str,
-        *,
-        db_host: str | None,
-        db_port: int,
-        target_database: str,
-        cluster_id: uuid.UUID | str,
-        data_directory: str | Path,
-    ) -> None:
-        """Publish replacement provenance and environment binding atomically."""
-        host = normalize_db_host(db_host)
-        identity = self._cluster_uuid(cluster_id)
-        data_dir = str(data_directory)
-        if not data_dir.strip():
-            raise BackupCatalogError("replacement data_directory must not be empty")
-        with self._conn:
-            environment = self._conn.execute(
-                "SELECT state, db_mode, target_db_name FROM environments WHERE id=?",
-                (environment_id,),
-            ).fetchone()
-            if (
-                environment is None
-                or environment["state"] not in {"ready", EnvironmentState.CLEANUP_FAILED.value}
-                or environment["db_mode"] != "copy"
-                or environment["target_db_name"] != target_database
-            ):
-                raise BackupCatalogError("environment replacement identity changed")
-            backup = self._conn.execute(
-                "SELECT state FROM backups WHERE id=?", (backup_id,)
-            ).fetchone()
-            if backup is None or backup["state"] != BackupState.AVAILABLE.value:
-                raise BackupCatalogError("replacement backup is no longer available")
-            claim = self._conn.execute(
-                "SELECT state FROM postgres_clusters WHERE cluster_id=?", (identity,)
-            ).fetchone()
-            if claim is None or claim["state"] != "active":
-                raise BackupCatalogError("replacement cluster claim is not active")
-            self._conn.execute(
-                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL WHERE id=?",
-                (backup_id, environment_id),
-            )
-            self._conn.execute(
-                "INSERT INTO restores "
-                "(db_host, db_port, database_name, backup_id, source_kind, source_sha256, "
-                "restored_at, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, ?, 'catalogue', NULL, datetime('now'), ?, ?)",
-                (host, db_port, target_database, backup_id, identity, data_dir),
-            )
-            self._conn.execute(
-                "INSERT INTO database_events "
-                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, "
-                "source_kind, source_sha256, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, 'catalogue', NULL, ?, ?)",
-                (host, db_port, target_database, backup_id, identity, data_dir),
-            )
-            self._conn.execute(
-                "INSERT INTO environment_events "
-                "(environment_id, operation, outcome, occurred_at, message) "
-                "VALUES (?, 'sync', 'succeeded', datetime('now'), 'replacement')",
-                (environment_id,),
-            )
-
-    @_translate_sqlite_error
-    def _rollback_environment_replacement(
-        self,
-        environment_id: str,
-        backup_id: str,
-        *,
-        db_host: str | None,
-        db_port: int,
-        target_database: str,
-        cluster_id: uuid.UUID | str,
-        data_directory: str | Path,
-    ) -> None:
-        """Restore the previous catalogue claim after post-publication compensation."""
-        host = normalize_db_host(db_host)
-        identity = self._cluster_uuid(cluster_id)
-        data_dir = str(data_directory)
-        with self._conn:
-            row = self._conn.execute(
-                "SELECT db_mode, target_db_name FROM environments WHERE id=?",
-                (environment_id,),
-            ).fetchone()
-            if row is None or row["db_mode"] != "copy" or row["target_db_name"] != target_database:
-                raise BackupCatalogError("environment replacement rollback identity changed")
-            self._conn.execute(
-                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL WHERE id=?",
-                (backup_id, environment_id),
-            )
-            self._conn.execute(
-                "INSERT INTO restores "
-                "(db_host, db_port, database_name, backup_id, source_kind, source_sha256, "
-                "restored_at, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, ?, 'catalogue', NULL, datetime('now'), ?, ?)",
-                (host, db_port, target_database, backup_id, identity, data_dir),
-            )
-            self._conn.execute(
-                "INSERT INTO database_events "
-                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, "
-                "source_kind, source_sha256, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, 'catalogue', NULL, ?, ?)",
-                (host, db_port, target_database, backup_id, identity, data_dir),
-            )
-            self._conn.execute(
-                "INSERT INTO environment_events "
-                "(environment_id, operation, outcome, occurred_at, message) "
-                "VALUES (?, 'sync', 'failed', datetime('now'), 'replacement compensated')",
-                (environment_id,),
-            )
-
-    @_translate_sqlite_error
-    def record_database_dropped(
-        self,
-        db_host: str | None,
-        db_port: int,
-        database_name: str,
-    ) -> None:
-        host = normalize_db_host(db_host)
-        row = self._conn.execute(
-            "SELECT event_type FROM database_events WHERE db_host=? AND db_port=? AND database_name=? ORDER BY sequence DESC LIMIT 1",
-            (host, db_port, database_name),
-        ).fetchone()
-        if row is not None and row["event_type"] == "dropped":
-            return
-        self._conn.execute(
-            "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) VALUES (?, ?, ?, 'dropped', datetime('now'), NULL)",
-            (host, db_port, database_name),
-        )
-        self._conn.commit()
-
-    @_translate_sqlite_error
-    def latest_restore(
-        self,
-        db_host: str | None,
-        db_port: int,
-        database_name: str,
-    ) -> Backup | None:
-        host = normalize_db_host(db_host)
-        row = self._conn.execute(
-            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at "
-            "FROM restores r LEFT JOIN backups b ON b.id = r.backup_id "
-            "WHERE r.db_host=? AND r.db_port=? AND r.database_name=? "
-            "ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1",
-            (host, db_port, database_name),
-        ).fetchone()
-        if row is None or row["restore_backup_id"] is None:
-            return None
-        if row["state"] == BackupState.DELETED.value:
-            return None
-        if not row["path"]:
-            return None
-        return _row_to_backup(row)
-
-    @_translate_sqlite_error
-    def latest_restore_provenance(
-        self,
-        db_host: str | None,
-        db_port: int,
-        database_name: str,
-    ) -> Backup | None:
-        """Return the mapped backup audit row without availability checks.
-
-        This is intentionally separate from :meth:`latest_restore`: callers
-        deciding freshness or restore input still need the latter's available
-        file semantics, while provenance remains valid after deletion or a
-        missing archive.
-        """
-        host = normalize_db_host(db_host)
-        row = self._conn.execute(
-            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at "
-            "FROM restores r LEFT JOIN backups b ON b.id = r.backup_id "
-            "WHERE r.db_host=? AND r.db_port=? AND r.database_name=? "
-            "ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1",
-            (host, db_port, database_name),
-        ).fetchone()
-        if row is None or row["restore_backup_id"] is None:
-            return None
-        return _row_to_backup(row, require_file=False)
-
-    @_translate_sqlite_error
-    def _list_restore_bindings(self, db_host: str | None, db_port: int) -> list[sqlite3.Row]:
-        """Read exact restore identities for internal database projections."""
-        host = normalize_db_host(db_host)
-        return self._conn.execute(
-            "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-            "data_directory, restored_at "
-            "FROM restores WHERE db_host=? AND db_port=? "
-            "ORDER BY database_name ASC, restored_at DESC, sequence DESC",
-            (host, db_port),
-        ).fetchall()
-
-    @_translate_sqlite_error
-    def _latest_restore_binding(
-        self, db_host: str | None, db_port: int, database_name: str
-    ) -> sqlite3.Row | None:
-        """Read the latest exact restore identity for internal ownership gates."""
-        host = normalize_db_host(db_host)
-        return cast(
-            "sqlite3.Row | None",
-            self._conn.execute(
-                "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, restored_at "
-                "FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
-                "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
-                (host, db_port, database_name),
-            ).fetchone(),
-        )
-
-    @_translate_sqlite_error
-    def distinct_restored_database_names(
-        self,
-        db_host: str | None,
-        db_port: int,
-    ) -> tuple[str, ...]:
-        host = normalize_db_host(db_host)
-        rows = self._conn.execute(
-            "SELECT DISTINCT database_name FROM restores WHERE db_host=? AND db_port=?",
-            (host, db_port),
-        ).fetchall()
-        return tuple(row["database_name"] for row in rows)
-
-    @_translate_sqlite_error
-    def has_tracked_database(
-        self,
-        db_host: str | None,
-        db_port: int,
-        database_name: str,
-    ) -> bool:
-        host = normalize_db_host(db_host)
-        row = self._conn.execute(
-            "SELECT 1 FROM restores WHERE db_host=? AND db_port=? AND database_name=? LIMIT 1",
-            (host, db_port, database_name),
-        ).fetchone()
-        return row is not None

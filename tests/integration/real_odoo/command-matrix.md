@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 50-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 62-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -15,7 +15,15 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `env show` | bounded-read-only | no | not-applicable | upstream environment inspection is covered by focused command tests |
 | `env rm` | mutating-or-spawning | yes | critical | E2E-CP-15: exact owned cleanup and repeat |
 | `env sync` | mutating-or-spawning | yes | critical | E2E-CP-04: public `--hash-lock`/digest sync, `--require-hashes`, and idempotency |
+| `remote ls` | bounded-read-only | no | not-applicable | offline project manifest projection |
+| `remote add` | mutating-or-spawning | yes | not-applicable | manifest-only configuration mutation |
+| `remote update` | mutating-or-spawning | yes | not-applicable | manifest-only configuration mutation |
+| `remote remove` | mutating-or-spawning | yes | not-applicable | manifest-only configuration mutation |
 | `backup ls` | bounded-read-only | no | critical | E2E-CP-09: downloaded catalog row |
+| `backup retention` | mutating-or-spawning | yes | not-applicable | user-level policy projection is outside the Odoo fixture |
+| `backup pin` | mutating-or-spawning | yes | not-applicable | catalogue retention policy is covered by focused tests |
+| `backup unpin` | mutating-or-spawning | yes | not-applicable | catalogue retention policy is covered by focused tests |
+| `backup prune` | mutating-or-spawning | yes | not-applicable | catalogue retention policy is covered by focused tests |
 | `backup inspect` | bounded-read-only | no | critical | E2E-CP-09: exact size/SHA/source identity |
 | `backup validate` | bounded-read-only | no | smoke | E2E-SM-03 / E2E-CP-09: ZIP plus filestore validation |
 | `backup rm` | mutating-or-spawning | yes | focused | E2E-FC-09: owned artifact deletion and repeat |
