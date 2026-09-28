@@ -400,6 +400,7 @@ class _EnvironmentMixin:
         http_url: str,
         http_port: int,
         database_name: str,
+        launch_identity_json: str | None = None,
     ) -> None:
         if owner_kind not in {"environment", "project"} or not owner_id.strip():
             raise BackupCatalogError("runtime owner must be exactly environment or project")
@@ -415,13 +416,14 @@ class _EnvironmentMixin:
         self._conn.execute(
             """INSERT INTO runtime
                (owner_kind, owner_id, root_pid, create_time, started_at, checkout_branch,
-                commit_sha, http_url, http_port, database_name, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                commit_sha, http_url, http_port, database_name, launch_identity_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
                  root_pid=excluded.root_pid, create_time=excluded.create_time,
                  started_at=excluded.started_at, checkout_branch=excluded.checkout_branch,
                  commit_sha=excluded.commit_sha, http_url=excluded.http_url,
                  http_port=excluded.http_port, database_name=excluded.database_name,
+                 launch_identity_json=excluded.launch_identity_json,
                  updated_at=excluded.updated_at""",
             (
                 owner_kind,
@@ -434,6 +436,7 @@ class _EnvironmentMixin:
                 http_url,
                 http_port,
                 database_name,
+                launch_identity_json,
             ),
         )
         self._conn.commit()
@@ -461,6 +464,7 @@ class _EnvironmentMixin:
         http_url: str,
         http_port: int,
         database_name: str,
+        launch_identity_json: str | None = None,
     ) -> None:
         self._upsert_runtime(
             "environment",
@@ -473,6 +477,7 @@ class _EnvironmentMixin:
             http_url=http_url,
             http_port=http_port,
             database_name=database_name,
+            launch_identity_json=launch_identity_json,
         )
 
     @_translate_sqlite_error

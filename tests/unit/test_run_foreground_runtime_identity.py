@@ -228,6 +228,8 @@ def test_persist_called_with_expected_fields(
     assert kw["http_url"] == f"http://127.0.0.1:{http_port}"
     assert kw["http_port"] == http_port
     assert kw["database_name"] == "mydb"
+    assert isinstance(kw["launch_identity_json"], str)
+    assert '"schema_version":1' in kw["launch_identity_json"]
     assert fake.clear_calls == [env_id]
 
 

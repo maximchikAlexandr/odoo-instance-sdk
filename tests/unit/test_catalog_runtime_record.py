@@ -72,7 +72,31 @@ def test_fresh_catalog_has_latest_schema_and_runtime_table(tmp_path: Path) -> No
         ).fetchall()
     }
     assert "runtime" in tables
+    runtime_columns = {r[1] for r in catalog._conn.execute("PRAGMA table_info(runtime)").fetchall()}
+    assert "launch_identity_json" in runtime_columns
     assert "projects" in tables
+    catalog.close()
+
+
+def test_runtime_launch_identity_round_trips_and_legacy_rows_remain_null(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    env_id = str(uuid.uuid4())
+    catalog.create_environment(_make_env(env_id))
+    catalog.upsert_environment_runtime(
+        env_id,
+        **_runtime_kwargs(),
+        launch_identity_json='{"schema_version":1}',
+    )
+    row = catalog.get_runtime("environment", env_id)
+    assert row is not None
+    assert row["launch_identity_json"] == '{"schema_version":1}'
+
+    legacy_id = str(uuid.uuid4())
+    catalog.create_environment({**_make_env(legacy_id), "name": "legacy", "branch": "legacy"})
+    catalog.upsert_environment_runtime(legacy_id, **_runtime_kwargs())
+    legacy = catalog.get_runtime("environment", legacy_id)
+    assert legacy is not None
+    assert legacy["launch_identity_json"] is None
     catalog.close()
 
 

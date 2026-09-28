@@ -98,6 +98,8 @@ class _PlanningMixin:
             root_pid: int,
             config: StartConfig,
             cwd: str | Path | None,
+            step: PreparedStep,
+            executable_prefix_length: int,
             context: RunContext[T] | None = None,
         ) -> None: ...
 
@@ -111,26 +113,33 @@ class _PlanningMixin:
                 return
             raise RuntimeError("runtime identity changed after planning")
 
-        persisted_fields = (
+        owner_fields = (
             "owner_kind",
             "owner_id",
             "project_id",
             "environment_id",
             "root_pid",
             "create_time",
+        )
+        if any(getattr(planned, field) != getattr(current, field) for field in owner_fields):
+            raise RuntimeError("runtime identity changed after planning")
+        if planned.vanished != current.vanished:
+            if planned.vanished or not current.vanished:
+                raise RuntimeError("runtime identity changed after planning")
+            return
+        if planned.vanished:
+            return
+
+        persisted_fields = (
             "expected_executable",
             "expected_argv",
             "expected_cwd",
             "expected_config_path",
+            "expected_sensitive_argv_indices",
+            "expected_executable_prefix_length",
         )
         if any(getattr(planned, field) != getattr(current, field) for field in persisted_fields):
             raise RuntimeError("runtime identity changed after planning")
-        if planned.vanished != current.vanished and not (
-            planned.vanished is False and current.vanished is True
-        ):
-            raise RuntimeError("runtime identity changed after planning")
-        if planned.vanished or current.vanished:
-            return
         live_fields = (
             "live_create_time",
             "live_executable",
@@ -316,10 +325,11 @@ class _PlanningMixin:
             env, project_environment=self.config.project_environment
         )
         secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
+        executable_prefix = self._executable_prefix()
         step = PreparedStep(
             step_id="instance.detached",
             argv=(
-                *self._executable_prefix(),
+                *executable_prefix,
                 *cli_args,
                 "--logfile",
                 str(effective_logfile),
@@ -417,6 +427,8 @@ class _PlanningMixin:
                             handle.pid,
                             snapshot,
                             resolved_cwd,
+                            step,
+                            len(executable_prefix),
                             context=context,
                         )
                     context.complete_action(action_ids[3])

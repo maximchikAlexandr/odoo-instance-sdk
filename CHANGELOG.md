@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   versioned applied-settings evidence, and read-only doctor drift diagnosis
 
 ### Changed
+- Managed foreground and detached runtime stops now validate the immutable,
+  secret-free launch identity captured at spawn time; legacy live rows without
+  that evidence remain fail-closed with sanitized diagnostics.
 - BREAKING: replace the removed `--json` compatibility option with explicit
   leaf-local `--format rich|json|toon`; eligible bounded machine results may use
   typed `--fields` projection only with explicit JSON or TOON

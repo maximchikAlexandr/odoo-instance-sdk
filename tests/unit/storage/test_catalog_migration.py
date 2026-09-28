@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from alembic import command
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.execution import JsonValue
@@ -13,7 +14,11 @@ from odoo_instance_sdk.internal.applied_settings import (
     encode_applied_settings,
 )
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_revision
+from odoo_instance_sdk.storage.catalog_migrate import (
+    CATALOG_REVISION,
+    _alembic_config,
+    catalog_revision,
+)
 from odoo_instance_sdk.storage.catalog_schema import CATALOG_INDEXES, CATALOG_TABLES
 from tests.unit.monitor_support import make_env
 from tests.unit.storage.catalog_alpha_fixture import write_alpha_catalog
@@ -23,6 +28,22 @@ V16_CATALOG_FIXTURE = Path(__file__).parents[2] / "fixtures" / "catalog_v16.sql"
 
 def _assert_current_revision(conn: sqlite3.Connection) -> None:
     assert catalog_revision(conn) == CATALOG_REVISION
+
+
+def test_runtime_launch_identity_migration_is_idempotent_and_reversible(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "head")
+    conn = sqlite3.connect(str(db))
+    assert "launch_identity_json" in {row[1] for row in conn.execute("PRAGMA table_info(runtime)")}
+    command.upgrade(config, "head")
+    command.downgrade(config, "0002")
+    assert "launch_identity_json" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(runtime)")
+    }
+    conn.close()
 
 
 def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:

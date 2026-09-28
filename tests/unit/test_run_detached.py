@@ -205,6 +205,7 @@ def test_detached_launch_persists_identity_and_returns_promptly(
     assert result.http_endpoint == f"http://127.0.0.1:{http_port}"
     assert result.log_path == str(wt / "odoo.log")
     assert len(fake.upsert_calls) == 1
+    assert isinstance(fake.upsert_calls[0][1]["launch_identity_json"], str)
     assert fake.clear_calls == []
 
 
