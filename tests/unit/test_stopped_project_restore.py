@@ -203,12 +203,11 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
     process.exe.return_value = instance._executable_prefix()[0]
     process.cmdline.return_value = list(session.start_step.argv)
     process.cwd.return_value = str(tmp_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.identity.psutil.Process", lambda _pid: process
+    process.net_connections.return_value = (
+        SimpleNamespace(status="LISTEN", laddr=("127.0.0.1", 0)),
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.auxiliary_restore.psutil.net_connections",
-        lambda kind: (SimpleNamespace(status="LISTEN", laddr=("127.0.0.1", 0), pid=42),),
+        "odoo_instance_sdk.resources.instance.identity.psutil.Process", lambda _pid: process
     )
     snapshot = MagicMock()
     snapshot.project_runtimes = (
@@ -240,16 +239,16 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
 
 
 @pytest.mark.parametrize(
-    ("listeners", "expected"),
+    ("listener_port", "expected"),
     [
-        ((43,), None),
-        ((42, 43), None),
+        (0, 42),
+        (1, None),
     ],
 )
 def test_recorded_runtime_requires_unambiguous_exact_socket_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    listeners: tuple[int, ...],
+    listener_port: int,
     expected: int | None,
 ) -> None:
     from odoo_instance_sdk.resources.instance.auxiliary_restore import _recorded_runtime_pid
@@ -271,15 +270,12 @@ def test_recorded_runtime_requires_unambiguous_exact_socket_owner(
     process.exe.return_value = instance._executable_prefix()[0]
     process.cmdline.return_value = list(session.start_step.argv)
     process.cwd.return_value = str(tmp_path)
+    process.net_connections.return_value = (
+        SimpleNamespace(status="LISTEN", laddr=("127.0.0.1", listener_port)),
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance.auxiliary_restore.psutil.Process",
         lambda _pid: process,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.auxiliary_restore.psutil.net_connections",
-        lambda kind: tuple(
-            SimpleNamespace(status="LISTEN", laddr=("127.0.0.1", 0), pid=pid) for pid in listeners
-        ),
     )
     snapshot = MagicMock()
     snapshot.project_runtimes = (
@@ -321,13 +317,10 @@ def test_uninspectable_socket_rejects_recorded_runtime(
     process.exe.return_value = instance._executable_prefix()[0]
     process.cmdline.return_value = list(session.start_step.argv)
     process.cwd.return_value = str(tmp_path)
+    process.net_connections.side_effect = PermissionError("socket inspection denied")
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance.auxiliary_restore.psutil.Process",
         lambda _pid: process,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.auxiliary_restore.psutil.net_connections",
-        MagicMock(side_effect=PermissionError("socket inspection denied")),
     )
     snapshot = MagicMock()
     snapshot.project_runtimes = (
@@ -345,6 +338,31 @@ def test_uninspectable_socket_rejects_recorded_runtime(
     config = instance.config.start_config
     assert config is not None
     assert _recorded_runtime_pid(instance, config) is None
+
+
+def test_socket_owner_uses_candidate_process_when_system_inspection_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.resources.instance.auxiliary_restore import _socket_owned_by
+
+    instance = _instance(tmp_path)
+    config = instance.config.start_config
+    assert config is not None
+    process = MagicMock()
+    process.net_connections.return_value = (
+        SimpleNamespace(status="LISTEN", laddr=("127.0.0.1", config.http_port)),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.auxiliary_restore_identity.psutil.net_connections",
+        MagicMock(side_effect=PermissionError("system inspection requires root")),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.auxiliary_restore_identity.psutil.Process",
+        lambda pid: process if pid == 42 else MagicMock(),
+    )
+
+    assert _socket_owned_by(config, 42) is True
+    process.net_connections.assert_called_once_with(kind="tcp")
 
 
 def test_backup_does_not_open_http_after_auxiliary_identity_drift(

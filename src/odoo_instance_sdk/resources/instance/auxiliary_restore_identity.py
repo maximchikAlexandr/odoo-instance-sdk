@@ -23,46 +23,47 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
-def _listener_owner_pids(config: StartConfig) -> set[int] | None:  # noqa: C901
-    """Return exact local listener owners, or ``None`` when inspection failed."""
+def _socket_owned_by(config: StartConfig, pid: int) -> bool:  # noqa: C901
+    """Return whether the verified process tree owns the configured listener."""
     target = normalize_bind_host(config.http_interface)
     try:
         target_ip = ipaddress.ip_address(target)
     except ValueError:
         target_ip = None
-    owners: set[int] = set()
     try:
-        connections = psutil.net_connections(kind="tcp")
+        process = psutil.Process(pid)
+        candidates = (process, *process.children(recursive=True))
     except (OSError, psutil.Error):
-        return None
-    for connection in connections:
-        if connection.status != psutil.CONN_LISTEN or connection.pid is None:
-            continue
-        address = connection.laddr
-        address_host = getattr(address, "ip", address[0] if address else "")
-        address_port = getattr(address, "port", address[1] if len(address) > 1 else None)
-        if address_port != config.http_port:
-            continue
+        return False
+    for candidate in candidates:
         try:
-            address_ip = ipaddress.ip_address(str(address_host))
-        except ValueError:
-            if str(address_host).lower() != target.lower():
+            connections = candidate.net_connections(kind="tcp")
+        except (OSError, psutil.Error):
+            continue
+        for connection in connections:
+            if connection.status != psutil.CONN_LISTEN:
                 continue
-        else:
-            if not address_ip.is_unspecified and address_ip != target_ip:
+            address = connection.laddr
+            address_host = getattr(address, "ip", address[0] if address else "")
+            address_port = getattr(address, "port", address[1] if len(address) > 1 else None)
+            if address_port != config.http_port:
                 continue
-            if (
-                address_ip.is_unspecified
-                and target_ip is not None
-                and address_ip.version != target_ip.version
-            ):
-                continue
-        owners.add(int(connection.pid))
-    return owners
-
-
-def _socket_owned_by(config: StartConfig, pid: int) -> bool:
-    return _listener_owner_pids(config) == {pid}
+            try:
+                address_ip = ipaddress.ip_address(str(address_host))
+            except ValueError:
+                if str(address_host).lower() != target.lower():
+                    continue
+            else:
+                if not address_ip.is_unspecified and address_ip != target_ip:
+                    continue
+                if (
+                    address_ip.is_unspecified
+                    and target_ip is not None
+                    and address_ip.version != target_ip.version
+                ):
+                    continue
+            return True
+    return False
 
 
 def _expected_runtime_identity(

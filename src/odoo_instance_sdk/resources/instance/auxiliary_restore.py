@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 _ContextResult = TypeVar("_ContextResult")
 _CommandResult = TypeVar("_CommandResult")
 
-_listener_owner_pids = _restore_identity._listener_owner_pids
 _project_runtime_owns_port = _restore_identity._project_runtime_owns_port
 _recorded_runtime_pid = _restore_identity._recorded_runtime_pid
 _socket_owned_by = _restore_identity._socket_owned_by
