@@ -161,6 +161,8 @@ def _live_process(
     *,
     mismatch: str | None = None,
     extra_args: tuple[str, ...] = (),
+    live_argv: tuple[str, ...] | None = None,
+    live_cwd: str | None = None,
 ) -> SimpleNamespace:
     catalog = cast("_Catalog", instance._client.get_catalog())
     row = _runtime_row(
@@ -172,12 +174,12 @@ def _live_process(
     expected_executable = identity.executable
     expected_argv = identity.argv
     expected_cwd = identity.cwd
-    argv = (*expected_argv, *instance.config.default_run_args, *extra_args)
+    argv = live_argv or (*expected_argv, *instance.config.default_run_args, *extra_args)
     live = SimpleNamespace(
         create_time=lambda: 12.5,
         exe=lambda: expected_executable,
         cmdline=lambda: list(argv),
-        cwd=lambda: expected_cwd,
+        cwd=lambda: live_cwd or expected_cwd,
     )
     if mismatch == "argv":
         live.cmdline = lambda: [*argv, "--config", "/wrong"]
@@ -924,6 +926,81 @@ def test_stop_cli_real_resolved_context_owner_neutral_output(
         assert all(document["context"][key] == value for key, value in expected_identity.items())
         assert all(document["result"][key] == value for key, value in expected_identity.items())
     terminate.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+@pytest.mark.parametrize("owner_kind", ["environment", "project"])
+def test_stop_cli_rejection_is_sanitized_across_public_formats(
+    tmp_path: Path, mode: str, owner_kind: str
+) -> None:
+    instance, catalog, owner_id = _instance(tmp_path, owner_kind=owner_kind)
+    secret = "db-password\x1b[31m\nattacker-secret"
+    attacker_path = str(tmp_path / "attacker\x1b[32m-path\ncontrol")
+    config_path = tmp_path / "odoo.conf"
+    odoo_bin = tmp_path / "odoo-bin"
+    step = PreparedStep(
+        step_id="instance.detached",
+        argv=(
+            sys.executable,
+            str(odoo_bin),
+            "--db_password",
+            secret,
+            "--config",
+            str(config_path),
+        ),
+        cwd=str(tmp_path / "worktree"),
+        secret_values=(secret,),
+    )
+    row = _runtime_row(catalog, owner_kind)
+    assert row is not None
+    row["launch_identity_json"] = _encode_launch_identity(step, executable_prefix_length=2)
+    captured = _decode_launch_identity(cast("str | None", row["launch_identity_json"]))
+    live_argv = list(captured.argv)
+    live_argv[3] = secret
+    live_argv[5] = attacker_path
+    context = _real_stop_context(tmp_path, instance, owner_kind, owner_id)
+    selector = ["--env", owner_id] if owner_kind == "environment" else ["--project", str(tmp_path)]
+    argv = [*selector, "stop"]
+    if mode != "rich":
+        argv.extend(["--format", mode])
+
+    with (
+        patch(
+            "odoo_instance_sdk.commands.cli_parts.callbacks._ready_instance", return_value=context
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            return_value=_live_process(
+                instance,
+                live_argv=tuple(live_argv),
+                live_cwd=attacker_path,
+            ),
+        ),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+    ):
+        result = CliRunner().invoke(cli, argv)
+
+    assert result.exit_code == 1, result.output
+    assert "runtime identity mismatch" in result.output
+    assert "argv: --config" in result.output
+    assert "cwd" in result.output
+    assert secret not in result.output
+    assert attacker_path not in result.output
+    assert "attacker" not in result.output
+    assert "control" not in result.output
+    terminate.assert_not_called()
+    assert _runtime_row(catalog, owner_kind) is not None
+    assert catalog.clear_calls == []
+    if mode == "json":
+        document = json.loads(result.stdout)
+        assert document["error"]["message"] == ("runtime identity mismatch: argv: --config, cwd")
+    elif mode == "toon":
+        from toon import DecodeOptions, decode
+
+        document = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+        assert document["error"]["message"] == ("runtime identity mismatch: argv: --config, cwd")
 
 
 @pytest.mark.unit

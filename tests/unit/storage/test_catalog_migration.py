@@ -46,6 +46,55 @@ def test_runtime_launch_identity_migration_is_idempotent_and_reversible(
     conn.close()
 
 
+def test_legacy_0002_runtime_row_upgrades_with_null_launch_identity(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0002")
+
+    conn = sqlite3.connect(str(db))
+    assert "launch_identity_json" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(runtime)")
+    }
+    conn.execute(
+        """INSERT INTO runtime
+           (owner_kind, owner_id, root_pid, create_time, started_at, checkout_branch,
+            commit_sha, http_url, http_port, database_name, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "environment",
+            "legacy-environment",
+            4242,
+            12.5,
+            "2026-01-01T00:00:00+00:00",
+            "main",
+            "abc123",
+            "http://127.0.0.1:8069",
+            8069,
+            "mydb",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM runtime").fetchone()[0] == 1
+    conn.close()
+
+    command.upgrade(config, "head")
+
+    conn = sqlite3.connect(str(db))
+    assert catalog_revision(conn) == CATALOG_REVISION
+    assert (
+        conn.execute(
+            "SELECT launch_identity_json FROM runtime WHERE owner_id = ?",
+            ("legacy-environment",),
+        ).fetchone()[0]
+        is None
+    )
+    conn.close()
+
+
 def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
