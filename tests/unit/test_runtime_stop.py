@@ -4,7 +4,7 @@ import json
 import signal
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,13 +13,13 @@ from unittest.mock import patch
 
 import psutil
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.execution import Command, JsonValue
-from odoo_instance_sdk.internal.proc import is_process_alive, terminate_pid
+from odoo_instance_sdk.internal.proc import PreparedStep, is_process_alive, terminate_pid
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import DevelopmentEnvironment, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
@@ -27,6 +27,8 @@ from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, Env
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.instance.runtime import (
     _canonical_runtime_argv,
+    _decode_launch_identity,
+    _encode_launch_identity,
     _runtime_expectations,
     _RuntimeBinding,
 )
@@ -38,6 +40,7 @@ class _Catalog:
         self.runtime_row = runtime_row
         self.project_runtime_row: dict[str, object] | None = None
         self.clear_calls: list[tuple[str, int, float]] = []
+        self.clear_identity_calls: list[str | None] = []
 
     def get_environment(self, _environment_id: str) -> dict[str, object]:
         return self.env_row
@@ -52,10 +55,17 @@ class _Catalog:
         *,
         root_pid: int,
         create_time: float,
+        launch_identity_json: str | None = None,
     ) -> bool:
         row = self.project_runtime_row if owner_kind == "project" else self.runtime_row
         self.clear_calls.append((owner_id, root_pid, create_time))
-        if row is None or row["root_pid"] != root_pid or row["create_time"] != create_time:
+        self.clear_identity_calls.append(launch_identity_json)
+        if (
+            row is None
+            or row["root_pid"] != root_pid
+            or row["create_time"] != create_time
+            or row["launch_identity_json"] != launch_identity_json
+        ):
             return False
         if owner_kind == "project":
             self.project_runtime_row = None
@@ -132,6 +142,25 @@ def _instance(
         _environment_id=environment_id if owner_kind == "environment" else None,
         _runtime_binding=binding,
     )
+    if runtime:
+        if owner_kind == "project":
+            process_step = instance.run_detached_command().plan.process_steps[0]
+            expected_argv = process_step.argv
+            expected_cwd = process_step.cwd or str(tmp_path)
+        else:
+            _expected_executable, expected_argv, expected_cwd, _ = _runtime_expectations(
+                cast("Mapping[str, JsonValue]", env_row)
+            )
+        row = catalog.project_runtime_row if owner_kind == "project" else catalog.runtime_row
+        assert row is not None
+        row["launch_identity_json"] = _encode_launch_identity(
+            PreparedStep(
+                step_id="instance.detached",
+                argv=expected_argv,
+                cwd=expected_cwd,
+            ),
+            executable_prefix_length=2,
+        )
     return instance, catalog, owner_id
 
 
@@ -140,25 +169,25 @@ def _live_process(
     *,
     mismatch: str | None = None,
     extra_args: tuple[str, ...] = (),
+    live_argv: tuple[str, ...] | None = None,
+    live_cwd: str | None = None,
 ) -> SimpleNamespace:
-    catalog = instance._client.get_catalog()
-    if instance._runtime_binding is not None and instance._runtime_binding.owner_kind == "project":
-        expected_executable, expected_argv, expected_cwd, _config_path = (
-            instance._project_runtime_expectations()
-        )
-    else:
-        env_row = cast(
-            "Mapping[str, JsonValue]", catalog.get_environment(str(instance._environment_id))
-        )
-        expected_executable, expected_argv, expected_cwd, _config_path = _runtime_expectations(
-            env_row
-        )
-    argv = (*expected_argv, *instance.config.default_run_args, *extra_args)
+    catalog = cast("_Catalog", instance._client.get_catalog())
+    row = _runtime_row(
+        catalog,
+        instance._runtime_binding.owner_kind if instance._runtime_binding else "environment",
+    )
+    assert row is not None
+    identity = _decode_launch_identity(cast("str | None", row["launch_identity_json"]))
+    expected_executable = identity.executable
+    expected_argv = identity.argv
+    expected_cwd = identity.cwd
+    argv = live_argv or (*expected_argv, *instance.config.default_run_args, *extra_args)
     live = SimpleNamespace(
         create_time=lambda: 12.5,
         exe=lambda: expected_executable,
         cmdline=lambda: list(argv),
-        cwd=lambda: expected_cwd,
+        cwd=lambda: live_cwd or expected_cwd,
     )
     if mismatch == "argv":
         live.cmdline = lambda: [*argv, "--config", "/wrong"]
@@ -262,9 +291,11 @@ def test_stop_project_runtime_reuses_identity_boundary_and_preserves_owner_neutr
 
 @pytest.mark.unit
 def test_project_stop_identity_matches_detached_launch_argv(tmp_path: Path) -> None:
-    instance, _catalog, _project_id = _instance(tmp_path, owner_kind="project")
+    instance, catalog, _project_id = _instance(tmp_path, owner_kind="project")
 
-    expected_argv = instance._project_runtime_expectations()[1]
+    row = _runtime_row(catalog, "project")
+    assert row is not None
+    expected_argv = _decode_launch_identity(cast("str | None", row["launch_identity_json"])).argv
     detached_argv = instance.run_detached_command().plan.process_steps[0].argv
 
     assert expected_argv == _canonical_runtime_argv(detached_argv)
@@ -330,6 +361,30 @@ def test_stop_inaccessible_identity_fails_closed_and_retains_runtime(
     terminate.assert_not_called()
     assert _runtime_row(catalog, owner_kind) is not None
     assert catalog.clear_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("owner_kind", ["environment", "project"])
+def test_stop_legacy_runtime_without_captured_identity_fails_closed(
+    tmp_path: Path, owner_kind: str
+) -> None:
+    instance, catalog, _ = _instance(tmp_path, owner_kind=owner_kind)
+    row = _runtime_row(catalog, owner_kind)
+    assert row is not None
+    live_process = _live_process(instance)
+    row["launch_identity_json"] = None
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            return_value=live_process,
+        ),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        pytest.raises(RuntimeError, match="captured launch identity unavailable"),
+    ):
+        _stop_command(instance, owner_kind).run()
+    terminate.assert_not_called()
+    assert _runtime_row(catalog, owner_kind) is not None
 
 
 @pytest.mark.unit
@@ -408,8 +463,8 @@ def test_stop_rejects_runtime_record_changed_after_planning(
 
 
 @pytest.mark.unit
-def test_stop_rejects_environment_evidence_changed_after_planning(tmp_path: Path) -> None:
-    instance, catalog, _ = _instance(tmp_path)
+def test_stop_uses_captured_environment_evidence_after_configuration_drift(tmp_path: Path) -> None:
+    instance, catalog, owner_id = _instance(tmp_path)
     with (
         patch(
             "odoo_instance_sdk.resources.instance.identity.psutil.Process",
@@ -417,6 +472,7 @@ def test_stop_rejects_environment_evidence_changed_after_planning(tmp_path: Path
         ),
         patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
         patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.runtime.is_process_alive", return_value=False),
     ):
         command = _stop_command(instance, "environment")
         catalog.env_row["runtime_json"] = json.dumps(
@@ -430,16 +486,16 @@ def test_stop_rejects_environment_evidence_changed_after_planning(tmp_path: Path
                 ),
             }
         )
-        with pytest.raises(RuntimeError, match="changed after planning"):
-            command.run()
-    terminate.assert_not_called()
-    assert catalog.runtime_row is not None
-    assert catalog.clear_calls == []
+        result = command.run()
+    assert result["status"] == "stopped"
+    terminate.assert_called_once()
+    assert catalog.runtime_row is None
+    assert catalog.clear_calls == [(owner_id, 4242, 12.5)]
 
 
 @pytest.mark.unit
-def test_stop_rejects_project_canonical_evidence_changed_after_planning(tmp_path: Path) -> None:
-    instance, catalog, _ = _instance(tmp_path, owner_kind="project")
+def test_stop_uses_captured_project_evidence_after_configuration_drift(tmp_path: Path) -> None:
+    instance, catalog, project_id = _instance(tmp_path, owner_kind="project")
     with (
         patch(
             "odoo_instance_sdk.resources.instance.identity.psutil.Process",
@@ -447,14 +503,15 @@ def test_stop_rejects_project_canonical_evidence_changed_after_planning(tmp_path
         ),
         patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
         patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.runtime.is_process_alive", return_value=False),
     ):
         command = instance.stop_runtime_command()
         object.__setattr__(instance.config, "default_cwd", tmp_path / "changed")
-        with pytest.raises(RuntimeError, match="changed after planning"):
-            command.run()
-    terminate.assert_not_called()
-    assert catalog.project_runtime_row is not None
-    assert catalog.clear_calls == []
+        result = command.run()
+    assert result["status"] == "stopped"
+    terminate.assert_called_once()
+    assert catalog.project_runtime_row is None
+    assert catalog.clear_calls == [(project_id, 4242, 12.5)]
 
 
 @pytest.mark.unit
@@ -479,12 +536,19 @@ def test_stop_rejects_live_evidence_changed_after_planning(tmp_path: Path, owner
 
 @pytest.mark.unit
 @pytest.mark.parametrize("owner_kind", ["environment", "project"])
-@pytest.mark.parametrize("replacement_field", ["root_pid", "create_time"])
+@pytest.mark.parametrize("replacement_field", ["root_pid", "create_time", "launch_identity_json"])
 def test_stop_cleanup_race_preserves_replacement_runtime(
     tmp_path: Path, owner_kind: str, replacement_field: str
 ) -> None:
     instance, catalog, owner_id = _instance(tmp_path, owner_kind=owner_kind)
-    replacement = {"root_pid": 5252, "create_time": 25.0}
+    row = _runtime_row(catalog, owner_kind)
+    assert row is not None
+    original_launch_identity = row["launch_identity_json"]
+    replacement = {
+        "root_pid": 5252,
+        "create_time": 25.0,
+        "launch_identity_json": str(row["launch_identity_json"]) + " ",
+    }
 
     def replace_runtime(
         _pid: int, *, process_group_id: int | None, timeout: float, **_kwargs: object
@@ -513,6 +577,11 @@ def test_stop_cleanup_race_preserves_replacement_runtime(
     assert row["root_pid"] == (replacement["root_pid"] if replacement_field == "root_pid" else 4242)
     assert row["create_time"] == (
         replacement["create_time"] if replacement_field == "create_time" else 12.5
+    )
+    assert row["launch_identity_json"] == (
+        replacement["launch_identity_json"]
+        if replacement_field == "launch_identity_json"
+        else original_launch_identity
     )
     assert catalog.clear_calls == [(owner_id, 4242, 12.5)]
 
@@ -877,6 +946,97 @@ def test_stop_cli_real_resolved_context_owner_neutral_output(
         assert all(document["context"][key] == value for key, value in expected_identity.items())
         assert all(document["result"][key] == value for key, value in expected_identity.items())
     terminate.assert_called_once()
+
+
+def _decode_rich_error(result: Result) -> str:
+    return result.output.strip()
+
+
+def _decode_json_error(result: Result) -> str:
+    return str(json.loads(result.stdout)["error"]["message"])
+
+
+def _decode_toon_error(result: Result) -> str:
+    from toon import DecodeOptions, decode
+
+    document = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+    return str(document["error"]["message"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("owner_kind", ["environment", "project"])
+@pytest.mark.parametrize(
+    ("format_args", "decode_error"),
+    [
+        ((), _decode_rich_error),
+        (("--format", "json"), _decode_json_error),
+        (("--format", "toon"), _decode_toon_error),
+    ],
+)
+def test_stop_cli_rejection_is_sanitized_across_public_formats(
+    tmp_path: Path,
+    owner_kind: str,
+    format_args: tuple[str, ...],
+    decode_error: Callable[[Result], str],
+) -> None:
+    instance, catalog, owner_id = _instance(tmp_path, owner_kind=owner_kind)
+    secret = "db-password\x1b[31m\nattacker-secret"
+    attacker_path = str(tmp_path / "attacker\x1b[32m-path\ncontrol")
+    config_path = tmp_path / "odoo.conf"
+    odoo_bin = tmp_path / "odoo-bin"
+    step = PreparedStep(
+        step_id="instance.detached",
+        argv=(
+            sys.executable,
+            str(odoo_bin),
+            "--db_password",
+            secret,
+            "--config",
+            str(config_path),
+        ),
+        cwd=str(tmp_path / "worktree"),
+        secret_values=(secret,),
+    )
+    row = _runtime_row(catalog, owner_kind)
+    assert row is not None
+    row["launch_identity_json"] = _encode_launch_identity(step, executable_prefix_length=2)
+    captured = _decode_launch_identity(cast("str | None", row["launch_identity_json"]))
+    live_argv = list(captured.argv)
+    live_argv[3] = secret
+    live_argv[5] = attacker_path
+    context = _real_stop_context(tmp_path, instance, owner_kind, owner_id)
+    selector = ["--env", owner_id] if owner_kind == "environment" else ["--project", str(tmp_path)]
+    argv = [*selector, "stop", *format_args]
+
+    with (
+        patch(
+            "odoo_instance_sdk.commands.cli_parts.callbacks._ready_instance", return_value=context
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            return_value=_live_process(
+                instance,
+                live_argv=tuple(live_argv),
+                live_cwd=attacker_path,
+            ),
+        ),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+    ):
+        result = CliRunner().invoke(cli, argv)
+
+    assert result.exit_code == 1, result.output
+    assert "runtime identity mismatch" in result.output
+    assert "argv: --config" in result.output
+    assert "cwd" in result.output
+    assert secret not in result.output
+    assert attacker_path not in result.output
+    assert "attacker" not in result.output
+    assert "control" not in result.output
+    terminate.assert_not_called()
+    assert _runtime_row(catalog, owner_kind) is not None
+    assert catalog.clear_calls == []
+    assert decode_error(result) == ("runtime identity mismatch: argv: --config, cwd")
 
 
 @pytest.mark.unit

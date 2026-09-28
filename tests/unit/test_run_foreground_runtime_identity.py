@@ -25,6 +25,11 @@ from odoo_instance_sdk.internal.proc import (
 from odoo_instance_sdk.internal.process_metrics import collect_process_tree
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.resources.instance.runtime import (
+    _canonical_runtime_argv,
+    _decode_launch_identity,
+    _RuntimeBinding,
+)
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 
 
@@ -36,20 +41,26 @@ class _FakeCatalog:
         self.clear_calls: list[str] = []
         self._upsert_raises = upsert_raises
 
+    def _register_project(
+        self, _project_id: str, _repository_root: str | Path, _git_common_dir: str | Path
+    ) -> None:
+        return None
+
     def upsert_environment_runtime(self, environment_id: str, **kw: object) -> None:
         self.upsert_calls.append((environment_id, dict(kw)))
         if self._upsert_raises is not None:
             raise self._upsert_raises
 
     def _upsert_runtime(self, owner_kind: str, owner_id: str, **kw: object) -> None:
-        assert owner_kind == "environment"
-        self.upsert_environment_runtime(owner_id, **kw)
+        if owner_kind == "environment":
+            self.upsert_environment_runtime(owner_id, **kw)
+        else:
+            self.upsert_calls.append((owner_id, dict(kw)))
 
     def clear_environment_runtime(self, environment_id: str) -> None:
         self.clear_calls.append(environment_id)
 
     def _clear_runtime(self, owner_kind: str, owner_id: str) -> None:
-        assert owner_kind == "environment"
         self.clear_environment_runtime(owner_id)
 
     def get_environment_runtime(self, environment_id: str) -> None:
@@ -111,12 +122,24 @@ def _make_tracked_instance(
     cwd: Path,
     command_prefix: tuple[str, ...],
     http_port: int,
+    owner_kind: str = "environment",
 ) -> OdooInstance:
     start_cfg = StartConfig(
         http_port=http_port,
         http_interface="127.0.0.1",
         config_path=str(cwd / "odoo.conf"),
         db_name="mydb",
+    )
+    binding = (
+        _RuntimeBinding(
+            owner_kind="project",
+            owner_id=f"project_{env_id}",
+            project_id=f"project_{env_id}",
+            repository_root=cwd,
+            git_common_dir=cwd / ".git",
+        )
+        if owner_kind == "project"
+        else None
     )
     return OdooInstance(
         config=InstanceConfig(
@@ -126,7 +149,8 @@ def _make_tracked_instance(
             default_cwd=cwd,
         ),
         _client=client,
-        _environment_id=env_id,
+        _environment_id=env_id if owner_kind == "environment" else None,
+        _runtime_binding=binding,
     )
 
 
@@ -228,7 +252,63 @@ def test_persist_called_with_expected_fields(
     assert kw["http_url"] == f"http://127.0.0.1:{http_port}"
     assert kw["http_port"] == http_port
     assert kw["database_name"] == "mydb"
+    assert isinstance(kw["launch_identity_json"], str)
+    assert '"schema_version":1' in kw["launch_identity_json"]
     assert fake.clear_calls == [env_id]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("owner_kind", ["environment", "project"])
+def test_foreground_persists_identity_from_exact_executed_step(
+    owner_kind: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    secret = "foreground-db-secret"
+    fake = _FakeCatalog()
+    inst = _make_tracked_instance(
+        client=_client_with_catalog(fake),
+        env_id=str(uuid.uuid4()),
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
+        owner_kind=owner_kind,
+    )
+    executor = RecordingExecutor(
+        handles={"instance.foreground": ProcessHandle(MagicMock(pid=4242), (), 4242, 4242, True)}
+    )
+    config = StartConfig(
+        http_port=http_port,
+        http_interface="127.0.0.1",
+        config_path=None,
+        db_name="exact-db",
+        db_password=secret,
+    )
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch("odoo_instance_sdk.internal.server.wait_foreground_process", return_value=0),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+        ),
+    ):
+        assert inst.run_foreground(config) == 0
+
+    assert len(executor.spawned) == 1
+    executed = executor.spawned[0]
+    encoded = cast("str", fake.upsert_calls[0][1]["launch_identity_json"])
+    identity = _decode_launch_identity(encoded)
+    prefix_length = len(inst.config.command_prefix or ())
+    assert identity.argv == _canonical_runtime_argv(
+        executed.public_projection().argv,
+        executable_prefix_length=prefix_length,
+    )
+    assert identity.sensitive_argv_indices == executed.sensitive_argv_indices
+    assert identity.executable_prefix_length == prefix_length
+    assert identity.cwd == str(Path(executed.cwd or "").resolve())
+    assert secret not in encoded
 
 
 @pytest.mark.unit
