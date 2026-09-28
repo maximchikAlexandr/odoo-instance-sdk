@@ -228,6 +228,12 @@ def test_ten_gib_dump_passes_with_disk_bound(
 
     monkeypatch.setattr(zipfile, "is_zipfile", lambda _path: True)
     monkeypatch.setattr(zipfile, "ZipFile", lambda _path: MetadataZip())
+    disk_usage_type = type(shutil.disk_usage("."))
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        lambda _path: disk_usage_type(100 * 1024**3, 0, 50 * 1024**3),
+    )
 
     result = validate_zip(tmp_path / f"{label}.zip")
 

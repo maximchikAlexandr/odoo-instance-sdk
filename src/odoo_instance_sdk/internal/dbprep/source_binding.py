@@ -127,7 +127,7 @@ def _annotate_retained_failure(
     restore_stage_elapsed = getattr(error, "restore_stage_elapsed", None)
     context = DatabasePreparationFailureContext(
         retained_backup_id=backup.id if backup is not None else None,
-        retained_database=target_database,
+        retained_database=target_database if database_confirmed else None,
         backup_id=backup.id if backup is not None else backup_id,
         database_confirmed=database_confirmed,
         default_switch_confirmed=default_switch_confirmed,
@@ -145,7 +145,7 @@ def _annotate_retained_failure(
     note = retained_artifact_context(
         "database preparation retained artifacts",
         backup_id=backup.id if backup is not None else None,
-        target_database=target_database,
+        target_database=target_database if database_confirmed else None,
     )
     error.add_note(note)
 

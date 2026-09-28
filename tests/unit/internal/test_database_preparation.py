@@ -2105,7 +2105,12 @@ def test_restore_failure_retains_backup_and_does_not_write_manifest(
         preparation.prepare_restore(client, project)
 
     assert backup.path and Path(backup.path).is_file()
-    assert "retained backup" in " ".join(failure.value.__notes__ or ())
+    notes = " ".join(failure.value.__notes__ or ())
+    context = getattr(failure.value, "failure_context")
+    assert "retained backup" in notes
+    assert "retained database" not in notes
+    assert context.database_confirmed is False
+    assert context.retained_database is None
     write.assert_not_called()
 
 
