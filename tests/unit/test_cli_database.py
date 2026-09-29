@@ -237,6 +237,43 @@ def test_restore_dry_run_uses_registered_source_and_emits_one_document(
     assert call.kwargs["target_database"] == "demo_copy"
 
 
+def test_restore_dry_run_emits_one_disk_inspection_failure_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.exceptions import BackupDiskInspectionError
+
+    client = MagicMock()
+    client.environments.refresh_database_command.side_effect = BackupDiskInspectionError(
+        requested_path=str(tmp_path / "missing" / "data"),
+        inspection_path=str(tmp_path),
+        reason="Permission denied",
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "db",
+            "restore",
+            "00000000-0000-0000-0000-000000000007",
+            "--target",
+            "demo_copy",
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "backup_disk_inspection"
+    assert "disk inspection" in payload["error"]["message"]
+    assert result.stdout.count('"error"') == 1
+    client.environments.refresh_database_command.assert_called_once()
+
+
 def test_restore_interrupt_emits_sanitized_context_and_exit_130(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -1045,6 +1045,45 @@ def test_local_archive_capture_uses_configured_restore_data_dir_for_space(
     assert observed == [data_dir.resolve()]
 
 
+def test_local_archive_capture_plans_missing_data_dir_without_creating_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    data_dir = source_root / "restore" / "nested" / "data"
+    source_config = source_root / "odoo.conf"
+    source_config.write_text(
+        "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\ndata_dir = restore/nested/data\n"
+    )
+    archive_path = _local_archive(source_root / "caller-owned.zip")
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=source_config,
+        default_source_database="old",
+    )
+    observed: list[Path] = []
+
+    def disk_usage(path: Path) -> SimpleNamespace:
+        observed.append(path)
+        return SimpleNamespace(free=2 * 1024**3)
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
+
+    payload = preparation._capture_selected_restore(
+        project,
+        LocalArchiveRestoreSource(str(archive_path)),
+    )
+
+    assert payload is not None
+    assert observed == [source_root.resolve(), source_root.resolve()]
+    assert not data_dir.exists()
+
+
 def test_local_archive_changed_after_capture_fails_before_snapshot_use(tmp_path: Path) -> None:
     from odoo_instance_sdk import LocalArchiveRestoreSource
     from odoo_instance_sdk.internal.database_preparation import (

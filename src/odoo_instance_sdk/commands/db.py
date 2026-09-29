@@ -411,7 +411,14 @@ def db_restore(  # noqa: C901
                     auxiliary_restore_session(auxiliary_instance),
                 )
     except Exception as exc:
-        fail(output_mode, "db.restore", exc, dry_run=dry_run)
+        fail(
+            output_mode,
+            "db.restore",
+            exc,
+            dry_run=dry_run,
+            error_code=_error_code(exc),
+            details=_error_details(exc),
+        )
 
     source_label = "local archive" if archive_file is not None else f"backup {backup_id}"
 

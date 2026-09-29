@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import subprocess
 import tomllib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
 from odoo_instance_sdk.exceptions import (
     BackupCorruptError,
+    BackupDiskInspectionError,
     BackupInsufficientDiskError,
     BackupOperatorLimitError,
     BackupUnsafeError,
@@ -34,6 +36,7 @@ BACKUP_CORRUPT = "backup_corrupt"
 BACKUP_UNSAFE = "backup_unsafe"
 BACKUP_OPERATOR_LIMIT = "backup_operator_limit"
 BACKUP_INSUFFICIENT_DISK = "backup_insufficient_disk"
+BACKUP_DISK_INSPECTION = "backup_disk_inspection"
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -270,22 +273,18 @@ def preflight_restore_disk_space(
 ) -> RestoreDiskPreflight:
     """Compare declared uncompressed size to local free space minus a reserve.
 
-    The base is ``Path(data_dir).resolve()`` when ``data_dir`` is set, else
-    ``get_backups_dir()``.  The reserve is ``max(1 GiB, 10% of free)``.
+    The filesystem base is the nearest existing directory at or above
+    ``Path(data_dir).resolve()`` when ``data_dir`` is set, else the same
+    fallback as backup storage. The reserve is ``max(1 GiB, 10% of free)``.
     """
     from odoo_instance_sdk.internal.paths import get_backups_dir
 
-    base = Path(data_dir).resolve() if data_dir is not None else get_backups_dir()
+    requested = Path(data_dir) if data_dir is not None else get_backups_dir(ensure_exists=False)
+    base = _resolve_disk_inspection_directory(requested)
     try:
         usage = shutil.disk_usage(base)
-    except OSError:
-        return RestoreDiskPreflight(
-            ok=False,
-            error_code=BACKUP_INSUFFICIENT_DISK,
-            measured_bytes=uncompressed_bytes,
-            available_bytes=0,
-            reserve_bytes=0,
-        )
+    except OSError as exc:
+        _raise_disk_inspection_error(requested, base, _filesystem_error_reason(exc))
     reserve = max(_DISK_RESERVE_BYTES, int(usage.free * _DISK_RESERVE_FRACTION))
     available = usage.free - reserve
     if uncompressed_bytes <= available:
@@ -302,6 +301,67 @@ def preflight_restore_disk_space(
         available_bytes=usage.free,
         reserve_bytes=reserve,
     )
+
+
+def _resolve_disk_inspection_directory(requested: Path) -> Path:
+    try:
+        resolved = requested.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        _raise_disk_inspection_error(requested, None, _filesystem_error_reason(exc), cause=exc)
+
+    base = resolved
+    while True:
+        try:
+            mode = base.stat().st_mode
+        except FileNotFoundError:
+            parent = base.parent
+            if parent == base:
+                _raise_disk_inspection_error(
+                    requested, base, "no existing directory ancestor", cause=None
+                )
+            base = parent
+            continue
+        except NotADirectoryError:
+            parent = base.parent
+            if parent == base:
+                _raise_disk_inspection_error(
+                    requested, base, "no existing directory ancestor", cause=None
+                )
+            base = parent
+            continue
+        except OSError as exc:
+            _raise_disk_inspection_error(requested, base, _filesystem_error_reason(exc), cause=exc)
+        if not stat.S_ISDIR(mode):
+            _raise_disk_inspection_error(
+                requested,
+                base,
+                "selected path component is not a directory",
+                cause=None,
+            )
+        return base
+
+
+def _raise_disk_inspection_error(
+    requested: Path,
+    inspection: Path | None,
+    reason: str,
+    *,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    error = BackupDiskInspectionError(
+        requested_path=str(requested),
+        inspection_path=str(inspection) if inspection is not None else None,
+        reason=reason,
+    )
+    if cause is None:
+        raise error
+    raise error from cause
+
+
+def _filesystem_error_reason(error: OSError | RuntimeError) -> str:
+    if isinstance(error, OSError) and error.strerror:
+        return error.strerror
+    return type(error).__name__
 
 
 def read_operator_max_uncompressed_bytes() -> tuple[int | None, str]:

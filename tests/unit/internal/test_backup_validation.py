@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from odoo_instance_sdk.exceptions import BackupDiskInspectionError
 from odoo_instance_sdk.internal.backup_validation import (
     BACKUP_CORRUPT,
+    BACKUP_DISK_INSPECTION,
     BACKUP_INSUFFICIENT_DISK,
     BACKUP_OPERATOR_LIMIT,
     BACKUP_UNSAFE,
@@ -411,6 +413,138 @@ def test_insufficient_disk_preflight_uses_data_dir_when_set(
     result = preflight_restore_disk_space(500 * 1024**2, data_dir)
     assert result.ok is True
     assert captured and captured[-1] == data_dir.resolve()
+
+
+def test_disk_preflight_uses_nearest_existing_ancestor_without_creating_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    captured: list[Path] = []
+
+    def disk_usage(path: Path) -> SimpleNamespace:
+        captured.append(path)
+        return SimpleNamespace(free=2 * 1024**3)
+
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        disk_usage,
+    )
+    data_dir = tmp_path / "new" / "nested" / "data"
+
+    result = preflight_restore_disk_space(500 * 1024**2, data_dir)
+
+    assert result.ok is True
+    assert captured == [tmp_path.resolve()]
+    assert not data_dir.exists()
+
+
+def test_disk_preflight_rejects_non_directory_ancestor(tmp_path: Path) -> None:
+    component = tmp_path / "not-a-directory"
+    component.write_text("file")
+    requested = component / "nested" / "data"
+
+    with pytest.raises(BackupDiskInspectionError) as failure:
+        preflight_restore_disk_space(1, requested)
+
+    assert failure.value.code == BACKUP_DISK_INSPECTION
+    assert failure.value.details["requested_path"] == str(requested)
+    assert failure.value.details["inspection_path"] == str(component.resolve())
+    assert failure.value.details["reason"] == "selected path component is not a directory"
+    assert failure.value.code != BACKUP_INSUFFICIENT_DISK
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        pytest.param("resolve", id="resolve"),
+        pytest.param("traversal", id="traversal"),
+        pytest.param("usage", id="disk-usage"),
+    ],
+)
+def test_disk_preflight_translates_inspection_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    requested = tmp_path / "missing" / "data"
+    if operation == "resolve":
+
+        def fail_resolve(*_args: object, **_kwargs: object) -> Path:
+            raise OSError(5, "I/O error")
+
+        monkeypatch.setattr(Path, "resolve", fail_resolve)
+    elif operation == "traversal":
+        resolved = requested.resolve()
+        original_stat = Path.stat
+
+        def fail_stat(path: Path) -> object:
+            if path == resolved:
+                raise OSError(5, "I/O error")
+            return original_stat(path)
+
+        monkeypatch.setattr(Path, "stat", fail_stat)
+    else:
+
+        def fail_disk_usage(_path: Path) -> object:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(shutil, "disk_usage", fail_disk_usage)
+
+    with pytest.raises(BackupDiskInspectionError) as failure:
+        preflight_restore_disk_space(1, requested)
+
+    assert failure.value.code == BACKUP_DISK_INSPECTION
+    assert failure.value.details["requested_path"] == str(requested)
+    assert "reason" in failure.value.details
+
+
+def test_disk_preflight_fallback_does_not_create_backup_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    fallback = tmp_path / "backups" / "future"
+    captured: list[Path] = []
+
+    def disk_usage(path: Path) -> SimpleNamespace:
+        captured.append(path)
+        return SimpleNamespace(free=2 * 1024**3)
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_backups_dir",
+        lambda **_kwargs: fallback,
+    )
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        disk_usage,
+    )
+
+    result = preflight_restore_disk_space(1, None)
+
+    assert result.ok is True
+    assert captured == [tmp_path.resolve()]
+    assert not fallback.exists()
+
+
+def test_validate_zip_propagates_typed_disk_inspection_failure(
+    backup_fixtures: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_disk_usage(_path: Path) -> object:
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(shutil, "disk_usage", fail_disk_usage)
+
+    with pytest.raises(BackupDiskInspectionError) as failure:
+        validate_zip(backup_fixtures["valid.zip"])
+
+    assert failure.value.code == BACKUP_DISK_INSPECTION
+
+
+def test_disk_inspection_error_is_a_public_sdk_export() -> None:
+    from odoo_instance_sdk import BackupDiskInspectionError as exported
+
+    assert exported is BackupDiskInspectionError
 
 
 def test_operator_limit_reads_user_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
