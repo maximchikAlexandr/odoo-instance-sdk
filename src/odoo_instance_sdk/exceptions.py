@@ -55,6 +55,30 @@ class BackupInsufficientDiskError(BackupPolicyError):
     code = "backup_insufficient_disk"
 
 
+class BackupUnsupportedFormatError(BackupPolicyError):
+    """Recognized local backup format that this source cannot restore."""
+
+    code = "backup_unsupported_format"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "unsupported local backup format: PostgreSQL custom dump",
+            details={"format": "postgres_custom_dump"},
+        )
+
+
+class BackupUnknownFormatError(BackupPolicyError):
+    """Unrecognized local backup content."""
+
+    code = "backup_unknown_format"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "unrecognized local backup format",
+            details={"format": "unknown"},
+        )
+
+
 class ConfigError(OdooInstanceSdkError):
     """Invalid configuration."""  # ponytail: spec-mandated, not yet raised in this slice
 
