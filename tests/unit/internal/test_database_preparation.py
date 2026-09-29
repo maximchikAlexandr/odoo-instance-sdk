@@ -10,6 +10,7 @@ import uuid
 import warnings
 import zipfile
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from pathlib import Path
@@ -21,6 +22,8 @@ import pytest
 
 from odoo_instance_sdk.exceptions import (
     BackupCorruptError,
+    BackupUnknownFormatError,
+    BackupUnsupportedFormatError,
     ConfigError,
     InstanceConfigurationError,
     LockConflictError,
@@ -943,7 +946,7 @@ def _missing_archive(_path: Path) -> None:
 
 
 def _invalid_archive(path: Path) -> None:
-    path.write_bytes(b"not a zip")
+    path.write_bytes(b"PK\x03\x04truncated")
 
 
 def _incompatible_archive(path: Path) -> None:
@@ -952,6 +955,36 @@ def _incompatible_archive(path: Path) -> None:
 
 def _unsafe_archive(path: Path) -> None:
     _local_archive(path, member="filestore/../escape")
+
+
+@dataclass(frozen=True)
+class _LocalFormatCase:
+    id: str
+    content: bytes
+    expected: type[Exception]
+    code: str
+
+
+_LOCAL_FORMAT_REJECTIONS = (
+    _LocalFormatCase(
+        "postgres-custom",
+        b"PGDMP\x01caller-owned",
+        BackupUnsupportedFormatError,
+        "backup_unsupported_format",
+    ),
+    _LocalFormatCase(
+        "malformed-zip-central-directory",
+        b"PK\x01\x02truncated",
+        BackupCorruptError,
+        "backup_corrupt",
+    ),
+    _LocalFormatCase(
+        "unknown",
+        b"unknown caller-owned bytes",
+        BackupUnknownFormatError,
+        "backup_unknown_format",
+    ),
+)
 
 
 @pytest.mark.parametrize(
@@ -981,6 +1014,70 @@ def test_local_archive_capture_rejects_invalid_sources(
         )
 
     assert str(archive_path) not in str(failure.value)
+
+
+def test_local_archive_capture_accepts_valid_zip_before_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
+
+    archive_path = tmp_path / "caller-owned.bin"
+    _local_archive(archive_path)
+    original = archive_path.read_bytes()
+    snapshot_directory = tmp_path / ".odcli" / "restore"
+    from odoo_instance_sdk.internal import backup_validation
+
+    monkeypatch.setattr(
+        backup_validation,
+        "validate_dump",
+        lambda *_args, **_kwargs: pytest.fail("local dump probed"),
+    )
+    payload = capture_local_archive_restore(
+        LocalArchiveRestoreSource(str(archive_path)),
+        snapshot_directory=snapshot_directory,
+    )
+
+    assert payload.database_name == "local_db"
+    assert archive_path.read_bytes() == original
+    assert not snapshot_directory.exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [pytest.param(case, id=case.id) for case in _LOCAL_FORMAT_REJECTIONS],
+)
+def test_local_archive_capture_rejects_formats_before_effects(
+    tmp_path: Path,
+    case: _LocalFormatCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal import backup_validation
+    from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
+
+    archive_path = tmp_path / "caller-owned.bin"
+    archive_path.write_bytes(case.content)
+    original = archive_path.read_bytes()
+    snapshot_directory = tmp_path / ".odcli" / "restore"
+    monkeypatch.setattr(
+        backup_validation,
+        "validate_dump",
+        lambda *_args, **_kwargs: pytest.fail("local dump probed"),
+    )
+
+    with pytest.raises(case.expected) as failure:
+        capture_local_archive_restore(
+            LocalArchiveRestoreSource(str(archive_path)),
+            snapshot_directory=snapshot_directory,
+        )
+
+    assert getattr(failure.value, "code", None) == case.code
+    assert str(archive_path) not in str(failure.value)
+    assert original.decode("utf-8", "ignore") not in str(failure.value)
+    assert archive_path.read_bytes() == original
+    assert not snapshot_directory.exists()
 
 
 def test_local_archive_capture_rejects_insufficient_space(
