@@ -161,43 +161,58 @@ Canonical project registration SHALL be written only after successful non-previe
 
 ### Requirement: Persisted environment runtime can be stopped safely
 
-The existing owner-neutral runtime record and canonical owner inputs SHALL be the starting point, but not sole proof, for out-of-process stop. Without a runtime migration, the stop path SHALL select the exact `_RuntimeBinding` owner (`environment | project`), re-read that owner's runtime row and PID/create time, and derive expected executable, argv, cwd, and config from canonical inputs for the same resolved owner. Environment expectations SHALL continue to come from its recorded runtime/config artifacts; project expectations SHALL come from the initialized project's resolved instance inputs used by detached launch, including the effective `--logfile` injected by that launch. Before signaling, the stop path SHALL compare the live PID create time, executable, argv, cwd, and config argument with those expectations. POSIX stop SHALL additionally require the live SDK-created process-group identity `pgid == pid` before using the existing bounded terminate-and-kill escalation; Windows SHALL require the same available identity checks before existing process-tree termination. Successful exit SHALL be verified before an atomic conditional delete of the exact `(owner_kind, owner_id, root_pid, create_time)` row. Project registration SHALL remain intact. The implementation SHALL add no runtime field, migration, second process registry, supervisor, or owner-specific termination algorithm.
-`OdooInstance` foreground runtime identity registration and cleanup SHALL remain under the artifact lock, but the wait for the foreground process SHALL happen outside the lock so a parallel `stop` can acquire the exclusive lock, read the persisted runtime identity, and call the existing `terminate_pid()`. Expression SHALL NOT appear in lock acquire/release, registration, wait, or cleanup. PID/create-time/process-group validation and stale-runtime safety SHALL be preserved because they operate on the persisted identity, not on the lock holder.
+The owner-neutral runtime record and its captured launch identity SHALL be the starting point for out-of-process stop. The runtime catalogue SHALL add one nullable JSON field for a versioned launch-identity document. Every new environment- or project-owned foreground or detached launch SHALL populate that field from the exact immutable `PreparedStep` used by execution, before foreground waiting or detached return. The document SHALL contain only JSON-safe, secret-free identity evidence: schema version, canonical executable, the common redacted argv projection with preserved boundaries, captured sensitive-argument positions, executable-prefix length, canonical cwd, and canonical config path. It SHALL NOT contain raw passwords, secret-bearing values, inherited environment values, or a digest of secret material.
 
-#### Scenario: Environment-owned persisted identity matches
+The stop path SHALL select the exact `_RuntimeBinding` owner, re-read that owner's runtime row and PID/create time, decode the captured launch identity, and project the live argv through the same common redaction rules and persisted sensitive positions. It SHALL compare PID create time, executable, captured executable prefix, protected option names and projected values, cwd, and config path. POSIX stop SHALL additionally require the live SDK-created process-group identity `pgid == pid` before using the existing bounded terminate-and-kill escalation; Windows SHALL require the same available identity checks before existing process-tree termination. The stop path SHALL NOT rebuild authoritative launch identity from current project manifest, current `StartConfig`, current default run args, generated configuration contents, Git branch, or checkout revision.
 
-- **WHEN** the selected environment owner/PID/create time, canonical environment runtime/config expectations, and every required live-process identity check match at execution time
+Mismatch evidence SHALL be bounded, deterministic, and value-free. An argv mismatch SHALL identify `executable-prefix` or the differing protected option name, such as `--database`; other mismatch labels SHALL remain limited to safe component names such as `create_time`, `executable`, `cwd`, `config`, and `process_group`. A secret-bearing option SHALL retain its option name and redaction marker only; neither persisted state nor exceptions SHALL expose its value. A malformed, unsupported, or absent launch-identity document SHALL fail closed before signaling and retain the runtime row with an actionable sanitized reason.
+
+Successful exit SHALL be verified before an atomic conditional delete of the exact `(owner_kind, owner_id, root_pid, create_time)` row. Project registration SHALL remain intact. The implementation SHALL add no second process registry, supervisor, port-based ownership inference, or owner-specific termination algorithm. `OdooInstance` foreground runtime identity registration and cleanup SHALL remain under the artifact lock, but foreground waiting SHALL happen outside the lock so parallel stop remains possible. Expression SHALL NOT appear in lock acquire/release, registration, wait, or cleanup.
+
+#### Scenario: Environment-owned captured identity matches
+
+- **WHEN** an environment-owned runtime row contains the identity captured from its immutable launch step and every required live-process identity check matches that snapshot
 - **THEN** the existing process boundary terminates only that process tree, verifies absence, and clears only that environment-owned runtime row
 
-#### Scenario: Project-owned persisted identity matches
+#### Scenario: Project checkout evolves after launch
 
-- **WHEN** the selected project owner/PID/create time, canonical project runtime/config expectations, and every required live-process identity check match at execution time
-- **THEN** the same process boundary terminates only that process tree, verifies absence, clears only that project-owned runtime row, and preserves project registration
+- **WHEN** a project-owned runtime remains unchanged while the checkout branch, revision, manifest-derived defaults, or current configuration source changes after launch
+- **THEN** stop validates against the persisted launch identity, terminates the owned process, verifies exit, clears only its project runtime row, and preserves project registration
 
-#### Scenario: PID was reused
+#### Scenario: Protected live binding differs
 
-- **WHEN** the PID exists but its create time, executable, argv, cwd, config argument, or required POSIX process group differs, or any required identity evidence is inaccessible
+- **WHEN** the live process differs from the captured launch identity in an executable-prefix element or a non-secret protected binding such as `--database`, `--config`, `--addons-path`, or `--http-port`
+- **THEN** no signal is sent, the runtime row is retained, and the error names only `argv: executable-prefix` or the differing option name without either value
+
+#### Scenario: Secret-bearing identity remains redacted
+
+- **WHEN** launch argv contains a secret-bearing protected option
+- **THEN** the persisted document, plan, fingerprint, representation, and mismatch diagnostic use the common redaction marker and never contain or digest the raw secret
+
+#### Scenario: PID was reused or process identity changed
+
+- **WHEN** the PID exists but its create time, executable, captured argv evidence, cwd, config argument, or required POSIX process group differs, or required identity evidence is inaccessible
 - **THEN** no signal is sent and the stale row is retained for actionable diagnosis
+
+#### Scenario: Legacy runtime lacks captured identity
+
+- **WHEN** a migrated pre-change runtime row has no captured launch-identity document
+- **THEN** stop fails closed with a sanitized `captured launch identity unavailable` reason, sends no signal, retains the row, and does not reconstruct authority from mutable current configuration
 
 #### Scenario: Process exited before execution
 
-- **WHEN** planning observed a matching process but execution revalidation proves that PID absent for either owner kind
-- **THEN** stop returns idempotent success and conditionally clears the now-stale matching owner row without signaling another process
+- **WHEN** planning observed a matching persisted owner but execution revalidation proves that PID absent for either owner kind
+- **THEN** stop returns idempotent success and conditionally clears only the now-stale matching owner row without signaling another process
 
 #### Scenario: Runtime row changed before cleanup
 
-- **WHEN** the matching owner's PID or create time changes after validation but before cleanup
-- **THEN** conditional cleanup fails without deleting the replacement runtime row
+- **WHEN** the matching owner's PID, create time, or captured launch identity changes after planning but before execution or cleanup
+- **THEN** stop fails closed without signaling or deleting the replacement runtime row
 
-#### Scenario: foreground wait does not block stop
+#### Scenario: Foreground wait does not block stop
 
 - **WHEN** a foreground `run` is waiting on the foreground process
-- **THEN** the artifact lock is not held and a parallel `stop` acquires the exclusive lock and terminates the registered runtime
-
-#### Scenario: identity validation is preserved
-
-- **WHEN** a parallel `stop` reads the persisted runtime identity
-- **THEN** PID/create-time/process-group validation runs as before and stale-runtime recognition is preserved
+- **THEN** the artifact lock is not held and a parallel stop acquires the exclusive lock and validates the captured identity before termination
 
 ### Requirement: Effective runtime diagnosis
 Doctor SHALL reuse the existing resolver/runtime view to report owner kind (`environment` or `project`), selection source, and effective Python, Odoo binary, config, database, and HTTP URL while distinguishing configured values from current availability. It SHALL work for initialized default checkouts, start no process, and expose no passwords or environment secrets. [Source: GH#43]

@@ -19,7 +19,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0003"
+CATALOG_REVISION = "0004"
 
 
 def _migrations_dir() -> Path:
@@ -138,6 +138,12 @@ def _schema_fingerprint(
     return tables, indexes, foreign_keys, view_exists
 
 
+def _without_runtime_launch_identity(
+    columns: tuple[tuple[str, str, int], ...],
+) -> tuple[tuple[str, str, int], ...]:
+    return tuple(item for item in columns if item[0] != "launch_identity_json")
+
+
 def _reference_fingerprint() -> tuple[
     tuple[
         tuple[str, tuple[tuple[str, str, int], ...], frozenset[tuple[str, ...]]],
@@ -161,11 +167,11 @@ def _reference_fingerprint() -> tuple[
 
 
 def verify_schema_equivalence(conn: sqlite3.Connection) -> None:
-    """Verify that an existing catalogue matches the first Alembic revision."""
+    """Verify that an existing catalogue matches the canonical metadata."""
     actual = _schema_fingerprint(conn)
     expected = _reference_fingerprint()
     if actual != expected:
-        raise BackupCatalogError("catalog schema is not equivalent to the first Alembic revision")
+        raise BackupCatalogError("catalog schema is not equivalent to the canonical revision")
 
 
 def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
@@ -190,6 +196,8 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
     compatible_tables = True
     for table, columns, keys in actual_tables:
         expected_columns, expected_keys = expected_by_name.get(table, ((), frozenset()))
+        if table == "runtime":
+            expected_columns = _without_runtime_launch_identity(expected_columns)
         if table in {"restores", "database_events"}:
             expected_columns = tuple(
                 item for item in expected_columns if item[0] not in {"source_kind", "source_sha256"}
@@ -234,6 +242,8 @@ def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:
     expected_by_name = {table: (columns, keys) for table, columns, keys in expected_tables}
     for table, columns, keys in actual_tables:
         expected_columns, expected_keys = expected_by_name.get(table, ((), frozenset()))
+        if table == "runtime":
+            expected_columns = _without_runtime_launch_identity(expected_columns)
         if table == "backups":
             expected_columns = tuple(
                 item for item in expected_columns if item[0] not in {"source_name", "pinned"}

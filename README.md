@@ -183,9 +183,11 @@ confirmation boundaries:
   target and environment identity, use matching database/filestore
   provenance, support the existing `--reset-admin-password`, and retain
   sanitized retry evidence on incomplete compensation.
-- Top-level `odcli stop` signals only a runtime whose persisted owner and live
-  executable, argv, create time, cwd, config, and (on POSIX) process-group
-  identity still match; stale or inaccessible evidence fails closed.
+- Top-level `odcli stop` validates the persisted owner and the secret-free
+  launch identity captured when the runtime started, plus live executable,
+  argv, create time, cwd, config, and (on POSIX) process-group identity.
+  Checkout/configuration drift remains stoppable; legacy live rows without a
+  captured identity fail closed with sanitized diagnostics.
 - Ticket Allocation accepts a tracker-shaped key such as `PROJ-123`, allocates
   the next never-reused branch from local refs, catalogue history (including
   removed rows), and recorded `origin` heads, then creates it from the selected

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections import deque
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         JsonValue,
     )
+    from odoo_instance_sdk.internal.proc import PreparedStep
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -75,12 +77,15 @@ class _RuntimeIdentity:
     owner_id: str
     project_id: str
     environment_id: str | None
+    launch_identity_json: str | None
     root_pid: int
     create_time: float
     expected_executable: str
     expected_argv: tuple[str, ...]
     expected_cwd: str
     expected_config_path: str
+    expected_sensitive_argv_indices: tuple[int, ...]
+    expected_executable_prefix_length: int
     live_create_time: float | None
     live_executable: str | None
     live_argv: tuple[str, ...] | None
@@ -115,6 +120,7 @@ class _RuntimeCatalog(Protocol):
         http_url: str,
         http_port: int,
         database_name: str,
+        launch_identity_json: str | None = None,
     ) -> None: ...
 
     def _clear_runtime(self, owner_kind: str, owner_id: str) -> None: ...
@@ -130,6 +136,7 @@ class _RuntimeCatalog(Protocol):
         *,
         root_pid: int,
         create_time: float,
+        launch_identity_json: str | None = None,
     ) -> bool: ...
 
 
@@ -384,12 +391,185 @@ def _runtime_config_arg(argv: Sequence[str]) -> str | None:
 _CANONICAL_VALUE_OPTIONS = frozenset({"--config", "-c", "--logfile"})
 
 
-def _canonical_runtime_argv(argv: Sequence[str]) -> tuple[str, ...]:
+def _canonical_runtime_argv(
+    argv: Sequence[str], *, executable_prefix_length: int = 2
+) -> tuple[str, ...]:
     values = list(argv)
     for index, value in enumerate(values):
-        if index in {0, 1} or (index > 0 and values[index - 1] in _CANONICAL_VALUE_OPTIONS):
+        if index < executable_prefix_length or (
+            index > 0 and values[index - 1] in _CANONICAL_VALUE_OPTIONS
+        ):
             values[index] = _canonical_runtime_path(value)
     return tuple(values)
+
+
+@dataclass(frozen=True, slots=True)
+class _LaunchIdentity:
+    """Secret-free identity captured from one immutable launch step."""
+
+    schema_version: int
+    executable: str
+    argv: tuple[str, ...]
+    sensitive_argv_indices: tuple[int, ...]
+    executable_prefix_length: int
+    cwd: str
+    config_path: str
+
+
+_LAUNCH_IDENTITY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "executable",
+        "argv",
+        "sensitive_argv_indices",
+        "executable_prefix_length",
+        "cwd",
+        "config_path",
+    }
+)
+
+
+def _encode_launch_identity(step: PreparedStep, *, executable_prefix_length: int) -> str:
+    """Encode the exact prepared step's common safe projection."""
+    from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
+    from odoo_instance_sdk.internal.proc.redaction import project_process_step
+
+    if not isinstance(step, _PreparedStep):
+        raise TypeError("runtime launch identity requires a prepared process step")
+    if not isinstance(executable_prefix_length, int) or isinstance(executable_prefix_length, bool):
+        raise TypeError("runtime executable prefix length is invalid")
+    projected_argv = _canonical_runtime_argv(
+        project_process_step(step).argv,
+        executable_prefix_length=executable_prefix_length,
+    )
+    if not projected_argv or not 0 < executable_prefix_length <= len(projected_argv):
+        raise ValueError("runtime launch identity argv is invalid")
+    config_path = _runtime_config_arg(projected_argv)
+    if config_path is None:
+        raise ValueError("runtime launch identity config is unavailable")
+    identity = _LaunchIdentity(
+        schema_version=1,
+        executable=projected_argv[0],
+        argv=projected_argv,
+        sensitive_argv_indices=tuple(step.sensitive_argv_indices),
+        executable_prefix_length=executable_prefix_length,
+        cwd=_canonical_runtime_path(step.cwd or os.getcwd()),
+        config_path=_canonical_runtime_path(config_path),
+    )
+    _validate_launch_identity(identity)
+    return json.dumps(
+        {
+            "schema_version": identity.schema_version,
+            "executable": identity.executable,
+            "argv": list(identity.argv),
+            "sensitive_argv_indices": list(identity.sensitive_argv_indices),
+            "executable_prefix_length": identity.executable_prefix_length,
+            "cwd": identity.cwd,
+            "config_path": identity.config_path,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _validate_launch_identity(identity: _LaunchIdentity) -> None:
+    if identity.schema_version != 1:
+        raise ValueError("runtime launch identity version is unsupported")
+    _validate_launch_identity_argv(identity)
+    _validate_canonical_launch_identity_paths(identity)
+    if (
+        _canonical_runtime_argv(
+            identity.argv, executable_prefix_length=identity.executable_prefix_length
+        )
+        != identity.argv
+    ):
+        raise ValueError("runtime launch identity argv is not canonical")
+    from odoo_instance_sdk.internal.proc.redaction import REDACTION_MARKER
+
+    for option in ("--db_password", "-w"):
+        value = _runtime_protected_bindings(identity.argv).get(option)
+        if value is not None and value != REDACTION_MARKER:
+            raise ValueError("runtime launch identity contains secret material")
+
+
+def _validate_launch_identity_argv(identity: _LaunchIdentity) -> None:
+    if not identity.argv or identity.executable != identity.argv[0]:
+        raise ValueError("runtime launch identity executable is invalid")
+    if not 0 < identity.executable_prefix_length <= len(identity.argv):
+        raise ValueError("runtime launch identity prefix is invalid")
+    if tuple(sorted(set(identity.sensitive_argv_indices))) != identity.sensitive_argv_indices:
+        raise ValueError("runtime launch identity sensitive positions are invalid")
+    if any(index < 0 or index >= len(identity.argv) for index in identity.sensitive_argv_indices):
+        raise ValueError("runtime launch identity sensitive positions are invalid")
+    if not all(isinstance(value, str) and value for value in identity.argv):
+        raise ValueError("runtime launch identity argv is invalid")
+    if not all(
+        isinstance(value, str) and value
+        for value in (identity.executable, identity.cwd, identity.config_path)
+    ):
+        raise ValueError("runtime launch identity path is invalid")
+
+
+def _validate_canonical_launch_identity_paths(identity: _LaunchIdentity) -> None:
+    if identity.executable != _canonical_runtime_path(identity.executable):
+        raise ValueError("runtime launch identity executable is not canonical")
+    if identity.cwd != _canonical_runtime_path(identity.cwd):
+        raise ValueError("runtime launch identity cwd is not canonical")
+    if identity.config_path != _canonical_runtime_path(identity.config_path):
+        raise ValueError("runtime launch identity config is not canonical")
+
+
+def _decode_launch_identity(raw: str | None) -> _LaunchIdentity:
+    if raw is None:
+        raise RuntimeError("captured launch identity unavailable")
+    try:
+        document = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("captured launch identity unreadable") from exc
+    if not isinstance(document, dict) or set(document) != _LAUNCH_IDENTITY_FIELDS:
+        raise RuntimeError("captured launch identity unreadable")
+    try:
+        identity = _LaunchIdentity(
+            schema_version=document["schema_version"],
+            executable=document["executable"],
+            argv=tuple(document["argv"]),
+            sensitive_argv_indices=tuple(document["sensitive_argv_indices"]),
+            executable_prefix_length=document["executable_prefix_length"],
+            cwd=document["cwd"],
+            config_path=document["config_path"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("captured launch identity unreadable") from exc
+    if any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in (
+            identity.schema_version,
+            identity.executable_prefix_length,
+            *identity.sensitive_argv_indices,
+        )
+    ) or any(not isinstance(value, str) for value in identity.argv):
+        raise RuntimeError("captured launch identity unreadable")
+    try:
+        _validate_launch_identity(identity)
+    except ValueError as exc:
+        raise RuntimeError("captured launch identity unreadable") from exc
+    return identity
+
+
+def _project_runtime_argv(
+    argv: Sequence[str],
+    *,
+    sensitive_argv_indices: Sequence[int],
+    executable_prefix_length: int,
+) -> tuple[str, ...]:
+    """Apply the shared redaction boundary before runtime comparisons."""
+    from odoo_instance_sdk.internal.proc.redaction import redacted_argv
+
+    return _canonical_runtime_argv(
+        redacted_argv(argv, sensitive_indices=sensitive_argv_indices),
+        executable_prefix_length=executable_prefix_length,
+    )
 
 
 def resolve_effective_logfile(config: StartConfig, default_cwd: Path | None) -> Path:
@@ -470,14 +650,20 @@ def _runtime_protected_bindings(argv: Sequence[str]) -> dict[str, str | None]:
     return bindings
 
 
-def _runtime_argv_matches(identity: _RuntimeIdentity) -> bool:
+def _runtime_argv_mismatch_components(identity: _RuntimeIdentity) -> tuple[str, ...]:
     live_argv = identity.live_argv
-    return (
-        live_argv is not None
-        and live_argv[:2] == identity.expected_argv[:2]
-        and _runtime_protected_bindings(live_argv)
-        == _runtime_protected_bindings(identity.expected_argv)
-    )
+    if live_argv is None:
+        return ("argv: unavailable",)
+    mismatches: list[str] = []
+    prefix_length = identity.expected_executable_prefix_length
+    if live_argv[:prefix_length] != identity.expected_argv[:prefix_length]:
+        mismatches.append("argv: executable-prefix")
+    expected_bindings = _runtime_protected_bindings(identity.expected_argv)
+    live_bindings = _runtime_protected_bindings(live_argv)
+    for option in _PROTECTED_RUNTIME_OPTIONS:
+        if live_bindings.get(option) != expected_bindings.get(option):
+            mismatches.append(f"argv: {option}")
+    return tuple(mismatches)
 
 
 def _verify_process_exit(pid: int, *, expected_create_time: float | None = None) -> None:
