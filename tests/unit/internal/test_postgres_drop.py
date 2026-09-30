@@ -204,6 +204,30 @@ def _compose_instance(project: Path, catalog: BackupCatalog) -> OdooInstance:
     return instance
 
 
+def _managed_bootstrap_instance(
+    project: Path, catalog: BackupCatalog, data_directory: Path
+) -> tuple[OdooInstance, Any]:
+    instance = _compose_instance(project, catalog)
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    volume = compose_volume_name(cluster._project_id)
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id, cluster.compose_project_name, volume
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume
+    )
+    data_directory.mkdir(parents=True, exist_ok=True)
+    catalog._record_database_bootstrapped(
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "tmp",
+        cluster_id=active.cluster_id,
+        data_directory=data_directory,
+    )
+    return instance, active
+
+
 @pytest.mark.unit
 def test_drop_plan_is_maintenance_bound_and_redacts_credentials(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
@@ -997,6 +1021,135 @@ def test_drop_allows_proven_retained_rollback_binding(
     ).run()
 
     assert result.database == rollback
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_bootstrap_drop_accepts_exact_event_and_records_drop(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "bootstrap-success.sqlite3")
+    instance, _claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "bootstrap-data"
+    )
+    executor = _executor()
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "tmp",
+        force_default=True,
+        executor=executor,
+    ).run()
+
+    assert result.database == "tmp"
+    assert any(step.step_id.endswith("execute") for step in executor.executed)
+    latest = catalog._latest_database_event("127.0.0.1", 5432, "tmp")
+    assert latest is not None and latest["event_type"] == "dropped"
+    catalog.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("revocation", ["dropped", "restored"])
+def test_bootstrap_authority_is_revoked_or_delegated_by_latest_event(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    tmp_path: Path,
+    revocation: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / f"bootstrap-{revocation}.sqlite3")
+    data_directory = tmp_path / "bootstrap-data"
+    instance, claim = _managed_bootstrap_instance(project_manifest, catalog, data_directory)
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    if revocation == "dropped":
+        catalog.record_database_dropped(cluster.endpoint_host, cluster.endpoint_port, "tmp")
+        with pytest.raises(ConfigError, match="exact current lifecycle event"):
+            build_database_drop_command(
+                instance, project_manifest, "tmp", force_default=True, executor=_executor()
+            )
+    else:
+        backup_id = str(uuid.uuid4())
+        backup = tmp_path / "restore.zip"
+        backup.write_bytes(b"restore")
+        catalog.start_download(backup_id, "http://127.0.0.1:8069", "tmp", "zip", True, backup)
+        catalog.success_download(backup_id, backup.name, backup.stat().st_size, "")
+        catalog.record_restore(
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+            "tmp",
+            backup_id,
+            cluster_id=claim.cluster_id,
+            data_directory=data_directory,
+        )
+        from odoo_instance_sdk.internal.pg.drop import _drop_ownership_evidence
+
+        evidence = _drop_ownership_evidence(instance, cluster, "tmp")
+        assert evidence is not None and evidence.event_type == "restored"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_bootstrap_absent_retry_reconciles_without_drop(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "bootstrap-absent.sqlite3")
+    instance, _claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "bootstrap-data"
+    )
+    executor = _executor(exists=False)
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "tmp",
+        force_default=True,
+        idempotent_absent=True,
+        executor=executor,
+    ).run()
+
+    assert result.database == "tmp"
+    assert not any(step.step_id.endswith("execute") for step in executor.executed)
+    latest = catalog._latest_database_event("127.0.0.1", 5432, "tmp")
+    assert latest is not None and latest["event_type"] == "dropped"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_bootstrap_locked_revalidation_refuses_changed_event(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "bootstrap-change.sqlite3")
+    instance, _claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "bootstrap-data"
+    )
+    import odoo_instance_sdk.internal.pg.drop as drop_module
+
+    original = drop_module._drop_ownership_evidence
+    calls = 0
+
+    def change_after_planning(*args: Any, **kwargs: Any) -> object:
+        nonlocal calls
+        calls += 1
+        evidence = original(*args, **kwargs)
+        if calls == 1:
+            catalog.record_database_dropped("127.0.0.1", 5432, "tmp")
+        return evidence
+
+    monkeypatch.setattr(drop_module, "_drop_ownership_evidence", change_after_planning)
+    command = build_database_drop_command(
+        instance, project_manifest, "tmp", force_default=True, executor=_executor()
+    )
+    with pytest.raises(ConfigError, match="exact current lifecycle event"):
+        command.run()
     catalog.close()
 
 

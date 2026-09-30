@@ -582,6 +582,7 @@ def test_init_dry_run_shows_bootstrap_step_without_spawn(tmp_path: Path) -> None
         dry_run=True,
     )
     assert any(step.step_id == "init.bootstrap.tmp" for step in command.plan.steps)
+    assert any(step.step_id == "catalog.bootstrap.tmp.record" for step in command.plan.steps)
 
 
 def test_auxiliary_restore_uses_bootstrap_database_in_argv(tmp_path: Path) -> None:
@@ -1016,6 +1017,7 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
     step_ids = [step.step_id for step in init_command.plan.steps]
     assert "init.bootstrap.tmp" in step_ids
     assert "init.bootstrap.tmp.probe" in step_ids
+    assert "catalog.bootstrap.tmp.record" in step_ids
     init_command.run()
     assert bootstrap_spawned == [True]
 
