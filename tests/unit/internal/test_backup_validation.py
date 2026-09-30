@@ -14,12 +14,50 @@ from odoo_instance_sdk.internal.backup_validation import (
     BACKUP_INSUFFICIENT_DISK,
     BACKUP_OPERATOR_LIMIT,
     BACKUP_UNSAFE,
+    classify_backup_prefix,
     enforce_operator_uncompressed_limit,
     preflight_restore_disk_space,
     read_operator_max_uncompressed_bytes,
     validate_dump,
     validate_zip,
 )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        (b"PK\x03\x04truncated", "odoo_zip"),
+        (b"PK\x01\x02truncated", "odoo_zip"),
+        (b"PK\x05\x06", "odoo_zip"),
+        (b"PK\x06\x06", "odoo_zip"),
+        (b"PK\x06\x07", "odoo_zip"),
+        (b"PK\x07\x08", "odoo_zip"),
+        (b"PGDMP\x01forged", "postgres_custom_dump"),
+        (b"PK\x03", "unknown"),
+        (b"PGDM", "unknown"),
+        (b"unknown", "unknown"),
+    ],
+)
+def test_classify_backup_prefix_is_pure_and_bounded(prefix: bytes, expected: str) -> None:
+    assert classify_backup_prefix(prefix) == expected
+
+
+def test_backup_format_policy_errors_are_stable_and_redacted() -> None:
+    from odoo_instance_sdk.exceptions import BackupUnknownFormatError, BackupUnsupportedFormatError
+
+    unsupported = BackupUnsupportedFormatError()
+    unknown = BackupUnknownFormatError()
+
+    assert (unsupported.code, str(unsupported), unsupported.details) == (
+        "backup_unsupported_format",
+        "unsupported local backup format: PostgreSQL custom dump",
+        {"format": "postgres_custom_dump"},
+    )
+    assert (unknown.code, str(unknown), unknown.details) == (
+        "backup_unknown_format",
+        "unrecognized local backup format",
+        {"format": "unknown"},
+    )
 
 
 class TestZipValidation:

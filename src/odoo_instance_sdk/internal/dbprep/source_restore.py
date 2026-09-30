@@ -17,7 +17,12 @@ from typing import Literal
 
 import msgspec
 
-from odoo_instance_sdk.exceptions import ConfigError, InstanceConfigurationError
+from odoo_instance_sdk.exceptions import (
+    BackupUnknownFormatError,
+    BackupUnsupportedFormatError,
+    ConfigError,
+    InstanceConfigurationError,
+)
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.project_runtime import uv_run_prefix
 from odoo_instance_sdk.models import Backup, BackupFormat, LocalArchiveRestoreSource
@@ -111,13 +116,16 @@ class SelectedBackupRestorePayload:
     source_kind: Literal["catalogue", "local_archive"] = "catalogue"
 
 
-def _verified_file(
+_CLASSIFICATION_PREFIX_BYTES = 8
+
+
+def _verified_file(  # noqa: C901
     path: Path,
     *,
     expected_size: int | None = None,
     expected_sha256: str | None = None,
     source_label: str = "selected backup",
-) -> tuple[tuple[int, int, int, int], str]:
+) -> tuple[tuple[int, int, int, int], str, bytes]:
     descriptor = -1
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -128,10 +136,13 @@ def _verified_file(
             raise ConfigError(f"{source_label} size does not match captured evidence")
         identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
         digest = hashlib.sha256()
+        prefix = bytearray()
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
+                if len(prefix) < _CLASSIFICATION_PREFIX_BYTES:
+                    prefix.extend(chunk[: _CLASSIFICATION_PREFIX_BYTES - len(prefix)])
             final_info = os.fstat(stream.fileno())
         final_identity = (
             final_info.st_dev,
@@ -154,7 +165,7 @@ def _verified_file(
     actual_digest = digest.hexdigest()
     if expected_sha256 and actual_digest != expected_sha256:
         raise ConfigError(f"{source_label} content does not match captured evidence")
-    return identity, actual_digest
+    return identity, actual_digest, bytes(prefix)
 
 
 def _sha256_no_follow(path: Path) -> str:
@@ -290,6 +301,7 @@ def capture_selected_backup_restore(  # noqa: C901
     """Read and validate one selected archive without creating staging files."""
     from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
     from odoo_instance_sdk.internal.backup_validation import (
+        classify_backup_prefix,
         raise_restore_preflight_errors,
         raise_zip_validation_error,
         validate_dump,
@@ -322,12 +334,18 @@ def capture_selected_backup_restore(  # noqa: C901
         if snapshot_directory is None:
             raise ConfigError("local archive snapshot directory is required")
 
-    file_identity, verified_sha256 = _verified_file(
+    file_identity, verified_sha256, classification_prefix = _verified_file(
         path,
         expected_size=expected_size,
         expected_sha256=expected_sha256,
         source_label=source_label,
     )
+    if source_kind == "local_archive":
+        local_format = classify_backup_prefix(classification_prefix)
+        if local_format == "postgres_custom_dump":
+            raise BackupUnsupportedFormatError()
+        if local_format == "unknown":
+            raise BackupUnknownFormatError()
     staging_directory = Path(snapshot_directory) if snapshot_directory is not None else path.parent
     snapshot_path = staging_directory / f".odcli-verified-{token}.backup"
     if archive_format == BackupFormat.DUMP:

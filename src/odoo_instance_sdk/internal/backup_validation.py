@@ -7,7 +7,7 @@ import tomllib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
@@ -29,11 +29,30 @@ _STREAM_BUFFER_BYTES = 65536
 _DISK_RESERVE_BYTES = 1024 * 1024 * 1024
 _DISK_RESERVE_FRACTION = 0.10
 _SUPPORTED_ZIP_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+_ZIP_PREFIXES = (
+    b"PK\x01\x02",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x06\x06",
+    b"PK\x06\x07",
+    b"PK\x07\x08",
+)
+
+type LocalBackupFormat = Literal["odoo_zip", "postgres_custom_dump", "unknown"]
 
 BACKUP_CORRUPT = "backup_corrupt"
 BACKUP_UNSAFE = "backup_unsafe"
 BACKUP_OPERATOR_LIMIT = "backup_operator_limit"
 BACKUP_INSUFFICIENT_DISK = "backup_insufficient_disk"
+
+
+def classify_backup_prefix(prefix: bytes) -> LocalBackupFormat:
+    """Classify bounded local backup evidence without inspecting its path."""
+    if prefix.startswith(b"PGDMP"):
+        return "postgres_custom_dump"
+    if any(prefix.startswith(signature) for signature in _ZIP_PREFIXES):
+        return "odoo_zip"
+    return "unknown"
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
