@@ -2322,7 +2322,7 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(  # noqa: C901
     if refusal == "active-use":
         monkeypatch.setattr(drop_module, "_catalog_database_in_use", lambda *_args, **_kwargs: True)
     elif refusal == "drift":
-        original_ownership = drop_module._drop_ownership_evidence
+        original_ownership = cast("Callable[..., object]", drop_module._drop_ownership_evidence)
         ownership_checks = 0
 
         def refuse_after_planning(*args: object, **kwargs: object) -> object:
@@ -2393,12 +2393,11 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(  # noqa: C901
         with pytest.raises(ConfigError):
             command.run()
         assert calls == []
-        assert (
-            catalog._latest_restore_binding(
-                cluster.endpoint_host, cluster.endpoint_port, "retained_target"
-            )["state"]
-            == "incomplete"
+        binding = catalog._latest_restore_binding(
+            cluster.endpoint_host, cluster.endpoint_port, "retained_target"
         )
+        assert binding is not None
+        assert binding["state"] == "incomplete"
         assert not any(
             row[0] == "dropped"
             for row in catalog._conn.execute(

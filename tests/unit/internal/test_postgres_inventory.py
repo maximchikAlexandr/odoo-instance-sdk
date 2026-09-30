@@ -207,6 +207,7 @@ def test_inventory_projects_incomplete_restore_state_without_marking_success(
     )
     instance = _instance(project_manifest, catalog)
     cluster = instance._postgres_cluster
+    assert cluster is not None
     volume = f"pgdata_{cluster._project_id}"
     claim = catalog._ensure_postgres_cluster_pending(
         cluster._project_id, cluster.compose_project_name, volume
