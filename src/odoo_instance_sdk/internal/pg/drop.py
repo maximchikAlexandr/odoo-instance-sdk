@@ -126,6 +126,8 @@ class _DropInspection:
 
 @dataclass(frozen=True, slots=True)
 class _DropOwnershipEvidence:
+    event_type: str
+    event_sequence: int
     cluster_id: str
     compose_project: str
     volume_name: str
@@ -463,6 +465,37 @@ def _drop_ownership_evidence(  # noqa: C901
     binding_database = (
         database if allow_environment_rollback_database is None else row_target_database
     )
+    event = catalog._latest_database_event(
+        cluster.endpoint_host, cluster.endpoint_port, binding_database
+    )
+    if event is None:
+        raise ConfigError("database drop requires an exact current lifecycle event")
+    if event["event_type"] == "bootstrapped":
+        if (
+            allow_environment_rollback_database is not None
+            or binding_database != "tmp"
+            or event["database_name"] != "tmp"
+            or event["cluster_id"] != str(claim.cluster_id)
+            or event["backup_id"] is not None
+            or event["source_kind"] is not None
+            or event["source_sha256"] is not None
+            or not isinstance(event["data_directory"], str)
+            or not _safe_bootstrap_data_directory(event["data_directory"])
+        ):
+            raise ConfigError("database drop bootstrap ownership evidence does not match")
+        return _DropOwnershipEvidence(
+            event_type="bootstrapped",
+            event_sequence=int(event["sequence"]),
+            cluster_id=str(claim.cluster_id),
+            compose_project=claim.compose_project,
+            volume_name=claim.volume_name,
+            backup_id=None,
+            source_kind="bootstrap",
+            source_sha256=None,
+            data_directory=event["data_directory"],
+        )
+    if event["event_type"] != "restored":
+        raise ConfigError("database drop requires an exact current lifecycle event")
     binding = catalog._latest_restore_binding(
         cluster.endpoint_host, cluster.endpoint_port, binding_database
     )
@@ -485,6 +518,15 @@ def _drop_ownership_evidence(  # noqa: C901
         or any(char not in "0123456789abcdef" for char in source_sha256)
     ):
         raise ConfigError("database drop restore binding provenance is invalid")
+    if (
+        event["cluster_id"] != str(claim.cluster_id)
+        or event["database_name"] != binding_database
+        or event["backup_id"] != backup_id
+        or event["source_kind"] != source_kind
+        or event["source_sha256"] != source_sha256
+        or event["data_directory"] != binding["data_directory"]
+    ):
+        raise ConfigError("database drop restore event identity does not match")
     data_directory_value = (
         binding["data_directory"] if isinstance(binding["data_directory"], str) else None
     )
@@ -493,6 +535,8 @@ def _drop_ownership_evidence(  # noqa: C901
     ):
         raise ConfigError("local archive restore binding lacks contained data-directory evidence")
     return _DropOwnershipEvidence(
+        event_type="restored",
+        event_sequence=int(event["sequence"]),
         cluster_id=str(claim.cluster_id),
         compose_project=claim.compose_project,
         volume_name=claim.volume_name,
@@ -517,6 +561,21 @@ def _safe_proven_filestore(data_directory: str | None, database: str) -> bool:
         return False
     candidate = root / database
     return not candidate.is_symlink()
+
+
+def _safe_bootstrap_data_directory(data_directory: str) -> bool:
+    """Validate bootstrap path containment even when its filestore is absent."""
+    base = Path(data_directory)
+    if not data_directory.strip() or base.is_symlink():
+        return False
+    root = base / "filestore"
+    if root.is_symlink():
+        return False
+    try:
+        validate_filestore_containment(base, "tmp")
+    except ConfigError:
+        return False
+    return True
 
 
 def _cleanup_proven_filestore(data_directory: str | None, database: str) -> tuple[str, str | None]:
@@ -793,6 +852,9 @@ def build_database_drop_command(  # noqa: C901
             filestore_state = "unknown"
             filestore_path: str | None = None
             if current_ownership is not None:
+                instance._client.get_catalog().record_database_dropped(
+                    binding.host, binding.port, database
+                )
                 filestore_state, filestore_path = _cleanup_proven_filestore(
                     current_ownership.data_directory, database
                 )
@@ -839,6 +901,9 @@ def build_database_drop_command(  # noqa: C901
             filestore_state = "unknown"
             filestore_path = None
             if current_ownership is not None:
+                instance._client.get_catalog().record_database_dropped(
+                    binding.host, binding.port, database
+                )
                 filestore_state, filestore_path = _cleanup_proven_filestore(
                     current_ownership.data_directory, database
                 )

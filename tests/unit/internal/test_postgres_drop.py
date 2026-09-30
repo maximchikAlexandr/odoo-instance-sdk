@@ -1035,10 +1035,8 @@ def test_verified_drop_cleans_only_filestore_and_retains_source_backup(
         "SELECT COUNT(*) FROM database_events WHERE database_name='feature_db' "
         "AND event_type='dropped'"
     ).fetchone()[0]
-    retry = build_database_drop_command(
-        instance, project_manifest, "feature_db", executor=_executor()
-    ).run()
-    assert retry.filestore_state == "absent"
+    with pytest.raises(ConfigError, match="exact current lifecycle event"):
+        build_database_drop_command(instance, project_manifest, "feature_db", executor=_executor())
     assert (
         catalog._conn.execute(
             "SELECT COUNT(*) FROM database_events WHERE database_name='feature_db' "

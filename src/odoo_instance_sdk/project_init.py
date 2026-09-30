@@ -48,14 +48,23 @@ class _ComposeFollowup:
 
 @dataclass(frozen=True, slots=True)
 class _BootstrapFollowup:
+    cluster: PostgresCluster
     spawn_step: PreparedStep
     probe_step: PreparedStep
     ready_step: PreparedStep
     verify_action: PreparedAction
+    record_action: PreparedAction
+    data_directory: Path
 
     @property
     def steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
-        return (self.spawn_step, self.probe_step, self.ready_step, self.verify_action)
+        return (
+            self.spawn_step,
+            self.probe_step,
+            self.ready_step,
+            self.verify_action,
+            self.record_action,
+        )
 
 
 def _execute_remote_database_names_phase(
@@ -143,11 +152,21 @@ def _execute_compose_followup_phase(
 def _execute_bootstrap_followup_phase(
     context: RunContext[dict[str, JsonValue]], followup: _BootstrapFollowup
 ) -> None:
-    from odoo_instance_sdk.internal.dbprep.bootstrap import run_bootstrap_tmp
+    from odoo_instance_sdk.internal.dbprep.bootstrap import (
+        BootstrapOutcome,
+        record_bootstrap_event,
+        run_bootstrap_tmp,
+    )
 
     context.action(followup.verify_action.step_id)
-    run_bootstrap_tmp(context, followup.spawn_step, followup.probe_step, followup.ready_step)
+    outcome = run_bootstrap_tmp(
+        context, followup.spawn_step, followup.probe_step, followup.ready_step
+    )
     context.complete_action(followup.verify_action.step_id)
+    if outcome is BootstrapOutcome.CREATED:
+        context.action(followup.record_action.step_id)
+        record_bootstrap_event(followup.cluster, followup.data_directory)
+        context.complete_action(followup.record_action.step_id)
     for step in followup.steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
             context.skip(step.step_id)
@@ -275,7 +294,10 @@ def _compose_followup_steps(
     dry_run: bool,
 ) -> tuple[_ComposeFollowup, _BootstrapFollowup]:
     """Return postgres ensure-running and bootstrap ``tmp`` steps for compose init."""
-    from odoo_instance_sdk.internal.dbprep.bootstrap import bootstrap_tmp_steps
+    from odoo_instance_sdk.internal.dbprep.bootstrap import (
+        bootstrap_record_action,
+        bootstrap_tmp_steps,
+    )
     from odoo_instance_sdk.internal.generated_config import project_generated_config_path
     from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
     from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
@@ -330,10 +352,13 @@ def _compose_followup_steps(
             steps=postgres_steps,
         ),
         _BootstrapFollowup(
+            cluster=cluster,
             spawn_step=spawn_step,
             probe_step=probe_step,
             ready_step=ready_step,
             verify_action=ready_action,
+            record_action=bootstrap_record_action(),
+            data_directory=Path(start_config.data_dir),
         ),
     )
 

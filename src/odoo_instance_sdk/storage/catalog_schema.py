@@ -158,7 +158,7 @@ database_events = Table(
     Column(
         "event_type",
         Text,
-        CheckConstraint("event_type IN ('restored', 'dropped')"),
+        CheckConstraint("event_type IN ('restored', 'bootstrapped', 'dropped')"),
         nullable=False,
     ),
     Column("occurred_at", Text, nullable=False),
@@ -173,6 +173,9 @@ database_events = Table(
     Column("data_directory", Text),
     CheckConstraint(
         "event_type = 'dropped' OR "
+        "(event_type = 'bootstrapped' AND database_name = 'tmp' AND backup_id IS NULL "
+        "AND source_kind IS NULL AND source_sha256 IS NULL AND cluster_id IS NOT NULL "
+        "AND data_directory IS NOT NULL AND length(trim(data_directory)) > 0) OR "
         "((source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
         "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "
         "AND length(source_sha256) = 64 AND source_sha256 NOT GLOB '*[^0-9a-f]*'))"

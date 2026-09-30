@@ -110,6 +110,16 @@ execution starts, a guarded failure is recorded for that target and the
 remaining prepared targets continue. The aggregate result exits non-zero when
 any target fails and does not claim to roll back earlier targets.
 
+Initialization-created `tmp` is removable through `odcli db rm tmp
+--force-default --yes` only for a stopped, SDK-owned Compose project whose
+latest exact `database_events` row is the matching `bootstrapped` event. The
+event is published after this invocation creates `tmp` and passes the existing
+readiness check; already-ready, legacy, external, dry-run, and failed paths do
+not adopt it. `--force-connections` remains an explicit opt-in. Missing,
+foreign, changed, active-bound, or later `restored`/`dropped` evidence fails
+closed before mutation, while ordinary restored databases retain their current
+restore-binding requirements.
+
 `ps` and `postgres ps` are bounded read-only leaves. Root `ps` is backed by
 the public `EnvironmentMonitor.processes_command()` SDK primitive; `postgres ps`
 is backed by `PostgresCluster.status_command()`. Both project typed read-only
@@ -243,7 +253,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/internal/self_update.py:801-803` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement
   centralized emitter.
-- `src/odoo_instance_sdk/resources/instance/identity.py:506` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
