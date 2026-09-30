@@ -201,7 +201,10 @@ def switch_project_default(
         else:
             _rewrite_project_generated_database(root, config, generated)
     except BaseException:
-        _restore_owned_snapshot(manifest, manifest_snapshot)
+        with contextlib.suppress(BaseException):
+            _restore_owned_snapshot(manifest, manifest_snapshot)
+        with contextlib.suppress(BaseException):
+            _restore_owned_snapshot(generated, generated_snapshot)
         raise
 
 

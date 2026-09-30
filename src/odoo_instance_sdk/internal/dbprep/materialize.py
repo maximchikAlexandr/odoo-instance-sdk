@@ -144,7 +144,11 @@ def _captured_restore_exists_after() -> bool | None:
     normalized = output.strip().lower()
     if not normalized:
         return None
-    return normalized in {"1", "t", "true", "yes"}
+    if normalized in {"1", "t", "true", "yes"}:
+        return True
+    if normalized in {"0", "f", "false", "no"}:
+        return False
+    return None
 
 
 def _record_incomplete_restore(  # noqa: C901
@@ -205,6 +209,70 @@ def _record_incomplete_restore(  # noqa: C901
     except Exception:
         return False
     return True
+
+
+def _matches_incomplete_restore(
+    client: OdooClient,
+    cluster: object,
+    target_database: str,
+    restore_source: _RestoreSource,
+    backup: Backup | None,
+    local_restore: SelectedBackupRestorePayload | None,
+) -> bool:
+    """Revalidate one exact retained target and its captured source identity."""
+    provenance = getattr(cluster, "_restore_provenance", None)
+    if not callable(provenance):
+        return False
+    try:
+        latest_binding = getattr(client.get_catalog(), "_latest_restore_binding", None)
+        if not callable(latest_binding):
+            return False
+        cluster_id, data_directory = provenance()
+        binding = latest_binding(
+            getattr(cluster, "endpoint_host"),
+            getattr(cluster, "endpoint_port"),
+            target_database,
+        )
+    except Exception:
+        return False
+    if binding is None or binding["state"] != RestoreState.INCOMPLETE.value:
+        return False
+    if binding["cluster_id"] != str(cluster_id):
+        return False
+    recorded_directory = binding["data_directory"]
+    if (recorded_directory is None) != (data_directory is None):
+        return False
+    if recorded_directory is not None and str(recorded_directory) != str(data_directory):
+        return False
+    if isinstance(restore_source, _CatalogueRestoreSource):
+        return (
+            backup is not None
+            and binding["source_kind"] == "catalogue"
+            and binding["backup_id"] == str(backup.id)
+            and binding["source_sha256"] is None
+        )
+    if isinstance(restore_source, _LocalArchiveRestoreSource):
+        return (
+            local_restore is not None
+            and binding["source_kind"] == "local_archive"
+            and binding["backup_id"] is None
+            and binding["source_sha256"] == local_restore.verified_sha256
+        )
+    return False
+
+
+def _reconcile_incomplete_restore(preflight: RestorePreflight) -> None:
+    """Drop one exact retained target only after all ownership guards pass."""
+    from odoo_instance_sdk.internal.pg.drop import _drop_ownership_evidence
+
+    ownership = _drop_ownership_evidence(
+        preflight.local_instance,
+        preflight.postgres_cluster,
+        preflight.target_database,
+    )
+    if ownership is None or ownership.restore_state != RestoreState.INCOMPLETE.value:
+        raise ConfigError("incomplete restore ownership evidence changed before retry")
+    preflight.local_instance.databases.drop(preflight.target_database)
 
 
 @contextlib.contextmanager
@@ -320,6 +388,7 @@ def _restore_preflight(  # noqa: C901
         # later public ``db.drop`` can validate the same ownership evidence.
         local._postgres_cluster = cluster
         resolved_database: str | None = None
+        reconcile_incomplete = False
         if (
             isinstance(selected_source, _RemoteRestoreSource)
             and source is not None
@@ -352,9 +421,18 @@ def _restore_preflight(  # noqa: C901
         else:
             validate_db_name(target_database)
             if local.databases.exists(target_database):
-                raise DatabaseAlreadyExistsError(
-                    f"Database {target_database!r} already exists on {local_url}"
-                )
+                if not _matches_incomplete_restore(
+                    client,
+                    cluster,
+                    target_database,
+                    selected_source,
+                    catalogue_backup,
+                    selected_restore,
+                ):
+                    raise DatabaseAlreadyExistsError(
+                        f"Database {target_database!r} already exists on {local_url}"
+                    )
+                reconcile_incomplete = True
             target = target_database
         yield RestorePreflight(
             project=current,
@@ -369,6 +447,7 @@ def _restore_preflight(  # noqa: C901
             target_database=target,
             resolved_database=resolved_database,
             selected_restore=selected_restore,
+            reconcile_incomplete=reconcile_incomplete,
         )
 
 
@@ -415,34 +494,15 @@ def prepare_restore(  # noqa: C901
         else None
     )
     try:
-        if selected_restore is None:
-            preflight_context = _restore_preflight(
-                client,
-                project,
-                options=options,
-                coalesce=coalesce,
-                target_database=restore_inputs[0] if restore_inputs is not None else None,
-                remote_password=remote_password,
-            )
-        else:
-            preflight_context = _restore_preflight(
-                client,
-                project,
-                options=options,
-                coalesce=coalesce,
-                target_database=restore_inputs[0] if restore_inputs is not None else None,
-                remote_password=remote_password,
-                selected_restore=selected_restore,
-            )
-        if not isinstance(selected_source, _RemoteRestoreSource):
+        preflight_target = restore_inputs[0] if restore_inputs is not None else None
+        if isinstance(selected_source, _RemoteRestoreSource):
             if selected_restore is None:
                 preflight_context = _restore_preflight(
                     client,
                     project,
                     options=options,
                     coalesce=coalesce,
-                    target_database=restore_inputs[0] if restore_inputs is not None else None,
-                    restore_source=selected_source,
+                    target_database=preflight_target,
                     remote_password=remote_password,
                 )
             else:
@@ -451,11 +511,31 @@ def prepare_restore(  # noqa: C901
                     project,
                     options=options,
                     coalesce=coalesce,
-                    target_database=restore_inputs[0] if restore_inputs is not None else None,
-                    restore_source=selected_source,
+                    target_database=preflight_target,
                     remote_password=remote_password,
                     selected_restore=selected_restore,
                 )
+        elif selected_restore is None:
+            preflight_context = _restore_preflight(
+                client,
+                project,
+                options=options,
+                coalesce=coalesce,
+                target_database=preflight_target,
+                restore_source=selected_source,
+                remote_password=remote_password,
+            )
+        else:
+            preflight_context = _restore_preflight(
+                client,
+                project,
+                options=options,
+                coalesce=coalesce,
+                target_database=preflight_target,
+                restore_source=selected_source,
+                remote_password=remote_password,
+                selected_restore=selected_restore,
+            )
         with preflight_context as preflight:
             current = preflight.project
             root = current.repository_root
@@ -515,6 +595,20 @@ def prepare_restore(  # noqa: C901
                     _assert_verified_snapshot_unchanged(restore_payload)
                 else:
                     assert backup is not None
+                if preflight.reconcile_incomplete:
+                    _consume_action_if_planned("database.restore.incomplete-retry")
+                    if not _matches_incomplete_restore(
+                        client,
+                        preflight.postgres_cluster,
+                        preflight.target_database,
+                        preflight.restore_source,
+                        backup,
+                        local_restore,
+                    ):
+                        raise ConfigError(  # noqa: TRY301
+                            "incomplete restore source changed before retry"
+                        )
+                    _reconcile_incomplete_restore(preflight)
                 from odoo_instance_sdk.internal.restore_stages import (
                     restore_stage as _restore_stage,
                 )
@@ -666,6 +760,7 @@ def prepare_restore(  # noqa: C901
                 "postgres.ensure.final.health",
                 "database.restore.exists-before",
                 "database.restore.exists-after",
+                "database.restore.incomplete-retry",
                 "instance.shell_script",
             )
         )
@@ -939,6 +1034,7 @@ class DatabasePreparationCoordinator:
                     "database.restore.exists-reservation",
                     "database.restore.exists-before",
                     "database.restore.exists-after",
+                    "database.restore.incomplete-retry",
                     "database.prepare.rollback",
                     "database.prepare.local-archive.cleanup",
                 }
@@ -1056,6 +1152,7 @@ class DatabasePreparationCoordinator:
                     "database.restore.exists-reservation",
                     "database.restore.exists-before",
                     "database.restore.exists-after",
+                    "database.restore.incomplete-retry",
                     "database.prepare.rollback",
                     "database.prepare.local-archive.cleanup",
                 }

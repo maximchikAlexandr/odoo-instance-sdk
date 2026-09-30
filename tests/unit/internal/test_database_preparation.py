@@ -2172,6 +2172,183 @@ def test_restore_failure_retains_backup_and_does_not_write_manifest(
     write.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [("1\n", True), ("false\n", False), ("not-a-proof\n", None), ("", None)],
+)
+def test_captured_restore_probe_distinguishes_affirmative_negative_and_unknown(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, expected: bool | None
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    class Context:
+        def planned(self, step_id: str) -> bool:
+            return step_id == "database.restore.exists-after"
+
+        def consumed(self, _step_id: str) -> bool:
+            return False
+
+        def process(self, _step_id: str) -> ProcessResult:
+            return ProcessResult(
+                argv=("psql",),
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+                duration=0.0,
+                cwd=None,
+                environment=(),
+            )
+
+    def active_context() -> Context:
+        return Context()
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.active_context", active_context)
+
+    assert preparation._captured_restore_exists_after() is expected
+
+
+def test_exact_incomplete_restore_retry_reconciles_before_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.database_preparation import (
+        ProjectRuntimeBinding,
+        RestorePreflight,
+        _CatalogueRestoreSource,
+    )
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+
+    source_config = tmp_path / "odoo.conf"
+    source_config.write_text(
+        "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\n"
+        "db_name = source\nadmin_passwd = local-secret\n"
+    )
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=source_config,
+        default_source_database="old",
+    )
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
+    cluster = MagicMock(endpoint_host="localhost", endpoint_port=5432)
+    cluster._restore_provenance.return_value = ("cluster-id", None)
+    local = MagicMock()
+    calls: list[str] = []
+    local.databases.restore.side_effect = lambda *_args, **_kwargs: calls.append("restore")
+    client = MagicMock()
+    client.get_catalog.return_value._latest_restore_binding.return_value = {
+        "state": "incomplete",
+        "cluster_id": "cluster-id",
+        "data_directory": None,
+        "source_kind": "catalogue",
+        "backup_id": str(backup.id),
+        "source_sha256": None,
+    }
+    preflight = RestorePreflight(
+        project=project,
+        project_id="project",
+        source=None,
+        source_config=source_config,
+        local_instance=local,
+        runtime=ProjectRuntimeBinding(
+            python_executable="/usr/bin/python3",
+            odoo_bin="/usr/bin/odoo-bin",
+            runtime_cwd=tmp_path,
+        ),
+        postgres_cluster=cluster,
+        target_database="retained_target",
+        restore_source=_CatalogueRestoreSource(backup.id),
+        catalogue_backup=backup,
+        reconcile_incomplete=True,
+    )
+
+    @contextlib.contextmanager
+    def fake_preflight(*_args: object, **_kwargs: object) -> Iterator[RestorePreflight]:
+        yield preflight
+
+    def reconcile(_preflight: RestorePreflight) -> None:
+        calls.append("drop")
+
+    monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
+    monkeypatch.setattr(preparation, "_reconcile_incomplete_restore", reconcile)
+    monkeypatch.setattr(preparation, "_manifest_after_preparation", lambda *_args: project)
+    monkeypatch.setattr(preparation, "switch_project_default", lambda *_args, **_kwargs: None)
+
+    result = preparation.prepare_restore(
+        client,
+        project,
+        restore_source=_CatalogueRestoreSource(backup.id),
+        target_database="retained_target",
+    )
+
+    assert result.restored_database == "retained_target"
+    assert calls == ["drop", "restore"]
+
+
+def test_default_switch_updates_owned_files_and_compensates_both_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import project_init
+    from odoo_instance_sdk.internal.generated_config import project_generated_config_path
+    from odoo_instance_sdk.internal.project_manifest import manifest_path
+
+    generated = project_generated_config_path(tmp_path)
+    generated.parent.mkdir(parents=True)
+    generated.write_bytes(b"old-generated\ncustom = retained\n")
+    manifest = manifest_path(tmp_path)
+    manifest.write_bytes(b"old-manifest\n")
+    config = ProjectConfig(
+        repository_root=tmp_path,
+        default_source_database="new-target",
+        postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5432),
+    )
+
+    monkeypatch.setattr(
+        project_init, "validate_generated_config_target", lambda *_args, **_kw: None
+    )
+
+    def write_manifest(_root: Path, _config: ProjectConfig) -> Path:
+        manifest.write_bytes(b"new-manifest\n")
+        return manifest
+
+    def fail_rewrite(_root: Path, _config: ProjectConfig, destination: Path) -> None:
+        destination.write_bytes(b"partial-generated\n")
+        raise RuntimeError("generated write failed")
+
+    monkeypatch.setattr(project_init, "_rewrite_project_generated_database", fail_rewrite)
+    with pytest.raises(RuntimeError, match="generated write failed"):
+        project_init.switch_project_default(tmp_path, config, write_manifest_fn=write_manifest)
+
+    assert manifest.read_bytes() == b"old-manifest\n"
+    assert generated.read_bytes() == b"old-generated\ncustom = retained\n"
+
+
+def test_default_switch_preserves_external_source_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import project_init
+    from odoo_instance_sdk.internal.project_manifest import manifest_path
+
+    external = tmp_path / "user-odoo.conf"
+    external.write_bytes(b"[options]\ncustom = retained\n")
+    manifest = manifest_path(tmp_path)
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(b"old-manifest\n")
+    config = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=external,
+        default_source_database="new-target",
+    )
+
+    def write_manifest(_root: Path, _config: ProjectConfig) -> Path:
+        manifest.write_bytes(b"new-manifest\n")
+        return manifest
+
+    project_init.switch_project_default(tmp_path, config, write_manifest_fn=write_manifest)
+
+    assert external.read_bytes() == b"[options]\ncustom = retained\n"
+    assert manifest.read_bytes() == b"new-manifest\n"
+
+
 def test_restore_admin_reset_failure_retains_target_and_removes_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

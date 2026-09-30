@@ -217,6 +217,12 @@ def _preparation_action_steps(
             description="Serialize project database preparation",
             mutating=True,
         ),
+        PreparedAction(
+            step_id="database.restore.incomplete-retry",
+            action="reconcile-incomplete-restore",
+            description="Reconcile an exact retained incomplete restore target",
+            mutating=True,
+        ),
     ]
     if isinstance(selected_source, _RemoteRestoreSource):
         action_steps.append(
