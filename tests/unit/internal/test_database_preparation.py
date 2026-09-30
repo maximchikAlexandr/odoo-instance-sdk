@@ -2209,12 +2209,13 @@ def test_captured_restore_probe_distinguishes_affirmative_negative_and_unknown(
 
 
 @pytest.mark.parametrize("refusal", [None, "active-use", "drift"])
-def test_exact_incomplete_restore_retry_reconciles_before_restore(
+def test_exact_incomplete_restore_retry_reconciles_before_restore(  # noqa: C901
     tmp_path: Path,
     project_manifest: Path,
     monkeypatch: pytest.MonkeyPatch,
     refusal: str | None,
 ) -> None:
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
     from odoo_instance_sdk.config import InstanceConfig
     from odoo_instance_sdk.internal.database_preparation import (
         ProjectRuntimeBinding,
@@ -2240,8 +2241,7 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(
         "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup._paths.get_catalog_path",
         lambda: tmp_path / "retry.sqlite3",
     )
-    client = MagicMock()
-    client.get_catalog.return_value = catalog
+    client = OdooClient(config=OdooClientConfig(executable="odoo"), _catalog=catalog)
     cluster = PostgresCluster.from_project(project_manifest)
     volume = compose_volume_name(cluster._project_id)
     claim = catalog._ensure_postgres_cluster_pending(
@@ -2329,7 +2329,7 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(
             nonlocal ownership_checks
             ownership_checks += 1
             evidence = original_ownership(*args, **kwargs)
-            if ownership_checks == 2:
+            if ownership_checks == 1:
                 raise ConfigError("database drop ownership evidence changed before mutation")
             return evidence
 
@@ -2354,20 +2354,44 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(
 
     @contextlib.contextmanager
     def fake_preflight(*_args: object, **_kwargs: object) -> Iterator[RestorePreflight]:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        assert context is not None
+        for step in command.plan.steps:
+            if step.step_id.startswith("database.drop") or step.step_id in {
+                "database.prepare",
+                "database.refresh",
+            }:
+                continue
+            if hasattr(step, "argv") and context.planned(step.step_id):
+                context.process(step.step_id)
+            elif context.planned(step.step_id):
+                context.action(step.step_id)
         yield preflight
 
     monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
     monkeypatch.setattr(preparation, "_manifest_after_preparation", lambda *_args: project)
     monkeypatch.setattr(preparation, "switch_project_default", lambda *_args, **_kwargs: None)
 
+    command = preparation.DatabasePreparationCoordinator(client).prepare_command(
+        project,
+        options=DatabaseRefreshOptions(restore=True),
+        restore_source=_CatalogueRestoreSource(backup.id),
+        target_database="retained_target",
+        executor=executor,
+    )
+    assert {
+        "database.drop.planning-inspect",
+        "database.drop.inspect",
+        "database.drop.revalidate-drop",
+        "database.drop.execute",
+        "database.drop.verify",
+    } <= {step.step_id for step in command.plan.process_steps}
+
     if refusal is not None:
         with pytest.raises(ConfigError):
-            preparation.prepare_restore(
-                client,
-                project,
-                restore_source=_CatalogueRestoreSource(backup.id),
-                target_database="retained_target",
-            )
+            command.run()
         assert calls == []
         assert (
             catalog._latest_restore_binding(
@@ -2384,16 +2408,13 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(
         catalog.close()
         return
 
-    result = preparation.prepare_restore(
-        client,
-        project,
-        restore_source=_CatalogueRestoreSource(backup.id),
-        target_database="retained_target",
-    )
+    result = command.run()
 
     assert result.restored_database == "retained_target"
     assert calls == ["restore"]
-    assert [step.step_id for step in executor.executed] == [
+    assert [
+        step.step_id for step in executor.executed if step.step_id.startswith("database.drop")
+    ] == [
         "database.drop.planning-inspect",
         "database.drop.inspect",
         "database.drop.revalidate-drop",

@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 
@@ -261,16 +261,37 @@ def _matches_incomplete_restore(
     return False
 
 
-def _reconcile_incomplete_restore(preflight: RestorePreflight) -> None:
-    """Drop one exact retained target through the guarded PostgreSQL command."""
+def _build_incomplete_retry_command(
+    client: OdooClient,
+    project: ProjectConfig | str | Path,
+    target_database: str,
+    *,
+    executor: ProcessExecutor,
+) -> Command[object]:
+    """Capture the guarded retry drop without executing planning probes."""
     from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
 
-    build_database_drop_command(
-        preflight.local_instance,
-        preflight.project.repository_root,
-        preflight.target_database,
-        command_origin="database-restore-retry",
-    ).run()
+    initial, root = _load_project(project)
+    local_instance = client.instance.from_project(initial)
+    return cast(
+        "Command[object]",
+        build_database_drop_command(
+            local_instance,
+            root,
+            target_database,
+            command_origin="database-restore-retry",
+            defer_planning=True,
+            executor=executor,
+        ),
+    )
+
+
+def _reconcile_incomplete_restore(
+    retry_command: Command[object],
+    context: RunContext[object],
+) -> None:
+    """Run the captured guarded retry drop in the enclosing preparation ledger."""
+    retry_command._prepared().callback(context)
 
 
 @contextlib.contextmanager
@@ -461,6 +482,8 @@ def prepare_restore(  # noqa: C901
     target_database: str | None = None,
     admin_password: str | None = None,
     admin_password_provenance: str = "environment",
+    retry_drop_command: Command[object] | None = None,
+    execution_context: RunContext[object] | None = None,
 ) -> DatabasePreparationResult:
     """Run the full restore preparation while retaining the project lock."""
     if not options.restore:
@@ -606,7 +629,14 @@ def prepare_restore(  # noqa: C901
                         raise ConfigError(  # noqa: TRY301
                             "incomplete restore source changed before retry"
                         )
-                    _reconcile_incomplete_restore(preflight)
+                    if retry_drop_command is None or execution_context is None:
+                        raise ConfigError(  # noqa: TRY301
+                            "incomplete restore retry requires a prepared command execution"
+                        )
+                    _reconcile_incomplete_restore(
+                        retry_drop_command,
+                        execution_context,
+                    )
                 from odoo_instance_sdk.internal.restore_stages import (
                     restore_stage as _restore_stage,
                 )
@@ -996,6 +1026,30 @@ class DatabasePreparationCoordinator:
             target_database=target_database,
             selected_restore=selected_restore,
         )
+        from odoo_instance_sdk.internal.proc import SubprocessExecutor
+
+        process_executor = executor or SubprocessExecutor()
+        project_root = (
+            project.repository_root if isinstance(project, ProjectConfig) else Path(project)
+        )
+        retry_drop_command = (
+            _build_incomplete_retry_command(
+                self.client,
+                project,
+                restore_inputs[0],
+                executor=process_executor,
+            )
+            if (
+                options.restore
+                and target_database is not None
+                and restore_inputs is not None
+                and (project_root / ".odcli" / "project.toml").is_file()
+            )
+            else None
+        )
+        retry_drop_steps = (
+            tuple(retry_drop_command._prepared().steps) if retry_drop_command is not None else ()
+        )
         steps: tuple[PreparedStep | PreparedAction, ...] = (
             *_preparation_action_steps(
                 operation="prepare", options=options, restore_source=restore_source
@@ -1010,7 +1064,7 @@ class DatabasePreparationCoordinator:
         return self._action_command(
             "database.prepare",
             "Prepare a project database",
-            lambda: self._prepare_impl(
+            lambda context: self._prepare_impl(
                 project,
                 options=options,
                 coalesce=coalesce,
@@ -1021,12 +1075,14 @@ class DatabasePreparationCoordinator:
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
                 planned_source=planned_source,
+                retry_drop_command=retry_drop_command,
+                execution_context=cast("RunContext[object]", context),
             ),
-            executor=executor,
-            steps=steps,
+            executor=process_executor,
+            steps=(*steps, *retry_drop_steps),
             optional_steps=tuple(
                 step.step_id
-                for step in steps
+                for step in (*steps, *retry_drop_steps)
                 if step.step_id
                 in {
                     "database.restore.exists-reservation",
@@ -1036,6 +1092,7 @@ class DatabasePreparationCoordinator:
                     "database.prepare.rollback",
                     "database.prepare.local-archive.cleanup",
                 }
+                or step.step_id.startswith("database.drop")
             ),
         )
 
@@ -1052,6 +1109,8 @@ class DatabasePreparationCoordinator:
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
         planned_source: tuple[str | None, str, str | None, str | None] | None = None,
+        retry_drop_command: Command[object] | None = None,
+        execution_context: RunContext[object] | None = None,
     ) -> DatabasePreparationResult:
         _assert_source_plan_current(project, options, planned_source)
         if options.restore:
@@ -1066,6 +1125,8 @@ class DatabasePreparationCoordinator:
                 target_database=target_database,
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
+                retry_drop_command=retry_drop_command,
+                execution_context=execution_context,
             )
         return prepare_download(self.client, project, options=options, wait_for_lock=True)
 
@@ -1114,6 +1175,30 @@ class DatabasePreparationCoordinator:
             target_database=target_database,
             selected_restore=selected_restore,
         )
+        from odoo_instance_sdk.internal.proc import SubprocessExecutor
+
+        process_executor = executor or SubprocessExecutor()
+        project_root = (
+            project.repository_root if isinstance(project, ProjectConfig) else Path(project)
+        )
+        retry_drop_command = (
+            _build_incomplete_retry_command(
+                self.client,
+                project,
+                restore_inputs[0],
+                executor=process_executor,
+            )
+            if (
+                options.restore
+                and target_database is not None
+                and restore_inputs is not None
+                and (project_root / ".odcli" / "project.toml").is_file()
+            )
+            else None
+        )
+        retry_drop_steps = (
+            tuple(retry_drop_command._prepared().steps) if retry_drop_command is not None else ()
+        )
         steps: tuple[PreparedStep | PreparedAction, ...] = (
             *_preparation_action_steps(
                 operation="refresh", options=options, restore_source=restore_source
@@ -1128,7 +1213,7 @@ class DatabasePreparationCoordinator:
         command = self._action_command(
             "database.refresh",
             "Refresh a project database",
-            lambda: self._prepare_impl(
+            lambda context: self._prepare_impl(
                 project,
                 options=options,
                 coalesce=False,
@@ -1139,12 +1224,14 @@ class DatabasePreparationCoordinator:
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
                 planned_source=planned_source,
+                retry_drop_command=retry_drop_command,
+                execution_context=cast("RunContext[object]", context),
             ),
-            executor=executor,
-            steps=steps,
+            executor=process_executor,
+            steps=(*steps, *retry_drop_steps),
             optional_steps=tuple(
                 step.step_id
-                for step in steps
+                for step in (*steps, *retry_drop_steps)
                 if step.step_id
                 in {
                     "database.restore.exists-reservation",
@@ -1154,6 +1241,7 @@ class DatabasePreparationCoordinator:
                     "database.prepare.rollback",
                     "database.prepare.local-archive.cleanup",
                 }
+                or step.step_id.startswith("database.drop")
             ),
         )
         from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
@@ -1168,7 +1256,7 @@ class DatabasePreparationCoordinator:
         self,
         step_id: str,
         description: str,
-        callback: Callable[[], T],
+        callback: Callable[..., T],
         *,
         executor: ProcessExecutor | None,
         steps: Sequence[PreparedStep | PreparedAction] = (),
@@ -1187,7 +1275,9 @@ class DatabasePreparationCoordinator:
 
         def run(context: RunContext[T]) -> T:
             context.action(step_id)
-            result = callback()
+            import inspect
+
+            result = callback() if not inspect.signature(callback).parameters else callback(context)
             for optional_step_id in optional_steps:
                 if not context.consumed(optional_step_id):
                     context.skip(optional_step_id)

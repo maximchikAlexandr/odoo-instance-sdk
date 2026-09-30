@@ -592,6 +592,7 @@ def build_database_drop_command(  # noqa: C901
     idempotent_absent: bool = False,
     step_prefix: str = "",
     command_origin: str | None = None,
+    defer_planning: bool = False,
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
     database = database_name
@@ -627,22 +628,26 @@ def build_database_drop_command(  # noqa: C901
     cluster = binding.cluster
     if cluster is None:
         raise ConfigError("database drop requires the resolved project's PostgreSQL cluster")
-    ownership = _drop_ownership_evidence(
-        instance,
-        cluster,
-        database,
-        allow_environment_id=allow_environment_id,
-        allow_environment_backup_id=allow_environment_backup_id,
-        allow_environment_rollback_database=allow_environment_rollback_database,
-    )
     process_executor = executor or SubprocessExecutor()
     planning_step = _inspect_command_step(
         binding, database=database, step_id=_PLANNING_INSPECT_STEP, timeout=timeout
     )
-    planning_result = process_executor.execute(planning_step)
-    if not isinstance(planning_result, ProcessResult):
-        raise ConfigError("database safety inspection returned no process result")
-    inspection = _decode_inspection(planning_result, database)
+    ownership: _DropOwnershipEvidence | None = None
+    if defer_planning:
+        inspection = _DropInspection(exists=True, is_template=False, sessions=())
+    else:
+        ownership = _drop_ownership_evidence(
+            instance,
+            cluster,
+            database,
+            allow_environment_id=allow_environment_id,
+            allow_environment_backup_id=allow_environment_backup_id,
+            allow_environment_rollback_database=allow_environment_rollback_database,
+        )
+        planning_result = process_executor.execute(planning_step)
+        if not isinstance(planning_result, ProcessResult):
+            raise ConfigError("database safety inspection returned no process result")
+        inspection = _decode_inspection(planning_result, database)
     project_default = project.default_source_database
     preconditions = _safety_preconditions(
         inspection,
@@ -675,7 +680,7 @@ def build_database_drop_command(  # noqa: C901
         step_ids=(_PLANNING_INSPECT_STEP,),
         budget_seconds=timeout,
         read_only=True,
-        executed_during_planning=True,
+        executed_during_planning=not defer_planning,
     )
 
     inspect_prepared_step = _inspect_command_step(
@@ -752,6 +757,7 @@ def build_database_drop_command(  # noqa: C901
             description="Drop one exact database from the bound project cluster",
             mutating=True,
         ),
+        *((planning_step,) if defer_planning else ()),
         ownership_volume_step,
         ownership_container_step,
         inspect_prepared_step,
@@ -783,6 +789,18 @@ def build_database_drop_command(  # noqa: C901
         if ownership is not None and current_ownership != ownership:
             raise ConfigError("database drop ownership evidence changed before mutation")
         current_project_default = current_default()
+        if defer_planning:
+            planned_before_lock = _decode_inspection(
+                _process_result(context, _PLANNING_INSPECT_STEP), database
+            )
+            _assert_safe(
+                planned_before_lock,
+                database=database,
+                project_default=current_project_default,
+                force_default=force_default,
+                force_connections=force_connections,
+                command_origin=command_origin,
+            )
         planned = _decode_inspection(_process_result(context, inspect_step_id), database)
         if idempotent_absent and not planned.exists:
             for step_id in (
