@@ -262,19 +262,29 @@ def _execute_init(
         except InstanceConfigurationError as exc:
             fail(output_mode, "init", str(exc), dry_run=request.dry_run)
 
-    from odoo_instance_sdk.commands.cli_parts.callbacks import _handle_existing_manifest
+    from odoo_instance_sdk.commands.cli_parts.callbacks import (
+        _ExistingManifestDecision,
+        _handle_existing_manifest,
+    )
 
     existing = manifest_path(resolved_project)
-    if existing.is_file() and _handle_existing_manifest(
-        existing,
-        resolved_project,
-        config,
-        request.no_input,
-        request.yes,
-        output_mode,
-        dry_run=request.dry_run,
-    ):
-        return
+    resume_existing = False
+    if existing.is_file():
+        decision = _handle_existing_manifest(
+            existing,
+            resolved_project,
+            config,
+            request.no_input,
+            request.yes,
+            output_mode,
+            dry_run=request.dry_run,
+        )
+        if (
+            decision is _ExistingManifestDecision.NOOP
+            or decision is _ExistingManifestDecision.REPAIR
+        ):
+            return
+        resume_existing = decision is _ExistingManifestDecision.RESUME
     from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
 
     status, _ = run_or_preview(
@@ -286,6 +296,7 @@ def _execute_init(
             postgres_image=request.postgres_image,
             existing_test_instance=existing_test_instance,
             allow_partial=request.allow_partial,
+            resume_existing=resume_existing,
             no_input=effective_no_input,
             dry_run=request.dry_run,
             confirm_partial=confirm_partial,

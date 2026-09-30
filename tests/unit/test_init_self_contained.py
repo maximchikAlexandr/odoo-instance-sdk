@@ -282,6 +282,64 @@ def test_init_rerun_preserves_existing_test_instance(tmp_path: Path) -> None:
     assert 'database = "remote_db"' in manifest
 
 
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_failed_compose_init_resumes_without_manifest_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    calls: list[int] = []
+
+    def _fail_once_then_skip(
+        context: object,
+        spawn_step: object,
+        probe_step: object,
+        ready_step: object,
+    ) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            raise BootstrapFailedError("tmp bootstrap failed")
+        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
+        return True
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
+        _fail_once_then_skip,
+    )
+    runner = CliRunner()
+    args = [
+        *_base_args(tmp_path, allow_partial=True),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+        "--test-url",
+        "http://127.0.0.1:18069",
+        "--test-database",
+        "remote_db",
+        "--test-branch",
+        "main",
+        "--local-config",
+    ]
+    first = runner.invoke(cli, args)
+    assert first.exit_code != 0
+    manifest = tmp_path / ".odcli" / "project.toml"
+    assert manifest.is_file()
+    before = manifest.read_bytes()
+
+    def _unexpected_manifest_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("identical Compose retry must not rewrite the manifest")
+
+    monkeypatch.setattr("odoo_instance_sdk.project_init.write_manifest", _unexpected_manifest_write)
+    second = runner.invoke(cli, args)
+    assert second.exit_code == 0, second.output
+    assert manifest.read_bytes() == before
+    assert len(calls) == 2
+
+
 def test_named_remote_init_is_complete_repeatable_and_secret_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

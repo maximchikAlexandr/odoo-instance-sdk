@@ -181,6 +181,45 @@ def test_idempotent_identical_is_noop(tmp_path: Path) -> None:
     assert mtime_before == mtime_after
 
 
+@pytest.mark.parametrize("output_format", ["json", "toon"])
+def test_identical_noop_machine_output_reports_requested_dry_run(
+    tmp_path: Path, output_format: str
+) -> None:
+    runner = CliRunner()
+    args = [
+        "init",
+        "--no-input",
+        "--allow-partial",
+        "--odoo-bin",
+        "/opt/odoo/odoo-bin",
+        "--python",
+        "python3",
+        "--format",
+        output_format,
+        "--project",
+        str(tmp_path),
+    ]
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(cli, args)
+    assert second.exit_code == 0, second.output
+    if output_format == "json":
+        payload = json.loads(second.output)
+    else:
+        from toon import DecodeOptions, decode
+
+        payload = decode(second.output, DecodeOptions(indent=2, strict=True))
+    assert payload["dry_run"] is False
+
+    dry_run = runner.invoke(cli, [*args, "--dry-run"])
+    assert dry_run.exit_code == 0, dry_run.output
+    if output_format == "json":
+        dry_run_payload = json.loads(dry_run.output)
+    else:
+        dry_run_payload = decode(dry_run.output, DecodeOptions(indent=2, strict=True))
+    assert dry_run_payload["dry_run"] is True
+
+
 def test_non_identical_no_input_errors(tmp_path: Path) -> None:
     runner = CliRunner()
     runner.invoke(

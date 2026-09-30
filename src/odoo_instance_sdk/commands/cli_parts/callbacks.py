@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 from collections.abc import Hashable, Mapping
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -92,6 +93,13 @@ def _ready_instance(ctx: CliContext) -> ResolvedContext:
     return cli_context.ready_instance(ctx)
 
 
+class _ExistingManifestDecision(Enum):
+    NOOP = "noop"
+    REPAIR = "repair"
+    RESUME = "resume"
+    OVERWRITE = "overwrite"
+
+
 def _handle_existing_manifest(  # noqa: C901
     existing: Path,
     resolved_project: Path,
@@ -101,7 +109,7 @@ def _handle_existing_manifest(  # noqa: C901
     output_mode: OutputMode,
     *,
     dry_run: bool,
-) -> bool:
+) -> _ExistingManifestDecision:
     try:
         existing_cfg = ProjectConfig.load(resolved_project)
     except Exception as e:
@@ -128,7 +136,7 @@ def _handle_existing_manifest(  # noqa: C901
                     )
                 else:
                     rich_print(f"Dry run — generated config needs repair: {target}")
-                return True
+                return _ExistingManifestDecision.REPAIR
             try:
                 validate_generated_config_target(target, project_root=resolved_project)
             except InstanceConfigurationError as exc:
@@ -148,7 +156,9 @@ def _handle_existing_manifest(  # noqa: C901
                 )
             else:
                 rich_print(f"Repaired generated config: {target}; manifest unchanged.")
-            return True
+            return _ExistingManifestDecision.REPAIR
+        if config.postgres is not None and config.postgres.mode == "compose":
+            return _ExistingManifestDecision.RESUME
         if not dry_run:
             register_initialized_project(resolved_project)
         if output_mode is not OutputMode.RICH:
@@ -157,15 +167,15 @@ def _handle_existing_manifest(  # noqa: C901
                 command="init",
                 result=manifest_dict(config),
                 provenance={},
-                dry_run=True,
+                dry_run=dry_run,
                 mode=output_mode,
             )
         else:
             rich_print("Manifest already up to date; no-op.")
-        return True
+        return _ExistingManifestDecision.NOOP
     if no_input or output_mode is not OutputMode.RICH:
         if yes:
-            return False
+            return _ExistingManifestDecision.OVERWRITE
         fail(
             output_mode,
             "init",
@@ -173,11 +183,11 @@ def _handle_existing_manifest(  # noqa: C901
             dry_run=dry_run,
         )
     if yes:
-        return False
+        return _ExistingManifestDecision.OVERWRITE
     if not click.confirm("Manifest exists and differs; overwrite?", default=False):
         rich_print("Aborted.")
-        return True
-    return False
+        return _ExistingManifestDecision.NOOP
+    return _ExistingManifestDecision.OVERWRITE
 
 
 @cli.command(help="Diagnose project, runtime, and PostgreSQL.")
