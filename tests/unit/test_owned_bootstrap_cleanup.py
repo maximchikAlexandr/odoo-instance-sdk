@@ -14,6 +14,7 @@ from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.internal.dbprep.bootstrap import (
     BootstrapFailedError,
     BootstrapOutcome,
+    _record_bootstrap_event,
     bootstrap_record_action,
     bootstrap_tmp_steps,
     ensure_project_bootstrap_tmp,
@@ -212,6 +213,50 @@ def test_bootstrap_executor_failure_keeps_record_action_unconsumed() -> None:
     with pytest.raises(BootstrapFailedError, match="base module"):
         run_bootstrap_tmp(context, *steps[:3])
     assert not context.consumed(bootstrap_record_action().step_id)
+
+
+def test_bootstrap_publication_failure_keeps_record_unconsumed_and_unwritten(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    _active_claim(catalog)
+    instance = MagicMock()
+
+    def fail_publication(_instance: object) -> None:
+        raise BootstrapFailedError("catalog lifecycle publication failed")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap._record_bootstrap_event",
+        fail_publication,
+    )
+    context, _executor, process_steps = _bootstrap_context(include_actions=True)
+    verify = PreparedAction(step_id="verify", read_only=True)
+
+    with pytest.raises(BootstrapFailedError, match="catalog lifecycle publication failed"):
+        ensure_project_bootstrap_tmp(instance, context, steps=(*process_steps, verify))
+
+    assert bootstrap_record_action().step_id in context._started_actions
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
+        ).fetchone()[0]
+        == 0
+    )
+    catalog.close()
+
+
+def test_bootstrap_publication_rejects_unowned_configured_data_directory(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / "outside-bootstrap-data"
+    outside.mkdir()
+    instance = MagicMock()
+    instance.config.default_cwd = tmp_path
+    instance.config.start_config = StartConfig(data_dir=str(outside))
+    instance._postgres_cluster.owned = True
+
+    with pytest.raises(BootstrapFailedError, match="not project-owned"):
+        _record_bootstrap_event(instance)
 
 
 def test_bootstrap_record_action_is_conditional_and_consumed_only_on_creation(

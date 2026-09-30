@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,7 @@ _REVALIDATE_DROP_STEP = "database.drop.revalidate-drop"
 _DROP_STEP = "database.drop.execute"
 _VERIFY_STEP = "database.drop.verify"
 _ContextT = TypeVar("_ContextT")
+_RMTREE_AVOIDS_SYMLINK_ATTACKS = bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
 
 
 class DatabaseDropSession(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -583,27 +585,40 @@ def _cleanup_proven_filestore(data_directory: str | None, database: str) -> tupl
     if data_directory is None:
         return "unknown", None
     base = Path(data_directory)
-    if base.is_symlink():
-        return "unknown", str(base / "filestore" / database)
     root = base / "filestore"
     if root.is_symlink() or not root.is_dir():
         return "unknown", str(root / database)
     candidate = root / database
-    try:
-        candidate.relative_to(root)
-    except ValueError:
+    if candidate.name != database or database in {".", ".."}:
         return "unknown", str(candidate)
-    current = candidate
-    while current != root:
-        if current.is_symlink():
+    if not _RMTREE_AVOIDS_SYMLINK_ATTACKS:
+        raise OSError("filestore cleanup requires symlink-attack-resistant rmtree")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None or os.open not in os.supports_dir_fd:
+        raise OSError("filestore cleanup requires descriptor-relative directory operations")
+    base_fd = os.open(base, os.O_RDONLY | directory | nofollow)
+    try:
+        root_fd = os.open(
+            "filestore",
+            os.O_RDONLY | directory | nofollow,
+            dir_fd=base_fd,
+        )
+    finally:
+        os.close(base_fd)
+    try:
+        try:
+            target_stat = os.stat(database, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return "absent", str(candidate)
+        if stat.S_ISLNK(target_stat.st_mode):
             return "unknown", str(candidate)
-        current = current.parent
-    if not os.path.lexists(candidate):
-        return "absent", str(candidate)
-    if not candidate.is_dir():
-        raise OSError(f"proven filestore target is not a directory: {candidate}")
-    shutil.rmtree(candidate)
-    return "deleted", str(candidate)
+        if not stat.S_ISDIR(target_stat.st_mode):
+            raise OSError(f"proven filestore target is not a directory: {candidate}")
+        shutil.rmtree(database, dir_fd=root_fd)
+        return "deleted", str(candidate)
+    finally:
+        os.close(root_fd)
 
 
 def _inspect_command_step(

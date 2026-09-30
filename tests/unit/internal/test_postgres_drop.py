@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 import zipfile
 from pathlib import Path
@@ -431,6 +432,42 @@ def test_proven_filestore_cleanup_is_exact_and_symlink_safe(tmp_path: Path) -> N
     assert state == "unknown"
     assert path == str(data_directory / "filestore" / "feature_db")
     assert (external / "secret").read_text() == "retain"
+
+
+@pytest.mark.unit
+def test_proven_filestore_cleanup_survives_filestore_symlink_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_directory = tmp_path / "odoo-data"
+    root = data_directory / "filestore"
+    target = root / "feature_db"
+    target.mkdir(parents=True)
+    (target / "owned").write_text("remove")
+    external = tmp_path / "external"
+    external_target = external / "feature_db"
+    external_target.mkdir(parents=True)
+    (external_target / "retain").write_text("keep")
+    checked_root = data_directory / "filestore-checked"
+    original_stat = os.stat
+    swapped = False
+
+    def swap_filestore_before_target_lookup(path: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal swapped
+        if path == "feature_db" and kwargs.get("dir_fd") is not None and not swapped:
+            root.rename(checked_root)
+            root.symlink_to(external, target_is_directory=True)
+            swapped = True
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", swap_filestore_before_target_lookup)
+    state, path = _cleanup_proven_filestore(str(data_directory), "feature_db")
+
+    assert swapped
+    assert state == "deleted"
+    assert path == str(target)
+    assert not (checked_root / "feature_db").exists()
+    assert root.is_symlink()
+    assert (external_target / "retain").read_text() == "keep"
 
 
 @pytest.mark.unit
@@ -1131,10 +1168,15 @@ def test_bootstrap_locked_revalidation_refuses_changed_event(
     instance, _claim = _managed_bootstrap_instance(
         project_manifest, catalog, tmp_path / "bootstrap-data"
     )
+    data_directory = tmp_path / "bootstrap-data"
+    target = data_directory / "filestore" / "tmp"
+    target.mkdir(parents=True)
+    (target / "retain").write_text("keep")
     import odoo_instance_sdk.internal.pg.drop as drop_module
 
     original = drop_module._drop_ownership_evidence
     calls = 0
+    executor = _executor()
 
     def change_after_planning(*args: Any, **kwargs: Any) -> object:
         nonlocal calls
@@ -1146,10 +1188,18 @@ def test_bootstrap_locked_revalidation_refuses_changed_event(
 
     monkeypatch.setattr(drop_module, "_drop_ownership_evidence", change_after_planning)
     command = build_database_drop_command(
-        instance, project_manifest, "tmp", force_default=True, executor=_executor()
+        instance, project_manifest, "tmp", force_default=True, executor=executor
     )
     with pytest.raises(ConfigError, match="exact current lifecycle event"):
         command.run()
+    assert not any(step.step_id.endswith(("terminate", "execute")) for step in executor.executed)
+    assert target.joinpath("retain").read_text() == "keep"
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE event_type='dropped'"
+        ).fetchone()[0]
+        == 1
+    )
     catalog.close()
 
 

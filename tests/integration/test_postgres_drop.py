@@ -385,8 +385,7 @@ def test_disposable_bootstrap_cleanup_public_cli_boundary(
     cluster: PostgresCluster | None = None
     try:
         init_result = CliRunner().invoke(cli, init_args)
-        if init_result.exit_code != 0:
-            pytest.skip(f"normal bootstrap setup blocked: {init_result.output}")
+        assert init_result.exit_code == 0, init_result.output
         cluster = PostgresCluster.from_project(tmp_path)
         volume_name = compose_volume_name(cluster._project_id)
         latest = catalog._latest_database_event(cluster.endpoint_host, cluster.endpoint_port, "tmp")

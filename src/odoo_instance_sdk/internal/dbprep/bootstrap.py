@@ -286,19 +286,30 @@ def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -
 
 def _record_bootstrap_event(instance: OdooInstance) -> None:
     """Publish bootstrap ownership using the already-resolved project identity."""
-    from odoo_instance_sdk.internal.project_init import project_owned_data_dir
+    from odoo_instance_sdk.internal.project_init import (
+        project_owned_data_dir,
+        verify_project_owned_data_dir,
+    )
 
     cluster = instance._postgres_cluster
     if cluster is None or not cluster.owned:
         raise BootstrapFailedError("bootstrap cluster ownership is unavailable")
+    project_root = instance.config.default_cwd or Path.cwd()
     configured_data_directory = (
         instance.config.start_config.data_dir if instance.config.start_config else None
     )
-    data_directory = (
-        Path(configured_data_directory)
-        if configured_data_directory is not None
-        else project_owned_data_dir(instance.config.default_cwd or Path.cwd())
-    )
+    if configured_data_directory is None:
+        data_directory = project_owned_data_dir(project_root)
+    else:
+        configured_path = Path(configured_data_directory)
+        if not configured_path.is_absolute():
+            configured_path = project_root / configured_path
+        try:
+            data_directory = verify_project_owned_data_dir(project_root, configured_path)
+        except InstanceConfigurationError as error:
+            raise BootstrapFailedError(
+                f"bootstrap data directory is not project-owned: {error}"
+            ) from error
     record_bootstrap_event(cluster, data_directory)
 
 
