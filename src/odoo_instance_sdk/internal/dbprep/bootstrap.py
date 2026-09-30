@@ -263,12 +263,14 @@ def ensure_project_bootstrap_tmp(
     context.action(ready_action.step_id)
     outcome = run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
     context.complete_action(ready_action.step_id)
+    record_action = bootstrap_record_action()
     if outcome is BootstrapOutcome.CREATED:
-        record_action = bootstrap_record_action()
         if context.planned(record_action.step_id):
             context.action(record_action.step_id)
             _record_bootstrap_event(instance)
             context.complete_action(record_action.step_id)
+    elif context.planned(record_action.step_id):
+        context.skip(record_action.step_id)
 
 
 def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -> bool:

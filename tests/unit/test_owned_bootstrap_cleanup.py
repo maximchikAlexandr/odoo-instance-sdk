@@ -233,7 +233,6 @@ def test_bootstrap_record_action_is_conditional_and_consumed_only_on_creation(
         probe_stdout="installed", include_actions=True
     )
     ensure_project_bootstrap_tmp(instance, context, steps=(*process_steps, verify))
-    context.skip(bootstrap_record_action().step_id)
     context.complete()
     assert published == [instance]
 

@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from odoo_instance_sdk.internal.postgres_compose import compose_volume_name, doc
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from tests.integration.postgres_cleanup import cleanup_postgres_project
+from tests.integration.postgres_cleanup import cleanup_postgres_project, patch_postgres_image_trust
 
 pytestmark = pytest.mark.integration
 
@@ -337,50 +338,61 @@ def test_disposable_bootstrap_cleanup_public_cli_boundary(
     docker_visible_postgres_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise public ``odcli db rm`` with bootstrap evidence and a mismatch."""
+    """Exercise normal bootstrap publication and public ``odcli db rm`` safety."""
     ready, diagnostic = docker_ready(timeout=3.0)
     if not ready:
         pytest.skip(f"docker unavailable for bootstrap cleanup E2E: {diagnostic}")
     psql = shutil.which("psql")
     if psql is None:
         pytest.skip("psql unavailable for bootstrap cleanup E2E")
+    odoo_bin = os.environ.get("ODCLI_BOOTSTRAP_ODOO_BIN")
+    if not odoo_bin or not Path(odoo_bin).is_file():
+        pytest.skip("set ODCLI_BOOTSTRAP_ODOO_BIN to a runnable Odoo binary for bootstrap E2E")
 
     port = _free_port()
-    manifest_dir = tmp_path / ".odcli"
-    manifest_dir.mkdir()
-    (manifest_dir / "project.toml").write_text(
-        "[project]\n"
-        'default_source_database = "tmp"\n\n'
-        "[postgres]\n"
-        'mode = "compose"\n'
-        'image = "postgres:16-alpine"\n'
-        f"port = {port}\n"
-        'user = "odoo"\n',
-        encoding="utf-8",
-    )
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup._paths.get_project_postgres_dir",
         lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
-    cluster = PostgresCluster.from_project(tmp_path)
-    volume_name = compose_volume_name(cluster._project_id)
-    compose_file = cluster.compose_file
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: catalog.db_path,
+    )
+    patch_postgres_image_trust(monkeypatch)
+    init_args = [
+        "init",
+        "--no-input",
+        "--allow-partial",
+        "--local-config",
+        "--odoo-bin",
+        odoo_bin,
+        "--python",
+        os.environ.get("ODCLI_BOOTSTRAP_PYTHON", sys.executable),
+        "--project",
+        str(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "postgres:16-alpine",
+        "--postgres-port",
+        str(port),
+        "--postgres-user",
+        "odoo",
+    ]
     primary_failure: BaseException | None = None
+    waiter: subprocess.Popen[str] | None = None
+    cluster: PostgresCluster | None = None
     try:
-        try:
-            digest = cluster.resolve_image_digest(timeout=120.0)
-            cluster.approve_image(digest, timeout=30.0)
-            cluster.ensure_running(timeout=120.0)
-        except PostgresClusterStartError as exc:
-            pytest.skip(f"disposable PostgreSQL cluster setup blocked: {exc}")
-
-        claim = catalog._ensure_postgres_cluster_pending(
-            cluster._project_id, cluster.compose_project_name, volume_name
-        )
-        claim = catalog._activate_postgres_cluster(
-            claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume_name
-        )
+        init_result = CliRunner().invoke(cli, init_args)
+        if init_result.exit_code != 0:
+            pytest.skip(f"normal bootstrap setup blocked: {init_result.output}")
+        cluster = PostgresCluster.from_project(tmp_path)
+        volume_name = compose_volume_name(cluster._project_id)
+        latest = catalog._latest_database_event(cluster.endpoint_host, cluster.endpoint_port, "tmp")
+        assert latest is not None and latest["event_type"] == "bootstrapped"
+        claim = catalog._get_postgres_cluster(cluster._project_id)
+        assert claim is not None and claim.state == "active"
         password = cluster.password_file.read_text(encoding="utf-8").strip()
         client = OdooClient(config=OdooClientConfig(executable="true"), _catalog=catalog)
         instance = OdooInstance(
@@ -396,25 +408,10 @@ def test_disposable_bootstrap_cleanup_public_cli_boundary(
             _client=client,
             _postgres_cluster=cluster,
         )
-        data_directory = tmp_path / "data"
+        data_directory = Path(str(latest["data_directory"]))
         unrelated = data_directory / "filestore" / "unrelated"
         unrelated.mkdir(parents=True)
         (unrelated / "keep").write_text("keep", encoding="utf-8")
-        created = _psql(
-            psql,
-            port=port,
-            password=password,
-            database="postgres",
-            sql='CREATE DATABASE "tmp"',
-        )
-        assert created.returncode == 0, created.stderr
-        catalog._record_database_bootstrapped(
-            cluster.endpoint_host,
-            cluster.endpoint_port,
-            "tmp",
-            cluster_id=claim.cluster_id,
-            data_directory=data_directory,
-        )
 
         with monkeypatch.context() as public_cli:
             public_cli.setattr(
@@ -443,21 +440,16 @@ def test_disposable_bootstrap_cleanup_public_cli_boundary(
         assert _volume_is_present(volume_name)
         assert (unrelated / "keep").read_text(encoding="utf-8") == "keep"
 
-        recreated = _psql(
-            psql,
-            port=port,
-            password=password,
-            database="postgres",
-            sql='CREATE DATABASE "tmp"',
-        )
-        assert recreated.returncode == 0, recreated.stderr
-        catalog._record_database_bootstrapped(
-            cluster.endpoint_host,
-            cluster.endpoint_port,
-            "tmp",
-            cluster_id=claim.cluster_id,
-            data_directory=data_directory,
-        )
+        second_init = CliRunner().invoke(cli, init_args)
+        assert second_init.exit_code == 0, second_init.output
+        latest = catalog._latest_database_event(cluster.endpoint_host, cluster.endpoint_port, "tmp")
+        assert latest is not None and latest["event_type"] == "bootstrapped"
+        event_count = catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE database_name='tmp'"
+        ).fetchone()[0]
+        waiter = _session_process(psql, port=port, password=password, database="tmp")
+        time.sleep(0.5)
+        assert waiter.poll() is None
         catalog._conn.execute(
             "UPDATE postgres_clusters SET volume_name='foreign-volume' WHERE cluster_id=?",
             (str(claim.cluster_id),),
@@ -483,20 +475,31 @@ def test_disposable_bootstrap_cleanup_public_cli_boundary(
                 ],
             )
         assert refused.exit_code != 0
+        assert waiter.poll() is None
         _assert_present(psql, port=port, password=password, database="tmp")
         assert _volume_is_present(volume_name)
         latest = catalog._latest_database_event(cluster.endpoint_host, cluster.endpoint_port, "tmp")
         assert latest is not None and latest["event_type"] == "bootstrapped"
+        assert (
+            catalog._conn.execute(
+                "SELECT COUNT(*) FROM database_events WHERE database_name='tmp'"
+            ).fetchone()[0]
+            == event_count
+        )
     except BaseException as exc:
         primary_failure = exc
         raise
     finally:
+        if waiter is not None:
+            _terminate_waiter(waiter)
         try:
             catalog.close()
         finally:
-            cleanup_postgres_project(
-                compose_file=compose_file,
-                compose_project_name=cluster.compose_project_name,
-                volume_name=volume_name,
-                primary_failure=primary_failure,
-            )
+            if cluster is not None:
+                volume_name = compose_volume_name(cluster._project_id)
+                cleanup_postgres_project(
+                    compose_file=cluster.compose_file,
+                    compose_project_name=cluster.compose_project_name,
+                    volume_name=volume_name,
+                    primary_failure=primary_failure,
+                )
