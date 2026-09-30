@@ -1,91 +1,92 @@
 ## Context
 
-The current Compose bootstrap path builds and executes one captured Odoo spawn for `tmp`, proves `base` readiness through PostgreSQL, and then returns. The catalog already carries authoritative project and active PostgreSQL cluster claims, while guarded `db rm` accepts database-level ownership only from the latest completed restore. That restore-only rule is correctly fail-closed, but bootstrap creates `tmp` outside it.
+The current Compose bootstrap path executes one captured Odoo spawn for `tmp`, proves `base` readiness through PostgreSQL, and returns. The catalog already has an append-only `database_events` lifecycle ordered by a global sequence: completed restore appends `restored`, successful reconciliation appends idempotent `dropped`, and each event can carry the exact endpoint, database, `cluster_id`, and data directory. Guarded `db rm` already validates the active project cluster claim, Docker volume/container labels, active bindings, sessions, and the same ownership projection again under the cluster lock.
 
-The change crosses bootstrap execution, catalog schema/migration, restore finalization, guarded deletion, tests, and user documentation. It must preserve the repository's immutable command-plan/process boundary and must not turn declarative Compose configuration into ownership evidence.
+The missing fact is only that this exact SDK bootstrap created `tmp`. The change therefore extends the existing lifecycle log rather than adding a second database-origin store.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
 - Give a freshly created, stopped, exactly owned Compose project a supported `odcli db rm tmp` cleanup path.
-- Record database-level bootstrap origin only after the existing creation and readiness proof succeeds.
-- Reuse the mature guarded database-drop operation and all of its revalidation, locking, confirmation, binding, session, audit, and filestore controls.
-- Ensure stale bootstrap evidence cannot authorize a restored, recreated, foreign, or otherwise replacement database.
+- Append bootstrap evidence only after the captured spawn actually creates `tmp` and readiness succeeds.
+- Reuse the existing lifecycle log, ownership gate, lock, destructive confirmations, reconciliation, and filestore safety.
+- Make a later `restored` or `dropped` event revoke bootstrap authority by ordinary event ordering.
 - Keep planning/preview output inspectable and secret-free.
 
 **Non-Goals:**
 
+- No new bootstrap database table, repository, CRUD lifecycle, or atomic finalizer.
 - No whole-project or Docker-volume reset command.
-- No weakening of the exact restore-origin gate for ordinary databases.
 - No adoption or backfill of pre-existing/legacy `tmp` databases.
-- No public `DatabaseResource` or `PostgresCluster` cleanup method and no second catalog.
-- No automatic stopping of an active Odoo runtime and no implicit connection termination.
+- No weakening of exact restore provenance for ordinary databases.
+- No public `DatabaseResource` or `PostgresCluster` cleanup method, automatic runtime stop, or implicit connection termination.
 
 ## Decisions
 
-### D1. Add a distinct current bootstrap-origin relation
+### D1. Reuse `database_events` with one `bootstrapped` event
 
-Add a small catalog relation keyed by exact `(cluster_id, database_name)` and containing canonical `project_id`, Compose project, volume name, normalized database host/port, fixed origin kind `bootstrap`, project-owned data directory, and creation time. A fresh-schema definition and one Alembic head migration SHALL remain metadata-equivalent.
+Extend the existing event-type CHECK constraint with `bootstrapped`. Its payload SHALL use the existing exact `db_host`, `db_port`, `database_name`, `cluster_id`, and `data_directory` columns; `backup_id`, `source_kind`, and `source_sha256` remain null. The catalog writer accepts only database `tmp`, requires a non-null data directory, and validates that `cluster_id` resolves to a current active cluster claim before appending.
 
-Catalog methods SHALL validate that the referenced cluster claim is currently `active`, matches project/Compose/volume identity, and that the name is exactly `tmp`. Bootstrap evidence is not stored in `restores`; its semantics and lifecycle are different.
+The next single-head Alembic migration rebuilds only the SQLite table constraint while preserving sequence values, rows, indexes, foreign keys, and metadata equivalence. It creates no new relation and synthesizes no legacy event.
 
 Alternatives considered:
 
-- Treat bootstrap as a restore source kind: rejected because no restore occurred and it would falsify the existing restore contract.
-- Infer ownership from `mode="compose"`, the database name, or a successful probe: rejected because those facts are reproducible by foreign and legacy resources.
-- Add whole-cluster teardown: rejected as a broader destructive surface that also needs independent volume, filestore, runtime, and multi-database policy.
+- A dedicated `bootstrap_databases` current-state relation: rejected because the append-only lifecycle already supplies exact identity, ordering, revocation, and idempotent drop reconciliation.
+- Treat bootstrap as a restore source: rejected because no restore occurred and existing restore provenance must remain truthful.
+- Infer ownership from `mode="compose"`, `tmp`, or a successful probe: rejected because those facts can describe foreign or legacy resources.
 
-### D2. Publish origin only for creation performed in the captured bootstrap execution
+### D2. Record only an actual creation by the captured bootstrap flow
 
-The internal bootstrap result SHALL distinguish `created` from `already_ready`. The plan adds one conditional catalog `ActionStep` after readiness verification. Only `created` proceeds to a catalog writer supplied with the already captured project/cluster/data-directory identity; `already_ready` skips the action. Both init and first-run callers use the same helper and action contract.
+The shared bootstrap executor SHALL return a typed internal outcome distinguishing `created` from `already_ready`. The immutable init and first-run plans add one conditional catalog `ActionStep` after readiness verification. Only `created` calls the narrow event writer; `already_ready` skips the action and never backfills missing evidence.
 
-The writer re-reads the active cluster claim at commit time. If catalog publication fails, the command fails; later readiness alone does not backfill authority. This deliberately leaves crash-orphaned databases fail-closed.
+The writer receives the already resolved endpoint, active cluster identity, and project-owned data directory. A write failure fails the command. A crash after database creation but before event publication leaves `tmp` unowned and therefore undeletable by the guarded path; later readiness does not adopt it.
 
-Alternative considered: record every successful readiness probe. Rejected because it silently adopts databases created outside the SDK.
+Alternative considered: append `bootstrapped` for every successful readiness probe. Rejected because that would convert observation into ownership.
 
-### D3. Extend the existing ownership projection with a discriminated origin
+### D3. The latest exact event selects the ownership path
 
-The guarded drop ownership projection SHALL represent either `restore` or `bootstrap` evidence. The shared prefix remains unchanged: resolve the project-bound Compose cluster, load the exact active claim, reject active catalog bindings, and inspect exact volume plus container attachment labels.
+Add one narrow internal catalog reader for the latest `database_events` row by normalized endpoint and exact database, ordered by `sequence DESC`.
 
-For `restore`, retain all current backup/source/digest and contained-filestore checks. For `bootstrap`, require the current relation to match the active claim, project, Compose project, expected volume, endpoint, exact `tmp`, and contained project-owned data directory. The same projection is calculated during planning and again inside the existing cluster lock; inequality refuses mutation.
+The guarded ownership gate keeps its existing common checks first: project-bound Compose cluster, exact active claim, active environment/runtime refusal, and Docker volume/container label inspection. It then applies this event rule:
 
-This is the ponytail/minimal path: one extra evidence variant at the existing root ownership gate, not a parallel cleanup implementation.
+- latest `bootstrapped`: accept only database `tmp`, matching non-null `cluster_id`, null restore fields, and a safe recorded data directory;
+- latest `restored`: retain the existing completed restore-binding validation unchanged;
+- latest `dropped` or no event: refuse as unknown current origin.
 
-### D4. Make restore and drop finalization revoke bootstrap authority
+The resulting immutable ownership projection is computed during planning and again under the existing cluster lock. Any event or identity change makes the projections unequal and refuses before mutation.
 
-A completed restore transaction for the exact cluster/database SHALL delete any matching bootstrap-origin relation as it records normal restore provenance. It does not touch bootstrap records for other clusters or names.
+### D4. Existing event order performs revocation and retry reconciliation
 
-After verified deletion, replace the split audit call for this path with one catalog transaction that performs the existing idempotent `dropped` event reconciliation and conditionally deletes the exact bootstrap record using the identity observed during locked revalidation. An already-absent retry runs the same finalizer after ownership and absence checks. A changed or missing row fails closed instead of deleting a replacement record.
+A completed restore already appends `restored`, so it naturally supersedes an older `bootstrapped` event without any extra restore mutation. A successful drop already calls `record_database_dropped`; the resulting latest `dropped` event revokes bootstrap authority.
 
-Alternative considered: leave the bootstrap row and prefer the newest timestamp. Rejected because timestamps across relations are an avoidable ordering ambiguity and stale authority would remain durable.
+For the interrupted case where PostgreSQL deletion succeeded but reconciliation did not, add the same existing `record_database_dropped` call to each authorized `idempotent_absent` return. At that point the command has already revalidated the latest `bootstrapped` event and exact cluster ownership under lock and PostgreSQL has proved absence. The helper remains idempotent, so no new finalizer or compare-delete API is needed.
 
-### D5. Keep the public and CLI surface stable
+### D5. Keep public and CLI surfaces stable
 
-Users use the existing command and flags: `odcli db rm tmp --force-default --yes`, adding `--force-connections` only when they explicitly accept termination under the existing policy. Public SDK method discovery and typed CLI output remain unchanged. Preview enriches the existing ownership projection with sanitized `origin=bootstrap`; it exposes no password or raw secret.
+Users keep the existing command and flags: `odcli db rm tmp --force-default --yes`, adding `--force-connections` only under the existing explicit policy. Public SDK method discovery and typed CLI output remain unchanged. Preview may show sanitized `origin=bootstrap`; it exposes no password or secret.
 
-### D6. Verify at catalog, bootstrap, ownership, CLI, and disposable Compose boundaries
+### D6. Verify the narrow seams
 
-Tests SHALL cover fresh-schema/migration equivalence; exact record/revoke validation; created versus already-ready bootstrap behavior; immutable plan/action consumption; restore supersession; planning and locked revalidation mismatch matrices; active environment/runtime/session and default/confirmation refusals; successful and interrupted-finalization retries; unchanged restore-origin behavior; and a public CLI/SDK-boundary disposable Compose regression with recorded catalog/label evidence.
+Tests SHALL cover the migrated CHECK constraint and row preservation; validated `bootstrapped` append/latest-event ordering; `created` versus `already_ready`; conditional action visibility/consumption; latest `bootstrapped` success; later `restored`/`dropped` revocation; missing, legacy, foreign, malformed, changed, active-binding, session, default, and confirmation refusals; authorized already-absent reconciliation; unchanged restore behavior; and one public-boundary disposable Compose regression.
 
-The opt-in Compose test creates the normal bootstrap `tmp`, stops Odoo, invokes the public CLI path, and proves only the matching identity succeeds. A second case changes one ownership component and proves no session termination, `DROP DATABASE`, volume deletion, or filestore deletion occurs.
+The Compose regression creates normal bootstrap `tmp`, stops Odoo, removes it through the public CLI path, then varies one identity component and proves no session termination, `DROP DATABASE`, volume deletion, or unrelated filestore deletion occurs.
 
 ## Risks / Trade-offs
 
-- **Catalog publication can fail after PostgreSQL creation** → fail the command and keep the database unauthorized; never repair ownership from a later probe.
-- **A stale current-origin row could authorize a replacement** → revoke it atomically on restore and drop finalization, compare exact identity twice, and require new evidence after recreation.
-- **Schema migration increases delivery surface** → add one narrow table, one head migration, downgrade behavior consistent with current migration policy, and metadata-equivalence tests.
-- **Bootstrap filestore may be absent** → preserve the existing contained-path cleanup semantics; absence is successful, unknown or unsafe paths are retained and reported.
-- **Retry after partial success could diverge catalog and PostgreSQL** → the already-absent branch performs identity-bound idempotent finalization and cannot issue a second drop.
-- **First-run and init paths could drift** → both consume the same bootstrap outcome and catalog-action helper rather than duplicating origin logic.
+- **SQLite cannot alter the event CHECK in place** → rebuild the existing table in one migration and verify rows, sequences, indexes, foreign keys, and metadata equivalence.
+- **Database creation can succeed before event publication** → fail closed and never infer or backfill ownership from readiness alone.
+- **A manual drop/recreate can leave an old event apparently current** → preserve the same recorded-origin trust model already used by restore bindings; any observed absence writes `dropped`, while unobserved out-of-band replacement remains outside the supported lifecycle.
+- **The absent retry could reconcile the wrong target** → call it only after exact ownership revalidation under the existing lock and a direct PostgreSQL absence proof.
+- **Bootstrap filestore may be absent or unsafe** → reuse contained-path cleanup; absence succeeds, unknown or unsafe paths are retained and reported.
 
 ## Migration Plan
 
-1. Ship the catalog table and Alembic migration; existing rows remain unchanged and no legacy bootstrap evidence is synthesized.
-2. Publish bootstrap evidence only on new successful SDK creation after the upgraded code is running.
-3. Enable the additional guarded-drop evidence variant and restore/drop revocation in the same release so no durable origin lacks lifecycle handling.
-4. Rollback removes the additive relation through the migration's explicit downgrade policy; existing restore and drop behavior remains usable, while bootstrap-only cleanup returns to fail-closed behavior.
+1. Rebuild `database_events` through the next Alembic head with `bootstrapped` allowed and all historical rows/sequences preserved.
+2. Start appending `bootstrapped` only for new successful SDK creations; do not synthesize events for legacy `tmp`.
+3. Enable latest-event dispatch in guarded drop and absent-branch reconciliation in the same release.
+4. Downgrade refuses while any `bootstrapped` row exists rather than silently discarding audit history; without such rows it restores the prior CHECK and behavior.
 
 ## Open Questions
 
-None. The selected scope is the exact init-created `tmp` cleanup through existing `db rm`; whole-cluster reset remains outside this change.
+None. The selected solution is the existing `database_events` lifecycle plus the existing guarded `db rm` path.

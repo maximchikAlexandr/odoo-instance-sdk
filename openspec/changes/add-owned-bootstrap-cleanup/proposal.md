@@ -4,11 +4,11 @@ Self-contained Compose initialization creates the disposable `tmp` database but 
 
 ## What Changes
 
-- Record a distinct, exact bootstrap-database origin only after the SDK-created `tmp` database has passed its existing SQL readiness check on an active owned cluster.
-- Allow the existing guarded `odcli db rm` path to accept that bootstrap origin as an alternative to completed restore provenance, without weakening restore-origin checks for ordinary databases.
-- Revalidate the bootstrap origin, project/cluster/volume/container identity, configured-default override, active bindings, and sessions under the existing cluster lock immediately before mutation.
-- Reconcile successful deletion so stale bootstrap evidence cannot authorize a later database with the same name.
-- Add bounded catalog-migration, command-plan, unit, CLI, and disposable Compose regression coverage plus user documentation for removing an init-created `tmp` database.
+- Extend the existing append-only `database_events` lifecycle with `bootstrapped`, recorded only after the SDK-created `tmp` database passes its existing SQL readiness check on an active owned cluster.
+- Allow the existing guarded `odcli db rm` path to accept `bootstrapped` only when it is the latest exact event for `tmp`, without weakening restore-origin checks for ordinary databases.
+- Revalidate the event, project/cluster/volume/container identity, configured-default override, active bindings, and sessions under the existing cluster lock immediately before mutation.
+- Reuse the existing idempotent `record_database_dropped` reconciliation after successful deletion and in the authorized already-absent retry path, so later `restored` or `dropped` events naturally revoke bootstrap authority.
+- Add the bounded CHECK-constraint migration, command-plan, unit, CLI, disposable Compose regression, and user documentation needed for the supported cleanup.
 
 ## Capabilities
 
@@ -18,13 +18,13 @@ None.
 
 ### Modified Capabilities
 
-- `project-init`: Successful Compose bootstrap records exact origin evidence for `tmp`; failed, skipped, dry-run, external, legacy, or mismatched initialization does not fabricate it.
-- `database-management`: The guarded project-cluster drop accepts a current exact bootstrap origin for `tmp` while preserving every existing destructive-operation refusal and restore-origin rule.
+- `project-init`: Successful Compose bootstrap appends exact `bootstrapped` lifecycle evidence for `tmp`; failed, skipped, dry-run, external, legacy, or mismatched initialization does not fabricate it.
+- `database-management`: The guarded project-cluster drop accepts a latest exact `bootstrapped` event for `tmp` while preserving every existing destructive-operation refusal and restore-origin rule.
 
 ## Impact
 
-- Catalog schema and Alembic migration for bootstrap-origin lifecycle evidence.
+- Existing `database_events` schema and one Alembic CHECK-constraint migration; no new table or parallel ownership store.
 - Compose init and first-run bootstrap execution/audit actions.
-- Internal guarded PostgreSQL drop ownership projection and reconciliation; no new public SDK database method and no new teardown command.
+- Internal guarded PostgreSQL drop ownership projection plus the existing dropped-event reconciliation; no new public SDK database method, finalizer, or teardown command.
 - Existing CLI confirmation, `--force-default`, `--force-connections`, immutable command-plan, process-boundary, redaction, and typed-output contracts remain in force.
 - Tests around catalog migration/equivalence, bootstrap execution, database-drop ownership matrices, CLI output, and opt-in disposable Compose behavior; database lifecycle documentation gains the supported cleanup command.
