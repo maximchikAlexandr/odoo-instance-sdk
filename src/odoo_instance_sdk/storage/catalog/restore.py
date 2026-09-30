@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
-from odoo_instance_sdk.models import Backup, BackupState, EnvironmentState
+from odoo_instance_sdk.models import Backup, BackupState, EnvironmentState, RestoreState
 from odoo_instance_sdk.storage.catalog.helpers import (
     _row_to_backup,
     _translate_sqlite_error,
@@ -40,9 +40,14 @@ class _RestoreMixin:
         source_sha256: str | None = None,
         cluster_id: uuid.UUID | str | None = None,
         data_directory: str | Path | None = None,
+        state: RestoreState | str = RestoreState.COMPLETE,
     ) -> None:
         host = normalize_db_host(db_host)
         kind, evidence_backup_id, digest = restore_provenance(backup_id, source_kind, source_sha256)
+        try:
+            restore_state = RestoreState(state)
+        except (TypeError, ValueError) as exc:
+            raise BackupCatalogError("restore state must be 'complete' or 'incomplete'") from exc
         identity = None if cluster_id is None else self._cluster_uuid(cluster_id)
         data_dir = None if data_directory is None else str(data_directory)
         if data_dir is not None and not data_dir.strip():
@@ -55,8 +60,8 @@ class _RestoreMixin:
             self._conn.execute(
                 """INSERT INTO restores
                    (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
-                    restored_at, cluster_id, data_directory)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)""",
+                    restored_at, cluster_id, data_directory, state)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)""",
                 (
                     host,
                     db_port,
@@ -66,6 +71,7 @@ class _RestoreMixin:
                     digest,
                     identity,
                     data_dir,
+                    restore_state.value,
                 ),
             )
             self._conn.execute(
@@ -275,7 +281,7 @@ class _RestoreMixin:
             "list[sqlite3.Row]",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, restored_at "
+                "data_directory, restored_at, state "
                 "FROM restores WHERE db_host=? AND db_port=? "
                 "ORDER BY database_name ASC, restored_at DESC, sequence DESC",
                 (host, db_port),
@@ -292,7 +298,7 @@ class _RestoreMixin:
             "sqlite3.Row | None",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, restored_at "
+                "data_directory, restored_at, state "
                 "FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
                 "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
                 (host, db_port, database_name),

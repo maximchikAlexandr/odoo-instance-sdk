@@ -50,6 +50,40 @@ def test_runtime_launch_identity_migration_is_idempotent_and_reversible(
     conn.close()
 
 
+def test_restore_state_migration_backfills_and_downgrades_to_legacy_shape(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "restore-state.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "0004")
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO backups "
+        "(id, source_base_url, database_name, format, filestore_requested, state, started_at) "
+        "VALUES ('backup', 'https://example.test', 'source', 'zip', 0, 'available', datetime('now'))"
+    )
+    conn.execute(
+        "INSERT INTO restores "
+        "(db_host, db_port, database_name, backup_id, source_kind, restored_at) "
+        "VALUES ('localhost', 5432, 'target', 'backup', 'catalogue', datetime('now'))"
+    )
+    conn.commit()
+    conn.close()
+
+    command.upgrade(config, "head")
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT state FROM restores").fetchone()[0] == "complete"
+    conn.execute("UPDATE restores SET state='incomplete'")
+    conn.commit()
+    command.downgrade(config, "0004")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(restores)")}
+    assert "state" not in columns
+    assert conn.execute(
+        "SELECT db_host, db_port, database_name, backup_id, source_kind FROM restores"
+    ).fetchone() == ("localhost", 5432, "target", "backup", "catalogue")
+    conn.close()
+
+
 def test_legacy_0002_runtime_row_upgrades_with_null_launch_identity(
     tmp_path: Path,
 ) -> None:
@@ -206,6 +240,12 @@ def test_real_v16_catalogue_is_repaired_stamped_and_preserves_rows(tmp_path: Pat
     assert catalog._conn.execute(
         "SELECT 1 FROM runtime WHERE owner_kind = 'environment' AND owner_id = 'environment-v16'"
     ).fetchone()
+    assert (
+        catalog._conn.execute(
+            "SELECT state FROM restores WHERE database_name = 'alpha_copy'"
+        ).fetchone()[0]
+        == "complete"
+    )
     indexes = {
         row[0]
         for row in catalog._conn.execute(

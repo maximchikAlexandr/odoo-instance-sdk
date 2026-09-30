@@ -19,7 +19,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0004"
+CATALOG_REVISION = "0005"
 
 
 def _migrations_dir() -> Path:
@@ -200,7 +200,9 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
             expected_columns = _without_runtime_launch_identity(expected_columns)
         if table in {"restores", "database_events"}:
             expected_columns = tuple(
-                item for item in expected_columns if item[0] not in {"source_kind", "source_sha256"}
+                item
+                for item in expected_columns
+                if item[0] not in {"source_kind", "source_sha256", "state"}
             )
             expected_columns = tuple(
                 (name, type_name, 1 if name == "backup_id" and table == "restores" else required)
@@ -218,6 +220,10 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
         return
     try:
         with conn:
+            conn.execute(
+                "ALTER TABLE restores ADD COLUMN state TEXT NOT NULL DEFAULT 'complete' "
+                "CHECK (state IN ('complete', 'incomplete'))"
+            )
             conn.execute(
                 "CREATE UNIQUE INDEX environments_one_active_branch "
                 "ON environments(git_common_dir, branch) WHERE state <> 'removed'"
