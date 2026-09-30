@@ -216,13 +216,17 @@ class _RestoreMixin:
             "SELECT event_type FROM database_events WHERE db_host=? AND db_port=? AND database_name=? ORDER BY sequence DESC LIMIT 1",
             (host, db_port, database_name),
         ).fetchone()
-        if row is not None and row["event_type"] == "dropped":
-            return
-        self._conn.execute(
-            "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) VALUES (?, ?, ?, 'dropped', datetime('now'), NULL)",
-            (host, db_port, database_name),
-        )
-        self._conn.commit()
+        with self._conn:
+            if row is None or row["event_type"] != "dropped":
+                self._conn.execute(
+                    "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) VALUES (?, ?, ?, 'dropped', datetime('now'), NULL)",
+                    (host, db_port, database_name),
+                )
+            self._conn.execute(
+                "DELETE FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
+                "AND state='incomplete'",
+                (host, db_port, database_name),
+            )
 
     @_translate_sqlite_error
     def latest_restore(
@@ -233,13 +237,14 @@ class _RestoreMixin:
     ) -> Backup | None:
         host = normalize_db_host(db_host)
         row = self._conn.execute(
-            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at "
+            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at, "
+            "r.state AS restore_state "
             "FROM restores r LEFT JOIN backups b ON b.id = r.backup_id "
             "WHERE r.db_host=? AND r.db_port=? AND r.database_name=? "
             "ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1",
             (host, db_port, database_name),
         ).fetchone()
-        if row is None or row["restore_backup_id"] is None:
+        if row is None or row["restore_backup_id"] is None or row["restore_state"] != "complete":
             return None
         if row["state"] == BackupState.DELETED.value:
             return None
@@ -263,13 +268,14 @@ class _RestoreMixin:
         """
         host = normalize_db_host(db_host)
         row = self._conn.execute(
-            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at "
+            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at, "
+            "r.state AS restore_state "
             "FROM restores r LEFT JOIN backups b ON b.id = r.backup_id "
             "WHERE r.db_host=? AND r.db_port=? AND r.database_name=? "
             "ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1",
             (host, db_port, database_name),
         ).fetchone()
-        if row is None or row["restore_backup_id"] is None:
+        if row is None or row["restore_backup_id"] is None or row["restore_state"] != "complete":
             return None
         return _row_to_backup(row, require_file=False)
 

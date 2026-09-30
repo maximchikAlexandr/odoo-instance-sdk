@@ -80,6 +80,7 @@ class DatabasePreparationFailureContext(
     retained_database: str | None = None
     backup_id: uuid.UUID | None = None
     database_confirmed: bool | None = None
+    restore_state: Literal["complete", "incomplete"] | None = None
     default_switch_confirmed: bool | None = None
     restore_stage_id: str | None = None
     restore_stage_elapsed: float | None = None

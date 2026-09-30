@@ -6,6 +6,7 @@ import contextlib
 import os
 import stat
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -17,6 +18,7 @@ from odoo_instance_sdk.internal.generated_config import (
     project_generated_config_path,
     render_config,
 )
+from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import StartConfig
@@ -158,6 +160,100 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
         db_password=password,
         data_dir=project_owned_data_dir(root),
     )
+
+
+def switch_project_default(
+    project_path: Path,
+    config: ProjectConfig,
+    *,
+    write_manifest_fn: Callable[[Path, ProjectConfig], Path] = write_manifest,
+) -> None:
+    """Publish a default database and keep the owned generated config aligned.
+
+    The preparation lock is held by the caller.  The manifest is written first;
+    a generated-config failure restores its owner-validated snapshot so callers
+    never observe a successful switch with only one owned file updated.
+    """
+    root = project_path.resolve()
+    generated = project_generated_config_path(root)
+    compose = config.postgres is not None and config.postgres.mode == "compose"
+    generated_snapshot: tuple[bytes, int] | None = None
+    if compose:
+        validate_generated_config_target(generated, project_root=root)
+        if generated.exists():
+            metadata = generated.lstat()
+            generated_snapshot = (generated.read_bytes(), stat.S_IMODE(metadata.st_mode))
+
+    manifest = manifest_path(root)
+    manifest_snapshot: tuple[bytes, int] | None = None
+    if manifest.exists():
+        metadata = manifest.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise InstanceConfigurationError("project manifest must be a regular file")
+        manifest_snapshot = (manifest.read_bytes(), stat.S_IMODE(metadata.st_mode))
+
+    write_manifest_fn(root, config)
+    if not compose:
+        return
+    try:
+        if generated_snapshot is None:
+            write_project_generated_config(root, config)
+        else:
+            _rewrite_project_generated_database(root, config, generated)
+    except BaseException:
+        _restore_owned_snapshot(manifest, manifest_snapshot)
+        raise
+
+
+def _rewrite_project_generated_database(
+    root: Path, config: ProjectConfig, destination: Path
+) -> None:
+    """Rewrite only generated values while retaining the current config inputs."""
+    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    parsed = parse_odoo_config(destination)
+    start = StartConfig.from_odoo_config(destination)
+    cluster = PostgresCluster.from_project(root)
+    password = cluster.password_file.read_text(encoding="utf-8").strip()
+    assert config.postgres is not None
+    generate_config(
+        destination,
+        destination,
+        repo_root=root,
+        worktree=root,
+        http_interface=start.http_interface or parsed.get("http_interface", "0.0.0.0"),
+        http_port=resolve_project_http_port(config.preferred_http_port, start.http_port),
+        db_name=config.default_source_database or "",
+        db_host=cluster.endpoint_host,
+        db_port=cluster.endpoint_port,
+        db_user=config.postgres.user or "odoo",
+        db_password=password,
+        data_dir=project_owned_data_dir(root),
+    )
+
+
+def _restore_owned_snapshot(path: Path, snapshot: tuple[bytes, int] | None) -> None:
+    if snapshot is None:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return
+    content, mode = snapshot
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(content)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+        os.replace(temporary, path)
+        temporary = ""
+    finally:
+        if fd != -1:
+            os.close(fd)
+        if temporary:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
 
 
 def validate_generated_config_target(

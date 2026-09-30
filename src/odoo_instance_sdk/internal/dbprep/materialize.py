@@ -80,6 +80,7 @@ from odoo_instance_sdk.internal.project_env import (
     load_project_environment,
 )
 from odoo_instance_sdk.internal.project_manifest import write_manifest
+from odoo_instance_sdk.internal.project_init import switch_project_default
 from odoo_instance_sdk.internal.project_runtime import (
     resolve_project_http_port,
 )
@@ -91,6 +92,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
+    RestoreState,
     StartConfig,
 )
 from odoo_instance_sdk.project import ProjectConfig
@@ -113,6 +115,96 @@ def _wait_for_preparation_lock(project_id: str, *, timeout: float = 300.0) -> It
         database_preparation_lock_path(project_id), time.monotonic() + timeout
     ):
         yield
+
+
+def _captured_restore_exists_after() -> bool | None:
+    """Consume or read the immutable post-restore existence proof."""
+    from odoo_instance_sdk.internal.proc import ProcessResult, active_context
+
+    context = active_context()
+    if context is None or not context.planned("database.restore.exists-after"):
+        return None
+    try:
+        result = (
+            context.process("database.restore.exists-after")
+            if not context.consumed("database.restore.exists-after")
+            else context.results.get("database.restore.exists-after")
+        )
+    except BaseException:
+        return None
+    if not isinstance(result, ProcessResult) or result.returncode != 0:
+        return None
+    output = (
+        result.stdout.decode(errors="replace")
+        if isinstance(result.stdout, bytes)
+        else result.stdout
+    )
+    if not isinstance(output, str):
+        return None
+    normalized = output.strip().lower()
+    if not normalized:
+        return None
+    return normalized in {"1", "t", "true", "yes"}
+
+
+def _record_incomplete_restore(  # noqa: C901
+    client: OdooClient,
+    preflight: RestorePreflight,
+    *,
+    backup: Backup | None,
+    local_restore: SelectedBackupRestorePayload | None,
+) -> bool:
+    """Record exact recovery evidence, returning false for any missing proof."""
+    provenance = getattr(preflight.postgres_cluster, "_restore_provenance", None)
+    if not callable(provenance):
+        return False
+    try:
+        cluster_id, data_directory = provenance()
+    except Exception:
+        return False
+    if not isinstance(cluster_id, str) or not cluster_id:
+        return False
+    if data_directory is None:
+        try:
+            start_config = StartConfig.from_odoo_config(preflight.source_config)
+            if isinstance(start_config.data_dir, str) and start_config.data_dir:
+                data_directory = str(
+                    _resolve_data_dir(start_config.data_dir, preflight.source_config)
+                )
+        except (ConfigError, OSError, ValueError, InstanceConfigurationError):
+            return False
+    source = preflight.restore_source
+    source_kind: str
+    source_sha256: str | None = None
+    backup_id: str | None = None
+    if isinstance(source, _LocalArchiveRestoreSource):
+        if local_restore is None:
+            return False
+        source_kind = "local_archive"
+        source_sha256 = local_restore.verified_sha256
+    else:
+        if backup is None:
+            return False
+        source_kind = "catalogue"
+        backup_id = str(backup.id)
+    if data_directory is not None and not isinstance(data_directory, str | Path):
+        data_directory = None
+    try:
+        catalog = client.get_catalog()
+        catalog.record_restore(
+            preflight.postgres_cluster.endpoint_host,
+            preflight.postgres_cluster.endpoint_port,
+            preflight.target_database,
+            backup_id,
+            source_kind=source_kind,
+            source_sha256=source_sha256,
+            cluster_id=cluster_id,
+            data_directory=data_directory,
+            state=RestoreState.INCOMPLETE,
+        )
+    except Exception:
+        return False
+    return True
 
 
 @contextlib.contextmanager
@@ -488,7 +580,7 @@ def prepare_restore(  # noqa: C901
                 )
 
                 with _restore_stage("default_switch"):
-                    write_manifest(root, switched)
+                    switch_project_default(root, switched, write_manifest_fn=write_manifest)
                 default_switch_confirmed = True
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
@@ -505,6 +597,25 @@ def prepare_restore(  # noqa: C901
                 )
             except BaseException as exc:
                 _consume_action_if_planned("database.prepare.rollback")
+                retained_incomplete = False
+                exists_after = _captured_restore_exists_after()
+                if exists_after is True:
+                    retained_incomplete = _record_incomplete_restore(
+                        client,
+                        preflight,
+                        backup=backup,
+                        local_restore=local_restore,
+                    )
+                elif exists_after is None and database_confirmed:
+                    # A successful SDK restore already returned only after its
+                    # own postcondition; legacy test doubles may not project
+                    # that captured stdout.  Keep the primary failure context,
+                    # but do not publish a new incomplete binding without proof.
+                    retained_incomplete = False
+                else:
+                    database_confirmed = False
+                if retained_incomplete:
+                    database_confirmed = True
                 _annotate_retained_failure(
                     error=exc,
                     backup=backup,
@@ -515,6 +626,7 @@ def prepare_restore(  # noqa: C901
                         else None
                     ),
                     database_confirmed=database_confirmed,
+                    restore_state=("incomplete" if retained_incomplete else None),
                     default_switch_confirmed=default_switch_confirmed,
                     source_kind=(
                         "local_archive"

@@ -766,6 +766,22 @@ def test_restore_state_rejects_unknown_value(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_incomplete_restore_is_not_a_successful_latest_restore_and_is_retired_on_drop(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "incomplete-lifecycle.db")
+    path = _create_backup_file(tmp_path, "incomplete.zip")
+    backup_id = _u("incomplete-lifecycle")
+    catalog.start_download(backup_id, "http://localhost:8069", "db", "zip", True, path)
+    catalog.success_download(backup_id, path.name, path.stat().st_size, "")
+    catalog.record_restore("localhost", 5432, "db", backup_id, state="incomplete")
+
+    assert catalog.latest_restore("localhost", 5432, "db") is None
+    catalog.record_database_dropped("localhost", 5432, "db")
+    assert catalog._latest_restore_binding("localhost", 5432, "db") is None
+    catalog.close()
+
+
 def test_local_archive_restore_records_source_neutral_provenance(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "local.db")
     digest = "a" * 64

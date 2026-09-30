@@ -191,3 +191,53 @@ def test_inventory_does_not_merge_foreign_cluster_restore_relationships(
     assert result.databases[0].origin == "unknown"
     assert result.databases[0].restore_backup_ids == ()
     catalog.close()
+
+
+@pytest.mark.unit
+def test_inventory_projects_incomplete_restore_state_without_marking_success(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    manifest = project_manifest / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n',
+        encoding="utf-8",
+    )
+    instance = _instance(project_manifest, catalog)
+    cluster = instance._postgres_cluster
+    volume = f"pgdata_{cluster._project_id}"
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id, cluster.compose_project_name, volume
+    )
+    claim = catalog._activate_postgres_cluster(
+        claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume
+    )
+    backup_file = tmp_path / "incomplete.zip"
+    backup_file.write_bytes(b"incomplete")
+    backup_id = str(uuid.uuid4())
+    catalog.start_download(
+        backup_id, "http://127.0.0.1:8069", "feature_db", "zip", True, backup_file
+    )
+    catalog.success_download(backup_id, backup_file.name, backup_file.stat().st_size, "")
+    catalog.record_restore(
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        backup_id,
+        cluster_id=claim.cluster_id,
+        state="incomplete",
+    )
+
+    result = build_database_inventory_command(
+        instance,
+        project_manifest,
+        tracked=True,
+        executor=_executor([{"name": "feature_db", "logical_size_bytes": 1, "active_sessions": 0}]),
+    ).run()
+
+    assert len(result.databases) == 1
+    assert result.databases[0].origin == "restore"
+    assert result.databases[0].restore_state == "incomplete"
+    catalog.close()

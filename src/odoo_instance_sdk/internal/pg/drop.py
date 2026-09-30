@@ -133,6 +133,7 @@ class _DropOwnershipEvidence:
     source_kind: str
     source_sha256: str | None
     data_directory: str | None
+    restore_state: str
 
 
 def _catalog_database_in_use(
@@ -468,6 +469,8 @@ def _drop_ownership_evidence(  # noqa: C901
     )
     if binding is None or binding["cluster_id"] != str(claim.cluster_id):
         raise ConfigError("database drop requires an exact active restore binding")
+    if binding["state"] not in {"complete", "incomplete"}:
+        raise ConfigError("database drop restore binding state is invalid")
     source_kind = binding["source_kind"]
     source_sha256 = binding["source_sha256"]
     backup_id = binding["backup_id"]
@@ -500,6 +503,7 @@ def _drop_ownership_evidence(  # noqa: C901
         source_kind=source_kind,
         source_sha256=source_sha256,
         data_directory=data_directory_value,
+        restore_state=str(binding["state"]),
     )
 
 
