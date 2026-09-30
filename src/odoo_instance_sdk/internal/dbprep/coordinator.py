@@ -320,7 +320,7 @@ class DatabasePreparationCoordinator:
         self,
         step_id: str,
         description: str,
-        callback: Callable[..., T],
+        callback: Callable[[], T] | Callable[[RunContext[T]], T],
         *,
         executor: ProcessExecutor | None,
         steps: Sequence[PreparedStep | PreparedAction] = (),
@@ -341,7 +341,12 @@ class DatabasePreparationCoordinator:
             context.action(step_id)
             import inspect
 
-            result = callback() if not inspect.signature(callback).parameters else callback(context)
+            if inspect.signature(callback).parameters:
+                contextual = cast("Callable[[RunContext[T]], T]", callback)
+                result = contextual(context)
+            else:
+                no_context = cast("Callable[[], T]", callback)
+                result = no_context()
             for optional_step_id in optional_steps:
                 if not context.consumed(optional_step_id):
                     context.skip(optional_step_id)

@@ -153,6 +153,10 @@ def test_developer_workflow_docs_cover_public_contracts() -> None:
         "odcli translations export",
         "odcli git commit",
         "odcli git sync",
+        "resumable",
+        "incomplete",
+        "dbfilter",
+        "crash window",
     ):
         assert text in combined
 

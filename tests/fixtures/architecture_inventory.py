@@ -18,16 +18,16 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 539),
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 540),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 555),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 556),
         ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 474),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
-        ("src/odoo_instance_sdk/commands/output.py", 287),
-        ("src/odoo_instance_sdk/commands/output.py", 456),
+        ("src/odoo_instance_sdk/commands/output.py", 289),
         ("src/odoo_instance_sdk/commands/output.py", 458),
-        ("src/odoo_instance_sdk/commands/output.py", 465),
+        ("src/odoo_instance_sdk/commands/output.py", 460),
         ("src/odoo_instance_sdk/commands/output.py", 467),
+        ("src/odoo_instance_sdk/commands/output.py", 469),
         ("src/odoo_instance_sdk/internal/self_update.py", 801),
         ("src/odoo_instance_sdk/internal/self_update.py", 802),
         ("src/odoo_instance_sdk/internal/self_update.py", 803),
@@ -38,18 +38,18 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 115): "in-memory Rich serialization boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 287): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 456): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 458): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 465): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 289): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 458): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 460): "shared TOON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 467): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 469): "shared diagnostic boundary",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
-        539,
+        555,
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
-        540,
+        556,
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
@@ -78,7 +78,12 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
+EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
+    "src/odoo_instance_sdk/internal/dbprep/coordinator.py": frozenset({165, 178, 179}),
+    "src/odoo_instance_sdk/internal/dbprep/materialize.py": frozenset(
+        {207, 209, 257, 282, 283, 284, 466, 478, 479}
+    ),
+}
 
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(

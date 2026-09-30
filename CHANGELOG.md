@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   versioned applied-settings evidence, and read-only doctor drift diagnosis
 
 ### Changed
+- Make identical Compose init resumable and keep no-op `dry_run` metadata
+  truthful; retain exact `incomplete` restore evidence for guarded diagnosis,
+  retry, and drop, and synchronize project-owned generated `db_name`/`dbfilter`
+  with a successful default switch. User-managed source configs remain
+  unchanged, and the documented crash window between atomic file replacements
+  remains recoverable by later drift repair.
 - Managed foreground and detached runtime stops now validate the immutable,
   secret-free launch identity captured at spawn time; legacy live rows without
   that evidence remain fail-closed with sanitized diagnostics.

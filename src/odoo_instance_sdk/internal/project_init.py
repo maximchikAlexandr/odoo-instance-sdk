@@ -179,7 +179,9 @@ def switch_project_default(
     compose = config.postgres is not None and config.postgres.mode == "compose"
     generated_snapshot: tuple[bytes, int] | None = None
     if compose:
-        validate_generated_config_target(generated, project_root=root)
+        validate_generated_config_target(
+            generated, project_root=root, allow_untracked_without_git=True
+        )
         if generated.exists():
             metadata = generated.lstat()
             generated_snapshot = (generated.read_bytes(), stat.S_IMODE(metadata.st_mode))
@@ -263,6 +265,7 @@ def validate_generated_config_target(
     path: Path,
     *,
     project_root: Path | None = None,
+    allow_untracked_without_git: bool = False,
 ) -> None:
     """Reject unsafe targets before any generated-config or secret write."""
     root = (project_root or path.parent.parent).resolve()
@@ -297,8 +300,18 @@ def validate_generated_config_target(
         raise InstanceConfigurationError(
             f"generated config is not owned by the current user: {path}"
         )
+    _reject_tracked_generated_config(
+        path, root=root, allow_untracked_without_git=allow_untracked_without_git
+    )
+
+
+def _reject_tracked_generated_config(
+    path: Path, *, root: Path, allow_untracked_without_git: bool
+) -> None:
     from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
 
+    if allow_untracked_without_git and not (root / ".git").exists():
+        return
     try:
         if is_tracked_path(path):
             raise InstanceConfigurationError(

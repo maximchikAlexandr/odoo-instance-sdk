@@ -197,6 +197,32 @@ confirmation boundaries:
   repairing or mutating anything; dependency and managed-config formatting
   that is semantically unchanged remains synchronized.
 
+### Resumable project lifecycle recovery
+
+Compose initialization is resumable. If an identical `odcli init` previously
+published its manifest and generated config but stopped before the owned
+cluster or SQL-proven `tmp` bootstrap completed, the identical retry reruns
+the captured cluster/bootstrap verification. A complete retry is a true
+no-op: it verifies the existing postconditions and does not recreate `tmp`.
+The machine envelope keeps the requested `dry_run` value (`false` for a real
+no-op), and image trust, cluster identity, and SQL checks remain fail-closed.
+
+A restore that fails after PostgreSQL creates its selected target is reported
+as an `incomplete` binding only when the captured post-failure probe proves
+that exact database in the active SDK-owned cluster. The failure and
+`odcli db ls --format json` inventory expose that state without treating it as
+ready, successful, or a project default. `odcli db rm TARGET --yes` or a
+supported retry may reconcile it only after the existing execution-time
+cluster, endpoint, source, volume, active-use, and filestore guards pass;
+unknown or unrelated databases remain protected.
+
+When a successful preparation switches `default_source_database`, the
+project manifest and project-owned `.odcli/odoo.conf` are updated together,
+including `db_name` and `dbfilter`. A user-managed source config is never
+rewritten. Each file replacement is atomic and ordinary write failures are
+compensated; an operating-system crash can still occur between the two
+replacements, so the next init or preparation repairs detectable drift.
+
 `.localhost` browser-session isolation is separate research and is not part of
 this delivery. Use `odcli env show` for a focused selected-environment
 projection, and use `odcli doctor` for read-only drift diagnosis.

@@ -190,7 +190,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "E2E-SM-01",
             "E2E-CP-01",
         ),
-        e2e_rationale="manifest and target project",
+        e2e_rationale="manifest/target project, resumable Compose postconditions, and truthful no-op metadata",
     ),
     PublicLeafCase(
         ("doctor",),
@@ -454,7 +454,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         sdk_primitive="EnvironmentResource.refresh_database_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-05",),
-        e2e_rationale="exact catalog restore, occupied/repeat cases",
+        e2e_rationale="exact catalog restore, occupied/repeat cases, and incomplete-target recovery",
     ),
     PublicLeafCase(
         ("db", "ls"),
@@ -488,7 +488,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         exception_reason="Guarded PostgreSQL drop uses internal.pg.drop.build_database_drop_command; HTTP drop_command semantics stay separate",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-10",),
-        e2e_rationale="owned DB deletion; foreign DB refusal",
+        e2e_rationale="owned DB deletion, foreign DB refusal, and exact incomplete-binding reconciliation",
     ),
     PublicLeafCase(
         ("eval",),

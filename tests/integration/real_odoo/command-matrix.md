@@ -4,7 +4,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
-| `init` | mutating-or-spawning | yes | smoke | E2E-SM-01 / E2E-CP-01: manifest and target project |
+| `init` | mutating-or-spawning | yes | smoke | E2E-SM-01 / E2E-CP-01: manifest/target project, resumable Compose postconditions, and truthful no-op metadata |
 | `doctor` | bounded-read-only | no | critical | E2E-CP-14: final project diagnosis |
 | `stop` | mutating-or-spawning | yes | critical | E2E-CP-13: owned target process stop and repeat |
 | `resource ls` | bounded-read-only | no | critical | E2E-CP-12: run-owned inventory |
@@ -28,10 +28,10 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `backup validate` | bounded-read-only | no | smoke | E2E-SM-03 / E2E-CP-09: ZIP plus filestore validation |
 | `backup rm` | mutating-or-spawning | yes | focused | E2E-FC-09: owned artifact deletion and repeat |
 | `db refresh` | mutating-or-spawning | yes | smoke | E2E-SM-02 / E2E-CP-08: real remote download and restore |
-| `db restore` | mutating-or-spawning | yes | focused | E2E-FC-05: exact catalog restore, occupied/repeat cases |
+| `db restore` | mutating-or-spawning | yes | focused | E2E-FC-05: exact catalog restore, occupied/repeat cases, and incomplete-target recovery |
 | `db ls` | bounded-read-only | no | smoke | E2E-SM-04 / E2E-CP-10: restored DB visible |
 | `db reset-admin-password` | mutating-or-spawning | yes | focused | E2E-FC-06: target Odoo shell reset and redaction |
-| `db rm` | mutating-or-spawning | yes | focused | E2E-FC-10: owned DB deletion; foreign DB refusal |
+| `db rm` | mutating-or-spawning | yes | focused | E2E-FC-10: owned DB deletion, foreign DB refusal, and exact incomplete-binding reconciliation |
 | `eval` | process-previewable-read-only | yes | critical | E2E-CP-11: restored model/attachment assertion |
 | `exec` | mutating-or-spawning | yes | focused | E2E-FC-07: framed script result and non-zero failure |
 | `test` | process-previewable-read-only | yes | critical | E2E-CP-07: probe module native runner report |
