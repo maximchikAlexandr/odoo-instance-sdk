@@ -97,6 +97,7 @@ class _ExistingManifestDecision(Enum):
     NOOP = "noop"
     REPAIR = "repair"
     RESUME = "resume"
+    RESUME_REPAIRED = "resume_repaired"
     OVERWRITE = "overwrite"
 
 
@@ -120,7 +121,10 @@ def _handle_existing_manifest(  # noqa: C901
         target = project_generated_config_path(resolved_project)
         repair = generated_config_needs_repair(resolved_project, existing_cfg)
         if repair:
+            is_compose = config.postgres is not None and config.postgres.mode == "compose"
             if dry_run:
+                if is_compose:
+                    return _ExistingManifestDecision.RESUME
                 result: JsonObject = {
                     **manifest_dict(config),
                     "generated_config": cast("JsonValue", {"path": str(target), "repair": True}),
@@ -142,6 +146,8 @@ def _handle_existing_manifest(  # noqa: C901
             except InstanceConfigurationError as exc:
                 fail(output_mode, "init", str(exc), dry_run=dry_run)
             write_project_generated_config(resolved_project, existing_cfg)
+            if is_compose:
+                return _ExistingManifestDecision.RESUME_REPAIRED
             register_initialized_project(resolved_project)
             if output_mode is not OutputMode.RICH:
                 emit_json_envelope(

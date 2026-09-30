@@ -269,6 +269,7 @@ def _execute_init(
 
     existing = manifest_path(resolved_project)
     resume_existing = False
+    repaired_existing = False
     if existing.is_file():
         decision = _handle_existing_manifest(
             existing,
@@ -284,7 +285,11 @@ def _execute_init(
             or decision is _ExistingManifestDecision.REPAIR
         ):
             return
-        resume_existing = decision is _ExistingManifestDecision.RESUME
+        repaired_existing = decision is _ExistingManifestDecision.RESUME_REPAIRED
+        resume_existing = decision in {
+            _ExistingManifestDecision.RESUME,
+            _ExistingManifestDecision.RESUME_REPAIRED,
+        }
     from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
 
     status, _ = run_or_preview(
@@ -322,7 +327,15 @@ def _execute_init(
         rich=lambda _document: (
             f"Dry run — no files written.\n{config.to_manifest()}"
             if request.dry_run
-            else f"Wrote {existing}"
+            else (
+                f"Repaired generated config and verified Compose lifecycle: {existing}"
+                if repaired_existing
+                else (
+                    "Manifest already up to date; Compose lifecycle verified; no-op."
+                    if resume_existing
+                    else f"Wrote {existing}"
+                )
+            )
         ),
     )
     sys.exit(status)
