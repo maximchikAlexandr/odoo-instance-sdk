@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,6 +21,7 @@ from odoo_instance_sdk.internal.dbprep.bootstrap import (
 )
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
+    PreparedProcess,
     PreparedStep,
     ProcessResult,
     RecordingExecutor,
@@ -29,10 +31,11 @@ from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.catalog.helpers import PostgresClusterClaim
 from odoo_instance_sdk.storage.catalog_migrate import _alembic_config
 
 
-def _active_claim(catalog: BackupCatalog, *, project: str = "project") -> object:
+def _active_claim(catalog: BackupCatalog, *, project: str = "project") -> PostgresClusterClaim:
     claim = catalog._ensure_postgres_cluster_pending(project, "compose", f"volume-{project}")
     return catalog._activate_postgres_cluster(
         claim.cluster_id,
@@ -55,7 +58,7 @@ def _bootstrap_context(
     probe_stdout: str = "uninstalled",
     ready_stdout: str = "installed",
     include_actions: bool = False,
-) -> tuple[RunContext[object], RecordingExecutor, tuple[PreparedStep, ...]]:
+) -> tuple[RunContext[object], RecordingExecutor, tuple[PreparedStep, PreparedStep, PreparedStep]]:
     process_steps = _process_steps()
     verify = PreparedAction(step_id="verify", action="verify-bootstrap-tmp-base", read_only=True)
     record = bootstrap_record_action()
@@ -64,20 +67,21 @@ def _bootstrap_context(
         *((verify, record) if include_actions else ()),
     )
 
-    def result_factory(step: PreparedStep) -> ProcessResult:
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
         stdout = ""
-        if step.step_id == "probe":
+        if prepared.step_id == "probe":
             stdout = probe_stdout
-        elif step.step_id == "ready":
+        elif prepared.step_id == "ready":
             stdout = ready_stdout
         return ProcessResult(
-            argv=step.argv,
+            argv=prepared.argv,
             returncode=0,
             stdout=stdout,
             stderr="",
             duration=0.0,
-            cwd=step.cwd,
-            environment=step.environment,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
         )
 
     executor = RecordingExecutor(result_factory=result_factory)
@@ -94,13 +98,13 @@ def test_catalog_bootstrap_writer_validates_claim_and_latest_order(tmp_path: Pat
         "localhost",
         5432,
         "tmp",
-        cluster_id=claim.cluster_id,  # type: ignore[attr-defined]
+        cluster_id=claim.cluster_id,
         data_directory=data_directory,
     )
     first = catalog._latest_database_event("localhost", 5432, "tmp")
     assert first is not None
     assert first["event_type"] == "bootstrapped"
-    assert first["cluster_id"] == str(claim.cluster_id)  # type: ignore[attr-defined]
+    assert first["cluster_id"] == str(claim.cluster_id)
     assert first["data_directory"] == str(data_directory)
     assert first["backup_id"] is None
     assert first["source_kind"] is None
@@ -117,7 +121,7 @@ def test_catalog_bootstrap_writer_validates_claim_and_latest_order(tmp_path: Pat
             "localhost",
             5432,
             "legacy",
-            cluster_id=claim.cluster_id,  # type: ignore[attr-defined]
+            cluster_id=claim.cluster_id,
             data_directory=data_directory,
         )
     with pytest.raises(BackupCatalogError, match="data directory"):
@@ -125,7 +129,7 @@ def test_catalog_bootstrap_writer_validates_claim_and_latest_order(tmp_path: Pat
             "localhost",
             5432,
             "tmp",
-            cluster_id=claim.cluster_id,  # type: ignore[attr-defined]
+            cluster_id=claim.cluster_id,
             data_directory="  ",
         )
 
@@ -133,14 +137,14 @@ def test_catalog_bootstrap_writer_validates_claim_and_latest_order(tmp_path: Pat
     catalog._conn.execute(
         "UPDATE postgres_clusters SET state='pending' WHERE cluster_id=?",
         (str(pending.cluster_id),),
-    )  # type: ignore[attr-defined]
+    )
     catalog._conn.commit()
     with pytest.raises(BackupCatalogError, match="active cluster claim"):
         catalog._record_database_bootstrapped(
             "localhost",
             5432,
             "tmp",
-            cluster_id=pending.cluster_id,  # type: ignore[attr-defined]
+            cluster_id=pending.cluster_id,
             data_directory=data_directory,
         )
     assert (
