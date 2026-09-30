@@ -262,17 +262,15 @@ def _matches_incomplete_restore(
 
 
 def _reconcile_incomplete_restore(preflight: RestorePreflight) -> None:
-    """Drop one exact retained target only after all ownership guards pass."""
-    from odoo_instance_sdk.internal.pg.drop import _drop_ownership_evidence
+    """Drop one exact retained target through the guarded PostgreSQL command."""
+    from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
 
-    ownership = _drop_ownership_evidence(
+    build_database_drop_command(
         preflight.local_instance,
-        preflight.postgres_cluster,
+        preflight.project.repository_root,
         preflight.target_database,
-    )
-    if ownership is None or ownership.restore_state != RestoreState.INCOMPLETE.value:
-        raise ConfigError("incomplete restore ownership evidence changed before retry")
-    preflight.local_instance.databases.drop(preflight.target_database)
+        command_origin="database-restore-retry",
+    ).run()
 
 
 @contextlib.contextmanager

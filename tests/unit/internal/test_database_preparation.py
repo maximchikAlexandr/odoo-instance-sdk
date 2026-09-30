@@ -2208,46 +2208,137 @@ def test_captured_restore_probe_distinguishes_affirmative_negative_and_unknown(
     assert preparation._captured_restore_exists_after() is expected
 
 
+@pytest.mark.parametrize("refusal", [None, "active-use", "drift"])
 def test_exact_incomplete_restore_retry_reconciles_before_restore(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    project_manifest: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str | None,
 ) -> None:
+    from odoo_instance_sdk.config import InstanceConfig
     from odoo_instance_sdk.internal.database_preparation import (
         ProjectRuntimeBinding,
         RestorePreflight,
         _CatalogueRestoreSource,
     )
     from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.internal.pg import drop as drop_module
+    from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
+    from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult
+    from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-    source_config = tmp_path / "odoo.conf"
-    source_config.write_text(
-        "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\n"
-        "db_name = source\nadmin_passwd = local-secret\n"
+    (project_manifest / ".odcli" / "project.toml").write_text(
+        (project_manifest / ".odcli" / "project.toml").read_text()
+        + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n'
     )
-    project = ProjectConfig(
-        repository_root=tmp_path,
-        source_config=source_config,
-        default_source_database="old",
-    )
+    project = ProjectConfig.load(project_manifest)
     backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
-    cluster = MagicMock(endpoint_host="localhost", endpoint_port=5432)
-    cluster._restore_provenance.return_value = ("cluster-id", None)
-    local = MagicMock()
-    calls: list[str] = []
-    local.databases.restore.side_effect = lambda *_args, **_kwargs: calls.append("restore")
+    catalog = BackupCatalog(db_path=tmp_path / "retry.sqlite3")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup._paths.get_catalog_path",
+        lambda: tmp_path / "retry.sqlite3",
+    )
     client = MagicMock()
-    client.get_catalog.return_value._latest_restore_binding.return_value = {
-        "state": "incomplete",
-        "cluster_id": "cluster-id",
-        "data_directory": None,
-        "source_kind": "catalogue",
-        "backup_id": str(backup.id),
-        "source_sha256": None,
-    }
+    client.get_catalog.return_value = catalog
+    cluster = PostgresCluster.from_project(project_manifest)
+    volume = compose_volume_name(cluster._project_id)
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id, cluster.compose_project_name, volume
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume
+    )
+    catalog.start_download(
+        str(backup.id),
+        backup.source_base_url,
+        backup.database_name,
+        backup.format.value,
+        backup.filestore_requested,
+        Path(backup.path),
+    )
+    catalog.success_download(
+        str(backup.id),
+        backup.filename,
+        backup.size_bytes,
+        backup.sha256,
+        downloaded_at=backup.downloaded_at,
+    )
+    catalog.record_restore(
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "retained_target",
+        str(backup.id),
+        source_kind="catalogue",
+        cluster_id=active.cluster_id,
+        state="incomplete",
+    )
+    local = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            configured_database_names=("retained_target",),
+            db_host="127.0.0.1",
+            db_port=5432,
+            db_user="odoo",
+            db_password="private-password",
+        ),
+        _client=client,
+    )
+    local._postgres_cluster = cluster
+    local.databases = MagicMock()
+    calls: list[str] = []
+
+    def restore(*_args: object, **_kwargs: object) -> None:
+        latest_event = catalog._conn.execute(
+            "SELECT event_type FROM database_events "
+            "WHERE database_name='retained_target' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()[0]
+        assert latest_event == "dropped"
+        calls.append("restore")
+
+    local.databases.restore.side_effect = restore
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_args, **_kwargs: True)
+
+    def result_for(step: PreparedProcess) -> ProcessResult:
+        stdout = (
+            "t\n"
+            if step.step_id.endswith("verify")
+            else '{"exists": true, "is_template": false, "sessions": []}'
+        )
+        return ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+
+    executor = RecordingExecutor(result_factory=result_for)
+    monkeypatch.setattr(drop_module, "SubprocessExecutor", lambda: executor)
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    if refusal == "active-use":
+        monkeypatch.setattr(drop_module, "_catalog_database_in_use", lambda *_args, **_kwargs: True)
+    elif refusal == "drift":
+        original_ownership = drop_module._drop_ownership_evidence
+        ownership_checks = 0
+
+        def refuse_after_planning(*args: object, **kwargs: object) -> object:
+            nonlocal ownership_checks
+            ownership_checks += 1
+            evidence = original_ownership(*args, **kwargs)
+            if ownership_checks == 2:
+                raise ConfigError("database drop ownership evidence changed before mutation")
+            return evidence
+
+        monkeypatch.setattr(drop_module, "_drop_ownership_evidence", refuse_after_planning)
     preflight = RestorePreflight(
         project=project,
-        project_id="project",
+        project_id=cluster._project_id,
         source=None,
-        source_config=source_config,
+        source_config=project.source_config or tmp_path / "odoo.conf",
         local_instance=local,
         runtime=ProjectRuntimeBinding(
             python_executable="/usr/bin/python3",
@@ -2265,13 +2356,33 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(
     def fake_preflight(*_args: object, **_kwargs: object) -> Iterator[RestorePreflight]:
         yield preflight
 
-    def reconcile(_preflight: RestorePreflight) -> None:
-        calls.append("drop")
-
     monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
-    monkeypatch.setattr(preparation, "_reconcile_incomplete_restore", reconcile)
     monkeypatch.setattr(preparation, "_manifest_after_preparation", lambda *_args: project)
     monkeypatch.setattr(preparation, "switch_project_default", lambda *_args, **_kwargs: None)
+
+    if refusal is not None:
+        with pytest.raises(ConfigError):
+            preparation.prepare_restore(
+                client,
+                project,
+                restore_source=_CatalogueRestoreSource(backup.id),
+                target_database="retained_target",
+            )
+        assert calls == []
+        assert (
+            catalog._latest_restore_binding(
+                cluster.endpoint_host, cluster.endpoint_port, "retained_target"
+            )["state"]
+            == "incomplete"
+        )
+        assert not any(
+            row[0] == "dropped"
+            for row in catalog._conn.execute(
+                "SELECT event_type FROM database_events WHERE database_name='retained_target'"
+            ).fetchall()
+        )
+        catalog.close()
+        return
 
     result = preparation.prepare_restore(
         client,
@@ -2281,7 +2392,15 @@ def test_exact_incomplete_restore_retry_reconciles_before_restore(
     )
 
     assert result.restored_database == "retained_target"
-    assert calls == ["drop", "restore"]
+    assert calls == ["restore"]
+    assert [step.step_id for step in executor.executed] == [
+        "database.drop.planning-inspect",
+        "database.drop.inspect",
+        "database.drop.revalidate-drop",
+        "database.drop.execute",
+        "database.drop.verify",
+    ]
+    catalog.close()
 
 
 def test_default_switch_updates_owned_files_and_compensates_both_on_write_failure(
