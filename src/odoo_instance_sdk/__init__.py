@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
     from odoo_instance_sdk.exceptions import (
         BackupCatalogError,
+        BackupDiskInspectionError,
         BackupDownloadError,
         BackupNotAvailableError,
         BackupNotFoundError,
@@ -235,6 +236,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "Backup": ("odoo_instance_sdk.models", "Backup"),
     "BackupBranchOrigin": ("odoo_instance_sdk.models", "BackupBranchOrigin"),
     "BackupCatalogError": ("odoo_instance_sdk.exceptions", "BackupCatalogError"),
+    "BackupDiskInspectionError": ("odoo_instance_sdk.exceptions", "BackupDiskInspectionError"),
     "BackupDeletionResult": ("odoo_instance_sdk.models", "BackupDeletionResult"),
     "BackupDownloadError": ("odoo_instance_sdk.exceptions", "BackupDownloadError"),
     "BackupEvent": ("odoo_instance_sdk.models", "BackupEvent"),
@@ -554,6 +556,7 @@ if TYPE_CHECKING:
         "BackupBranchOrigin",
         "BackupCatalogError",
         "BackupDeletionResult",
+        "BackupDiskInspectionError",
         "BackupDownloadError",
         "BackupEnvironmentLink",
         "BackupEvent",

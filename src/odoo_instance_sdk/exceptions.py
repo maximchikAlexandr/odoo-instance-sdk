@@ -79,6 +79,27 @@ class BackupUnknownFormatError(BackupPolicyError):
         )
 
 
+class BackupDiskInspectionError(BackupPolicyError):
+    """Restore preflight could not inspect the destination filesystem."""
+
+    code = "backup_disk_inspection"
+
+    def __init__(
+        self,
+        *,
+        requested_path: str,
+        inspection_path: str | None,
+        reason: str,
+    ) -> None:
+        details: dict[str, PlanJsonValue] = {
+            "requested_path": requested_path,
+            "reason": reason,
+        }
+        if inspection_path is not None:
+            details["inspection_path"] = inspection_path
+        super().__init__("restore disk inspection failed", details=details)
+
+
 class ConfigError(OdooInstanceSdkError):
     """Invalid configuration."""  # ponytail: spec-mandated, not yet raised in this slice
 
