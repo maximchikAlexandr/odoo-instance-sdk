@@ -89,72 +89,127 @@ def _bootstrap_context(
     return RunContext(steps, executor), executor, process_steps
 
 
-def test_catalog_bootstrap_writer_validates_claim_and_latest_order(tmp_path: Path) -> None:
+def _catalog_with_active_claim(
+    tmp_path: Path, *, project: str = "project"
+) -> tuple[BackupCatalog, PostgresClusterClaim]:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
-    claim = _active_claim(catalog)
+    return catalog, _active_claim(catalog, project=project)
+
+
+def _bootstrap_data_directory(tmp_path: Path) -> Path:
     data_directory = tmp_path / "data"
     data_directory.mkdir()
+    return data_directory
 
-    catalog._record_database_bootstrapped(
-        "localhost",
-        5432,
-        "tmp",
-        cluster_id=claim.cluster_id,
-        data_directory=data_directory,
-    )
-    first = catalog._latest_database_event("localhost", 5432, "tmp")
-    assert first is not None
-    assert first["event_type"] == "bootstrapped"
-    assert first["cluster_id"] == str(claim.cluster_id)
-    assert first["data_directory"] == str(data_directory)
-    assert first["backup_id"] is None
-    assert first["source_kind"] is None
-    assert first["source_sha256"] is None
 
-    catalog.record_database_dropped("localhost", 5432, "tmp")
-    latest = catalog._latest_database_event("localhost", 5432, "tmp")
-    assert latest is not None
-    assert latest["event_type"] == "dropped"
-    assert int(latest["sequence"]) > int(first["sequence"])
-
-    with pytest.raises(BackupCatalogError, match="database tmp"):
-        catalog._record_database_bootstrapped(
-            "localhost",
-            5432,
-            "legacy",
-            cluster_id=claim.cluster_id,
-            data_directory=data_directory,
-        )
-    with pytest.raises(BackupCatalogError, match="data directory"):
+def test_catalog_bootstrap_writer_records_exact_event_fields(tmp_path: Path) -> None:
+    catalog, claim = _catalog_with_active_claim(tmp_path)
+    data_directory = _bootstrap_data_directory(tmp_path)
+    try:
         catalog._record_database_bootstrapped(
             "localhost",
             5432,
             "tmp",
             cluster_id=claim.cluster_id,
-            data_directory="  ",
+            data_directory=data_directory,
         )
+        event = catalog._latest_database_event("localhost", 5432, "tmp")
+        assert event is not None
+        assert event["event_type"] == "bootstrapped"
+        assert event["cluster_id"] == str(claim.cluster_id)
+        assert event["data_directory"] == str(data_directory)
+        assert event["backup_id"] is None
+        assert event["source_kind"] is None
+        assert event["source_sha256"] is None
+    finally:
+        catalog.close()
 
-    pending = _active_claim(catalog, project="pending")
-    catalog._conn.execute(
-        "UPDATE postgres_clusters SET state='pending' WHERE cluster_id=?",
-        (str(pending.cluster_id),),
-    )
-    catalog._conn.commit()
-    with pytest.raises(BackupCatalogError, match="active cluster claim"):
+
+def test_catalog_bootstrap_writer_orders_drop_after_bootstrap(tmp_path: Path) -> None:
+    catalog, claim = _catalog_with_active_claim(tmp_path)
+    data_directory = _bootstrap_data_directory(tmp_path)
+    try:
         catalog._record_database_bootstrapped(
             "localhost",
             5432,
             "tmp",
-            cluster_id=pending.cluster_id,
+            cluster_id=claim.cluster_id,
             data_directory=data_directory,
         )
-    assert (
+        first = catalog._latest_database_event("localhost", 5432, "tmp")
+        assert first is not None
+        catalog.record_database_dropped("localhost", 5432, "tmp")
+        latest = catalog._latest_database_event("localhost", 5432, "tmp")
+        assert latest is not None
+        assert latest["event_type"] == "dropped"
+        assert int(latest["sequence"]) > int(first["sequence"])
+    finally:
+        catalog.close()
+
+
+def test_catalog_bootstrap_writer_rejects_invalid_payloads(tmp_path: Path) -> None:
+    catalog, claim = _catalog_with_active_claim(tmp_path)
+    data_directory = _bootstrap_data_directory(tmp_path)
+    try:
+        catalog._record_database_bootstrapped(
+            "localhost",
+            5432,
+            "tmp",
+            cluster_id=claim.cluster_id,
+            data_directory=data_directory,
+        )
+        with pytest.raises(BackupCatalogError, match="database tmp"):
+            catalog._record_database_bootstrapped(
+                "localhost",
+                5432,
+                "legacy",
+                cluster_id=claim.cluster_id,
+                data_directory=data_directory,
+            )
+        with pytest.raises(BackupCatalogError, match="data directory"):
+            catalog._record_database_bootstrapped(
+                "localhost",
+                5432,
+                "tmp",
+                cluster_id=claim.cluster_id,
+                data_directory="  ",
+            )
+        assert (
+            catalog._conn.execute(
+                "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        catalog.close()
+
+
+def test_catalog_bootstrap_writer_requires_active_claim(tmp_path: Path) -> None:
+    catalog, _claim = _catalog_with_active_claim(tmp_path)
+    data_directory = _bootstrap_data_directory(tmp_path)
+    try:
+        pending = _active_claim(catalog, project="pending")
         catalog._conn.execute(
-            "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
-        ).fetchone()[0]
-        == 1
-    )
-    catalog.close()
+            "UPDATE postgres_clusters SET state='pending' WHERE cluster_id=?",
+            (str(pending.cluster_id),),
+        )
+        catalog._conn.commit()
+        with pytest.raises(BackupCatalogError, match="active cluster claim"):
+            catalog._record_database_bootstrapped(
+                "localhost",
+                5432,
+                "tmp",
+                cluster_id=pending.cluster_id,
+                data_directory=data_directory,
+            )
+        assert (
+            catalog._conn.execute(
+                "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        catalog.close()
 
 
 def test_catalog_migration_preserves_events_and_refuses_bootstrap_downgrade(
