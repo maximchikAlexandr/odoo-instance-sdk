@@ -126,6 +126,13 @@ restores = Table(
     Column("restored_at", Text, nullable=False),
     Column("cluster_id", Text),
     Column("data_directory", Text),
+    Column(
+        "state",
+        Text,
+        CheckConstraint("state IN ('complete', 'incomplete')"),
+        nullable=False,
+        server_default="complete",
+    ),
     CheckConstraint(
         "(source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
         "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "

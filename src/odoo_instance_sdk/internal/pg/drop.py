@@ -496,6 +496,7 @@ def _drop_ownership_evidence(  # noqa: C901
             source_kind="bootstrap",
             source_sha256=None,
             data_directory=event["data_directory"],
+            restore_state="complete",
         )
     if event["event_type"] != "restored":
         raise ConfigError("database drop requires an exact current lifecycle event")

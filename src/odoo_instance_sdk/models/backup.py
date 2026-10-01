@@ -40,6 +40,11 @@ class BackupState(enum.StrEnum):
     DELETED = "deleted"
 
 
+class RestoreState(enum.StrEnum):
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+
+
 class BackupEventType(enum.StrEnum):
     DOWNLOAD_STARTED = "download_started"
     DOWNLOAD_SUCCEEDED = "download_succeeded"
