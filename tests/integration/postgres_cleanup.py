@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import PostgresImageNotTrustedError
-from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpSteps
+from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpSteps, bootstrap_record_action
 from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -190,6 +190,9 @@ def patch_compose_init_bootstrap_skip(monkeypatch: MonkeyPatch) -> None:
     ) -> None:
         for step in steps or ():
             context.skip(step.step_id)
+        record_action = bootstrap_record_action()
+        if context.planned(record_action.step_id):
+            context.skip(record_action.step_id)
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",

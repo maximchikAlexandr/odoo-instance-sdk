@@ -305,6 +305,22 @@ prompt.
 `--force-connections` terminates sessions belonging only to the exact target.
 Remote instances, configured defaults, and template databases remain refused.
 
+For a self-contained, stopped SDK-owned Compose project, the supported cleanup
+for the database created by initialization is:
+
+```bash
+odcli db rm tmp --force-default --yes
+```
+
+This succeeds only when the current lifecycle record proves that this
+invocation created and readied `tmp`, the active cluster and Compose labels
+still match, and no environment, runtime, or unforced session uses it. A
+pre-existing or legacy `tmp`, an external or active cluster, mismatched
+identity, or a later `restored`/`dropped` event remains refused. Add
+`--force-connections` only when terminating sessions on that exact database is
+intentional. Restore-origin databases keep their existing exact restore
+provenance and cleanup rules; readiness alone never adopts ownership.
+
 `backup rm`, `db rm`, and `env rm` accept variadic multi-target arguments.
 Each target is resolved and previewed independently before any mutation; a
 dry-run lists every target's plan. Any guarded failure during resolution or

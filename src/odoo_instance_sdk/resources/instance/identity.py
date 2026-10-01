@@ -355,12 +355,17 @@ class _IdentityMixin:
         from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
-        from odoo_instance_sdk.internal.dbprep.bootstrap import project_bootstrap_tmp_steps
+        from odoo_instance_sdk.internal.dbprep.bootstrap import (
+            bootstrap_record_action,
+            project_bootstrap_tmp_steps,
+        )
 
         bootstrap_steps = project_bootstrap_tmp_steps(cast("OdooInstance", self))
+        bootstrap_record = bootstrap_record_action() if bootstrap_steps else None
         prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (
             *dependency_steps,
             *bootstrap_steps,
+            *((bootstrap_record,) if bootstrap_record is not None else ()),
             step,
         )
         if (
