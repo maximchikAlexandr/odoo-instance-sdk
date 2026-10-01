@@ -1142,6 +1142,60 @@ def test_local_archive_capture_uses_configured_restore_data_dir_for_space(
     assert observed == [data_dir.resolve()]
 
 
+def test_local_archive_restore_command_plans_missing_data_dir_without_creating_it(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from odoo_instance_sdk import LocalArchiveRestoreSource, OdooClient, OdooClientConfig
+
+    source_root = git_repo
+    data_dir = source_root / "restore" / "nested" / "data"
+    source_config = source_root / "odoo.conf"
+    source_config.write_text(
+        "[options]\n"
+        "http_interface = 127.0.0.1\n"
+        "http_port = 8069\n"
+        "db_host = 127.0.0.1\n"
+        "db_port = 5432\n"
+        "db_user = odoo\n"
+        "db_password = private\n"
+        "data_dir = restore/nested/data\n"
+    )
+    archive_path = _local_archive(source_root / "caller-owned.zip")
+    project = ProjectConfig(
+        repository_root=source_root,
+        source_config=source_config,
+        default_source_database="old",
+    )
+
+    def disk_usage(path: Path) -> SimpleNamespace:
+        return SimpleNamespace(free=2 * 1024**3)
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which",
+        lambda _name: "/usr/bin/psql",
+    )
+    executor = RecordingExecutor()
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+
+    command = client.environments.refresh_database_command(
+        project,
+        options=DatabaseRefreshOptions(restore=True),
+        restore_source=LocalArchiveRestoreSource(str(archive_path)),
+        target_database="restored_target",
+        executor=executor,
+    )
+
+    assert command.plan.fingerprint
+    assert command.plan.steps
+    with pytest.raises(AttributeError):
+        setattr(command.plan, "steps", ())
+    assert executor.executed == []
+    assert not data_dir.exists()
+
+
 def test_local_archive_changed_after_capture_fails_before_snapshot_use(tmp_path: Path) -> None:
     from odoo_instance_sdk import LocalArchiveRestoreSource
     from odoo_instance_sdk.internal.database_preparation import (
