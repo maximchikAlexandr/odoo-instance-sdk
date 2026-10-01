@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 import zipfile
 from pathlib import Path
@@ -202,6 +203,30 @@ def _compose_instance(project: Path, catalog: BackupCatalog) -> OdooInstance:
     instance._postgres_cluster = PostgresCluster.from_project(project)
     cast("Any", instance._client).get_catalog.return_value = catalog
     return instance
+
+
+def _managed_bootstrap_instance(
+    project: Path, catalog: BackupCatalog, data_directory: Path
+) -> tuple[OdooInstance, Any]:
+    instance = _compose_instance(project, catalog)
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    volume = compose_volume_name(cluster._project_id)
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id, cluster.compose_project_name, volume
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume
+    )
+    data_directory.mkdir(parents=True, exist_ok=True)
+    catalog._record_database_bootstrapped(
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "tmp",
+        cluster_id=active.cluster_id,
+        data_directory=data_directory,
+    )
+    return instance, active
 
 
 @pytest.mark.unit
@@ -407,6 +432,83 @@ def test_proven_filestore_cleanup_is_exact_and_symlink_safe(tmp_path: Path) -> N
     assert state == "unknown"
     assert path == str(data_directory / "filestore" / "feature_db")
     assert (external / "secret").read_text() == "retain"
+
+
+@pytest.mark.unit
+def test_proven_filestore_cleanup_survives_filestore_symlink_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_directory = tmp_path / "odoo-data"
+    root = data_directory / "filestore"
+    target = root / "feature_db"
+    target.mkdir(parents=True)
+    (target / "owned").write_text("remove")
+    external = tmp_path / "external"
+    external_target = external / "feature_db"
+    external_target.mkdir(parents=True)
+    (external_target / "retain").write_text("keep")
+    checked_root = data_directory / "filestore-checked"
+    original_stat = os.stat
+    swapped = False
+
+    def swap_filestore_before_target_lookup(path: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal swapped
+        if path == "feature_db" and kwargs.get("dir_fd") is not None and not swapped:
+            root.rename(checked_root)
+            root.symlink_to(external, target_is_directory=True)
+            swapped = True
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", swap_filestore_before_target_lookup)
+    state, path = _cleanup_proven_filestore(str(data_directory), "feature_db")
+
+    assert swapped
+    assert state == "deleted"
+    assert path == str(target)
+    assert not (checked_root / "feature_db").exists()
+    assert root.is_symlink()
+    assert (external_target / "retain").read_text() == "keep"
+
+
+@pytest.mark.unit
+def test_proven_filestore_cleanup_rejects_intermediate_ancestor_symlink_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parent = tmp_path / "trusted-parent"
+    data_directory = parent / "odoo-data"
+    target = data_directory / "filestore" / "feature_db"
+    target.mkdir(parents=True)
+    (target / "owned").write_text("remove")
+    external_parent = tmp_path / "external-parent"
+    external_target = external_parent / "odoo-data" / "filestore" / "feature_db"
+    external_target.mkdir(parents=True)
+    (external_target / "retain").write_text("keep")
+    checked_parent = tmp_path / "trusted-parent-checked"
+    original_open = os.open
+    supported_dir_functions = os.supports_dir_fd
+    swapped = False
+
+    def swap_ancestor_before_open(path: Any, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        if path == parent.name and kwargs.get("dir_fd") is not None and not swapped:
+            parent.rename(checked_parent)
+            parent.symlink_to(external_parent, target_is_directory=True)
+            swapped = True
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_ancestor_before_open)
+    monkeypatch.setattr(
+        os,
+        "supports_dir_fd",
+        (*supported_dir_functions, swap_ancestor_before_open),
+    )
+    with pytest.raises(OSError):
+        _cleanup_proven_filestore(str(data_directory), "feature_db")
+
+    assert swapped
+    assert (checked_parent / "odoo-data" / "filestore" / "feature_db" / "owned").exists()
+    assert parent.is_symlink()
+    assert (external_target / "retain").read_text() == "keep"
 
 
 @pytest.mark.unit
@@ -1001,6 +1103,148 @@ def test_drop_allows_proven_retained_rollback_binding(
 
 
 @pytest.mark.unit
+def test_bootstrap_drop_accepts_exact_event_and_records_drop(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "bootstrap-success.sqlite3")
+    instance, _claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "bootstrap-data"
+    )
+    executor = _executor()
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "tmp",
+        force_default=True,
+        executor=executor,
+    ).run()
+
+    assert result.database == "tmp"
+    assert any(step.step_id.endswith("execute") for step in executor.executed)
+    latest = catalog._latest_database_event("127.0.0.1", 5432, "tmp")
+    assert latest is not None and latest["event_type"] == "dropped"
+    catalog.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("revocation", ["dropped", "restored"])
+def test_bootstrap_authority_is_revoked_or_delegated_by_latest_event(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    tmp_path: Path,
+    revocation: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / f"bootstrap-{revocation}.sqlite3")
+    data_directory = tmp_path / "bootstrap-data"
+    instance, claim = _managed_bootstrap_instance(project_manifest, catalog, data_directory)
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    if revocation == "dropped":
+        catalog.record_database_dropped(cluster.endpoint_host, cluster.endpoint_port, "tmp")
+        with pytest.raises(ConfigError, match="exact current lifecycle event"):
+            build_database_drop_command(
+                instance, project_manifest, "tmp", force_default=True, executor=_executor()
+            )
+    else:
+        backup_id = str(uuid.uuid4())
+        backup = tmp_path / "restore.zip"
+        backup.write_bytes(b"restore")
+        catalog.start_download(backup_id, "http://127.0.0.1:8069", "tmp", "zip", True, backup)
+        catalog.success_download(backup_id, backup.name, backup.stat().st_size, "")
+        catalog.record_restore(
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+            "tmp",
+            backup_id,
+            cluster_id=claim.cluster_id,
+            data_directory=data_directory,
+        )
+        from odoo_instance_sdk.internal.pg.drop import _drop_ownership_evidence
+
+        evidence = _drop_ownership_evidence(instance, cluster, "tmp")
+        assert evidence is not None and evidence.event_type == "restored"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_bootstrap_absent_retry_reconciles_without_drop(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "bootstrap-absent.sqlite3")
+    instance, _claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "bootstrap-data"
+    )
+    executor = _executor(exists=False)
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "tmp",
+        force_default=True,
+        idempotent_absent=True,
+        executor=executor,
+    ).run()
+
+    assert result.database == "tmp"
+    assert not any(step.step_id.endswith("execute") for step in executor.executed)
+    latest = catalog._latest_database_event("127.0.0.1", 5432, "tmp")
+    assert latest is not None and latest["event_type"] == "dropped"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_bootstrap_locked_revalidation_refuses_changed_event(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "bootstrap-change.sqlite3")
+    instance, _claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "bootstrap-data"
+    )
+    data_directory = tmp_path / "bootstrap-data"
+    target = data_directory / "filestore" / "tmp"
+    target.mkdir(parents=True)
+    (target / "retain").write_text("keep")
+    import odoo_instance_sdk.internal.pg.drop as drop_module
+
+    original = drop_module._drop_ownership_evidence
+    calls = 0
+    executor = _executor()
+
+    def change_after_planning(*args: Any, **kwargs: Any) -> object:
+        nonlocal calls
+        calls += 1
+        evidence = original(*args, **kwargs)
+        if calls == 1:
+            catalog.record_database_dropped("127.0.0.1", 5432, "tmp")
+        return evidence
+
+    monkeypatch.setattr(drop_module, "_drop_ownership_evidence", change_after_planning)
+    command = build_database_drop_command(
+        instance, project_manifest, "tmp", force_default=True, executor=executor
+    )
+    with pytest.raises(ConfigError, match="exact current lifecycle event"):
+        command.run()
+    assert not any(step.step_id.endswith(("terminate", "execute")) for step in executor.executed)
+    assert target.joinpath("retain").read_text() == "keep"
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE event_type='dropped'"
+        ).fetchone()[0]
+        == 1
+    )
+    catalog.close()
+
+
+@pytest.mark.unit
 def test_verified_drop_cleans_only_filestore_and_retains_source_backup(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
 ) -> None:
@@ -1035,10 +1279,8 @@ def test_verified_drop_cleans_only_filestore_and_retains_source_backup(
         "SELECT COUNT(*) FROM database_events WHERE database_name='feature_db' "
         "AND event_type='dropped'"
     ).fetchone()[0]
-    retry = build_database_drop_command(
-        instance, project_manifest, "feature_db", executor=_executor()
-    ).run()
-    assert retry.filestore_state == "absent"
+    with pytest.raises(ConfigError, match="exact current lifecycle event"):
+        build_database_drop_command(instance, project_manifest, "feature_db", executor=_executor())
     assert (
         catalog._conn.execute(
             "SELECT COUNT(*) FROM database_events WHERE database_name='feature_db' "
