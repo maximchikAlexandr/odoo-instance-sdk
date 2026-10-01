@@ -287,7 +287,6 @@ def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -
 def _record_bootstrap_event(instance: OdooInstance) -> None:
     """Publish bootstrap ownership using the already-resolved project identity."""
     from odoo_instance_sdk.internal.project_init import (
-        project_owned_data_dir,
         verify_project_owned_data_dir,
     )
 
@@ -299,17 +298,16 @@ def _record_bootstrap_event(instance: OdooInstance) -> None:
         instance.config.start_config.data_dir if instance.config.start_config else None
     )
     if configured_data_directory is None:
-        data_directory = project_owned_data_dir(project_root)
-    else:
-        configured_path = Path(configured_data_directory)
-        if not configured_path.is_absolute():
-            configured_path = project_root / configured_path
-        try:
-            data_directory = verify_project_owned_data_dir(project_root, configured_path)
-        except InstanceConfigurationError as error:
-            raise BootstrapFailedError(
-                f"bootstrap data directory is not project-owned: {error}"
-            ) from error
+        raise BootstrapFailedError("bootstrap data directory is not configured")
+    configured_path = Path(configured_data_directory)
+    if not configured_path.is_absolute():
+        configured_path = project_root / configured_path
+    try:
+        data_directory = verify_project_owned_data_dir(project_root, configured_path)
+    except InstanceConfigurationError as error:
+        raise BootstrapFailedError(
+            f"bootstrap data directory is not project-owned: {error}"
+        ) from error
     record_bootstrap_event(cluster, data_directory)
 
 

@@ -289,6 +289,44 @@ def test_bootstrap_publication_rejects_unowned_configured_data_directory(
         _record_bootstrap_event(instance)
 
 
+def test_bootstrap_publication_rejects_missing_data_dir_without_following_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    _active_claim(catalog)
+    catalog.close()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: catalog_path,
+    )
+    external = tmp_path / "external-filestore"
+    external.mkdir()
+    data_directory = tmp_path / ".odcli" / "filestore"
+    data_directory.parent.mkdir()
+    data_directory.symlink_to(external, target_is_directory=True)
+    cluster = MagicMock()
+    cluster.owned = True
+    cluster._project_id = "project"
+    cluster.endpoint_host = "localhost"
+    cluster.endpoint_port = 5432
+    instance = MagicMock()
+    instance._postgres_cluster = cluster
+    instance.config.default_cwd = tmp_path
+    instance.config.start_config = StartConfig(data_dir=None)
+
+    with pytest.raises(BootstrapFailedError, match="data directory is not configured"):
+        _record_bootstrap_event(instance)
+
+    with sqlite3.connect(catalog_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
 def test_bootstrap_record_action_is_conditional_and_consumed_only_on_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
