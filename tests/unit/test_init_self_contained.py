@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +40,7 @@ from odoo_instance_sdk.project_init import init_project, init_project_command
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 @pytest.fixture(autouse=True)
@@ -583,6 +585,40 @@ def test_init_dry_run_shows_bootstrap_step_without_spawn(tmp_path: Path) -> None
     )
     assert any(step.step_id == "init.bootstrap.tmp" for step in command.plan.steps)
     assert any(step.step_id == "catalog.bootstrap.tmp.record" for step in command.plan.steps)
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_rejects_symlinked_data_dir_without_bootstrap_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    config = _compose_config(tmp_path)
+    source_config = config.source_config
+    assert source_config is not None
+    source_config.parent.mkdir(parents=True)
+    source_config.write_text("[options]\nhttp_port = 8069\n", encoding="utf-8")
+    external = tmp_path.parent / "external-init-filestore"
+    external.mkdir()
+    data_directory = tmp_path / ".odcli" / "filestore"
+    data_directory.symlink_to(external, target_is_directory=True)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog.close()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: catalog_path,
+    )
+
+    with pytest.raises(InstanceConfigurationError, match="symlink"):
+        init_project_command(tmp_path, config, postgres_allocated=False, local_config=True)
+
+    with sqlite3.connect(catalog_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_auxiliary_restore_uses_bootstrap_database_in_argv(tmp_path: Path) -> None:

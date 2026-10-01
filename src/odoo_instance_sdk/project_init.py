@@ -54,6 +54,7 @@ class _BootstrapFollowup:
     ready_step: PreparedStep
     verify_action: PreparedAction
     record_action: PreparedAction
+    project_root: Path
     data_directory: Path
 
     @property
@@ -157,7 +158,11 @@ def _execute_bootstrap_followup_phase(
         record_bootstrap_event,
         run_bootstrap_tmp,
     )
+    from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
 
+    verify_project_owned_data_dir(
+        followup.project_root, followup.data_directory, require_exists=False
+    )
     context.action(followup.verify_action.step_id)
     outcome = run_bootstrap_tmp(
         context, followup.spawn_step, followup.probe_step, followup.ready_step
@@ -165,7 +170,10 @@ def _execute_bootstrap_followup_phase(
     context.complete_action(followup.verify_action.step_id)
     if outcome is BootstrapOutcome.CREATED:
         context.action(followup.record_action.step_id)
-        record_bootstrap_event(followup.cluster, followup.data_directory)
+        data_directory = verify_project_owned_data_dir(
+            followup.project_root, followup.data_directory
+        )
+        record_bootstrap_event(followup.cluster, data_directory)
         context.complete_action(followup.record_action.step_id)
     for step in followup.steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
@@ -300,6 +308,7 @@ def _compose_followup_steps(
     )
     from odoo_instance_sdk.internal.generated_config import project_generated_config_path
     from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+    from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
     from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
     from odoo_instance_sdk.models import StartConfig
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -332,9 +341,9 @@ def _compose_followup_steps(
     start_config.db_port = cluster.endpoint_port
     start_config.db_user = config.postgres.user if config.postgres is not None else "odoo"
     start_config.db_password = password
-    from odoo_instance_sdk.internal.project_init import project_owned_data_dir
-
-    start_config.data_dir = str(project_owned_data_dir(root))
+    data_directory = root / ".odcli" / "filestore"
+    verify_project_owned_data_dir(root, data_directory, require_exists=False)
+    start_config.data_dir = str(data_directory)
     command_prefix = _planned_command_prefix(root, config)
     spawn_step, probe_step, ready_step, ready_action = bootstrap_tmp_steps(
         command_prefix=command_prefix,
@@ -358,7 +367,8 @@ def _compose_followup_steps(
             ready_step=ready_step,
             verify_action=ready_action,
             record_action=bootstrap_record_action(),
-            data_directory=Path(start_config.data_dir),
+            project_root=root,
+            data_directory=data_directory,
         ),
     )
 

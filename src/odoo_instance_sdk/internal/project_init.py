@@ -42,11 +42,28 @@ def _resolve_source_config_path(root: Path, source: Path | None) -> Path | None:
     return source_path if source_path.is_file() else None
 
 
-def verify_project_owned_data_dir(project_root: Path, data_dir: str | Path) -> Path:
-    """Verify a restore ``data_dir`` is a contained non-symlink project directory."""
+def verify_project_owned_data_dir(
+    project_root: Path, data_dir: str | Path, *, require_exists: bool = True
+) -> Path:
+    """Verify a contained non-symlink project directory."""
     root = Path(project_root).resolve()
     path = Path(data_dir)
-    if path.is_symlink() or not path.is_dir():
+    if not path.is_absolute():
+        path = root / path
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise InstanceConfigurationError(
+            f"project-owned data_dir must stay inside the project tree: {path}"
+        ) from None
+    current = root
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise InstanceConfigurationError(
+                f"project-owned data_dir must be a regular directory, not a symlink: {path}"
+            )
+    if (require_exists and not path.is_dir()) or (path.exists() and not path.is_dir()):
         raise InstanceConfigurationError(
             f"project-owned data_dir must be a regular directory, not a symlink: {path}"
         )

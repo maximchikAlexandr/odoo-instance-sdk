@@ -23,6 +23,7 @@ from odoo_instance_sdk.execution import (
     _PlanObservation,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
+from odoo_instance_sdk.internal.files import open_directory_path_without_symlinks
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.pg.context import DatabaseContext, resolve_database_context
@@ -593,19 +594,7 @@ def _cleanup_proven_filestore(data_directory: str | None, database: str) -> tupl
         return "unknown", str(candidate)
     if not _RMTREE_AVOIDS_SYMLINK_ATTACKS:
         raise OSError("filestore cleanup requires symlink-attack-resistant rmtree")
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    directory = getattr(os, "O_DIRECTORY", None)
-    if nofollow is None or directory is None or os.open not in os.supports_dir_fd:
-        raise OSError("filestore cleanup requires descriptor-relative directory operations")
-    base_fd = os.open(base, os.O_RDONLY | directory | nofollow)
-    try:
-        root_fd = os.open(
-            "filestore",
-            os.O_RDONLY | directory | nofollow,
-            dir_fd=base_fd,
-        )
-    finally:
-        os.close(base_fd)
+    root_fd = open_directory_path_without_symlinks(root)
     try:
         try:
             target_stat = os.stat(database, dir_fd=root_fd, follow_symlinks=False)

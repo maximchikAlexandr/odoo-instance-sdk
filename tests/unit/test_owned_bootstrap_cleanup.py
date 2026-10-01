@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -215,34 +215,64 @@ def test_bootstrap_executor_failure_keeps_record_action_unconsumed() -> None:
     assert not context.consumed(bootstrap_record_action().step_id)
 
 
-def test_bootstrap_publication_failure_keeps_record_unconsumed_and_unwritten(
+def test_bootstrap_publication_failure_keeps_record_incomplete_and_unwritten(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
     _active_claim(catalog)
-    instance = MagicMock()
-
-    def fail_publication(_instance: object) -> None:
-        raise BootstrapFailedError("catalog lifecycle publication failed")
-
+    catalog.close()
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.dbprep.bootstrap._record_bootstrap_event",
-        fail_publication,
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: catalog_path,
     )
+    data_directory = tmp_path / "bootstrap-data"
+    data_directory.mkdir()
+    cluster = MagicMock()
+    cluster.owned = True
+    cluster._project_id = "project"
+    cluster.endpoint_host = "localhost"
+    cluster.endpoint_port = 5432
+    instance = MagicMock()
+    instance._postgres_cluster = cluster
+    instance.config.default_cwd = tmp_path
+    instance.config.start_config = StartConfig(data_dir=str(data_directory))
+
+    original_init = BackupCatalog.__init__
+
+    def deny_bootstrap_insert(self: BackupCatalog, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+
+        def authorize(
+            action: int,
+            table: str | None,
+            _column: str | None,
+            _database: str | None,
+            _source: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_INSERT and table == "database_events":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        self._conn.set_authorizer(authorize)
+
+    monkeypatch.setattr(BackupCatalog, "__init__", deny_bootstrap_insert)
     context, _executor, process_steps = _bootstrap_context(include_actions=True)
     verify = PreparedAction(step_id="verify", read_only=True)
 
-    with pytest.raises(BootstrapFailedError, match="catalog lifecycle publication failed"):
+    with pytest.raises(BootstrapFailedError, match="bootstrap lifecycle publication failed"):
         ensure_project_bootstrap_tmp(instance, context, steps=(*process_steps, verify))
 
-    assert bootstrap_record_action().step_id in context._started_actions
-    assert (
-        catalog._conn.execute(
-            "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
-        ).fetchone()[0]
-        == 0
-    )
-    catalog.close()
+    record_step = bootstrap_record_action().step_id
+    assert context.consumed(record_step)
+    assert record_step in context._started_actions
+    with sqlite3.connect(catalog_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_bootstrap_publication_rejects_unowned_configured_data_directory(

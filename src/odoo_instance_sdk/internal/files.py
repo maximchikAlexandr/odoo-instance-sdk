@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from urllib.parse import unquote
 
 _FALLBACK_FILENAME = "odoo_backup.zip"
+
+
+def open_directory_path_without_symlinks(path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", -1) | getattr(os, "O_NOFOLLOW", -1)
+    if not path.is_absolute() or flags < 0 or os.open not in os.supports_dir_fd:
+        raise OSError("filestore cleanup requires descriptor-relative directory operations")
+    fd = os.open(os.sep, flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def extract_server_filename(content_disposition: str | None) -> str | None:

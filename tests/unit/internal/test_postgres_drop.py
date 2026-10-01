@@ -471,6 +471,47 @@ def test_proven_filestore_cleanup_survives_filestore_symlink_swap(
 
 
 @pytest.mark.unit
+def test_proven_filestore_cleanup_rejects_intermediate_ancestor_symlink_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parent = tmp_path / "trusted-parent"
+    data_directory = parent / "odoo-data"
+    target = data_directory / "filestore" / "feature_db"
+    target.mkdir(parents=True)
+    (target / "owned").write_text("remove")
+    external_parent = tmp_path / "external-parent"
+    external_target = external_parent / "odoo-data" / "filestore" / "feature_db"
+    external_target.mkdir(parents=True)
+    (external_target / "retain").write_text("keep")
+    checked_parent = tmp_path / "trusted-parent-checked"
+    original_open = os.open
+    supported_dir_functions = os.supports_dir_fd
+    swapped = False
+
+    def swap_ancestor_before_open(path: Any, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        if path == parent.name and kwargs.get("dir_fd") is not None and not swapped:
+            parent.rename(checked_parent)
+            parent.symlink_to(external_parent, target_is_directory=True)
+            swapped = True
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_ancestor_before_open)
+    monkeypatch.setattr(
+        os,
+        "supports_dir_fd",
+        (*supported_dir_functions, swap_ancestor_before_open),
+    )
+    with pytest.raises(OSError):
+        _cleanup_proven_filestore(str(data_directory), "feature_db")
+
+    assert swapped
+    assert (checked_parent / "odoo-data" / "filestore" / "feature_db" / "owned").exists()
+    assert parent.is_symlink()
+    assert (external_target / "retain").read_text() == "keep"
+
+
+@pytest.mark.unit
 def test_drop_projection_and_refusal_retain_sanitized_session_identities(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
 ) -> None:
