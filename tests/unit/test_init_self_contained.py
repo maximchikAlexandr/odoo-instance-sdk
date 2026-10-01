@@ -23,7 +23,12 @@ from odoo_instance_sdk.internal.dbprep.bootstrap import (
     tmp_bootstrap_command,
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-from odoo_instance_sdk.internal.proc import ProcessHandle, ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
+    ProcessHandle,
+    ProcessResult,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.internal.project_init import (
     _INIT_REMOTE_NAMES_ACTION_ID,
     evaluate_init_completeness,
@@ -287,6 +292,243 @@ def test_init_rerun_preserves_existing_test_instance(tmp_path: Path) -> None:
     manifest = (tmp_path / ".odcli" / "project.toml").read_text()
     assert "http://127.0.0.1:18069" in manifest
     assert 'database = "remote_db"' in manifest
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_failed_compose_init_resumes_without_manifest_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    calls: list[int] = []
+
+    def _fail_once_then_skip(
+        context: object,
+        spawn_step: object,
+        probe_step: object,
+        ready_step: object,
+    ) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            raise BootstrapFailedError("tmp bootstrap failed")
+        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
+        return True
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
+        _fail_once_then_skip,
+    )
+    runner = CliRunner()
+    args = [
+        *_base_args(tmp_path, allow_partial=True),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+        "--test-url",
+        "http://127.0.0.1:18069",
+        "--test-database",
+        "remote_db",
+        "--test-branch",
+        "main",
+        "--local-config",
+    ]
+    first = runner.invoke(cli, args)
+    assert first.exit_code != 0
+    manifest = tmp_path / ".odcli" / "project.toml"
+    assert manifest.is_file()
+    before = manifest.read_bytes()
+
+    def _unexpected_manifest_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("identical Compose retry must not rewrite the manifest")
+
+    monkeypatch.setattr("odoo_instance_sdk.project_init.write_manifest", _unexpected_manifest_write)
+    second = runner.invoke(cli, args)
+    assert second.exit_code == 0, second.output
+    assert manifest.read_bytes() == before
+    assert len(calls) == 2
+
+
+def _compose_config_repair_case(tmp_path: Path) -> tuple[CliRunner, list[str], Path]:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    runner = CliRunner()
+    args = [
+        *_base_args(tmp_path, allow_partial=True),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+        "--test-url",
+        "http://127.0.0.1:18069",
+        "--test-database",
+        "remote_db",
+        "--test-branch",
+        "main",
+        "--local-config",
+        "--format",
+        "json",
+    ]
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    generated.unlink()
+    return runner, args, generated
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_compose_config_repair_dry_run_does_not_mutate(tmp_path: Path) -> None:
+    runner, args, generated = _compose_config_repair_case(tmp_path)
+
+    dry_run = runner.invoke(cli, [*args, "--dry-run"])
+    assert dry_run.exit_code == 0, dry_run.output
+    assert json.loads(dry_run.output)["dry_run"] is True
+    assert not generated.exists()
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_compose_config_repair_resumes_lifecycle_without_premature_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, generated = _compose_config_repair_case(tmp_path)
+
+    calls: list[str] = []
+
+    def _track_bootstrap(
+        context: object,
+        spawn_step: object,
+        probe_step: object,
+        ready_step: object,
+    ) -> bool:
+        calls.append("bootstrap")
+        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
+        return True
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
+        _track_bootstrap,
+    )
+    repaired = runner.invoke(cli, args)
+    assert repaired.exit_code == 0, repaired.output
+    payload = json.loads(repaired.output)
+    assert payload["ok"] is True
+    assert "generated_config" not in payload["result"]
+    assert generated.is_file()
+    assert calls == ["bootstrap"]
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_complete_compose_retry_skips_tmp_recreation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    runner = CliRunner()
+    args = [
+        *_base_args(tmp_path, allow_partial=True),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+        "--format",
+        "json",
+    ]
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+
+    def _ready_sql_step(
+        *,
+        db_host: str,
+        db_port: int,
+        db_user: str,
+        db_password: str,
+        step_id: str,
+    ) -> PreparedStep:
+        del db_host, db_port, db_user, db_password
+        return PreparedStep(
+            step_id=step_id,
+            argv=("/usr/bin/printf", "installed"),
+            timeout=30.0,
+            read_only=True,
+        )
+
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    monkeypatch.setattr(bootstrap, "_bootstrap_sql_step", _ready_sql_step)
+
+    def _probe_ready_without_spawn(
+        context: object,
+        spawn_step: object,
+        probe_step: object,
+        ready_step: object,
+    ) -> bool:
+        result = context.process_prepared(probe_step)  # type: ignore[attr-defined]
+        assert getattr(result, "stdout", "").strip() == "installed"
+        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
+        return True
+
+    monkeypatch.setattr(bootstrap, "run_bootstrap_tmp", _probe_ready_without_spawn)
+    retry = runner.invoke(cli, args)
+    assert retry.exit_code == 0, retry.output
+    assert json.loads(retry.output)["ok"] is True
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_repeated_compose_resume_failure_preserves_boundary_error_and_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    runner = CliRunner()
+    args = [
+        *_base_args(tmp_path, allow_partial=True),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+    ]
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    manifest = tmp_path / ".odcli" / "project.toml"
+    before = manifest.read_bytes()
+    calls: list[tuple[str, ...]] = []
+
+    def _fail_after_accounting(
+        context: object,
+        spawn_step: object,
+        probe_step: object,
+        ready_step: object,
+    ) -> bool:
+        calls.append((spawn_step.step_id, probe_step.step_id, ready_step.step_id))  # type: ignore[attr-defined]
+        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
+        raise BootstrapFailedError("tmp bootstrap failed: boundary unavailable")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
+        _fail_after_accounting,
+    )
+    for _ in range(2):
+        failed = runner.invoke(cli, args)
+        assert failed.exit_code != 0
+        assert isinstance(failed.exception, BootstrapFailedError)
+        assert failed.exception.error_code == "init_bootstrap_failed"
+        assert "boundary unavailable" in str(failed.exception)
+    assert manifest.read_bytes() == before
+    assert calls == [
+        ("init.bootstrap.tmp", "init.bootstrap.tmp.probe", "init.bootstrap.tmp.ready"),
+        ("init.bootstrap.tmp", "init.bootstrap.tmp.probe", "init.bootstrap.tmp.ready"),
+    ]
 
 
 def test_named_remote_init_is_complete_repeatable_and_secret_free(
