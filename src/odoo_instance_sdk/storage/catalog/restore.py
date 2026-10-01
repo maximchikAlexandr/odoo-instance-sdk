@@ -219,6 +219,55 @@ class _RestoreMixin:
         self._conn.commit()
 
     @_translate_sqlite_error
+    def _record_database_bootstrapped(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+        *,
+        cluster_id: uuid.UUID | str,
+        data_directory: str | Path,
+    ) -> None:
+        """Publish ownership evidence for one newly-created Compose ``tmp``."""
+        host = normalize_db_host(db_host)
+        if database_name != "tmp":
+            raise BackupCatalogError("bootstrap provenance requires database tmp")
+        if not isinstance(data_directory, (str, Path)) or not str(data_directory).strip():
+            raise BackupCatalogError("bootstrap provenance requires a data directory")
+        identity = self._cluster_uuid(cluster_id)
+        claim = self._get_postgres_cluster_by_id(identity)
+        if claim is None or claim.state != "active":
+            raise BackupCatalogError("bootstrap provenance requires an active cluster claim")
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO database_events
+                   (db_host, db_port, database_name, event_type, occurred_at, backup_id,
+                    source_kind, source_sha256, cluster_id, data_directory)
+                   VALUES (?, ?, ?, 'bootstrapped', datetime('now'), NULL,
+                           NULL, NULL, ?, ?)""",
+                (host, db_port, database_name, identity, str(data_directory).strip()),
+            )
+
+    @_translate_sqlite_error
+    def _latest_database_event(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+    ) -> sqlite3.Row | None:
+        """Read the latest exact lifecycle event by append sequence."""
+        host = normalize_db_host(db_host)
+        return cast(
+            "sqlite3.Row | None",
+            self._conn.execute(
+                "SELECT * FROM database_events "
+                "WHERE db_host=? AND db_port=? AND database_name=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (host, db_port, database_name),
+            ).fetchone(),
+        )
+
+    @_translate_sqlite_error
     def latest_restore(
         self,
         db_host: str | None,
