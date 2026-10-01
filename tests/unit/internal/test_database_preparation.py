@@ -43,6 +43,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationResult,
     DatabaseRefreshOptions,
     LocalArchiveRestoreSource,
+    RestoreState,
 )
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
@@ -1365,6 +1366,7 @@ def _production_restore_command(
     python_value: str | Path | None = None,
     remote_name: str | None = None,
     observed: dict[str, object] | None = None,
+    restore_probe_results: tuple[str, str] | None = None,
 ) -> tuple[
     Command[DatabasePreparationResult],
     RecordingExecutor,
@@ -1457,8 +1459,6 @@ def _production_restore_command(
     remote.databases.backup.return_value = backup
     client = MagicMock()
     client.instance.return_value = remote
-    if observed is not None:
-        observed.update(client=client, remote=remote)
     local = MagicMock()
     local.databases.restore.side_effect = _consume_restore_probes
     cluster = PostgresCluster._from_config(
@@ -1467,6 +1467,8 @@ def _production_restore_command(
         compose_runner=None,
         project_id="<runtime>",
     )
+    if observed is not None:
+        observed.update(client=client, cluster=cluster, local=local, remote=remote)
     options = DatabaseRefreshOptions(
         restore=True, reset_admin_password=True, remote_name=remote_name
     )
@@ -1484,8 +1486,17 @@ def _production_restore_command(
         target_database: str | None = None,
         restore_source: object = None,
         remote_password: str | None = None,
+        retry_expectation: object = None,
     ) -> Iterator[RestorePreflight]:
-        del _client, _project, wait_for_lock, coalesce, restore_source, remote_password
+        del (
+            _client,
+            _project,
+            wait_for_lock,
+            coalesce,
+            restore_source,
+            remote_password,
+            retry_expectation,
+        )
         context = active_context()
         assert context is not None
         context.action("database.prepare.lock")
@@ -1507,10 +1518,16 @@ def _production_restore_command(
 
     def result_for(prepared: PreparedProcess) -> ProcessResult:
         prepared = cast("PreparedStep", prepared)
+        probe_output = ""
+        if restore_probe_results is not None:
+            probe_output = {
+                "database.restore.exists-before": restore_probe_results[0],
+                "database.restore.exists-after": restore_probe_results[1],
+            }.get(prepared.step_id, "")
         return ProcessResult(
             argv=prepared.argv,
             returncode=odoo_returncode if prepared.step_id == "instance.shell_script" else 0,
-            stdout="",
+            stdout=probe_output,
             stderr="odoo failed" if prepared.step_id == "instance.shell_script" else "",
             duration=0.0,
             cwd=prepared.cwd,
@@ -1638,17 +1655,74 @@ def test_production_restore_command_rolls_back_after_odoo_child_failure(
         command.run()
 
     assert getattr(failure.value, "failure_context").retained_backup_id == backup.id
-    target_step = next(
-        step
-        for step in command.plan.process_steps
-        if step.step_id == "database.restore.exists-before"
-    )
-    assert getattr(failure.value, "failure_context").retained_database in target_step.argv[-1]
+    assert getattr(failure.value, "failure_context").retained_database is None
     assert project.default_source_database == "old"
     write.assert_not_called()
     assert tuple(step.step_id for step in executor.executed) == tuple(
         step.step_id for step in command.plan.process_steps
     )
+
+
+def test_restore_failure_before_attempt_does_not_consume_or_record_probe_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+    command, executor, _project, _backup_value, _write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        observed=observed,
+        restore_probe_results=("false\n", "true\n"),
+    )
+    client = cast("MagicMock", observed["client"])
+    local = cast("MagicMock", observed["local"])
+    monkeypatch.setattr(
+        type(observed["cluster"]), "_restore_provenance", lambda _cluster: ("cluster-id", None)
+    )
+    local.databases.restore.side_effect = RuntimeError("restore was not attempted")
+
+    with pytest.raises(RuntimeError, match="restore was not attempted"):
+        command.run()
+
+    catalog = client.get_catalog.return_value
+    catalog.record_restore.assert_not_called()
+    assert not {
+        "database.restore.exists-before",
+        "database.restore.exists-after",
+    } & {step.step_id for step in executor.executed}
+
+
+def test_restore_failure_after_attempt_persists_valid_incomplete_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+    command, _executor, _project, _backup_value, _write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        observed=observed,
+        restore_probe_results=("false\n", "true\n"),
+    )
+    client = cast("MagicMock", observed["client"])
+    local = cast("MagicMock", observed["local"])
+    monkeypatch.setattr(
+        type(observed["cluster"]), "_restore_provenance", lambda _cluster: ("cluster-id", None)
+    )
+
+    def fail_after_attempt(*_args: object, **_kwargs: object) -> None:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        assert context is not None
+        context.process("database.restore.exists-before")
+        raise RuntimeError("restore failed after attempt")
+
+    local.databases.restore.side_effect = fail_after_attempt
+
+    with pytest.raises(RuntimeError, match="restore failed after attempt"):
+        command.run()
+
+    catalog = client.get_catalog.return_value
+    catalog.record_restore.assert_called_once()
+    assert catalog.record_restore.call_args.kwargs["state"] == RestoreState.INCOMPLETE
 
 
 def test_preparation_command_rejects_omitted_captured_child() -> None:
@@ -2323,7 +2397,461 @@ def test_restore_failure_retains_backup_and_does_not_write_manifest(
     write.assert_not_called()
 
 
-def test_restore_admin_reset_failure_retains_target_and_removes_config(
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [("1\n", True), ("false\n", False), ("not-a-proof\n", None), ("", None)],
+)
+def test_captured_restore_probe_distinguishes_affirmative_negative_and_unknown(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, expected: bool | None
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    class Context:
+        def planned(self, step_id: str) -> bool:
+            return step_id == "database.restore.exists-after"
+
+        def consumed(self, _step_id: str) -> bool:
+            return False
+
+        def process(self, _step_id: str) -> ProcessResult:
+            return ProcessResult(
+                argv=("psql",),
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+                duration=0.0,
+                cwd=None,
+                environment=(),
+            )
+
+    def active_context() -> Context:
+        return Context()
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.active_context", active_context)
+
+    assert preparation._captured_restore_exists("database.restore.exists-after") is expected
+
+
+@pytest.mark.parametrize(
+    ("exists_before", "exists_after", "publishes"),
+    [
+        (False, True, True),
+        (True, True, False),
+        (None, True, False),
+        (False, False, False),
+        (False, None, False),
+    ],
+)
+def test_preexisting_or_raced_restore_target_never_publishes_incomplete_binding(
+    tmp_path: Path,
+    project_manifest: Path,
+    exists_before: bool | None,
+    exists_after: bool | None,
+    publishes: bool,
+) -> None:
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
+    from odoo_instance_sdk.internal.database_preparation import (
+        ProjectRuntimeBinding,
+        RestorePreflight,
+        _CatalogueRestoreSource,
+    )
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    project = ProjectConfig.load(project_manifest)
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
+    catalog = BackupCatalog(db_path=tmp_path / "restore-proof.sqlite3")
+    cluster = MagicMock(spec=PostgresCluster)
+    cluster.endpoint_host = "127.0.0.1"
+    cluster.endpoint_port = 5432
+    claim = catalog._ensure_postgres_cluster_pending("project", "compose", "volume")
+    active = catalog._activate_postgres_cluster(claim.cluster_id, "project", "compose", "volume")
+    cluster._restore_provenance.return_value = (str(active.cluster_id), tmp_path / "pgdata")
+    catalog.start_download(
+        str(backup.id),
+        backup.source_base_url,
+        backup.database_name,
+        backup.format.value,
+        backup.filestore_requested,
+        Path(backup.path),
+    )
+    catalog.success_download(
+        str(backup.id),
+        backup.filename,
+        backup.size_bytes,
+        backup.sha256,
+        downloaded_at=backup.downloaded_at,
+    )
+    client = OdooClient(config=OdooClientConfig(executable="odoo"), _catalog=catalog)
+    preflight = RestorePreflight(
+        project=project,
+        project_id="project",
+        source=None,
+        source_config=project.source_config or tmp_path / "odoo.conf",
+        local_instance=MagicMock(),
+        runtime=ProjectRuntimeBinding("python", "odoo-bin", tmp_path),
+        postgres_cluster=cluster,
+        target_database="raced_target",
+        restore_source=_CatalogueRestoreSource(backup.id),
+    )
+
+    assert (
+        preparation._record_incomplete_restore(
+            client,
+            preflight,
+            exists_before=exists_before,
+            exists_after=exists_after,
+            backup=backup,
+            local_restore=None,
+        )
+        is publishes
+    )
+    binding = catalog._latest_restore_binding("127.0.0.1", 5432, "raced_target")
+    assert (binding is not None) is publishes
+    if publishes:
+        assert binding is not None and binding["state"] == "incomplete"
+    catalog.close()
+
+
+def _incomplete_restore_retry_case(
+    tmp_path: Path,
+    project_manifest: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SimpleNamespace:
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
+    from odoo_instance_sdk.config import InstanceConfig
+    from odoo_instance_sdk.internal.database_preparation import (
+        ProjectRuntimeBinding,
+        RestorePreflight,
+        _CatalogueRestoreSource,
+    )
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.internal.pg import drop as drop_module
+    from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
+    from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult
+    from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    (project_manifest / ".odcli" / "project.toml").write_text(
+        (project_manifest / ".odcli" / "project.toml").read_text()
+        + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n'
+    )
+    project = ProjectConfig.load(project_manifest)
+    backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
+    catalog = BackupCatalog(db_path=tmp_path / "retry.sqlite3")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup._paths.get_catalog_path",
+        lambda: tmp_path / "retry.sqlite3",
+    )
+    client = OdooClient(config=OdooClientConfig(executable="odoo"), _catalog=catalog)
+    cluster = PostgresCluster.from_project(project_manifest)
+    volume = compose_volume_name(cluster._project_id)
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id, cluster.compose_project_name, volume
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume
+    )
+    catalog.start_download(
+        str(backup.id),
+        backup.source_base_url,
+        backup.database_name,
+        backup.format.value,
+        backup.filestore_requested,
+        Path(backup.path),
+    )
+    catalog.success_download(
+        str(backup.id),
+        backup.filename,
+        backup.size_bytes,
+        backup.sha256,
+        downloaded_at=backup.downloaded_at,
+    )
+    catalog.record_restore(
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "retained_target",
+        str(backup.id),
+        source_kind="catalogue",
+        cluster_id=active.cluster_id,
+        state="incomplete",
+    )
+    local = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            configured_database_names=("retained_target",),
+            db_host="127.0.0.1",
+            db_port=5432,
+            db_user="odoo",
+            db_password="private-password",
+        ),
+        _client=client,
+    )
+    local._postgres_cluster = cluster
+    local.databases = MagicMock()
+    calls: list[str] = []
+
+    def restore(*_args: object, **_kwargs: object) -> None:
+        latest_event = catalog._conn.execute(
+            "SELECT event_type FROM database_events "
+            "WHERE database_name='retained_target' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()[0]
+        assert latest_event == "dropped"
+        calls.append("restore")
+
+    local.databases.restore.side_effect = restore
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_args, **_kwargs: True)
+
+    def result_for(step: PreparedProcess) -> ProcessResult:
+        stdout = (
+            "t\n"
+            if step.step_id.endswith("verify")
+            else '{"exists": true, "is_template": false, "sessions": []}'
+        )
+        return ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+
+    executor = RecordingExecutor(result_factory=result_for)
+    monkeypatch.setattr(drop_module, "SubprocessExecutor", lambda: executor)
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    preflight = RestorePreflight(
+        project=project,
+        project_id=cluster._project_id,
+        source=None,
+        source_config=project.source_config or tmp_path / "odoo.conf",
+        local_instance=local,
+        runtime=ProjectRuntimeBinding(
+            python_executable="/usr/bin/python3",
+            odoo_bin="/usr/bin/odoo-bin",
+            runtime_cwd=tmp_path,
+        ),
+        postgres_cluster=cluster,
+        target_database="retained_target",
+        restore_source=_CatalogueRestoreSource(backup.id),
+        catalogue_backup=backup,
+        reconcile_incomplete=True,
+    )
+
+    @contextlib.contextmanager
+    def fake_preflight(*_args: object, **_kwargs: object) -> Iterator[RestorePreflight]:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        assert context is not None
+        for step in command.plan.steps:
+            if step.step_id.startswith("database.drop") or step.step_id in {
+                "database.prepare",
+                "database.refresh",
+            }:
+                continue
+            if hasattr(step, "argv") and context.planned(step.step_id):
+                context.process(step.step_id)
+            elif context.planned(step.step_id):
+                context.action(step.step_id)
+        yield preflight
+
+    monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
+    monkeypatch.setattr(preparation, "_manifest_after_preparation", lambda *_args: project)
+    monkeypatch.setattr(preparation, "switch_project_default", lambda *_args, **_kwargs: None)
+
+    command = preparation.DatabasePreparationCoordinator(client).prepare_command(
+        project,
+        options=DatabaseRefreshOptions(restore=True),
+        restore_source=_CatalogueRestoreSource(backup.id),
+        target_database="retained_target",
+        executor=executor,
+    )
+    assert {
+        "database.drop.planning-inspect",
+        "database.drop.inspect",
+        "database.drop.revalidate-drop",
+        "database.drop.execute",
+        "database.drop.verify",
+    } <= {step.step_id for step in command.plan.process_steps}
+
+    return SimpleNamespace(
+        command=command,
+        catalog=catalog,
+        cluster=cluster,
+        backup=backup,
+        active=active,
+        calls=calls,
+        executor=executor,
+        drop_module=drop_module,
+    )
+
+
+def test_incomplete_restore_retry_succeeds_before_restore(
+    tmp_path: Path, project_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _incomplete_restore_retry_case(tmp_path, project_manifest, monkeypatch)
+    result = case.command.run()
+    assert result.restored_database == "retained_target"
+    assert case.calls == ["restore"]
+    assert [
+        step.step_id for step in case.executor.executed if step.step_id.startswith("database.drop")
+    ] == [
+        "database.drop.planning-inspect",
+        "database.drop.inspect",
+        "database.drop.revalidate-drop",
+        "database.drop.execute",
+        "database.drop.verify",
+    ]
+    case.catalog.close()
+
+
+def _assert_incomplete_restore_retry_refused(case: SimpleNamespace) -> None:
+    with pytest.raises(ConfigError):
+        case.command.run()
+    assert case.calls == []
+    binding = case.catalog._latest_restore_binding(
+        case.cluster.endpoint_host, case.cluster.endpoint_port, "retained_target"
+    )
+    assert binding is not None
+    assert binding["state"] == "incomplete"
+    assert not any(
+        row[0] == "dropped"
+        for row in case.catalog._conn.execute(
+            "SELECT event_type FROM database_events WHERE database_name='retained_target'"
+        ).fetchall()
+    )
+    case.catalog.close()
+
+
+def test_incomplete_restore_retry_refuses_active_use(
+    tmp_path: Path, project_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _incomplete_restore_retry_case(tmp_path, project_manifest, monkeypatch)
+    monkeypatch.setattr(
+        case.drop_module, "_catalog_database_in_use", lambda *_args, **_kwargs: True
+    )
+    _assert_incomplete_restore_retry_refused(case)
+
+
+def test_incomplete_restore_retry_refuses_evidence_drift(
+    tmp_path: Path, project_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _incomplete_restore_retry_case(tmp_path, project_manifest, monkeypatch)
+    original_ownership = cast("Callable[..., object]", case.drop_module._drop_ownership_evidence)
+    ownership_checks = 0
+
+    def refuse_after_planning(*args: object, **kwargs: object) -> object:
+        nonlocal ownership_checks
+        ownership_checks += 1
+        evidence = original_ownership(*args, **kwargs)
+        if ownership_checks == 1:
+            raise ConfigError("database drop ownership evidence changed before mutation")
+        return evidence
+
+    monkeypatch.setattr(case.drop_module, "_drop_ownership_evidence", refuse_after_planning)
+    _assert_incomplete_restore_retry_refused(case)
+
+
+def test_incomplete_restore_retry_refuses_complete_state_drift(
+    tmp_path: Path, project_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _incomplete_restore_retry_case(tmp_path, project_manifest, monkeypatch)
+    original_ownership = cast("Callable[..., object]", case.drop_module._drop_ownership_evidence)
+
+    def complete_before_locked_guard(*args: object, **kwargs: object) -> object:
+        case.catalog.record_restore(
+            case.cluster.endpoint_host,
+            case.cluster.endpoint_port,
+            "retained_target",
+            str(case.backup.id),
+            source_kind="catalogue",
+            cluster_id=case.active.cluster_id,
+            state="complete",
+        )
+        return original_ownership(*args, **kwargs)
+
+    monkeypatch.setattr(case.drop_module, "_drop_ownership_evidence", complete_before_locked_guard)
+    with pytest.raises(ConfigError):
+        case.command.run()
+    assert case.calls == []
+    binding = case.catalog._latest_restore_binding(
+        case.cluster.endpoint_host, case.cluster.endpoint_port, "retained_target"
+    )
+    assert binding is not None and binding["state"] == "complete"
+    case.catalog.close()
+
+
+def test_default_switch_updates_owned_files_and_compensates_both_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import project_init
+    from odoo_instance_sdk.internal.generated_config import project_generated_config_path
+    from odoo_instance_sdk.internal.project_manifest import manifest_path
+
+    generated = project_generated_config_path(tmp_path)
+    generated.parent.mkdir(parents=True)
+    generated.write_bytes(b"old-generated\ncustom = retained\n")
+    manifest = manifest_path(tmp_path)
+    manifest.write_bytes(b"old-manifest\n")
+    config = ProjectConfig(
+        repository_root=tmp_path,
+        default_source_database="new-target",
+        postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5432),
+    )
+
+    monkeypatch.setattr(
+        project_init, "validate_generated_config_target", lambda *_args, **_kw: None
+    )
+
+    def write_manifest(_root: Path, _config: ProjectConfig) -> Path:
+        manifest.write_bytes(b"new-manifest\n")
+        return manifest
+
+    def fail_rewrite(_root: Path, _config: ProjectConfig, destination: Path) -> None:
+        destination.write_bytes(b"partial-generated\n")
+        raise RuntimeError("generated write failed")
+
+    monkeypatch.setattr(project_init, "_rewrite_project_generated_database", fail_rewrite)
+    with pytest.raises(RuntimeError, match="generated write failed"):
+        project_init.switch_project_default(tmp_path, config, write_manifest_fn=write_manifest)
+
+    assert manifest.read_bytes() == b"old-manifest\n"
+    assert generated.read_bytes() == b"old-generated\ncustom = retained\n"
+
+
+def test_default_switch_preserves_external_source_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import project_init
+    from odoo_instance_sdk.internal.project_manifest import manifest_path
+
+    external = tmp_path / "user-odoo.conf"
+    external.write_bytes(b"[options]\ncustom = retained\n")
+    manifest = manifest_path(tmp_path)
+    manifest.parent.mkdir(parents=True)
+    manifest.write_bytes(b"old-manifest\n")
+    config = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=external,
+        default_source_database="new-target",
+    )
+
+    def write_manifest(_root: Path, _config: ProjectConfig) -> Path:
+        manifest.write_bytes(b"new-manifest\n")
+        return manifest
+
+    project_init.switch_project_default(tmp_path, config, write_manifest_fn=write_manifest)
+
+    assert external.read_bytes() == b"[options]\ncustom = retained\n"
+    assert manifest.read_bytes() == b"new-manifest\n"
+
+
+def test_restore_admin_reset_failure_does_not_claim_target_without_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from odoo_instance_sdk.internal.dbprep import materialize as preparation
@@ -2385,7 +2913,7 @@ def test_restore_admin_reset_failure_retains_target_and_removes_config(
             admin_password="test-secret",
         )
 
-    assert "retained database" in " ".join(failure.value.__notes__ or ())
+    assert "retained database" not in " ".join(failure.value.__notes__ or ())
     assert not list(tmp_path.glob(".odcli-refresh-*.conf"))
     assert project.default_source_database == "old"
     local.databases.restore.assert_called_once()

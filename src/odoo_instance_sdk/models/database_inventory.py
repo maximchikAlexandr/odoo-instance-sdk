@@ -17,6 +17,7 @@ class DatabaseInventoryItem(msgspec.Struct, frozen=True, forbid_unknown_fields=T
     environment_ids: tuple[str, ...] = ()
     runtime_bindings: tuple[str, ...] = ()
     restore_backup_ids: tuple[str, ...] = ()
+    restore_state: Literal["complete", "incomplete"] | None = None
     origin: Literal["restore", "unknown"] = "unknown"
 
 

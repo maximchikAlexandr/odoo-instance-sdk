@@ -35,6 +35,57 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
+def _restore_probe_consumed(step_id: str) -> bool:
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    return context is not None and context.planned(step_id) and context.consumed(step_id)
+
+
+def _captured_restore_exists(step_id: str) -> bool | None:
+    from odoo_instance_sdk.internal.proc import ProcessResult, active_context
+
+    context = active_context()
+    if context is None or not context.planned(step_id):
+        return None
+    try:
+        result = (
+            context.process(step_id)
+            if not context.consumed(step_id)
+            else context.results.get(step_id)
+        )
+    except BaseException:
+        return None
+    if not isinstance(result, ProcessResult) or result.returncode != 0:
+        return None
+    output = (
+        result.stdout.decode(errors="replace")
+        if isinstance(result.stdout, bytes)
+        else result.stdout
+    )
+    if not isinstance(output, str):
+        return None
+    return {
+        "1": True,
+        "t": True,
+        "true": True,
+        "yes": True,
+        "0": False,
+        "f": False,
+        "false": False,
+        "no": False,
+    }.get(output.strip().lower())
+
+
+def _restore_failure_probe_evidence() -> tuple[bool | None, bool | None]:
+    if not _restore_probe_consumed("database.restore.exists-before"):
+        return None, None
+    return (
+        _captured_restore_exists("database.restore.exists-before"),
+        _captured_restore_exists("database.restore.exists-after"),
+    )
+
+
 def _preparation_process_steps(
     project: ProjectConfig | str | Path,
     *,
@@ -215,6 +266,12 @@ def _preparation_action_steps(
             step_id="database.prepare.lock",
             action="acquire-preparation-lock",
             description="Serialize project database preparation",
+            mutating=True,
+        ),
+        PreparedAction(
+            step_id="database.restore.incomplete-retry",
+            action="reconcile-incomplete-restore",
+            description="Reconcile an exact retained incomplete restore target",
             mutating=True,
         ),
     ]

@@ -266,6 +266,8 @@ def _failure_message(message: DiagnosticValue, context: JsonObject) -> str:
         details.append(f"retained database {context['retained_database']}")
     if context.get("database_confirmed") is not None:
         details.append(f"database confirmed {context['database_confirmed']}")
+    if context.get("restore_state") is not None:
+        details.append(f"restore state {context['restore_state']}")
     if context.get("default_switch_confirmed") is not None:
         details.append(f"default switch confirmed {context['default_switch_confirmed']}")
     sessions = context.get("active_sessions")

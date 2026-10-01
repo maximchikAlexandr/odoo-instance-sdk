@@ -183,6 +183,7 @@ class RestorePreflight:
     catalogue_backup: Backup | None = None
     resolved_database: str | None = None
     selected_restore: SelectedBackupRestorePayload | None = None
+    reconcile_incomplete: bool = False
 
 
 class _CoalescedRestore(Exception):

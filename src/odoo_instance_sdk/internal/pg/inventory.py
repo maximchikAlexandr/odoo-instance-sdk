@@ -94,13 +94,18 @@ def _relationships(
     port: int,
     cluster_id: str | None,
     names: set[str],
-) -> dict[str, tuple[tuple[str, ...], tuple[str, ...], Literal["restore", "unknown"]]]:
-    restored: dict[str, tuple[list[str], list[str]]] = {name: ([], []) for name in names}
+) -> dict[
+    str,
+    tuple[tuple[str, ...], tuple[str, ...], Literal["restore", "unknown"], str | None],
+]:
+    restored: dict[str, tuple[list[str], list[str], str | None]] = {
+        name: ([], [], None) for name in names
+    }
     for row in catalog._list_restore_bindings(host, port):
         name = str(row["database_name"])
         if name not in restored:
             continue
-        backup_ids, proven_clusters = restored[name]
+        backup_ids, proven_clusters, restore_state = restored[name]
         row_cluster = row["cluster_id"]
         if row_cluster is None and isinstance(row["backup_id"], str):
             backup_ids.append(row["backup_id"])
@@ -108,13 +113,17 @@ def _relationships(
             if isinstance(row["backup_id"], str):
                 backup_ids.append(row["backup_id"])
             proven_clusters.append(row_cluster)
+            if restore_state is None and row["state"] in {"complete", "incomplete"}:
+                restore_state = str(row["state"])
+        restored[name] = (backup_ids, proven_clusters, restore_state)
     return {
         name: (
             tuple(dict.fromkeys(backup_ids)),
             tuple(dict.fromkeys(proven_clusters)),
             "restore" if proven_clusters else "unknown",
+            restore_state if proven_clusters else None,
         )
-        for name, (backup_ids, proven_clusters) in restored.items()
+        for name, (backup_ids, proven_clusters, restore_state) in restored.items()
     }
 
 
@@ -163,12 +172,13 @@ def build_database_inventory_command(
         rows = _decode_rows(result)
         source_catalog = catalog
         relationships: dict[
-            str, tuple[tuple[str, ...], tuple[str, ...], Literal["restore", "unknown"]]
+            str,
+            tuple[tuple[str, ...], tuple[str, ...], Literal["restore", "unknown"], str | None],
         ]
         if source_catalog is _CATALOG_UNSET:
             source_catalog = instance._client.get_catalog()
         if not isinstance(source_catalog, BackupCatalog):
-            relationships = {str(row["name"]): ((), (), "unknown") for row in rows}
+            relationships = {str(row["name"]): ((), (), "unknown", None) for row in rows}
             environment_rows: tuple[sqlite3.Row, ...] = ()
         else:
             claim = source_catalog._get_postgres_cluster(str(getattr(cluster, "_project_id", "")))
@@ -190,7 +200,7 @@ def build_database_inventory_command(
         default = project.default_source_database
         for row in rows:
             name = str(row["name"])
-            backups, proven_clusters, origin = relationships[name]
+            backups, proven_clusters, origin, restore_state = relationships[name]
             environment_ids = tuple(
                 str(env["id"])
                 for env in environment_rows
@@ -206,6 +216,7 @@ def build_database_inventory_command(
                 environment_ids=environment_ids,
                 runtime_bindings=tuple(f"{env_id}:{name}" for env_id in environment_ids),
                 restore_backup_ids=backups,
+                restore_state=cast("Literal['complete', 'incomplete'] | None", restore_state),
                 origin=origin,
             )
             if not tracked or item.origin == "restore":
