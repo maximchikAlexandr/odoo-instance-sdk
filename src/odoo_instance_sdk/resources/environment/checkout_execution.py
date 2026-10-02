@@ -77,7 +77,9 @@ def do_checkout(  # noqa: C901
     env_row: dict[str, CatalogValue] = {
         "id": str(plan.env_id),
         "name": plan.name,
-        "repository_root": str(plan.repo_root),
+        "repository_root": str(
+            (plan.project_root or plan.project.repository_root) if plan.adopted else plan.repo_root
+        ),
         "git_common_dir": plan.git_common_dir,
         "branch": plan.branch,
         "base_ref": plan.base_ref,
@@ -96,6 +98,13 @@ def do_checkout(  # noqa: C901
         "last_used_at": None,
         "removed_at": None,
         "last_error": None,
+        "project_id": plan.project_id,
+        "checkout_repository_root": str(plan.repo_root),
+        "checkout_git_common_dir": plan.git_common_dir,
+        "checkout_commit_sha": plan.checkout_commit_sha or plan.base_revision,
+        "code_ownership": plan.code_ownership,
+        "artifact_root": str(plan.artifact_root or plan.env_root),
+        "adoption_input_fingerprint": plan.adoption_input_fingerprint,
     }
 
     cat = catalog
@@ -105,20 +114,21 @@ def do_checkout(  # noqa: C901
     created_paths: list[Path] = []
     backup_id: uuid.UUID | None = None
     try:
-        plan.worktree.parent.mkdir(parents=True, exist_ok=True)
-        # Register the path before invoking Git.  ``git worktree add`` can
-        # be interrupted after creating the administrative entry but
-        # before returning; failure cleanup must then remove that partial
-        # worktree instead of leaving a stale catalog row and lock.
-        created_paths.append(plan.worktree)
-        worktree_result = cast("ProcessResult", context.process("checkout.worktree"))
-        if worktree_result.returncode != 0:
-            stderr = str(worktree_result.stderr or "").strip()
-            if "is already checked out at" in stderr or "already used by worktree" in stderr:
-                raise EnvironmentConflictError(  # noqa: TRY301
-                    "branch_in_use", f"Branch {plan.branch!r} is already checked out"
-                )
-            raise ConfigError(f"git worktree add failed: {stderr}")  # noqa: TRY301
+        if not plan.adopted:
+            plan.worktree.parent.mkdir(parents=True, exist_ok=True)
+            # Register the path before invoking Git.  ``git worktree add`` can
+            # be interrupted after creating the administrative entry but
+            # before returning; failure cleanup must then remove that partial
+            # worktree instead of leaving a stale catalog row and lock.
+            created_paths.append(plan.worktree)
+            worktree_result = cast("ProcessResult", context.process("checkout.worktree"))
+            if worktree_result.returncode != 0:
+                stderr = str(worktree_result.stderr or "").strip()
+                if "is already checked out at" in stderr or "already used by worktree" in stderr:
+                    raise EnvironmentConflictError(  # noqa: TRY301
+                        "branch_in_use", f"Branch {plan.branch!r} is already checked out"
+                    )
+                raise ConfigError(f"git worktree add failed: {stderr}")  # noqa: TRY301
         if plan.source_config is not None:
             context.action("checkout.generated_config")
             db_name_for_config = (
@@ -201,7 +211,7 @@ def do_checkout(  # noqa: C901
                 cfg_dict=plan.config_values,
                 source_db=plan.source_database,
                 target_db=plan.target_database,
-                repo_root=plan.repo_root,
+                repo_root=(plan.project_root or plan.repo_root) if plan.adopted else plan.repo_root,
                 project=plan.project,
                 remote_name=plan.options.remote_name,
                 selected_backup=plan.selected_backup,

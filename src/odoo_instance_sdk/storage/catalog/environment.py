@@ -45,14 +45,18 @@ class _EnvironmentMixin:
                 python_environment_owned, dependency_lock_path, db_mode,
                 source_db_name, target_db_name, backup_id,
                 runtime_json, applied_settings_json, state, created_at, last_used_at,
-                removed_at, last_error
+                removed_at, last_error, project_id, checkout_repository_root,
+                checkout_git_common_dir, checkout_commit_sha, code_ownership,
+                artifact_root, adoption_input_fingerprint
             ) VALUES (
                 :id, :name, :repository_root, :git_common_dir, :branch, :base_ref,
                 :worktree_path, :generated_config_path, :python_environment_path,
                 :python_environment_owned, :dependency_lock_path, :db_mode,
                 :source_db_name, :target_db_name, :backup_id,
                 :runtime_json, :applied_settings_json, :state, :created_at, :last_used_at,
-                :removed_at, :last_error
+                :removed_at, :last_error, :project_id, :checkout_repository_root,
+                :checkout_git_common_dir, :checkout_commit_sha, :code_ownership,
+                :artifact_root, :adoption_input_fingerprint
             )""",
             {
                 "id": env["id"],
@@ -79,6 +83,19 @@ class _EnvironmentMixin:
                 "last_error": sanitize_last_error(str(env.get("last_error")))
                 if env.get("last_error")
                 else None,
+                "project_id": env.get("project_id"),
+                "checkout_repository_root": env.get(
+                    "checkout_repository_root", env["repository_root"]
+                ),
+                "checkout_git_common_dir": env.get(
+                    "checkout_git_common_dir", env["git_common_dir"]
+                ),
+                "checkout_commit_sha": env.get("checkout_commit_sha"),
+                "code_ownership": env.get("code_ownership", "sdk_owned"),
+                "artifact_root": env.get(
+                    "artifact_root", str(Path(str(env["worktree_path"])).parent)
+                ),
+                "adoption_input_fingerprint": env.get("adoption_input_fingerprint"),
             },
         )
         self._conn.commit()
@@ -304,6 +321,21 @@ class _EnvironmentMixin:
             (git_common_dir, branch),
         ).fetchone()
         return row
+
+    @_translate_sqlite_error
+    def adopted_environment_for(
+        self, *, project_id: str, checkout_path: str, checkout_git_common_dir: str
+    ) -> sqlite3.Row | None:
+        """Return the active adoption for one explicit project/checkout identity."""
+        return cast(
+            "sqlite3.Row | None",
+            self._conn.execute(
+                "SELECT * FROM environments WHERE project_id = ? "
+                "AND worktree_path = ? AND checkout_git_common_dir = ? "
+                "AND state <> 'removed' ORDER BY created_at DESC, id DESC LIMIT 1",
+                (project_id, checkout_path, checkout_git_common_dir),
+            ).fetchone(),
+        )
 
     @_translate_sqlite_error
     def get_environment_runtime(self, environment_id: str) -> sqlite3.Row | None:

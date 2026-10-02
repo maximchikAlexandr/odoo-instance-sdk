@@ -37,6 +37,7 @@ from odoo_instance_sdk.models import (
     BackupFormat,
     DevelopmentEnvironment,
     EnvironmentDatabaseMode,
+    EnvironmentCodeOwnership,
     EnvironmentState,
     PostgresClusterState,
 )
@@ -215,16 +216,25 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         backup_raw = cast("JsonValue", row["backup_id"])
     env_id = str(_get("id"))
     python_owned = bool(_get("python_environment_owned"))
-    artifacts = resolve_environment_artifact_paths(
-        environment_id=env_id,
-        repository_root=str(_get("repository_root")),
-        git_common_dir=str(_get("git_common_dir")),
-        python_environment_owned=python_owned,
-        python_environment_path=str(_get("python_environment_path")),
-    )
-    http_interface, http_port = _http_fields_from_generated_config(
-        str(artifacts.generated_config_path)
-    )
+    # Stored paths are authoritative for adopted checkouts.  Fall back to the
+    # canonical resolver for pre-0006 rows and older hand-written fixtures.
+    worktree_value = _opt("worktree_path")
+    generated_value = _opt("generated_config_path")
+    lock_value = _opt("dependency_lock_path")
+    artifact_value = _opt("artifact_root")
+    if worktree_value is None or generated_value is None or lock_value is None:
+        artifacts = resolve_environment_artifact_paths(
+            environment_id=env_id,
+            repository_root=str(_get("repository_root")),
+            git_common_dir=str(_get("git_common_dir")),
+            python_environment_owned=python_owned,
+            python_environment_path=str(_get("python_environment_path")),
+        )
+        worktree_value = str(artifacts.worktree_path)
+        generated_value = str(artifacts.generated_config_path)
+        lock_value = str(artifacts.dependency_lock_path)
+        artifact_value = artifact_value or str(artifacts.env_root)
+    http_interface, http_port = _http_fields_from_generated_config(generated_value)
 
     return DevelopmentEnvironment(
         id=uuid.UUID(env_id),
@@ -233,11 +243,11 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         git_common_dir=str(_get("git_common_dir")),
         branch=str(_get("branch")),
         base_ref=str(_get("base_ref")),
-        worktree_path=str(artifacts.worktree_path),
-        generated_config_path=str(artifacts.generated_config_path),
-        python_environment_path=str(artifacts.python_environment_path),
+        worktree_path=worktree_value,
+        generated_config_path=generated_value,
+        python_environment_path=str(_get("python_environment_path")),
         python_environment_owned=python_owned,
-        dependency_lock_path=str(artifacts.dependency_lock_path),
+        dependency_lock_path=lock_value,
         http_interface=http_interface,
         http_port=http_port,
         db_mode=EnvironmentDatabaseMode(str(_get("db_mode"))),
@@ -251,6 +261,12 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         else None,
         removed_at=datetime.fromisoformat(str(_get("removed_at"))) if _opt("removed_at") else None,
         last_error=_opt("last_error"),
+        project_id=_opt("project_id"),
+        checkout_repository_root=_opt("checkout_repository_root") or str(_get("repository_root")),
+        checkout_git_common_dir=_opt("checkout_git_common_dir") or str(_get("git_common_dir")),
+        checkout_commit_sha=_opt("checkout_commit_sha"),
+        code_ownership=EnvironmentCodeOwnership(_opt("code_ownership") or "unknown"),
+        artifact_root=artifact_value,
     )
 
 
@@ -466,15 +482,33 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
             details={"environment_id": str(plan.env_id)},
             mutating=True,
         ),
-        PreparedStep(
-            step_id="checkout.worktree",
-            argv=plan.worktree_argv,
-            cwd=str(plan.repo_root),
-            timeout=_CHECKOUT_WORKTREE_TIMEOUT,
-            mode="captured",
-            mutating=True,
-        ),
     ]
+    if not plan.adopted:
+        steps.append(
+            PreparedStep(
+                step_id="checkout.worktree",
+                argv=plan.worktree_argv,
+                cwd=str(plan.repo_root),
+                timeout=_CHECKOUT_WORKTREE_TIMEOUT,
+                mode="captured",
+                mutating=True,
+            )
+        )
+    else:
+        steps.extend(
+            (
+                PreparedStep(
+                    step_id="checkout.validate.git.head",
+                    argv=("git", "-C", str(plan.worktree), "rev-parse", "HEAD"),
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="checkout.validate.git.status",
+                    argv=("git", "-C", str(plan.worktree), "status", "--porcelain"),
+                    read_only=True,
+                ),
+            )
+        )
     if plan.branch_revalidator is not None:
         # Ticket allocation revalidation is part of the immutable checkout
         # boundary.  Capture its Git reads here so the callback cannot open an
@@ -654,6 +688,18 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
                 },
                 mutating=True,
             ),
+            PreparedAction(
+                step_id="checkout.cleanup",
+                action="cleanup_on_failure",
+                description="Remove owned checkout artifacts if execution fails",
+                details={"root": str(plan.env_root)},
+                mutating=True,
+            ),
+        )
+    )
+    if not plan.adopted:
+        steps.insert(
+            -1,
             PreparedStep(
                 step_id="checkout.cleanup.worktree",
                 argv=(
@@ -667,15 +713,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
                 timeout=30.0,
                 mutating=True,
             ),
-            PreparedAction(
-                step_id="checkout.cleanup",
-                action="cleanup_on_failure",
-                description="Remove owned checkout artifacts if execution fails",
-                details={"root": str(plan.env_root)},
-                mutating=True,
-            ),
         )
-    )
     return tuple(steps)
 
 

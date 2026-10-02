@@ -2,13 +2,13 @@
 
 ## 1. Dependency revalidation and observed contracts
 
-- [ ] 1.1 Consume current core `EnvironmentCheckoutOptions(remote_name=...|backup_id=...)` source/COPY selection and its provenance, restore, readiness, retention, failure and cleanup contracts from the integrated PR #110 base. Add focused compatibility tests and do not duplicate those predecessor behaviors.
-- [ ] 1.2 Consume `MulticaClient.repositories.checkout_command()/checkout()` with `RepositoryCheckoutResult` and `MulticaClient.daemon.status_command()/status()` with `DaemonStatus` from exact `multica-py` PR #95 merge revision; enforce its package/CLI compatibility and verify timeout/cancellation, ambiguous-version and redaction behavior without raw `cli.command_command()`, local output decoders, or private transport.
+- [x] 1.1 Consume current core `EnvironmentCheckoutOptions(remote_name=...|backup_id=...)` source/COPY selection and its provenance, restore, readiness, retention, failure and cleanup contracts from the integrated PR #110 base. Add focused compatibility tests and do not duplicate those predecessor behaviors.
+- [x] 1.2 Consume `MulticaClient.repositories.checkout_command()/checkout()` with `RepositoryCheckoutResult` and `MulticaClient.daemon.status_command()/status()` with `DaemonStatus` from exact `multica-py` PR #95 merge revision; enforce its package/CLI compatibility and verify timeout/cancellation, ambiguous-version and redaction behavior without raw `cli.command_command()`, local output decoders, or private transport.
 
 ## 2. Core adoption and owned-only lifecycle
 
-- [ ] 2.1 Add only the necessary additive core catalog/public evidence for configured project identity, actual checkout identity, code ownership, and explicit SDK artifact root. Verify conservative legacy ownership, fresh/upgraded schema equivalence, and one migration head; document the forward-only migration.
-- [ ] 2.2 Add public inspectable caller-owned-checkout adoption by reusing COPY provisioning after code acquisition. Cover linked worktrees and independent clones, explicit source/base, wrong/dirty/replaced checkout, secret isolation, no implicit venv, plan parity, concurrent reservation, same-input UUID retry, conflicting/incomplete records, and retry after ordinary edits.
+- [x] 2.1 Add only the necessary additive core catalog/public evidence for configured project identity, actual checkout identity, code ownership, and explicit SDK artifact root. Verify conservative legacy ownership, fresh/upgraded schema equivalence, and one migration head; document the forward-only migration.
+- [x] 2.2 Add public inspectable caller-owned-checkout adoption by reusing COPY provisioning after code acquisition. Cover linked worktrees and independent clones, explicit source/base, wrong/dirty/replaced checkout, secret isolation, no implicit venv, plan parity, concurrent reservation, same-input UUID retry, conflicting/incomplete records, and retry after ordinary edits.
 - [ ] 2.3 Update core list/cwd/config/sync/runtime/diagnostic paths to use separate project, checkout, and artifact identities. Verify project/UUID/cwd lookup, rebased repository-local paths, external path preservation, isolated data, startup refusal for missing/replaced code, and normal SDK-owned compatibility.
 - [ ] 2.4 Make rollback/removal preserve caller-owned code and its parent even when dirty, missing, symlinked, or replaced, while removing only independently proven SDK artifacts under existing runtime/database ownership guards. Verify partial cleanup/recovery and unchanged SDK-owned checkout behavior.
 

@@ -25,6 +25,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     EnvironmentCheckoutPlan,
     EnvironmentPythonMode,
+    EnvironmentCodeOwnership,
     DevelopmentEnvironment as _DevelopmentEnvironment,
     EnvironmentDatabaseMode as _EnvironmentDatabaseMode,
     EnvironmentState as _EnvironmentState,
@@ -188,6 +189,13 @@ class _CheckoutPlan:
     source_git_branch: str | None = None
     selected_backup: Backup | None = None
     branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
+    project_root: Path | None = None
+    project_id: str | None = None
+    checkout_commit_sha: str | None = None
+    code_ownership: EnvironmentCodeOwnership = EnvironmentCodeOwnership.SDK_OWNED
+    artifact_root: Path | None = None
+    adoption_input_fingerprint: str | None = None
+    adopted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
