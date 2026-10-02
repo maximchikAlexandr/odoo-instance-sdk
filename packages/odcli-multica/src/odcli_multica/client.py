@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 from urllib.parse import urlsplit
 
+from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
+
 from odcli_multica.models import (
     MULTICA_PY_REVISION,
     MULTICA_PY_VERSION,
@@ -188,7 +190,7 @@ class MulticaOdooClient:
         run = _find_run(self.multica.issues.runs(request.issue), request.run)
         if run.issue_id not in (None, request.issue):
             raise ContextVerificationError("run issue identity conflicts with the request")
-        if run.project_id != project.id:
+        if run.project_id is not None and run.project_id != project.id:
             raise ContextVerificationError("run project identity conflicts with the request")
         workspace_id = _required(run.workspace_id, "run workspace identity")
         if request.workspace_id is not None and request.workspace_id != workspace_id:
@@ -203,9 +205,17 @@ class MulticaOdooClient:
             raise ContextVerificationError("requested runtime conflicts with the run")
         task_root = _task_root(run, checkout)
         core_repository_url = _verify_core_project(request.core_project)
+        try:
+            resources = self.multica.projects.resources.list(project.id)
+        except Exception as exc:
+            raise ContextVerificationError("project repository evidence is unavailable") from exc
         repository_url = _repository_url(
-            run, core_repository_url, request.core_repository_url or request.repository_url
+            resources,
+            project.id,
+            core_repository_url,
+            request.core_repository_url or request.repository_url,
         )
+        _verify_run_snapshot(run, project.id, repository_url)
         daemon = self.multica.daemon.status()
         daemon_id = _required(daemon.daemon_id, "daemon identity")
         _verify_daemon(
@@ -341,12 +351,19 @@ def _git_config_path(path: Path) -> Path:
     return git_dir / "config"
 
 
-def _repository_url(run: TaskRun, core_url: str, selected: str | None) -> str:
+def _repository_url(
+    page: Page[ProjectResourceRecord], project_id: str, core_url: str, selected: str | None
+) -> str:
+    if page.has_more or page.next_cursor is not None:
+        raise ContextVerificationError("project repository evidence is paginated and incomplete")
+    if page.offset not in (None, 0) or page.total is None or page.total != len(page.items):
+        raise ContextVerificationError("project repository evidence is incomplete")
     values = tuple(
-        resource.resource_ref
-        for resource in run.project_resources
-        if resource.resource_type in {"github_repo", "git_repository", "repository"}
-        and isinstance(resource.resource_ref, str)
+        resource.resource_ref.url
+        for resource in page.items
+        if resource.project_id == project_id
+        and resource.resource_type == "github_repo"
+        and isinstance(resource.resource_ref, GithubRepoResourceRef)
     )
     if len(values) != 1:
         raise ContextVerificationError("repository identity is absent or ambiguous")
@@ -356,6 +373,21 @@ def _repository_url(run: TaskRun, core_url: str, selected: str | None) -> str:
     if selected is not None and _normalize_url(selected) != _normalize_url(core_url):
         raise ContextVerificationError("selected repository does not match the core repository")
     return native
+
+
+def _verify_run_snapshot(run: TaskRun, project_id: str, repository_url: str) -> None:
+    if run.project_id is not None and run.project_id != project_id:
+        raise ContextVerificationError("run project identity conflicts with the request")
+    if not run.project_resources:
+        return
+    values = tuple(
+        resource.resource_ref
+        for resource in run.project_resources
+        if resource.resource_type in {"github_repo", "git_repository", "repository"}
+        and isinstance(resource.resource_ref, str)
+    )
+    if len(values) != 1 or _normalize_url(values[0]) != _normalize_url(repository_url):
+        raise ContextVerificationError("run repository snapshot conflicts with project resources")
 
 
 def _normalize_url(value: str) -> str:

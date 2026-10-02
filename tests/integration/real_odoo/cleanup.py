@@ -14,6 +14,8 @@ from pathlib import Path
 from odoo_instance_sdk.internal.proc import terminate_pid
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 
+from .compose import _docker_environment
+
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_FAILURE_BUNDLE_BYTES = 50 * 1024 * 1024
 
@@ -228,7 +230,7 @@ def compose_down(
         [
             "docker",
             "compose",
-            "--project-name",
+            "-p",
             project_name,
             "--file",
             str(compose_file),
@@ -241,6 +243,7 @@ def compose_down(
         check=False,
         text=True,
         timeout=max(0.0, deadline - time.monotonic()),
+        env=_docker_environment(),
     )
     if result.returncode:
         raise RuntimeError(f"Compose cleanup failed for owned project {project_name}")

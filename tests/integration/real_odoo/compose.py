@@ -7,6 +7,7 @@ target Odoo process remains owned by OdCLI.
 
 from __future__ import annotations
 
+import os
 import secrets
 import shutil
 import socket
@@ -23,6 +24,18 @@ from scripts.real_odoo_pins import E2E_PINS
 
 PG_READY_TIMEOUT: Final[float] = 90.0
 ODOO_READY_TIMEOUT: Final[float] = 180.0
+
+# The real-Odoo fixture deliberately gives each test an isolated HOME for the
+# SDK catalogue.  Docker's Compose plugin is installed below the caller's
+# Docker config on developer machines, so retain that config for Docker CLI
+# subprocesses without making it the fixture's HOME.
+_DOCKER_CONFIG = os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker")
+
+
+def _docker_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["DOCKER_CONFIG"] = _DOCKER_CONFIG
+    return environment
 
 
 def new_run_id() -> str:
@@ -337,7 +350,7 @@ class ComposeLifecycle:
         command = (
             "docker",
             "compose",
-            "--project-name",
+            "-p",
             self.project_name,
             "--file",
             str(self.compose_file),
@@ -351,6 +364,7 @@ class ComposeLifecycle:
                 check=False,
                 text=True,
                 timeout=timeout,
+                env=_docker_environment(),
             )
         except FileNotFoundError as error:
             raise RuntimeError("Docker Compose is required for real-Odoo E2E") from error
