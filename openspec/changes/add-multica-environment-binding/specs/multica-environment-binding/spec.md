@@ -25,12 +25,22 @@ Checkout and Odoo preparation SHALL remain separately captured phases. No genera
 
 The extension SHALL expose a finite read-only context SDK operation and CLI equivalent. Inputs SHALL identify the selected core project/repository, checkout path, expected Multica project, issue, and run; existing scoped Multica configuration SHALL supply server/workspace credentials. It SHALL NOT persist a project-link file or infer identities from names, branches, task prose, or list order.
 
-Context SHALL compose public typed issue/run operations with `MulticaClient.daemon.status_command()/status()` and frozen `DaemonStatus` from exact `multica-py` PR #95 merge revision. It SHALL verify issue/project/workspace/run membership, owning local daemon/runtime identity, repository identity, and containment beneath the run's absolute current/durable directory. It SHALL return frozen facts and observation time. Raw daemon commands, local JSON decoders, private transports, and reduced status models SHALL NOT be used.
+Context SHALL compose public typed project, project-resource, issue/run operations with `MulticaClient.daemon.status_command()/status()` and frozen `DaemonStatus` from exact `multica-py` PR #95 merge revision. It SHALL require `Issue.project_id` to equal the selected `Project.id`, a complete public `Project.resources` page, and exactly one matching typed `github_repo` resource whose `GithubRepoResourceRef.url` identifies the selected core repository. It SHALL separately verify workspace/issue/run membership, owning local daemon/runtime identity, and containment beneath the run's absolute current/durable directory. Populated TaskRun project identity snapshots SHALL be consistent, but their absence SHALL NOT fail otherwise complete authoritative Issue/Project evidence. It SHALL return frozen facts and observation time. Raw daemon commands, local JSON decoders, private transports, and reduced status models SHALL NOT be used.
 
 #### Scenario: Matching local run
 
 - **WHEN** exact membership, server/workspace/runtime, repository, and local filesystem/path evidence match
 - **THEN** context returns the verified identifiers and checkout facts without mutation
+
+#### Scenario: TaskRun omits duplicated project snapshot
+
+- **WHEN** the exact TaskRun omits `project_id` or `project_resources`, while the issue identifies the selected project, the complete public Project resource collection identifies exactly the selected repository, and run/workspace/runtime/path plus daemon evidence match
+- **THEN** context returns the verified identifiers and checkout facts without weakening any run, host, runtime, or path check
+
+#### Scenario: Project repository evidence is unavailable
+
+- **WHEN** the public Project resource page is incomplete, has no matching repository, has multiple matches, or conflicts with the selected core repository, or a populated TaskRun project snapshot conflicts with authoritative Issue/Project evidence
+- **THEN** context fails before mutation and does not infer repository identity from TaskRun absence, prose, names, list order, or local paths
 
 #### Scenario: Wrong host or incomplete evidence
 
@@ -98,21 +108,21 @@ The package SHALL provide finite operations only. Native checkout lifetime SHALL
 - **WHEN** a caller saves the context result and environment UUID
 - **THEN** it can inspect, start, stop, and remove the environment through core without an extension registry or repeated native checkout
 
-### Requirement: Implementation requires exact post-dependency approval
+### Requirement: Blocker repair requires exact planning approval
 
-The implementation SHALL use the post-dependency planning revision that records integrated Odoo Instance SDK PR #110 and complete `multica-py` PR #95 public contracts, selected base, compatible version evidence, recomputed estimate properties and validated delivery topology. Its exact SHA SHALL be pushed unchanged and independently approved by Plan Verifier before implementation begins.
+The implementation SHALL use the blocker-revised planning revision that records integrated Odoo Instance SDK PR #110 and complete `multica-py` PR #95 public contracts, the authoritative public Issue/Project resource identity contract, selected base, compatible version evidence, recomputed estimate properties and validated delivery topology. Its exact SHA SHALL be pushed unchanged and independently approved by Plan Verifier before `WP-04` resumes.
 
-The parked implementation parent SHALL remain in backlog. No WP child or implementation run SHALL start from an earlier planning SHA or merely from dependency completion.
+`WP-04` SHALL remain blocked and its current candidate SHALL remain unaccepted. Manager/WP Delivery SHALL NOT change production code or OpenSpec from an earlier planning SHA or outside the planning flow.
 
-#### Scenario: Dependencies are complete but revision is not approved
+#### Scenario: Blocker revision is not approved
 
-- **WHEN** both dependency implementations are available and the post-dependency planning revision exists but lacks independent exact-SHA approval
-- **THEN** the implementation gate remains closed and no WP is materialized or started
+- **WHEN** the task-4.2 blocker revision exists but lacks independent exact-SHA approval
+- **THEN** `WP-04` remains blocked, its candidate remains unaccepted, and Manager/WP Delivery performs no production or OpenSpec repair
 
-#### Scenario: Post-dependency exact SHA is approved
+#### Scenario: Blocker-revision exact SHA is approved
 
-- **WHEN** Plan Verifier confirms that the pushed exact SHA matches the fully validated post-dependency package and its recorded compatibility evidence
-- **THEN** the implementation parent may open the gate and materialize the delivery-plan WPs
+- **WHEN** Plan Verifier confirms that the pushed exact SHA matches the fully validated blocker-revision package and its recorded compatibility evidence
+- **THEN** Plan Verifier may update the graph contract and Manager may resume `WP-04` under the revised task 4.2 acceptance contract
 
 #### Scenario: Contract drift appears after approval
 

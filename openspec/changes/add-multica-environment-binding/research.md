@@ -14,6 +14,22 @@ This is source and contract inspection, not a live Multica/Odoo acceptance run. 
 
 The former dependency gates are complete. Implementation remains closed only until this post-dependency exact planning SHA is independently approved.
 
+## Task 4.2 blocker re-research — 2026-10-02
+
+The implementation feature head inspected for this revision is `8f63f6d07ac2e9947dbf190590293266e2dd29ae`. Its accepted predecessor WPs already implement the core adoption/lifecycle and extension package. The unaccepted task-4.2 candidate `c15b84d9bc87a63513d9da04f8718dc3cdd3e0cc` is not merged into that head. Live acceptance exposed one planning-contract mismatch: the selected TaskRun can have no `project_id` and an empty `project_resources` snapshot even though authoritative project and repository records exist.
+
+The current platform public surface returns the planning issue with project id `be21ace8-af16-4e39-a10a-dbec46d6b2ad`; `multica project resource list` returns one `github_repo` record (`f27b41c9-d3bf-48b0-add2-8f4b4f9eb20d`) whose structured URL is the selected repository. At exact `multica-py` revision `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed`, `Project.resources` and `MulticaClient.projects.resources.list(project_id)` are public typed surfaces returning `Page[ProjectResourceRecord]`; each record exposes `project_id`, `resource_type`, and typed `resource_ref`, including `GithubRepoResourceRef.url`.
+
+The minimal supported contract is therefore:
+
+1. `Issue.project_id` SHALL match the explicitly selected `Project.id`.
+2. A complete public Project-resource page SHALL contain exactly one `github_repo` match for the normalized selected core Git origin.
+3. TaskRun SHALL still prove the exact issue/run, workspace, runtime and absolute current/durable task path; daemon status SHALL still prove same-host/shared-filesystem identity.
+4. Populated TaskRun `project_id` or `project_resources` SHALL agree with authoritative Issue/Project evidence, but an omitted duplicate snapshot SHALL NOT fail that otherwise complete proof.
+5. Incomplete pagination, no match, multiple matches, identity conflict, or missing run/daemon/path proof SHALL fail before mutation.
+
+Requiring the platform to populate the duplicated TaskRun snapshot was rejected: it adds a prerequisite while providing no stronger identity than the supported source-of-truth Issue/Project relations. Reading raw CLI JSON, private transport, task prose, list order, branch names, or `local_directory` was also rejected. The chosen repair reuses one existing public relation and does not add a registry, adapter, decoder, or fallback identity source.
+
 ## Observed Odoo Instance SDK contracts
 
 `EnvironmentResource.checkout_command(project, branch, *, options=EnvironmentCheckoutOptions()) -> Command[DevelopmentEnvironment]`, `checkout()` and `checkout_with_plan()` remain the public SDK-owned checkout surfaces. `EnvironmentCheckoutOptions` now includes:
@@ -52,7 +68,7 @@ No raw `CliResource.command_command()`, stdout/status decoder, private transport
 ## Native checkout and context boundary
 
 1. Native repository checkout remains task-owned and returns its path through `RepositoryCheckoutResult`.
-2. The extension canonicalizes and verifies that path against the explicitly selected core project/repository and the typed issue/run/daemon context.
+2. The extension canonicalizes and verifies that path against the explicitly selected core project/repository and the typed Issue/Project-resource plus run/daemon context.
 3. It requires same-host/shared-filesystem evidence and containment beneath the run's absolute current or durable directory; equal strings or reachability are insufficient.
 4. Core adoption validates repository/HEAD/cleanliness on first use, persists explicit ownership evidence, and reuses the predecessor COPY pipeline.
 5. Later core lifecycle uses the environment UUID. Multica continues to own code lifetime; core cleanup owns only independently proven SDK artifacts.
@@ -67,9 +83,9 @@ The core base also declares `0.1.0`; implementation shall bind to the integrated
 
 ## Reconciliation result
 
-- **Scope:** unchanged. The new evidence confirms the selected thin-extension plus generic-adoption design and removes provisional API discovery work; it adds no product capability.
+- **Scope:** unchanged. The blocker repair substitutes the public authoritative Issue/Project-resource relation for an optional duplicated TaskRun snapshot; it adds no product capability.
 - **Topology:** unchanged. Core adoption/catalog remains the shared foundation; core lifecycle and the extension package remain a real disjoint parallel frontier; integrated acceptance and final publication remain the fan-in.
-- **Estimate threshold:** unchanged. Uncertainty is lower, but the remaining catalog/adoption/lifecycle/package/integration work still exceeds the authoritative multi-WP threshold. Exact totals live only in issue properties.
+- **Estimate threshold:** unchanged. Accepted predecessor work lowers remaining effort, while the context repair and disposable live acceptance retain material integration uncertainty; the authoritative estimate remains above the multi-WP threshold. Exact totals live only in issue properties.
 - **Issue #70 split:** unchanged. Context and preparation remain here; telemetry, usage allocation and inventory enrichment remain #105.
 
 ## Implementation authorization checklist
@@ -77,4 +93,4 @@ The core base also declares `0.1.0`; implementation shall bind to the integrated
 1. Strictly validate and push this complete post-dependency package at one exact SHA.
 2. Verify the remote branch resolves to that exact SHA and the managed worktree is cleanly removed.
 3. Obtain independent Plan Verifier approval of that SHA.
-4. Only then may the parked implementation parent materialize/start the recorded WPs; any incompatible base, API, version or estimate-threshold drift returns to planning.
+4. Only then may Plan Verifier update the graph contract and Manager resume blocked `WP-04`; any incompatible base, API, version or estimate-threshold drift returns to planning.

@@ -2,21 +2,21 @@
 
 ## Readiness contract
 
-This is the mandatory post-dependency planning revision. MYL-272 is integrated by PR #110 merge `11ff3403f2108adc901154ebeb9ee509add46ef5` and present in selected base `c1e57b79f39e529a50c25818134c06309384ee23`; complete `multica-py` #93 is integrated by PR #95 merge `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed` with package version `0.1.0` and native checkout CLI floor `0.5.3`. `research.md` records the observed APIs and compatibility consequence.
+This is the mandatory task-4.2 blocker revision. MYL-272 is integrated by PR #110 merge `11ff3403f2108adc901154ebeb9ee509add46ef5` and present in selected base `c1e57b79f39e529a50c25818134c06309384ee23`; complete `multica-py` #93 is integrated by PR #95 merge `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed` with package version `0.1.0` and native checkout CLI floor `0.5.3`. The implementation feature head at research time is `8f63f6d07ac2e9947dbf190590293266e2dd29ae`. `research.md` records the observed APIs, compatibility consequence, and public authoritative Issue/Project-resource repair.
 
-Implementation remains blocked only until the new exact SHA of this complete revision is independently approved by Plan Verifier. The implementation parent remains parked in backlog; no WP child or implementation run starts before that approval.
+`WP-04` remains blocked and candidate `c15b84d9bc87a63513d9da04f8718dc3cdd3e0cc` remains unaccepted until the new exact SHA of this complete revision is independently approved by Plan Verifier. Manager/WP Delivery SHALL NOT change production code or OpenSpec outside this planning flow. After approval, Plan Verifier updates the graph contract before Manager resumes `WP-04`; `WP-05` remains parked.
 
 ## Estimate and delivery mode
 
-The authoritative estimate totals are stored only in this planning issue's `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours` properties and were verified by read-back. The estimate covers remaining active developer effort for one experienced developer familiar with Python SDK/CLI, immutable command plans, SQLite/Alembic, Git worktrees, Odoo COPY restore, packaging, and the repository's test gates. External dependency waiting and human approval queues are excluded.
+The authoritative estimate totals are stored only in this planning issue's `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours` properties and were verified by read-back. The revised estimate covers remaining active developer effort from the inspected feature head for one experienced developer familiar with Python SDK/CLI, immutable command plans, Git worktrees, Odoo COPY restore, packaging, and the repository's test gates. Accepted predecessor WPs are excluded; the public context-contract repair, candidate reconciliation, live acceptance and final publication gates are included. External dependency waiting and human approval queues are excluded.
 
-Confidence is **medium** and calibration is **uncalibrated**. Evidence includes the complete OpenSpec package, current checkout/cleanup/catalog code, the integrated MYL-272 source/COPY implementation, the exact final typed `multica-py` checkout/status contracts, and existing test and packaging boundaries. The principal uncertainty is the size of the new adoption/catalog migration, live daemon/Odoo acceptance, and cross-package compatibility repair; dependency API discovery is no longer estimated. Tests were not run to manufacture estimate timing.
+Confidence is **medium** and calibration is **uncalibrated**. Evidence includes the complete OpenSpec package, accepted predecessor implementation, the unaccepted candidate diff, actual platform Project-resource output, exact typed `multica-py` Project/Issue/TaskRun/resource/daemon contracts, and existing integration/publication gates. The principal uncertainty is disposable live daemon/Odoo acceptance and any cross-package repair it exposes. Tests were not run to manufacture estimate timing.
 
 The authoritative `Estimate, hours` property exceeds the multi-WP threshold. Delivery mode is `dag`: five atomic WPs with one genuine parallel frontier. Each OpenSpec task appears exactly once.
 
 ## Pre-start gate
 
-Before materializing or starting any WP, the implementation parent SHALL record the selected base, the exact `multica-py` revision/version above, this post-dependency OpenSpec exact SHA and its independent approval. `implementation_gate=open` is valid only after those facts agree.
+Before resuming `WP-04`, the implementation parent SHALL record the selected base, exact `multica-py` revision/version above, this blocker-revision exact SHA, its independent approval, and the revised graph contract. `WP-04` remains blocked until those facts agree; its current candidate is not accepted by this planning revision.
 
 If observed APIs change product scope, compatibility, estimate threshold, task coverage, contract dependencies, or write-zone ownership, return to planning and publish a new delivery-plan revision. Operational status/assignee changes do not revise this topology.
 
@@ -52,8 +52,8 @@ If observed APIs change product scope, compatibility, estimate threshold, task c
 - **Deliverable:** independently installable `odcli-multica` composes typed native checkout/context with exact core adoption and emits bounded sanitized output without its own orchestration or persistence.
 - **Owned responsibility scope:** workspace member/package metadata, `odcli_multica` SDK/CLI, package-local tests/fixtures/docs, and the narrow documented public core output symbols consumed by the extension. It does not edit core lifecycle/cleanup modules owned by WP-02.
 - **Critical shared files:** root workspace/lock/release configuration and existing core bounded-output public surface. No sibling writes those files at level 2.
-- **Contract surface:** typed checkout/issue/run/daemon status; frozen verified context; inspectable prepare command and delegating convenience operation; compatible dependency bounds; standalone/combined tools; Rich/JSON/TOON/error/redaction contracts.
-- **DoD / evidence:** no raw command/private import/local decoder; identity/containment/pagination/forwarded-host/cancellation matrix; no implicit bind/start/task mutation; preparation retry/recovery; no-sources wheel plus isolated standalone/combined installs; output parity and package architecture tests; focused Ruff/mypy/tests pass.
+- **Contract surface:** typed checkout/Project resources/issue/run/daemon status; authoritative Issue-to-Project and Project-to-repository identity; optional consistent TaskRun project snapshots; frozen verified context; inspectable prepare command and delegating convenience operation; compatible dependency bounds; standalone/combined tools; Rich/JSON/TOON/error/redaction contracts.
+- **DoD / evidence:** no raw command/private import/local decoder; absent/conflicting TaskRun snapshots, complete/incomplete/ambiguous Project resources, identity/containment/run-pagination/forwarded-host/cancellation matrix; no implicit bind/start/task mutation; preparation retry/recovery; no-sources wheel plus isolated standalone/combined installs; output parity and package architecture tests; focused Ruff/mypy/tests pass.
 - **Parallel safety:** writes only extension, packaging, and bounded-output-publicization areas; core lifecycle/cleanup is exclusively WP-02.
 
 ## WP-04 — Integrated fake and live acceptance
@@ -62,10 +62,10 @@ If observed APIs change product scope, compatibility, estimate threshold, task c
 - **Depends on:** `WP-02`, `WP-03`.
 - **Stage / level:** 3.
 - **Deliverable:** end-to-end evidence proves one native checkout flows through context/adoption/runtime/cleanup at fake boundaries and in an approved disposable native-daemon/Odoo fixture.
-- **Owned responsibility scope:** cross-package integration/acceptance tests, disposable fixture wiring, sanitized evidence, and repairs required to satisfy those cases after predecessor fan-in. Predecessor public contracts may only change through coordinated repair and planning escalation when scope changes.
+- **Owned responsibility scope:** cross-package integration/acceptance tests, disposable fixture wiring, sanitized evidence, and the narrow planning-approved context repair in `odcli_multica` plus directly coupled tests required to consume public Issue/Project resources. Other predecessor public contracts may only change through coordinated repair and planning escalation when scope changes.
 - **Critical shared files:** integration test harnesses and fixture configuration; it is the sole writer after fan-in.
-- **Contract surface:** checkout → context → COPY adoption → start/status → stop/remove; two tasks per project; same-host evidence; permissions; stable UUID; one database/isolated filestore; no borrowed-code deletion or binding files.
-- **DoD / evidence:** fake-boundary matrix passes; explicitly approved live fixture passes without customer data; exact dependency versions and sanitized runtime evidence retained; failure/cleanup paths are demonstrated; focused Ruff/mypy/tests pass.
+- **Contract surface:** public Issue/Project resource authority with optional consistent TaskRun project snapshots; exact run/workspace/runtime/path and daemon proof; checkout → context → COPY adoption → start/status → stop/remove; two tasks per project; same-host evidence; permissions; stable UUID; one database/isolated filestore; no borrowed-code deletion or binding files.
+- **DoD / evidence:** task 4.2 explicitly proves `TaskRun omits duplicated project snapshot`, `Matching local run`, `Project repository evidence is unavailable`, and `Wrong host or incomplete evidence`; fake-boundary matrix passes; explicitly approved live fixture passes without customer data; exact dependency versions and sanitized runtime evidence retained; failure/cleanup paths are demonstrated; focused Ruff/mypy/tests pass.
 - **Parallel safety:** join WP; no sibling is active at this level.
 
 ## WP-05 — Final quality and publication gate

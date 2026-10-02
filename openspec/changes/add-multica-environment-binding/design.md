@@ -35,9 +35,11 @@ Alternative rejected: keep the two local decoders as compatibility fallbacks. Th
 
 Provide a small integration client with read-only `context` and preparation operations. Inputs identify the selected core project/repository, exact checkout path, expected Multica project, issue, and run. Server/workspace/credentials come from the scoped Multica client. Repository identity comes from the explicitly selected core project; ambiguity fails.
 
-Context composes typed issue/run and daemon-status operations to verify workspace/project/issue/run membership, the owning runtime/daemon, repository identity, and containment of the actual Git root beneath an absolute current/durable task directory. Missing fields, incomplete pagination, conflicting identities, relative-only paths, or forwarded/container endpoints without proven shared-filesystem evidence fail before mutation. The frozen result records verified identifiers, checkout facts, and observation time, but is not a lease.
+Context fetches the expected project and issue, requires `Issue.project_id` to equal the selected `Project.id`, and enumerates the public typed `Project.resources` collection. A complete page containing exactly one matching `github_repo` resource with a typed `GithubRepoResourceRef.url` proves authoritative repository membership against the selected core Git origin. Missing, incomplete, ambiguous, or mismatched project-resource evidence fails before mutation.
 
-Alternative rejected: infer identity from task prose, branch names, path equality, or project `local_directory`. None proves issue-scoped ownership on the local host.
+Context separately uses typed issue/run and daemon-status operations to verify workspace/issue/run membership, the owning runtime/daemon, and containment of the actual Git root beneath an absolute current/durable task directory. `TaskRun.project_id` and `TaskRun.project_resources` are duplicated snapshots: when populated they SHALL be consistent, but their absence SHALL NOT override complete authoritative Issue/Project evidence. Missing run/workspace/runtime/path fields, incomplete run pagination, conflicting populated identities, relative-only paths, or forwarded/container endpoints without proven shared-filesystem evidence fail before mutation. The frozen result records verified identifiers, checkout facts, and observation time, but is not a lease.
+
+Alternative rejected: require the platform to populate duplicated TaskRun project snapshots before task 4.2. The public Issue and Project-resource surfaces already expose the authoritative identity, so that prerequisite would delay acceptance without strengthening it. Inferring identity from task prose, branch names, path equality, or project `local_directory` remains forbidden because none proves issue-scoped ownership on the local host.
 
 ### D3. Preparation delegates to generic core adoption
 
@@ -57,11 +59,11 @@ List/cwd/config/sync/runtime/diagnostic/remove paths use recorded project and ch
 
 Add `packages/odcli-multica` as an independently versioned distribution/import/executable using the shared workspace scaffold and the verified exact dependency revisions until equivalent uniquely versioned releases exist. Core does not import Multica. The extension uses existing public bounded output contracts for equivalent Rich/JSON/TOON documents; it adds no serializer, renderer hierarchy, live monitor, or execution abstraction.
 
-### D6. Planning and implementation have separate readiness gates
+### D6. Blocker repair remains planning-owned
 
 The dependency and re-research conditions are satisfied: MYL-272 is integrated by PR #110 merge `11ff3403f2108adc901154ebeb9ee509add46ef5` and is present in selected base `c1e57b79f39e529a50c25818134c06309384ee23`; complete `multica-py` #93 is integrated by PR #95 merge `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed`; their public code, types, tests and version metadata were re-read for this revision.
 
-Implementation readiness now requires the new exact planning SHA to be strictly validated, pushed unchanged, and independently approved by Plan Verifier. The parked implementation parent may retain this gate, but no WP child or implementation run may start before approval. Any later incompatible dependency or base drift returns to planning.
+The implementation feature branch contains accepted predecessor work, while `WP-04` is blocked on task 4.2 and candidate `c15b84d9bc87a63513d9da04f8718dc3cdd3e0cc` is unaccepted. The public Project-resource contract above is the planning-approved repair. `WP-04` remains blocked until this exact planning SHA is strictly validated, pushed unchanged, and independently approved by Plan Verifier; Manager or WP Delivery SHALL NOT alter production code or OpenSpec to bypass that gate. Any later incompatible dependency, base, scope, estimate-threshold, or topology drift returns to planning.
 
 ## Risks / Trade-offs
 
@@ -70,11 +72,12 @@ Implementation readiness now requires the new exact planning SHA to be strictly 
 - **Task checkout can disappear during or after restore** → retain environment/recovery identity, diagnose missing code, and clean only independently proven SDK artifacts.
 - **No extension-side persistent association** → the workflow caller stores context plus environment UUID; later telemetry attribution remains #105.
 - **Cross-package compatibility can drift** → declare compatible versions, run installed-wheel tests, and fail before mutation on unsupported contracts.
+- **Project resources may be incomplete or ambiguous** → require a complete public typed page and exactly one repository match; never fall back to TaskRun snapshots, prose, list order, or local guesses.
 - **Live daemon/Odoo evidence is environment-sensitive** → require an explicitly approved disposable acceptance fixture; static research never substitutes for it.
 
 ## Migration Plan
 
-1. Independently approve this post-dependency exact planning SHA against the recorded base and dependency revisions.
+1. Independently approve this task-4.2 blocker-revision exact SHA against the recorded feature head, base and dependency revisions.
 2. Add the smallest ownership/project evidence migration and generic adoption path while preserving existing SDK-owned behavior.
 3. Add the optional package using the observed typed Multica contracts and existing output boundary.
 4. Validate fake boundaries, installed wheels, and an approved disposable native-daemon/Odoo flow before release.
@@ -83,4 +86,4 @@ Rollback uninstalls the extension without deleting environments. A compatible co
 
 ## Open Questions
 
-No product or dependency-contract decision is delegated to implementation. Plan Verifier approval of this exact revision is the only remaining planning gate.
+No product or dependency-contract decision is delegated to implementation. Plan Verifier approval of this exact revision is the only remaining planning gate for resuming `WP-04`.
