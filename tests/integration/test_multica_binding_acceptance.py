@@ -127,6 +127,7 @@ class _Record:
 class _CoreEnvironments:
     def __init__(self, artifact_root: Path) -> None:
         self.artifact_root = artifact_root
+        self.fail_after_artifacts = False
         self.records: dict[tuple[str, str, str, str], _Record] = {}
         self.adoption_calls: list[tuple[Path, Path, EnvironmentCheckoutOptions]] = []
         self.restore_count = 0
@@ -159,6 +160,11 @@ class _CoreEnvironments:
             config.write_text("[options]\ndb_name = target-db\n", encoding="utf-8")
             filestore = artifact_root / "filestore"
             filestore.mkdir()
+            if self.fail_after_artifacts:
+                config.unlink()
+                filestore.rmdir()
+                artifact_root.rmdir()
+                raise RuntimeError("disposable adoption failure after SDK artifact creation")
             environment = DevelopmentEnvironment(
                 id=environment_id,
                 name="native-task",
@@ -350,6 +356,33 @@ def test_fake_boundaries_cover_checkout_context_adoption_and_owned_lifecycle(
     assert (Path(native.path) / "README.md").read_text(encoding="utf-8") == "caller-owned\n"
     assert not list(task_root.glob("**/*binding*"))
     assert not list(task_root.glob("**/*project-link*"))
+    assert not list(tmp_path.joinpath("artifacts").glob("**/*"))
+
+
+@pytest.mark.integration
+def test_failed_adoption_cleans_sdk_artifacts_and_preserves_caller_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, _, environments, project = _fake_client(monkeypatch, tmp_path)
+    environments.fail_after_artifacts = True
+    checkout = tmp_path / "task" / "checkout"
+    sentinel = checkout / "README.md"
+
+    request = ContextRequest(
+        checkout_path=checkout,
+        core_project=project,
+        multica_project="project",
+        issue="issue-1",
+        run="run-issue-1",
+        repository_url="https://example.test/repo.git",
+    )
+    with pytest.raises(RuntimeError, match="after SDK artifact creation"):
+        client.prepare(
+            PreparationRequest(context=request, base_ref="main", remote_name="disposable")
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "caller-owned\n"
+    assert checkout.is_dir()
     assert not list(tmp_path.joinpath("artifacts").glob("**/*"))
 
 
