@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -9,14 +10,8 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from odoo_instance_sdk.client import OdooClient  # noqa: I001 -- keep context/provenance aliases grouped at this CLI seam; remove when Ruff supports grouped aliases.
-from odoo_instance_sdk.commands.context import (
-    CliContext,
-    pass_cli_context,
-    resolve_environment,
-    resolve_project_path,
-    project_provenance as _project_provenance,
-)
+from odoo_instance_sdk.commands import context as _cli_context
+from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.env.checkout import env_group
 from odoo_instance_sdk.commands.output import (
     JsonObject,
@@ -36,7 +31,22 @@ from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.models.backup import DevelopmentEnvironment
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, JsonValue
+
+
+def resolve_environment(
+    client: OdooClient, explicit: str | None, *, cwd: Path | None = None
+) -> DevelopmentEnvironment:
+    return _cli_context.resolve_environment(client, explicit, cwd=cwd)
+
+
+def resolve_project_path(cli_context: CliContext) -> Path:
+    return _cli_context.resolve_project_path(cli_context)
+
+
+def _project_provenance(cli_context: CliContext) -> str:
+    return _cli_context.project_provenance(cli_context)
 
 
 def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
@@ -78,6 +88,8 @@ def env_remove(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
+    from odoo_instance_sdk.client import OdooClient
+
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     if not environments or len(environments) == 1:
         selector: str | None = environments[0] if environments else None
@@ -305,6 +317,8 @@ def env_sync(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
+    from odoo_instance_sdk.client import OdooClient
+
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     if environment is None:
         if ctx.env is not None:

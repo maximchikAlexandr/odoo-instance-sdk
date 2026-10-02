@@ -23,7 +23,7 @@ from odoo_instance_sdk.internal.doctor.manifest import (
 from odoo_instance_sdk.internal.git_worktree import (
     worktree_list_porcelain,
 )
-from odoo_instance_sdk.models import DevelopmentEnvironment
+from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentCodeOwnership
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -75,8 +75,37 @@ def _check_worktree(
             )
         )
         return
+    if env.code_ownership is EnvironmentCodeOwnership.CALLER_OWNED:
+        actual_root: Path | None
+        actual_common: Path | None
+        expected_root: Path | None
+        expected_common: Path | None
+        try:
+            from odoo_instance_sdk.internal.git_worktree import (
+                rev_parse_git_common_dir,
+                rev_parse_toplevel,
+            )
+
+            actual_root = rev_parse_toplevel(worktree).resolve()
+            actual_common = rev_parse_git_common_dir(actual_root).resolve()
+            expected_root = Path(env.checkout_repository_root or env.repository_root).resolve()
+            expected_common = Path(env.checkout_git_common_dir or env.git_common_dir).resolve()
+        except Exception:
+            actual_root = actual_common = None
+            expected_root = expected_common = None
+        if actual_root != expected_root or actual_common != expected_common:
+            report.checks.append(
+                CheckResult(
+                    "worktree",
+                    STATUS_WARN,
+                    f"caller-owned worktree identity was replaced: {worktree}",
+                    environment_id=eid,
+                    environment_name=ename,
+                )
+            )
+            return
     repo_root = Path(env.repository_root)
-    if repo_root.is_dir():
+    if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED and repo_root.is_dir():
         try:
             porcelain = worktree_list_porcelain(repo_root)
             paths = {Path(w.worktree).resolve() for w in porcelain}
@@ -106,7 +135,7 @@ def _check_worktree(
 
 def _check_python(report: DoctorReport, env: DevelopmentEnvironment, eid: str, ename: str) -> None:
     py_path = Path(env.python_environment_path)
-    env_root = Path(env.worktree_path).parent
+    env_root = Path(env.artifact_root or Path(env.worktree_path).parent)
     if env.python_environment_owned:
         try:
             contained = py_path.resolve().is_relative_to(env_root.resolve())

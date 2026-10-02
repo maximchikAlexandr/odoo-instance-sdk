@@ -187,7 +187,9 @@ class ResolvedContext:
         environment_git_common = Path(
             getattr(environment, "git_common_dir", repository_root / ".git")
         )
-        project_id = f"project_{repo_key(repository_root, environment_git_common)}"
+        project_id = (
+            environment.project_id or f"project_{repo_key(repository_root, environment_git_common)}"
+        )
         if not database:
             database = getattr(environment, "target_db_name", None) or getattr(
                 environment, "source_db_name", None

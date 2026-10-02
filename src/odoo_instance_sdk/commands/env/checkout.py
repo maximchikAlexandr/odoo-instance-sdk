@@ -20,13 +20,8 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.text import Text
 
-from odoo_instance_sdk.client import OdooClient
-from odoo_instance_sdk.commands.context import (
-    CliContext,
-    pass_cli_context,
-    resolve_environment,
-    resolve_project_path,
-)
+from odoo_instance_sdk.commands import context as _cli_context
+from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.env.display import (
     _ENV_LIST_COLUMNS,  # noqa: F401
     _ENV_LIST_COMPACT_COLUMNS,
@@ -60,12 +55,7 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import BackupCatalogError, StalePlanError
-from odoo_instance_sdk.internal.git_worktree import (
-    local_branch_names,
-    remote_branch_names,
-    rev_parse_git_common_dir,
-    rev_parse_toplevel,
-)
+from odoo_instance_sdk.internal import git_worktree
 from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.models.backup import (
@@ -93,7 +83,34 @@ from odoo_instance_sdk.resources.monitor.collection_parts import EnvironmentMoni
 from odoo_instance_sdk.resources.monitor.planning import SnapshotSelection
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, JsonValue
+
+
+def local_branch_names(repo_root: Path) -> tuple[str, ...]:
+    return git_worktree.local_branch_names(repo_root)
+
+
+def remote_branch_names(repo_root: Path, ticket: str) -> tuple[str, ...]:
+    return git_worktree.remote_branch_names(repo_root, ticket)
+
+
+def rev_parse_git_common_dir(path: Path) -> Path:
+    return git_worktree.rev_parse_git_common_dir(path)
+
+
+def rev_parse_toplevel(path: Path) -> Path:
+    return git_worktree.rev_parse_toplevel(path)
+
+
+def resolve_environment(
+    client: OdooClient, explicit: str | None, *, cwd: Path | None = None
+) -> DevelopmentEnvironment:
+    return _cli_context.resolve_environment(client, explicit, cwd=cwd)
+
+
+def resolve_project_path(cli_context: CliContext) -> Path:
+    return _cli_context.resolve_project_path(cli_context)
 
 
 def select_snapshot_environment(
@@ -412,6 +429,8 @@ def env_checkout(
         )
 
         project_path = resolve_project_path(cli_ctx)
+        from odoo_instance_sdk.client import OdooClient
+
         client = OdooClient(config=OdooClientConfig(executable="odoo"))
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
@@ -547,6 +566,8 @@ def env_list(
     _validate_watch_options(output_mode, watch=watch, interval=interval)
     try:
         project_id = resolve_monitor_project_id(ctx, all_projects)
+        from odoo_instance_sdk.client import OdooClient
+
         client = OdooClient(config=OdooClientConfig(executable="odoo"))
         environments = client.environments
     except Exception as e:
@@ -790,18 +811,9 @@ def _catalog_worktree_paths(
         raise RuntimeError(
             "environment catalogue read failed; cannot resolve worktree paths for env list"
         ) from exc
-    from odoo_instance_sdk.internal.paths import resolve_environment_artifact_paths
-
     paths: dict[str, str] = {}
     for row in rows:
-        artifacts = resolve_environment_artifact_paths(
-            environment_id=str(row["id"]),
-            repository_root=str(row["repository_root"]),
-            git_common_dir=str(row["git_common_dir"]),
-            python_environment_owned=bool(int(row["python_environment_owned"])),
-            python_environment_path=str(row["python_environment_path"]),
-        )
-        paths[str(row["id"])] = str(artifacts.worktree_path)
+        paths[str(row["id"])] = str(row["worktree_path"])
     return paths
 
 
@@ -860,6 +872,8 @@ def env_path(
             dry_run=False,
             usage=True,
         )
+
+    from odoo_instance_sdk.client import OdooClient
 
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     try:

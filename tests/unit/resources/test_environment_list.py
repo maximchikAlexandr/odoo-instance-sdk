@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentResource,
@@ -94,5 +95,7 @@ class TestEnvList:
             "environment.list.git.common-dir",
         ]
         catalog.list_environments.assert_called_once_with(
-            git_common_dir=str((tmp_path / ".git").resolve()), include_removed=False
+            git_common_dir=str((tmp_path / ".git").resolve()),
+            project_id=f"project_{repo_key(tmp_path, tmp_path / '.git')}",
+            include_removed=False,
         )
