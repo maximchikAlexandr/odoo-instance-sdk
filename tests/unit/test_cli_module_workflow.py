@@ -178,6 +178,7 @@ def _update_context(tmp_path: Path, owner: str) -> tuple[ResolvedContext, OdooIn
             "DevelopmentEnvironment",
             SimpleNamespace(
                 id="env-1",
+                project_id="project_env",
                 name="dev",
                 worktree_path=str(tmp_path),
                 repository_root=str(tmp_path),

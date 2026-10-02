@@ -49,9 +49,9 @@ def test_adopt_command_captures_external_checkout_without_git_creation(
             python=str(fake_python),
         ),
     )
-    plan = command._private_projection()  # type: ignore[attr-defined]
+    plan = command._private_projection()
     assert plan is not None
-    assert all(step.step_id != "checkout.worktree" for step in command._prepared().steps)  # type: ignore[attr-defined]
+    assert all(step.step_id != "checkout.worktree" for step in command._prepared().steps)
     assert checkout.is_dir()
 
 
@@ -110,8 +110,8 @@ def _process_result(step: PreparedProcess, stdout: str = "", stderr: str = "") -
         stdout=stdout if text else stdout.encode(),
         stderr=stderr if text else stderr.encode(),
         duration=0.0,
-        cwd=step.cwd,
-        environment=step.environment,
+        cwd=step.cwd,  # type: ignore[attr-defined]
+        environment=step.environment,  # type: ignore[attr-defined]
     )
 
 
@@ -169,8 +169,8 @@ def _capture_adoption_command(  # noqa: C901
                 "database.restore.exists-before",
                 "database.restore.exists-after",
             ):
-                if context.planned(step_id):
-                    context.skip(step_id)
+                if context.planned(step_id):  # type: ignore[attr-defined]
+                    context.skip(step_id)  # type: ignore[attr-defined]
         if restore_error is not None:
             raise restore_error
         value = uuid.uuid4()
@@ -181,7 +181,7 @@ def _capture_adoption_command(  # noqa: C901
     monkeypatch.setattr(type(resource), "_copy_auxiliary_session", lambda *_args: None)
     monkeypatch.setattr(type(resource), "_preflight_copy_checkout", lambda *_args: None)
     monkeypatch.setattr(type(resource), "_do_copy_restore", restore)
-    command = resource.adopt_command(  # type: ignore[attr-defined]
+    command = resource.adopt_command(
         project_manifest,
         checkout,
         options=EnvironmentCheckoutOptions(
@@ -211,7 +211,7 @@ def test_adoption_executes_copy_pipeline_without_taking_code_ownership(
 
     environment = command.run()  # type: ignore[attr-defined]
     plan = command._private_projection()  # type: ignore[attr-defined]
-    step_ids = tuple(step.step_id for step in captured["executor"].executed)  # type: ignore[attr-defined]
+    step_ids = tuple(step.step_id for step in captured["executor"].executed)  # type: ignore[index]
     assert environment.state is EnvironmentState.READY
     assert environment.code_ownership.value == "caller_owned"
     assert environment.checkout_repository_root == str(checkout)

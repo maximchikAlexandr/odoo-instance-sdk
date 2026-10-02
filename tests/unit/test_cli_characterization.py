@@ -489,6 +489,8 @@ def test_raw_stream_dry_run_option_order_is_stable_and_preserves_shell_args(
 def test_discovered_public_methods() -> None:
     expected = {
         EnvironmentResource: (
+            "adopt",
+            "adopt_command",
             "checkout",
             "checkout_command",
             "checkout_inventory",
@@ -619,6 +621,7 @@ def test_discovered_public_methods() -> None:
         BackupCatalog: (
             "active_environment_for",
             "add_environment_event",
+            "adopted_environment_for",
             "clear_environment_runtime",
             "close",
             "create_environment",

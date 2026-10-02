@@ -78,7 +78,13 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
+EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
+    # The optional Multica boundary is intentionally dependency-free in core;
+    # its operation-options value is supplied by the extension's typed SDK.
+    "src/odoo_instance_sdk/internal/multica_compat.py": frozenset(
+        {38, 44, 47, 53, 58, 60, 87, 94, 102, 109, 117, 122, 130, 135}
+    ),
+}
 
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(

@@ -87,6 +87,7 @@ from odoo_instance_sdk.models import (
     DevelopmentEnvironment,
     EnvironmentArtifacts,
     EnvironmentCheckoutPlan,
+    EnvironmentCodeOwnership,
     EnvironmentPythonMode,
     EnvironmentSnapshot,
     GitActivity,
@@ -851,6 +852,7 @@ PUBLIC_LEAF_CASES = tuple(_PUBLIC_LEAF_DATA)
 def _matrix_environment() -> SimpleNamespace:
     return SimpleNamespace(
         id="env-1",
+        project_id="project-1",
         name="demo",
         state="ready",
         branch="main",
@@ -1122,6 +1124,7 @@ def _matrix_public_environment(*, name: str = "demo") -> DevelopmentEnvironment:
         http_port=8069,
         db_mode=EnvironmentDatabaseMode.SHARED,
         state=EnvironmentState.READY,
+        code_ownership=EnvironmentCodeOwnership.SDK_OWNED,
         created_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
 

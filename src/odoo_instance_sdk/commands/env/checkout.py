@@ -20,6 +20,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.text import Text
 
+from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands import context as _cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.env.display import (
@@ -83,7 +84,6 @@ from odoo_instance_sdk.resources.monitor.collection_parts import EnvironmentMoni
 from odoo_instance_sdk.resources.monitor.planning import SnapshotSelection
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, JsonValue
 
 
@@ -429,8 +429,6 @@ def env_checkout(
         )
 
         project_path = resolve_project_path(cli_ctx)
-        from odoo_instance_sdk.client import OdooClient
-
         client = OdooClient(config=OdooClientConfig(executable="odoo"))
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
@@ -566,8 +564,6 @@ def env_list(
     _validate_watch_options(output_mode, watch=watch, interval=interval)
     try:
         project_id = resolve_monitor_project_id(ctx, all_projects)
-        from odoo_instance_sdk.client import OdooClient
-
         client = OdooClient(config=OdooClientConfig(executable="odoo"))
         environments = client.environments
     except Exception as e:
@@ -872,8 +868,6 @@ def env_path(
             dry_run=False,
             usage=True,
         )
-
-    from odoo_instance_sdk.client import OdooClient
 
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     try:
