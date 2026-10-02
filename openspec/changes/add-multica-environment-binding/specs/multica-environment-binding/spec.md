@@ -25,7 +25,7 @@ Checkout and Odoo preparation SHALL remain separately captured phases. No genera
 
 The extension SHALL expose a finite read-only context SDK operation and CLI equivalent. Inputs SHALL identify the selected core project/repository, checkout path, expected Multica project, issue, and run; existing scoped Multica configuration SHALL supply server/workspace credentials. It SHALL NOT persist a project-link file or infer identities from names, branches, task prose, or list order.
 
-Context SHALL compose public typed project, project-resource, issue/run operations with `MulticaClient.daemon.status_command()/status()` and frozen `DaemonStatus` from exact `multica-py` PR #95 merge revision. It SHALL require `Issue.project_id` to equal the selected `Project.id`, a complete public `Project.resources` page, and exactly one matching typed `github_repo` resource whose `GithubRepoResourceRef.url` identifies the selected core repository. It SHALL separately verify workspace/issue/run membership, owning local daemon/runtime identity, and containment beneath the run's absolute current/durable directory. Populated TaskRun project identity snapshots SHALL be consistent, but their absence SHALL NOT fail otherwise complete authoritative Issue/Project evidence. It SHALL return frozen facts and observation time. Raw daemon commands, local JSON decoders, private transports, and reduced status models SHALL NOT be used.
+Context SHALL compose public typed project, project-resource, issue/run operations with `MulticaClient.daemon.status_command()/status()` and frozen `DaemonStatus` from exact `multica-py` PR #95 merge revision. It SHALL require `Issue.project_id` to equal the selected `Project.id` and SHALL read resources through `MulticaClient.projects.resources.list_command(project_id)` / `list(project_id)` returning `Page[ProjectResourceRecord]`. That page SHALL be accepted as complete only when `has_more is False`, `next_cursor is None`, `offset` is absent or zero, `total` is present and equals `len(items)`, and exactly one matching typed `github_repo` item has a `GithubRepoResourceRef.url` identifying the selected core repository. `Project.resources` MAY be used as a convenience `LazyCollection`, but SHALL NOT be used to prove pagination completeness because its loader exposes only page items. Context SHALL separately verify workspace/issue/run membership, owning local daemon/runtime identity, and containment beneath the run's absolute current/durable directory. Populated TaskRun project identity snapshots SHALL be consistent, but their absence SHALL NOT fail otherwise complete authoritative Issue/Project evidence. It SHALL return frozen facts and observation time. Raw daemon commands, local JSON decoders, private transports, and reduced status models SHALL NOT be used.
 
 #### Scenario: Matching local run
 
@@ -34,12 +34,12 @@ Context SHALL compose public typed project, project-resource, issue/run operatio
 
 #### Scenario: TaskRun omits duplicated project snapshot
 
-- **WHEN** the exact TaskRun omits `project_id` or `project_resources`, while the issue identifies the selected project, the complete public Project resource collection identifies exactly the selected repository, and run/workspace/runtime/path plus daemon evidence match
+- **WHEN** the exact TaskRun omits `project_id` or `project_resources`, while the issue identifies the selected project, the direct public Project-resource page has complete pagination metadata and identifies exactly the selected repository, and run/workspace/runtime/path plus daemon evidence match
 - **THEN** context returns the verified identifiers and checkout facts without weakening any run, host, runtime, or path check
 
 #### Scenario: Project repository evidence is unavailable
 
-- **WHEN** the public Project resource page is incomplete, has no matching repository, has multiple matches, or conflicts with the selected core repository, or a populated TaskRun project snapshot conflicts with authoritative Issue/Project evidence
+- **WHEN** the direct public Project-resource page reports more data, a cursor, a nonzero offset, an absent or inconsistent total, no matching repository, multiple matches, or a conflict with the selected core repository, or a populated TaskRun project snapshot conflicts with authoritative Issue/Project evidence
 - **THEN** context fails before mutation and does not infer repository identity from TaskRun absence, prose, names, list order, or local paths
 
 #### Scenario: Wrong host or incomplete evidence
