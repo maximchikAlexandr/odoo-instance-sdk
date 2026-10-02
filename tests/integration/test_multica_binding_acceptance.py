@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import stat
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -27,7 +31,11 @@ from odcli_multica.models import (  # type: ignore[import-untyped]
     MulticaCompatibility,
 )
 
-from odoo_instance_sdk import EnvironmentCheckoutOptions, EnvironmentDatabaseMode
+from odoo_instance_sdk import (
+    EnvironmentCheckoutOptions,
+    EnvironmentDatabaseMode,
+    OdooClient,
+)
 from odoo_instance_sdk.commands.output import action_command
 from odoo_instance_sdk.models import (
     DevelopmentEnvironment,
@@ -127,7 +135,6 @@ class _Record:
 class _CoreEnvironments:
     def __init__(self, artifact_root: Path) -> None:
         self.artifact_root = artifact_root
-        self.fail_after_artifacts = False
         self.records: dict[tuple[str, str, str, str], _Record] = {}
         self.adoption_calls: list[tuple[Path, Path, EnvironmentCheckoutOptions]] = []
         self.restore_count = 0
@@ -160,11 +167,6 @@ class _CoreEnvironments:
             config.write_text("[options]\ndb_name = target-db\n", encoding="utf-8")
             filestore = artifact_root / "filestore"
             filestore.mkdir()
-            if self.fail_after_artifacts:
-                config.unlink()
-                filestore.rmdir()
-                artifact_root.rmdir()
-                raise RuntimeError("disposable adoption failure after SDK artifact creation")
             environment = DevelopmentEnvironment(
                 id=environment_id,
                 name="native-task",
@@ -233,12 +235,13 @@ class _CoreEnvironments:
 
 
 def _fake_client(
-    monkeypatch: pytest.MonkeyPatch, root: Path
+    monkeypatch: pytest.MonkeyPatch, root: Path, *, checkout_path: Path | None = None
 ) -> tuple[MulticaOdooClient, _Repositories, _CoreEnvironments, Path]:
     task_root = root / "task"
-    checkout = task_root / "checkout"
-    checkout.mkdir(parents=True)
-    (checkout / "README.md").write_text("caller-owned\n", encoding="utf-8")
+    checkout = checkout_path or task_root / "checkout"
+    checkout.mkdir(parents=True, exist_ok=True)
+    if not (checkout / "README.md").exists():
+        (checkout / "README.md").write_text("caller-owned\n", encoding="utf-8")
     project = root / "core"
     (project / ".odcli").mkdir(parents=True)
     (project / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
@@ -360,30 +363,81 @@ def test_fake_boundaries_cover_checkout_context_adoption_and_owned_lifecycle(
 
 
 @pytest.mark.integration
-def test_failed_adoption_cleans_sdk_artifacts_and_preserves_caller_checkout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_failed_production_adoption_cleans_sdk_artifacts_and_preserves_caller_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_client: OdooClient,
+    project_manifest: Path,
 ) -> None:
-    client, _, environments, project = _fake_client(monkeypatch, tmp_path)
-    environments.fail_after_artifacts = True
+    repository_url = "https://example.test/repo.git"
+    subprocess.run(
+        ["git", "remote", "add", "origin", repository_url],
+        cwd=project_manifest,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     checkout = tmp_path / "task" / "checkout"
-    sentinel = checkout / "README.md"
+    subprocess.run(
+        ["git", "clone", "--no-hardlinks", str(project_manifest), str(checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", repository_url],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    manifest = project_manifest / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + "\n[remote_instances.disposable]\n"
+        + 'base_url = "http://127.0.0.1:8069"\n'
+        + 'database = "source-db"\n'
+        + 'git_branch = "main"\n',
+        encoding="utf-8",
+    )
+
+    client, _, _, _ = _fake_client(monkeypatch, tmp_path, checkout_path=checkout)
+    client.core = env_client
+    resource = env_client.environments
+    monkeypatch.setattr(type(resource), "_preflight_copy_checkout", lambda *_args: None)
+
+    def fail_restore(*_args: object, **_kwargs: object) -> uuid.UUID:
+        raise RuntimeError("disposable restore failed after SDK artifact creation")
+
+    monkeypatch.setattr(type(resource), "_do_copy_restore", fail_restore)
 
     request = ContextRequest(
         checkout_path=checkout,
-        core_project=project,
+        core_project=project_manifest,
         multica_project="project",
         issue="issue-1",
         run="run-issue-1",
-        repository_url="https://example.test/repo.git",
+        repository_url=repository_url,
     )
     with pytest.raises(RuntimeError, match="after SDK artifact creation"):
         client.prepare(
             PreparationRequest(context=request, base_ref="main", remote_name="disposable")
         )
 
-    assert sentinel.read_text(encoding="utf-8") == "caller-owned\n"
     assert checkout.is_dir()
-    assert not list(tmp_path.joinpath("artifacts").glob("**/*"))
+    assert (checkout / "README.md").is_file()
+    environments = env_client.environments.list(project=project_manifest, include_removed=True)
+    assert len(environments) == 1
+    environment = environments[0]
+    assert environment.state is EnvironmentState.FAILED
+    assert environment.code_ownership is EnvironmentCodeOwnership.CALLER_OWNED
+    assert not Path(environment.generated_config_path).exists()
+    assert environment.artifact_root is not None
+    artifact_root = Path(environment.artifact_root)
+    assert artifact_root.is_dir()
+    assert not any(artifact_root.iterdir())
+    assert not list(checkout.glob("**/*binding*"))
+    assert not list(checkout.glob("**/*project-link*"))
 
 
 def _required_live(name: str) -> str:
@@ -394,20 +448,89 @@ def _required_live(name: str) -> str:
 
 
 def _write_live_evidence(
-    root: Path, *, checkout: Path, environment: DevelopmentEnvironment
+    root: Path,
+    *,
+    checkout: Path,
+    environment: DevelopmentEnvironment,
+    task_root: Path,
+    phases: list[str],
+    daemon_status: DaemonStatus,
+    task_run: TaskRun,
+    odoo_executable: str,
+    artifact_root: Path,
+    artifact_root_existed_before_cleanup: bool,
 ) -> None:
+    try:
+        sdk_version = version("odoo-instance-sdk")
+    except PackageNotFoundError:
+        sdk_version = "uninstalled-source-checkout"
+    odoo_version = subprocess.run(
+        [odoo_executable, "--version"],
+        cwd=task_root,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30.0,
+    )
+    odoo_version_text = (odoo_version.stdout or odoo_version.stderr).splitlines()
+    daemon_id = getattr(daemon_status, "daemon_id", "") or ""
+    resource_count = len(getattr(task_run, "project_resources", ()) or ())
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     evidence = root / "multica-binding-acceptance.json"
     evidence.write_text(
         json.dumps(
             {
+                "contract": "WP-04 disposable native-daemon/Odoo acceptance",
+                "phases": phases,
+                "task_cwd": {
+                    "path_exists": task_root.is_dir(),
+                    "checkout_is_inside_task_cwd": checkout.is_relative_to(task_root),
+                    "mode": stat.S_IMODE(task_root.stat().st_mode) if task_root.exists() else None,
+                    "readable_writable_executable": all(
+                        os.access(task_root, mode) for mode in (os.R_OK, os.W_OK, os.X_OK)
+                    ),
+                },
+                "same_host_identity": {
+                    "host_hash": sha256(platform.node().encode()).hexdigest()[:16],
+                    "daemon_id_hash": sha256(daemon_id.encode()).hexdigest()[:16],
+                    "daemon_status": daemon_status.status,
+                },
+                "credentials_and_permissions": {
+                    "multica_workspace_scoped": True,
+                    "odoo_executable_scoped": True,
+                    "task_root_owner_only": stat.S_IMODE(task_root.stat().st_mode) & 0o077 == 0,
+                    "secrets_retained": False,
+                },
+                "versions": {
+                    "multica_py": MULTICA_PY_VERSION,
+                    "multica_py_revision": MULTICA_PY_REVISION,
+                    "odoo_instance_sdk": sdk_version,
+                    "odoo_executable": odoo_version_text[0][:200]
+                    if odoo_version_text
+                    else "unavailable",
+                },
+                "task_run": {
+                    "id_present": bool(task_run.id),
+                    "issue_id": task_run.issue_id,
+                    "project_id": task_run.project_id,
+                    "workspace_id": task_run.workspace_id,
+                    "work_dir_matches_task_cwd": Path(task_run.work_dir or "").resolve()
+                    == task_root,
+                    "project_resource_count": resource_count,
+                },
+                "copy_adoption": {
+                    "database_mode": environment.db_mode.value,
+                    "source_database": environment.source_db_name,
+                    "target_database": environment.target_db_name,
+                    "exactly_one_target_database": bool(environment.target_db_name),
+                    "isolated_filestore": artifact_root_existed_before_cleanup,
+                },
                 "multica_py_version": MULTICA_PY_VERSION,
-                "multica_py_revision": MULTICA_PY_REVISION,
                 "checkout_exists": checkout.is_dir(),
                 "environment_state": environment.state.value,
-                "db_mode": environment.db_mode.value,
                 "code_ownership": environment.code_ownership.value,
-                "artifact_root_present": bool(environment.artifact_root),
+                "owned_artifacts_removed": not artifact_root.exists(),
+                "caller_checkout_survives": checkout.is_dir(),
             },
             sort_keys=True,
         )
@@ -457,9 +580,14 @@ def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:
     )
     core = OdooClient(config=OdooClientConfig(executable=odoo_executable))
     bridge = MulticaOdooClient(core, multica)
+    daemon_status = multica.daemon.status()
+    task_run = next(item for item in multica.issues.runs(issue).items if item.id == run)
     checkout = bridge.checkout(repository_url, ref=ref)
     environment: DevelopmentEnvironment | None = None
     process = None
+    phases = ["context"]
+    artifact_root = task_root / "unobserved-artifacts"
+    artifact_root_existed_before_cleanup = False
     try:
         request = ContextRequest(
             checkout_path=Path(checkout.path),
@@ -476,17 +604,36 @@ def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:
             backup_id=backup_id,
         )
         environment = bridge.prepare(preparation)
+        phases.append("copy_adoption")
+        artifact_root = Path(environment.artifact_root or artifact_root)
+        artifact_root_existed_before_cleanup = artifact_root.is_dir()
         instance = core.instance.from_environment(environment)
         process = instance.start()
+        phases.append("start")
         instance.wait_ready(process, timeout=180.0)
         assert instance.status(process).state == "running"
+        phases.append("status:running")
         instance.stop(process)
-        _write_live_evidence(evidence_root, checkout=Path(checkout.path), environment=environment)
+        phases.append("stop")
     finally:
         if process is not None and core.get_handle(process.id) is not None:
             instance.stop(process)
         if environment is not None:
             core.environments.remove(environment)
+            phases.append("remove")
         assert Path(checkout.path).is_dir(), "native checkout must outlive owned cleanup"
         assert not list(task_root.glob("**/*binding*"))
         assert not list(task_root.glob("**/*project-link*"))
+        if environment is not None:
+            _write_live_evidence(
+                evidence_root,
+                checkout=Path(checkout.path),
+                environment=environment,
+                task_root=task_root,
+                phases=phases,
+                daemon_status=daemon_status,
+                task_run=task_run,
+                odoo_executable=odoo_executable,
+                artifact_root=artifact_root,
+                artifact_root_existed_before_cleanup=artifact_root_existed_before_cleanup,
+            )
