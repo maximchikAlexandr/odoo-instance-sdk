@@ -218,14 +218,22 @@ class _EnvironmentMixin:
         self,
         *,
         git_common_dir: str | None = None,
+        project_id: str | None = None,
         include_removed: bool = False,
     ) -> list[sqlite3.Row]:
         query = "SELECT * FROM environments"
         params: list[str] = []
         clauses: list[str] = []
         if git_common_dir is not None:
-            clauses.append("git_common_dir = ?")
-            params.append(git_common_dir)
+            if project_id is None:
+                clauses.append("git_common_dir = ?")
+                params.append(git_common_dir)
+            else:
+                clauses.append("(project_id = ? OR (project_id IS NULL AND git_common_dir = ?))")
+                params.extend((project_id, git_common_dir))
+        elif project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
         if not include_removed:
             clauses.append("state != 'removed'")
         if clauses:
@@ -381,13 +389,13 @@ class _EnvironmentMixin:
                 clauses.append("e.state != 'removed'")
             if project_id is not None:
                 clauses.append(
-                    "EXISTS ("
+                    "(e.project_id = ? OR (e.project_id IS NULL AND EXISTS ("
                     "SELECT 1 FROM projects p "
                     "WHERE p.project_id = ? AND p.repository_root = e.repository_root "
                     "AND p.git_common_dir = e.git_common_dir"
-                    ")"
+                    ")))"
                 )
-                params.append(project_id)
+                params.extend((project_id, project_id))
             state_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
             environment_query = (
                 "SELECT e.*, b.state AS backup_state, b.path AS backup_path "

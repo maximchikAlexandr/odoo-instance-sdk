@@ -249,17 +249,13 @@ class _CollectMixin:
             if env_id not in environment_ids:
                 continue
             if project_id is not None:
-                resolved_project = f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                resolved_project = str(
+                    row["project_id"]
+                    or f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                )
                 if resolved_project != project_id:
                     continue
-            artifacts = _paths.resolve_environment_artifact_paths(
-                environment_id=env_id,
-                repository_root=str(row["repository_root"]),
-                git_common_dir=str(row["git_common_dir"]),
-                python_environment_owned=bool(int(row["python_environment_owned"])),
-                python_environment_path=str(row["python_environment_path"]),
-            )
-            paths[env_id] = str(artifacts.worktree_path)
+            paths[env_id] = str(row["worktree_path"])
         return paths
 
     def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:
@@ -331,7 +327,10 @@ class _CollectMixin:
         try:
             rows = catalog._monitor_snapshot_rows(include_removed=False)
             for row, _runtime in rows.environments:
-                resolved_project_id = f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                resolved_project_id = str(
+                    row["project_id"]
+                    or f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                )
                 if project_id is not None and resolved_project_id != project_id:
                     continue
                 database_value = (
@@ -485,7 +484,10 @@ class _CollectMixin:
             worktree = Path(str(row["worktree_path"])).resolve()
             env_id = str(row["id"])
             repository = Path(str(row["repository_root"])).resolve()
-            resolved_project = f"project_{repo_key(repository, Path(str(row['git_common_dir'])))}"
+            resolved_project = str(
+                row["project_id"]
+                or f"project_{repo_key(repository, Path(str(row['git_common_dir'])))}"
+            )
             if project_id is not None and resolved_project != project_id:
                 continue
             base_ref = _validated_base_ref(row["base_ref"])
@@ -810,7 +812,9 @@ class _CollectMixin:
         for row, runtime in rows:
             repository = Path(str(row["repository_root"])).resolve()
             git_common = Path(str(row["git_common_dir"])).resolve()
-            resolved_project_id = f"project_{repo_key(repository, git_common)}"
+            resolved_project_id = str(
+                row["project_id"] or f"project_{repo_key(repository, git_common)}"
+            )
             groups.setdefault(resolved_project_id, []).append(_EnvironmentPlan(row, runtime))
             project_details.setdefault(resolved_project_id, repository)
             environment_ids.add(str(row["id"]))

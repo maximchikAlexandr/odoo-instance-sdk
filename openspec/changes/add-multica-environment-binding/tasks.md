@@ -9,8 +9,8 @@
 
 - [x] 2.1 Add only the necessary additive core catalog/public evidence for configured project identity, actual checkout identity, code ownership, and explicit SDK artifact root. Verify conservative legacy ownership, fresh/upgraded schema equivalence, and one migration head; document the forward-only migration.
 - [x] 2.2 Add public inspectable caller-owned-checkout adoption by reusing COPY provisioning after code acquisition. Cover linked worktrees and independent clones, explicit source/base, wrong/dirty/replaced checkout, secret isolation, no implicit venv, plan parity, concurrent reservation, same-input UUID retry, conflicting/incomplete records, and retry after ordinary edits.
-- [ ] 2.3 Update core list/cwd/config/sync/runtime/diagnostic paths to use separate project, checkout, and artifact identities. Verify project/UUID/cwd lookup, rebased repository-local paths, external path preservation, isolated data, startup refusal for missing/replaced code, and normal SDK-owned compatibility.
-- [ ] 2.4 Make rollback/removal preserve caller-owned code and its parent even when dirty, missing, symlinked, or replaced, while removing only independently proven SDK artifacts under existing runtime/database ownership guards. Verify partial cleanup/recovery and unchanged SDK-owned checkout behavior.
+- [x] 2.3 Update core list/cwd/config/sync/runtime/diagnostic paths to use separate project, checkout, and artifact identities. Verify project/UUID/cwd lookup, rebased repository-local paths, external path preservation, isolated data, startup refusal for missing/replaced code, and normal SDK-owned compatibility.
+- [x] 2.4 Make rollback/removal preserve caller-owned code and its parent even when dirty, missing, symlinked, or replaced, while removing only independently proven SDK artifacts under existing runtime/database ownership guards. Verify partial cleanup/recovery and unchanged SDK-owned checkout behavior.
 
 ## 3. Minimal integration package
 

@@ -790,18 +790,9 @@ def _catalog_worktree_paths(
         raise RuntimeError(
             "environment catalogue read failed; cannot resolve worktree paths for env list"
         ) from exc
-    from odoo_instance_sdk.internal.paths import resolve_environment_artifact_paths
-
     paths: dict[str, str] = {}
     for row in rows:
-        artifacts = resolve_environment_artifact_paths(
-            environment_id=str(row["id"]),
-            repository_root=str(row["repository_root"]),
-            git_common_dir=str(row["git_common_dir"]),
-            python_environment_owned=bool(int(row["python_environment_owned"])),
-            python_environment_path=str(row["python_environment_path"]),
-        )
-        paths[str(row["id"])] = str(artifacts.worktree_path)
+        paths[str(row["id"])] = str(row["worktree_path"])
     return paths
 
 
