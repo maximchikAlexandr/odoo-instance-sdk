@@ -30,6 +30,18 @@ The minimal supported contract is therefore:
 
 Requiring the platform to populate the duplicated TaskRun snapshot was rejected: it adds a prerequisite while providing no stronger identity than the supported source-of-truth Issue/Project relations. Reading raw CLI JSON, private transport, task prose, list order, branch names, or `local_directory` was also rejected. The chosen repair reuses one existing public relation and does not add a registry, adapter, decoder, or fallback identity source.
 
+## Task 4.2 native fixture re-research — 2026-10-02
+
+The subsequent unaccepted WP-04 candidate is `8c912c81d6a21d4675b11a3c87a44884a14620c2` on `origin/wp/MYL-307-WP-04-integrated-acceptance`. Its live selector is skipped unless a caller supplies an executable, repository/project/issue/run/task-root identity, Odoo executable, evidence root, and exactly one of `ODCLI_MULTICA_REMOTE_NAME` or `ODCLI_MULTICA_BACKUP_ID`. The project currently exposes only the SDK GitHub resource, and no approved disposable Odoo source exists. Therefore the skip is a real missing fixture contract, not successful native evidence.
+
+The existing real-Odoo foundation supplies a reusable immutable source identity without changing product scope: public repository `https://github.com/odoo/odoo.git`, commit `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, audited CPython `3.12.13` dependency lock, loopback-only source/target patterns, owner-only secret files, unique per-run database names, cleanup ledgers, and sanitized evidence helpers. Its Compose tiers are useful provisioning evidence but do not exercise Multica's native checkout, the selected TaskRun/daemon identity, or a native target process from the borrowed checkout.
+
+The safe live selector is the existing named-source contract, fixed to `EnvironmentCheckoutOptions(remote_name="disposable-native-source")`. The source is created for the run, initialized natively with only Odoo `base` and no demo data, and addressed through loopback with generated owner-only credentials. This reuses the public backup download/catalogue/provenance pipeline and avoids an unverifiable pre-existing retained backup UUID. Task 4.2 forbids `backup_id`, direct `source_database`, default fallback, customer sources, and catalogue rows that predate the fixture.
+
+Repository authority requires a dedicated disposable Multica fixture project rather than the current SDK project: its sole `github_repo` resource identifies the pinned public Odoo repository, and its fixture issue creates the actual active TaskRun below whose owner-only absolute root typed checkout runs. A separate core-project clone of the same repository/ref carries the test-local `.odcli` manifest; the typed native checkout remains Multica-owned. Core cleanup removes only its target database, filestore, config/log/lock and other proven artifacts. Fixture teardown separately removes the native source process/database/filestore, generated PostgreSQL role and credentials, and core-project clone, while Multica retires its issue/project/checkout through public lifecycle.
+
+This fixture is intentionally operator-provisioned rather than a new product orchestrator. WP-04 owns only test wiring, preflight, evidence and teardown. Fail-closed preflight precedes checkout/database mutation and verifies exact repository/ref, unique names, same-host daemon/runtime/path, owner-only task root and secret files, available pinned native executable/Python, and an empty cleanup ledger. Sanitized evidence records exact versions/ref/selector, identity checks, lifecycle phases, isolation and cleanup booleans/hashes; it never retains credentials, source dumps, customer identifiers, or private absolute paths.
+
 ## Observed Odoo Instance SDK contracts
 
 `EnvironmentResource.checkout_command(project, branch, *, options=EnvironmentCheckoutOptions()) -> Command[DevelopmentEnvironment]`, `checkout()` and `checkout_with_plan()` remain the public SDK-owned checkout surfaces. `EnvironmentCheckoutOptions` now includes:
@@ -83,9 +95,9 @@ The core base also declares `0.1.0`; implementation shall bind to the integrated
 
 ## Reconciliation result
 
-- **Scope:** unchanged. The blocker repair substitutes the public authoritative Issue/Project-resource relation for an optional duplicated TaskRun snapshot; it adds no product capability.
+- **Scope:** unchanged. The blocker repair substitutes the public authoritative Issue/Project-resource relation for an optional duplicated TaskRun snapshot and makes the already-required live fixture executable; it adds no product capability or production orchestrator.
 - **Topology:** unchanged. Core adoption/catalog remains the shared foundation; core lifecycle and the extension package remain a real disjoint parallel frontier; integrated acceptance and final publication remain the fan-in.
-- **Estimate threshold:** unchanged. Accepted predecessor work lowers remaining effort, while the context repair and disposable live acceptance retain material integration uncertainty; the authoritative estimate remains above the multi-WP threshold. Exact totals live only in issue properties.
+- **Estimate threshold:** must be recomputed from the complete revision. Accepted predecessor work lowers remaining effort, while dedicated project/run provisioning, native source/target setup, fail-closed preflight and cleanup evidence make the live acceptance boundary explicit. Exact totals live only in issue properties.
 - **Issue #70 split:** unchanged. Context and preparation remain here; telemetry, usage allocation and inventory enrichment remain #105.
 
 ## Implementation authorization checklist

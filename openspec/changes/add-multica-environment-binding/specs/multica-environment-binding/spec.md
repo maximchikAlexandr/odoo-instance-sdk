@@ -128,3 +128,31 @@ The implementation SHALL use the blocker-revised planning revision that records 
 
 - **WHEN** the selected base or dependency API/version no longer matches the approved evidence in a scope-, topology-, or threshold-affecting way
 - **THEN** implementation remains or becomes closed until a new planning revision is validated and independently approved
+
+### Requirement: Disposable native acceptance fixture
+
+Task 4.2 SHALL run in a dedicated disposable Multica project, issue, and active TaskRun on the same native daemon and shared filesystem as the acceptance executor. The project SHALL contain exactly one `github_repo` resource for `https://github.com/odoo/odoo.git`; typed native checkout SHALL use `fresh=False`, ref `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, and an owner-only absolute task root reported by that TaskRun. A different project/run, a forwarded daemon, a pre-existing checkout, or customer workspace/data/credentials SHALL NOT qualify.
+
+The fixture SHALL create a separate core-project clone of the same repository/ref, an audited native Odoo/Python environment, a unique fixture-only PostgreSQL role, a native loopback source database initialized with `base` and no demo data, and a separate target database/filestore. The configured source SHALL be named `disposable-native-source`, and live preparation SHALL select exactly `remote_name=disposable-native-source`. It SHALL NOT accept `backup_id`, `source_database`, a default source, a pre-existing catalogue entry, or any source whose disposable ownership is unproven.
+
+The adopted target SHALL start, report ready/running, stop, and be removed through public native core lifecycle surfaces. A container MAY provide isolated PostgreSQL, but Compose or containerized Odoo smoke SHALL NOT replace native checkout, daemon/context, adoption, Odoo lifecycle, or cleanup evidence. Fixture teardown SHALL stop owned processes; remove source and target databases, filestores, generated role/credentials, core-project clone, and SDK-owned artifacts; preserve the Multica-owned checkout during core cleanup; and leave retirement of the fixture issue/project/checkout to their public Multica lifecycle. Evidence SHALL be sanitized and SHALL include exact revisions/ref/selector, identity/page checks, phases, isolation, and cleanup-ledger results without secrets or private absolute paths.
+
+#### Scenario: Approved fixture completes native flow
+
+- **WHEN** the dedicated same-host fixture passes fail-closed preflight and preparation uses the prescribed named source
+- **THEN** the typed native checkout flows through verified context, COPY adoption, native start/status, stop/remove, sanitized evidence capture, and complete owned-resource cleanup while the Multica-owned checkout survives core cleanup
+
+#### Scenario: Fixture identity or ownership is unsafe
+
+- **WHEN** the project/resource/run/daemon/path evidence is incomplete, the repository/ref differs, the task root is not owner-only, a name collides, or source/cleanup ownership cannot be proved
+- **THEN** the fixture fails before checkout or database mutation and task 4.2 remains unsatisfied
+
+#### Scenario: Unsupported live source selector
+
+- **WHEN** live acceptance supplies `backup_id`, `source_database`, a default source, a pre-existing catalogue row, or more than the prescribed named source
+- **THEN** the fixture rejects the run before preparation and records no native acceptance pass
+
+#### Scenario: Compose smoke is available
+
+- **WHEN** Compose or containerized Odoo smoke passes without the prescribed native Multica and Odoo phases
+- **THEN** it remains supplementary infrastructure evidence and does not satisfy task 4.2

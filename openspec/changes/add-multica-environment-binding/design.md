@@ -63,7 +63,19 @@ Add `packages/odcli-multica` as an independently versioned distribution/import/e
 
 The dependency and re-research conditions are satisfied: MYL-272 is integrated by PR #110 merge `11ff3403f2108adc901154ebeb9ee509add46ef5` and is present in selected base `c1e57b79f39e529a50c25818134c06309384ee23`; complete `multica-py` #93 is integrated by PR #95 merge `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed`; their public code, types, tests and version metadata were re-read for this revision.
 
-The implementation feature branch contains accepted predecessor work, while `WP-04` is blocked on task 4.2 and candidate `c15b84d9bc87a63513d9da04f8718dc3cdd3e0cc` is unaccepted. The public Project-resource contract above is the planning-approved repair. `WP-04` remains blocked until this exact planning SHA is strictly validated, pushed unchanged, and independently approved by Plan Verifier; Manager or WP Delivery SHALL NOT alter production code or OpenSpec to bypass that gate. Any later incompatible dependency, base, scope, estimate-threshold, or topology drift returns to planning.
+The implementation feature branch contains accepted predecessor work, while `WP-04` is blocked on task 4.2 and candidate `8c912c81d6a21d4675b11a3c87a44884a14620c2` is unaccepted. The public Project-resource contract above and disposable fixture contract below are the planning-approved repair. `WP-04` remains blocked until this exact planning SHA is strictly validated, pushed unchanged, and independently approved by Plan Verifier; Manager or WP Delivery SHALL NOT alter production code or OpenSpec to bypass that gate. Any later incompatible dependency, base, scope, estimate-threshold, or topology drift returns to planning.
+
+### D7. Task 4.2 uses one prescribed disposable native fixture
+
+The fixture owner SHALL provision a dedicated temporary Multica project in the acceptance workspace with exactly one `github_repo` resource for `https://github.com/odoo/odoo.git`, a temporary issue assigned only to the acceptance executor, and one resulting active TaskRun on the same native daemon/filesystem as the test. The run's absolute current or durable directory SHALL be an owner-only (`0700`) disposable root. The typed checkout SHALL use `fresh=False`, the repository URL above, and ref `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, matching the repository's existing immutable real-Odoo pin. It SHALL create the checkout below that TaskRun root; a pre-existing checkout, another project/run, a forwarded daemon, or a customer workspace is not an admissible substitute.
+
+The fixture owner SHALL prepare a separate owner-only core-project clone of the same repository at the same commit and a test-local Odoo/Python environment from the checked repository's existing audited real-Odoo lock. It SHALL create a unique PostgreSQL role plus two unique databases: a source initialized natively with only `base`, no demo data, and a separate target selected by core COPY provisioning. A native loopback-only source Odoo process SHALL expose that source under the manifest name `disposable-native-source`; fixture-generated master/database credentials SHALL live only in owner-only files. Task 4.2 SHALL pass only `EnvironmentCheckoutOptions(remote_name="disposable-native-source")`. `backup_id`, `source_database`, default-source fallback, pre-existing catalogue rows, customer sources, and customer credentials are forbidden for this acceptance case.
+
+The target Odoo process SHALL be started from the adopted native checkout through the public core instance lifecycle and the configured native executable/Python environment, then observed ready/running, stopped, and removed. A container MAY supply an isolated PostgreSQL dependency, but containerized or Compose Odoo smoke SHALL NOT satisfy native checkout, native daemon, context, adoption, start/status, stop, or removal evidence. Teardown SHALL run from `finally`: stop both Odoo processes, remove the target environment/database/filestore and source database/filestore/role, remove fixture credentials and the core-project clone, and verify that core cleanup did not remove the Multica-owned checkout. The Multica fixture issue/project and native checkout remain owned by the fixture owner/Multica and SHALL be retired through their public lifecycle after evidence capture, never by recursive test cleanup.
+
+The fixture preflight SHALL fail before checkout or database mutation unless the project/resource/run/daemon/path evidence is complete, the pinned Odoo ref and native executable are available, names are unique, the task root is owner-only, and the source/target cleanup ledger is empty. Sanitized evidence SHALL record hashes or booleans rather than secrets or absolute private paths, the exact repository/ref and dependency revisions, the selected source name, TaskRun snapshot-omission case, complete direct Project-resource page, lifecycle phases, database/filestore isolation, and post-cleanup ownership results.
+
+Alternative rejected: reuse the current SDK project/run and point at an unrelated Odoo source. Its authoritative repository resource identifies the SDK repository, so it cannot prove the selected Odoo checkout belongs to the issue project. Alternative rejected: use only the existing Compose smoke. It does not exercise native Multica checkout/daemon identity or the core native lifecycle from the borrowed checkout. Alternative rejected: select an arbitrary retained backup UUID. Its origin and customer-data safety cannot be proven by this fixture.
 
 ## Risks / Trade-offs
 
@@ -73,14 +85,14 @@ The implementation feature branch contains accepted predecessor work, while `WP-
 - **No extension-side persistent association** → the workflow caller stores context plus environment UUID; later telemetry attribution remains #105.
 - **Cross-package compatibility can drift** → declare compatible versions, run installed-wheel tests, and fail before mutation on unsupported contracts.
 - **Project resources may be incomplete or ambiguous** → require a complete public typed page and exactly one repository match; never fall back to TaskRun snapshots, prose, list order, or local guesses.
-- **Live daemon/Odoo evidence is environment-sensitive** → require an explicitly approved disposable acceptance fixture; static research never substitutes for it.
+- **Live daemon/Odoo evidence is environment-sensitive** → use the single D7 fixture contract with pinned public source, fixture-only databases/credentials, fail-closed preflight, cleanup ledger, and sanitized evidence; static research or Compose smoke never substitutes for it.
 
 ## Migration Plan
 
 1. Independently approve this task-4.2 blocker-revision exact SHA against the recorded feature head, base and dependency revisions.
 2. Add the smallest ownership/project evidence migration and generic adoption path while preserving existing SDK-owned behavior.
 3. Add the optional package using the observed typed Multica contracts and existing output boundary.
-4. Validate fake boundaries, installed wheels, and an approved disposable native-daemon/Odoo flow before release.
+4. Provision the D7 disposable project/run and native Odoo source, execute task 4.2 with `remote_name=disposable-native-source`, capture sanitized evidence, and complete the cleanup ledger before release.
 
 Rollback uninstalls the extension without deleting environments. A compatible core cleans only proven SDK-owned artifacts by UUID. Catalog migration is forward-only; an older core must not manage rows carrying the new ownership evidence.
 
