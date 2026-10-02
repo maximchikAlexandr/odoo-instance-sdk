@@ -181,20 +181,34 @@ def _handle_existing_manifest(  # noqa: C901
 
 
 @cli.command(help="Diagnose project, runtime, and PostgreSQL.")
+@click.option("--remote", "remote_name", default=None, help="Named remote source to diagnose.")
 @output_options
 @pass_cli_context
-def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
+def doctor(
+    ctx: CliContext,
+    remote_name: str | None,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
         resolved = cli_context._ready_instance_for_doctor(ctx)
         from odoo_instance_sdk.internal.doctor import run_doctor
 
-        report = run_doctor(
-            resolved.client,
-            resolved.project_root,
-            resolved_context=resolved,
-        )
+        if remote_name is None:
+            report = run_doctor(
+                resolved.client,
+                resolved.project_root,
+                resolved_context=resolved,
+            )
+        else:
+            report = run_doctor(
+                resolved.client,
+                resolved.project_root,
+                resolved_context=resolved,
+                remote_name=remote_name,
+            )
     except Exception as e:
         fail(output_mode, "doctor", str(e), dry_run=False)
     if json_output:
@@ -367,17 +381,36 @@ def stop(
     default=False,
     help="Launch Odoo detached and return once it is alive.",
 )
+@click.option(
+    "--wait-ready",
+    is_flag=True,
+    default=False,
+    help="Wait for the environment-bound detached runtime to pass readiness checks.",
+)
+@click.option(
+    "--readiness-timeout",
+    type=click.FloatRange(min=0.0, min_open=True),
+    default=None,
+    help="Finite readiness wait in seconds (default: 60 when enabled).",
+)
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @command_options
 @pass_cli_context
 def run(  # noqa: C901
     ctx: CliContext,
     detach: bool,
+    wait_ready: bool,
+    readiness_timeout: float | None,
     odoo_args: tuple[str, ...],
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
+    if wait_ready and (not detach or ctx.env is None):
+        raise click.UsageError("--wait-ready requires root --env together with --detach")
+    if not wait_ready and readiness_timeout is not None:
+        raise click.UsageError("--readiness-timeout requires --wait-ready")
+    effective_readiness_timeout = 60.0 if readiness_timeout is None else readiness_timeout
     if detach:
         output_mode = resolve_output_mode(output_format, json_output)
     else:
@@ -398,7 +431,10 @@ def run(  # noqa: C901
         )
         if detach:
             detached_command = runtime_context.instance.run_detached_command(
-                args=odoo_args, env=pg_dump_env
+                args=odoo_args,
+                env=pg_dump_env,
+                wait_ready=wait_ready,
+                readiness_timeout=effective_readiness_timeout,
             )
         else:
             if not dry_run:

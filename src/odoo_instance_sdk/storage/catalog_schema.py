@@ -67,6 +67,14 @@ backups = Table(
     Column("error_message", Text),
     Column("project_id", Text, ForeignKey("projects.project_id")),
     Column("source_git_branch", Text),
+    Column("source_name", Text),
+    Column(
+        "pinned",
+        Integer,
+        CheckConstraint("pinned IN (0, 1)"),
+        nullable=False,
+        server_default="0",
+    ),
     Index("backups_lookup_idx", "source_base_url", "database_name", text("downloaded_at DESC")),
     Index("backups_state_idx", "state"),
     Index(
@@ -75,6 +83,7 @@ backups = Table(
         text("id ASC"),
     ),
     Index("backups_project_idx", "project_id"),
+    Index("backups_source_group_idx", "project_id", "source_name", text("downloaded_at DESC")),
 )
 
 backup_events = Table(
@@ -87,7 +96,7 @@ backup_events = Table(
         Text,
         CheckConstraint(
             "event_type IN ('download_started', 'download_succeeded', 'download_failed', "
-            "'validation_succeeded', 'validation_failed', 'validation_unavailable', 'deleted')"
+            "'validation_succeeded', 'validation_failed', 'validation_unavailable', 'pin_set', 'deleted')"
         ),
         nullable=False,
     ),
@@ -149,7 +158,7 @@ database_events = Table(
     Column(
         "event_type",
         Text,
-        CheckConstraint("event_type IN ('restored', 'dropped')"),
+        CheckConstraint("event_type IN ('restored', 'bootstrapped', 'dropped')"),
         nullable=False,
     ),
     Column("occurred_at", Text, nullable=False),
@@ -164,6 +173,9 @@ database_events = Table(
     Column("data_directory", Text),
     CheckConstraint(
         "event_type = 'dropped' OR "
+        "(event_type = 'bootstrapped' AND database_name = 'tmp' AND backup_id IS NULL "
+        "AND source_kind IS NULL AND source_sha256 IS NULL AND cluster_id IS NOT NULL "
+        "AND data_directory IS NOT NULL AND length(trim(data_directory)) > 0) OR "
         "((source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
         "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "
         "AND length(source_sha256) = 64 AND source_sha256 NOT GLOB '*[^0-9a-f]*'))"
@@ -257,6 +269,14 @@ environment_copy_journal = Table(
     Column("db_user", Text),
     Column("backup_id", Text, ForeignKey("backups.id")),
     Column(
+        "backup_ownership",
+        Text,
+        CheckConstraint(
+            "backup_ownership IS NULL OR backup_ownership IN ('owned', 'borrowed', 'unknown')"
+        ),
+        server_default="unknown",
+    ),
+    Column(
         "stage",
         Text,
         CheckConstraint(
@@ -309,6 +329,7 @@ runtime = Table(
     Column("http_url", Text, nullable=False),
     Column("http_port", Integer, nullable=False),
     Column("database_name", Text, nullable=False),
+    Column("launch_identity_json", Text),
     Column("updated_at", Text, nullable=False),
     UniqueConstraint("owner_kind", "owner_id"),
 )
@@ -332,6 +353,7 @@ CATALOG_INDEXES = (
     "backups_state_idx",
     "backups_point_order_idx",
     "backups_project_idx",
+    "backups_source_group_idx",
     "backup_events_backup_idx",
     "restores_cluster_idx",
     "restores_cluster_identity_idx",
@@ -346,6 +368,7 @@ CATALOG_INDEXES = (
 ENVIRONMENT_RUNTIME_VIEW_SQL = """
 CREATE VIEW environment_runtime AS
     SELECT owner_id AS environment_id, root_pid, create_time, started_at,
-           checkout_branch, commit_sha, http_url, http_port, database_name, updated_at
+           checkout_branch, commit_sha, http_url, http_port, database_name,
+           launch_identity_json, updated_at
     FROM runtime WHERE owner_kind = 'environment'
 """

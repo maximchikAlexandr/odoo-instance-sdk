@@ -48,6 +48,8 @@ classification is bounded and whose contract requires `--dry-run`:
 | CLI leaf | canonical classification |
 | --- | --- |
 | `init` | mutating-or-spawning |
+| `remote add/update/remove` | mutating-or-spawning |
+| `backup retention/pin/unpin/prune` | mutating-or-spawning |
 | `stop` | mutating-or-spawning |
 | `env create` | mutating-or-spawning |
 | `env rm` | mutating-or-spawning |
@@ -107,6 +109,16 @@ independently. Planning/preflight failures abort before mutation; once
 execution starts, a guarded failure is recorded for that target and the
 remaining prepared targets continue. The aggregate result exits non-zero when
 any target fails and does not claim to roll back earlier targets.
+
+Initialization-created `tmp` is removable through `odcli db rm tmp
+--force-default --yes` only for a stopped, SDK-owned Compose project whose
+latest exact `database_events` row is the matching `bootstrapped` event. The
+event is published after this invocation creates `tmp` and passes the existing
+readiness check; already-ready, legacy, external, dry-run, and failed paths do
+not adopt it. `--force-connections` remains an explicit opt-in. Missing,
+foreign, changed, active-bound, or later `restored`/`dropped` evidence fails
+closed before mutation, while ordinary restored databases retain their current
+restore-binding requirements.
 
 `ps` and `postgres ps` are bounded read-only leaves. Root `ps` is backed by
 the public `EnvironmentMonitor.processes_command()` SDK primitive; `postgres ps`
@@ -218,30 +230,30 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:503-504` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:539-540` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:473` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:474` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/backup.py:347` — shared Rich validation
+- `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/output.py:116` — in-memory Rich serialization
+- `src/odoo_instance_sdk/commands/output.py:115` — in-memory Rich serialization
   boundary; it writes only to an in-memory buffer and never to terminal output.
-- `src/odoo_instance_sdk/commands/output.py:288` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:287` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:457` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:456` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:459` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:458` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:466` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:465` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:468` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:467` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/internal/self_update.py:798-800` — maintenance child
+- `src/odoo_instance_sdk/internal/self_update.py:801-803` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement
   centralized emitter.
-- `src/odoo_instance_sdk/resources/instance/identity.py:503` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
@@ -283,7 +295,7 @@ locations while the production launch inventory is empty:
 - `tests/unit/test_monitor_cache_and_docker.py:119`
 - `tests/unit/test_cluster_resources.py:188`
 - `tests/unit/test_real_odoo_ci_components.py:40,109,151`
-- `tests/unit/test_real_odoo_foundation.py:325,348,367`
+- `tests/unit/test_real_odoo_foundation.py:324,347,366`
 
 These are not production launches or public behavior exceptions. Their removal
 condition is migration of each fixture to the shared recording executor; the

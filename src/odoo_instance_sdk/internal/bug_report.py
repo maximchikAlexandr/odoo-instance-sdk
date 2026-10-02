@@ -16,7 +16,7 @@ import os
 import re
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -32,6 +32,10 @@ from odoo_instance_sdk.models.bug_report import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.context import ProjectSnapshot
+    from odoo_instance_sdk.internal.proc import PreparedStep
+    from odoo_instance_sdk.models import ServerUnavailabilityReason
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 _DEFAULT_REPOSITORY = "maximchikAlexandr/odoo-instance-sdk"
 _BUG_REPORT_LABELS: tuple[str, ...] = ("bug",)
@@ -39,6 +43,11 @@ _REPORT_MAX_BYTES = 262144
 _MAX_REVIEW_ROUNDS = 3
 _REVIEW_ROUNDS: tuple[int, ...] = (1, 2, 3)
 _REPORT_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9._+\-]{0,63}$")
+_ODOO_OUTPUT_LIMIT = 16 * 1024
+_ODOO_TIMEOUT = 5.0
+_POSTGRES_TIMEOUT = 10.0
+_RUNTIME_ENVIRONMENT = (("LANG", "C"), ("LC_ALL", "C"), ("PATH", os.defpath))
 
 _REPORT_TEMPLATE = """\
 # {title}
@@ -91,6 +100,146 @@ Hypotheses:
 
 <applicable SDK rules, contracts, or consequences of the proposed change>
 """
+
+
+@dataclass(frozen=True, slots=True)
+class _VersionProbePlan:
+    odoo_step: PreparedStep | None
+    postgres_steps: tuple[PreparedStep, ...]
+    postgres_cluster: PostgresCluster | None
+    postgres_eligibility: ServerUnavailabilityReason | None
+
+
+def _normalize_version(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return "unknown"
+    if not isinstance(value, str) or "\n" in value or "\r" in value:
+        return "unknown"
+    candidate = value.strip()
+    return candidate if _VERSION_RE.fullmatch(candidate) else "unknown"
+
+
+def _parse_odoo_version(
+    value: str | bytes | None,
+    stderr: str | bytes | None = None,
+) -> str:
+    def size(raw: str | bytes | None) -> int:
+        if isinstance(raw, bytes):
+            return len(raw)
+        return len(raw.encode("utf-8")) if isinstance(raw, str) else 0
+
+    if size(value) + size(stderr) > _ODOO_OUTPUT_LIMIT:
+        return "unknown"
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return "unknown"
+    if not isinstance(value, str):
+        return "unknown"
+    line = value.strip()
+    prefix = "Odoo Server "
+    if not line.startswith(prefix):
+        return "unknown"
+    return _normalize_version(line[len(prefix) :])
+
+
+def _runtime_cwd(snapshot: ProjectSnapshot) -> Path:
+    value = snapshot.project.runtime_cwd
+    if value is None:
+        return snapshot.project.repository_root
+    path = Path(value)
+    if not path.is_absolute():
+        path = snapshot.project.repository_root / path
+    return path.resolve()
+
+
+def _build_version_probe_plan(snapshot: ProjectSnapshot) -> _VersionProbePlan:
+    """Build both optional providers without resolving or launching a process."""
+    from odoo_instance_sdk.internal.pg.server import build_server_summary_plan
+    from odoo_instance_sdk.internal.proc import PreparedStep
+    from odoo_instance_sdk.internal.project_runtime import (
+        defer_project_runtime,
+        resolve_project_runtime,
+    )
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    if not snapshot.runtime_trusted:
+        return _VersionProbePlan(None, (), None, None)
+
+    odoo_step: PreparedStep | None = None
+    project = snapshot.project
+    if project.python is not None and project.odoo_bin is not None:
+        try:
+            odoo_bin = resolve_project_runtime(
+                project.repository_root, project.odoo_bin, field="odoo_bin"
+            )
+            deferred = defer_project_runtime(
+                project.repository_root,
+                project.python,
+                odoo_bin=odoo_bin,
+            )
+            if deferred is not None:
+                argv = (*deferred.command_prefix(), "--version")
+            else:
+                python = resolve_project_runtime(project.repository_root, project.python)
+                argv = (str(python), str(odoo_bin), "--version")
+            runtime_cwd = _runtime_cwd(snapshot)
+            if runtime_cwd.is_dir():
+                odoo_step = PreparedStep(
+                    step_id="bug-report.version.odoo",
+                    argv=tuple(argv),
+                    cwd=str(runtime_cwd),
+                    environment=_RUNTIME_ENVIRONMENT,
+                    environment_policy="explicit",
+                    timeout=_ODOO_TIMEOUT,
+                    max_combined_output_bytes=_ODOO_OUTPUT_LIMIT,
+                    read_only=True,
+                    text=True,
+                )
+        except Exception:
+            odoo_step = None
+
+    postgres_steps: tuple[PreparedStep, ...] = ()
+    postgres_cluster: PostgresCluster | None = None
+    postgres_eligibility: ServerUnavailabilityReason | None = None
+    try:
+        postgres_cluster = PostgresCluster.from_project(project.repository_root)
+        summary_plan = build_server_summary_plan(
+            postgres_cluster,
+            timeout=_POSTGRES_TIMEOUT,
+        )
+        postgres_steps = tuple(
+            replace(
+                step,
+                environment_snapshot=tuple(
+                    sorted(
+                        (
+                            key,
+                            value,
+                        )
+                        for key, value in dict(step.environment_snapshot).items()
+                        if key in {"LANG", "LC_ALL", "PGPASSWORD", "PGOPTIONS"}
+                    )
+                ),
+                environment_policy="explicit",
+            )
+            for step in summary_plan.steps
+        )
+        postgres_eligibility = summary_plan.reason
+    except Exception:
+        postgres_cluster = None
+        postgres_eligibility = "query_failed"
+    return _VersionProbePlan(
+        odoo_step=odoo_step,
+        postgres_steps=postgres_steps,
+        postgres_cluster=postgres_cluster,
+        postgres_eligibility=postgres_eligibility,
+    )
+
 
 _REQUIRED_SECTIONS: tuple[str, ...] = (
     "## Context",

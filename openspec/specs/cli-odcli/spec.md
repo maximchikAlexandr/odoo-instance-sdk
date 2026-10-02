@@ -1,9 +1,7 @@
 ## Purpose
 
 Click CLI adapter over the SDK for project init, environment lifecycle, diagnostics, and local Odoo automation.
-
 ## Requirements
-
 ### Requirement: Click entry point
 
 SDK MUST добавлять один Click entry point:
@@ -1856,21 +1854,23 @@ The CLI SHALL expose the following canonical names while retaining each existing
 
 ### Requirement: Stop a selected environment runtime
 
-Top-level `odcli stop` SHALL resolve exactly one initialized project or registered environment through the existing shared context rules. Its help SHALL describe the selected runtime rather than requiring an environment. Without adding a runtime migration, it SHALL re-read the exact persisted `owner_kind` and `owner_id` plus PID/create time and reconstruct expected executable, argv, cwd, and config from the resolved owner's canonical runtime inputs. At execution it SHALL terminate only when the owner and every live PID create-time, executable, argv, cwd, and config check match and, on POSIX, the live process satisfies `pgid == pid`; Windows SHALL require the same available identity checks before existing process-tree termination. It SHALL never infer ownership from a listening port. No matching runtime row, or an absent PID still associated with the selected owner, SHALL return idempotent success and conditionally clear only that owner's stale row; reused, partial, inaccessible, owner-changed, or mismatched identity SHALL fail with actionable sanitized evidence and SHALL NOT signal any process. Rich, JSON, and TOON success output SHALL identify `owner_kind`, canonical `project_id`, nullable `environment_id` and `environment_name`, and status consistently.
+Top-level `odcli stop` SHALL resolve exactly one initialized project or registered environment through the existing shared context rules. Its help SHALL describe the selected runtime rather than requiring an environment. It SHALL re-read the exact persisted `owner_kind`, `owner_id`, PID, create time, and versioned secret-free launch identity captured from the immutable process step used to start that runtime. At execution it SHALL terminate only when the owner and every live PID create-time, executable, captured executable-prefix/protected-argv, cwd, and config check match and, on POSIX, the live process satisfies `pgid == pid`; Windows SHALL require the same available identity checks before existing process-tree termination. It SHALL NOT reconstruct authoritative project launch identity from mutable stop-time checkout configuration and SHALL never infer ownership from a listening port.
+
+No matching runtime row, or an absent PID still associated with the selected owner, SHALL return idempotent success and conditionally clear only that owner's stale row. Reused, partial, inaccessible, owner-changed, malformed-snapshot, missing-snapshot, or mismatched identity SHALL fail closed and SHALL NOT signal any process. Rejections SHALL provide bounded sanitized component evidence: argv differences SHALL name `executable-prefix` or the protected option name, while no raw argument value, password, secret, full argv, environment value, or unsafe path SHALL be emitted. Rich, JSON, and TOON success output SHALL continue to identify `owner_kind`, canonical `project_id`, nullable `environment_id` and `environment_name`, and status consistently.
 
 #### Scenario: Stop cwd-owned environment runtime
 
-- **WHEN** cwd resolves a running environment and the re-read owner/runtime/config evidence plus every required live-process identity check match
+- **WHEN** cwd resolves a running environment and the re-read owner/runtime/captured-launch evidence plus every required live-process identity check match
 - **THEN** `odcli stop` terminates that exact owned process group through the existing process boundary, verifies exit, clears only its environment-owned runtime row, and reports environment ownership
 
 #### Scenario: Stop explicitly selected environment runtime
 
-- **WHEN** `odcli --env ENVIRONMENT stop` is invoked outside the worktree with matching live identity
+- **WHEN** `odcli --env ENVIRONMENT stop` is invoked outside the worktree with matching captured and live identity
 - **THEN** it has the same plan, safety, output, and exit behavior as cwd environment resolution
 
-#### Scenario: Stop project-owned main-checkout runtime
+#### Scenario: Stop project runtime after unrelated checkout evolution
 
-- **WHEN** cwd or `--project` resolves an initialized main checkout whose project-owned detached runtime and every required live-process identity check match
+- **WHEN** cwd or `--project` resolves an initialized main checkout whose project-owned process still matches its captured launch identity after a branch switch, revision change, or mutable configuration-source change
 - **THEN** `odcli stop` terminates that exact owned process group, verifies exit, clears only its project-owned runtime row, reports project ownership with null environment identity, and leaves project registration intact
 
 #### Scenario: Already stopped is idempotent for either owner
@@ -1883,10 +1883,25 @@ Top-level `odcli stop` SHALL resolve exactly one initialized project or register
 - **WHEN** an unrelated process listens on the selected owner's recorded port or a PID has been reused
 - **THEN** `stop` does not signal it and reports an ownership validation failure when stale or conflicting identity remains
 
-#### Scenario: Persisted owner changes during stop
+#### Scenario: Protected binding mismatch is actionable and sanitized
 
-- **WHEN** the persisted owner kind, owner id, PID, create time, or canonical runtime expectations differ between planning and execution revalidation
+- **WHEN** the live process changes one protected binding from the captured launch identity
+- **THEN** `stop` fails without signaling or clearing the row and its Rich, JSON, and TOON error message names only the safe differing component, such as `argv: --database`
+
+#### Scenario: Secret-bearing mismatch evidence is bounded
+
+- **WHEN** identity validation encounters a secret-bearing argv position or attacker-controlled process text
+- **THEN** every output mode emits the common redaction marker where needed, preserves the safe option name, and emits neither raw values nor the full live or captured argv
+
+#### Scenario: Persisted owner or snapshot changes during stop
+
+- **WHEN** the persisted owner kind, owner id, PID, create time, or captured launch identity differs between planning and execution revalidation
 - **THEN** `stop` fails closed without signaling or clearing either owner's runtime row
+
+#### Scenario: Pre-migration live row has no snapshot
+
+- **WHEN** `odcli stop` selects a live legacy runtime row without captured launch identity
+- **THEN** it reports a sanitized unavailable-identity failure, sends no signal, retains the row, and does not authorize termination from reconstructed current configuration
 
 ### Requirement: Jira-key environment creation CLI
 
@@ -2368,3 +2383,83 @@ The bordered-table change SHALL NOT alter JSON or TOON schemas or values, CLI en
 
 - **WHEN** `odcli env path` succeeds in Rich mode
 - **THEN** it prints only the validated path and no table border or label
+
+### Requirement: CLI MUST expose checkout from an existing backup
+
+The existing `env checkout` leaf MUST accept `--backup BACKUP_UUID` and delegate once to the public checkout operation. It MUST preserve the SDK's validation, dry-run plan, typed failure, redaction, and output contracts.
+
+#### Scenario: Automation checks out from a backup
+
+- **WHEN** a caller invokes `odcli env checkout TASK-123 --db-mode copy --backup BACKUP_UUID --base staging --format json`
+- **THEN** the CLI passes the exact UUID to the public checkout operation
+- **AND** emits the established bounded JSON envelope
+
+### Requirement: CLI MUST expose opt-in detached readiness
+
+The existing `run` leaf MUST accept `--wait-ready` only for root `--env` plus `--detach`. `--readiness-timeout` MUST be positive, MUST default to 60 seconds when readiness is enabled, and MUST be rejected without `--wait-ready`. The CLI MUST delegate polling and cleanup to the public SDK operation.
+
+#### Scenario: Automation waits for detached readiness
+
+- **WHEN** a caller invokes `odcli --env ENVIRONMENT run --detach --wait-ready --format json`
+- **THEN** the CLI emits success only after the SDK confirms readiness
+- **AND** emits SDK failure without implementing its own polling or cleanup
+
+#### Scenario: Readiness options are incompatible
+
+- **WHEN** readiness is requested without an explicit environment and detached mode, the timeout is non-positive, or a timeout is supplied without readiness
+- **THEN** the CLI rejects the invocation before starting Odoo
+- **AND** returns the established usage-error contract
+
+### Requirement: CLI exposes named remote configuration
+
+CLI SHALL expose `remote ls`, `remote add NAME --url URL --database DB --branch REF`, `remote update NAME` with the same configurable fields, and `remote remove NAME`. Add SHALL use the public configure primitive without replace; update SHALL use the same primitive with explicit replace and preserve unspecified fields before constructing the complete typed source. Init SHALL accept repeatable `--remote NAME URL DATABASE GIT_REF`. Every operation SHALL delegate once to a public SDK primitive; credentials SHALL NOT be accepted as literal CLI arguments.
+
+#### Scenario: Add staging after init
+
+- **WHEN** a caller adds staging with URL, database and branch
+- **THEN** the SDK atomically stores the entry and the CLI reports expected credential variable names without values
+
+#### Scenario: Preview configuration change
+
+- **WHEN** add, update, remove or init uses dry-run
+- **THEN** the output describes the configuration change and no configuration or operational resource is mutated
+
+### Requirement: CLI exposes exact source selection and diagnostics
+
+`db refresh` and `env checkout` SHALL accept `--remote NAME`; checkout SHALL require COPY mode and reject conflicting source flags. Existing `doctor` SHALL accept the same selector and project context. Selection SHALL NOT be inferred from prose, branch names or ordering of profiles.
+
+#### Scenario: Checkout staging
+
+- **WHEN** `odcli env checkout TASK-123 --db-mode copy --remote staging --format json` is invoked
+- **THEN** the CLI delegates to the SDK and reports the historical source name, normalized origin/database, declared branch, resolved base commit and resulting backup/environment identities
+
+#### Scenario: Invalid source combination
+
+- **WHEN** checkout combines remote, backup or local source inputs
+- **THEN** it fails before download or mutation with a stable actionable error
+
+### Requirement: CLI exposes retention and pinning
+
+CLI SHALL expose `backup retention` to inspect user settings, optional `--days N` and `--auto/--no-auto` to update them, `backup pin UUID`, `backup unpin UUID`, and project-scoped `backup prune`. Existing exact backup deletion SHALL surface the same protected reason as prune for pinned, busy, referenced or newest-per-source archives. Prune SHALL require normal destructive confirmation interactively or explicit `--yes` without input; dry-run SHALL require no confirmation and perform no deletion. Retention updates SHALL require an explicit enablement flag before enabling automatic deletion.
+
+#### Scenario: Enable two-week retention
+
+- **WHEN** `odcli backup retention --days 14 --auto` succeeds
+- **THEN** output identifies effective user settings and their actual file path
+
+#### Scenario: Preview and apply pruning
+
+- **WHEN** a caller uses `backup prune --dry-run --format json`
+- **THEN** output lists exact candidates, protections and bytes without deletion
+- **WHEN** a later confirmed prune command is created
+- **THEN** it produces its own current plan and applies only that plan after execution-time rechecks
+
+### Requirement: New operations share the existing automation contract
+
+Every new CLI leaf SHALL have a public typed SDK equivalent and use existing bounded human/JSON/TOON output, redaction, immutable plans and stable failure contracts. Partial pruning outcomes SHALL remain machine-readable; automatic maintenance failure SHALL be a warning alongside primary success, whereas explicit prune failure SHALL use a non-success exit. Missing non-interactive inputs SHALL produce errors without prompts or guessed defaults.
+
+#### Scenario: Script handles cleanup warning
+
+- **WHEN** a successful restore is followed by unsuccessful opportunistic pruning
+- **THEN** machine output retains the successful restore identity and separate maintenance warning
+- **AND** its exit status does not instruct the script to repeat restore

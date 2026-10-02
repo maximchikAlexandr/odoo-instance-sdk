@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.integration.real_odoo import cleanup as e2e_cleanup
-from tests.integration.real_odoo import conftest as e2e_fixtures
+from tests.integration.real_odoo import cleanup as e2e_cleanup, conftest as e2e_fixtures
 from tests.integration.real_odoo.archive import (
     ArchiveValidationError,
     archive_identity,

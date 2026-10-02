@@ -384,6 +384,10 @@ COPY environment checkout SHALL make its source Database Manager available throu
 
 The environment restore command SHALL accept public frozen typed `LocalArchiveRestoreSource(path: str)` through its existing restore-source parameter. It SHALL support Odoo ZIP archives containing `dump.sql`, a compatible manifest database name, and safe filestore content. It SHALL preserve the caller-owned archive, restore into a new target, verify database and filestore postconditions, apply the existing neutralization and optional administrator reset, switch the project default only after full success, and return `DatabasePreparationResult` without fabricating a `Backup`. It SHALL NOT persist the source path, expose it in plan/output/error projections, add a public restore method, or support native dump/remote URL/format conversion through this source.
 
+Before ZIP validation, the local-file preflight SHALL classify a bounded content prefix captured through the same no-follow descriptor and stable file-identity check used to hash the caller-owned file. A `PGDMP` prefix SHALL identify a PostgreSQL custom-format dump without invoking `pg_restore`; a recognized ZIP-family prefix SHALL continue through existing bounded ZIP validation; all other content SHALL be unknown. Classification SHALL NOT depend on the filename or extension and SHALL NOT read secret or unbounded content.
+
+A recognized PostgreSQL custom dump SHALL fail with typed code `backup_unsupported_format` and sanitized message `unsupported local backup format: PostgreSQL custom dump`. Unknown content SHALL fail with typed code `backup_unknown_format` and sanitized message `unrecognized local backup format`. A recognized but malformed ZIP SHALL retain typed code `backup_corrupt` and the existing sanitized corrupt-archive diagnostic. These failures SHALL occur before snapshot creation, subprocess execution, database mutation, catalogue write, or project-default change, and SHALL NOT expose the caller-owned path or content. The existing catalogued `BackupFormat.DUMP` validation and restore branch SHALL remain unchanged.
+
 #### Scenario: Valid local ZIP restores through the public boundary
 
 - **WHEN** `LocalArchiveRestoreSource` identifies a supported Odoo ZIP and the target is absent
@@ -399,7 +403,78 @@ The environment restore command SHALL accept public frozen typed `LocalArchiveRe
 - **WHEN** a local-archive command is previewed, succeeds, fails, or is interrupted
 - **THEN** bounded Rich, JSON, and TOON projections identify the source kind and sanitized digest evidence without exposing the source or private snapshot path
 
-#### Scenario: Unsupported local format is rejected
+#### Scenario: PostgreSQL custom dump is explicitly unsupported
 
-- **WHEN** `LocalArchiveRestoreSource` identifies a native dump, remote URL, or archive requiring conversion
-- **THEN** restore fails before database mutation with a typed validation/configuration error
+- **WHEN** `LocalArchiveRestoreSource` content begins with the PostgreSQL custom-format signature `PGDMP`
+- **THEN** restore fails with code `backup_unsupported_format` and message `unsupported local backup format: PostgreSQL custom dump` before ZIP validation or any mutation and does not select the native dump restore branch
+
+#### Scenario: Malformed ZIP remains a corrupt ZIP
+
+- **WHEN** `LocalArchiveRestoreSource` content has a recognized ZIP-family prefix but fails existing structural or CRC validation
+- **THEN** restore fails with code `backup_corrupt` and the existing sanitized corrupt-archive diagnostic before any mutation
+
+#### Scenario: Unknown binary content fails closed
+
+- **WHEN** `LocalArchiveRestoreSource` content is neither a recognized ZIP-family input nor a PostgreSQL custom-format dump
+- **THEN** restore fails with code `backup_unknown_format` and message `unrecognized local backup format` before ZIP validation or any mutation
+
+#### Scenario: Dry-run distinguishes local format outcomes
+
+- **WHEN** the public command `odcli db restore --file FILE --dry-run --format json` receives respectively a valid Odoo ZIP, a PostgreSQL custom dump, a malformed ZIP, or unknown bytes
+- **THEN** it plans the valid ZIP or returns the corresponding stable typed diagnostic without database mutation, subprocess execution, source modification, or path disclosure
+
+#### Scenario: Other unsupported local sources remain rejected
+
+- **WHEN** `LocalArchiveRestoreSource` identifies a remote URL or an archive requiring format conversion
+- **THEN** restore fails before database mutation with a typed validation or configuration error and performs no conversion
+
+### Requirement: Restore disk preflight measures a valid containing filesystem
+
+Restore command construction SHALL determine the inspection directory from the configured restore `data_dir`. When the configured destination does not exist, it SHALL select the nearest existing directory ancestor without creating the destination or any missing parent. When the configured destination already exists as a directory, it SHALL inspect that directory. When no `data_dir` is configured, the existing backup-directory fallback SHALL remain in effect.
+
+After selecting an inspection directory, restore preflight SHALL measure its filesystem and SHALL retain the existing reserve calculation of the greater of 1 GiB or 10 percent of measured free space. Archive size, operator-limit, CRC, and other restore safety checks SHALL remain unchanged.
+
+#### Scenario: Missing nested data directory has sufficient capacity
+
+- **WHEN** a restore dry-run targets a missing nested `data_dir`, its nearest existing directory ancestor is inspectable, and the measured filesystem satisfies the existing reserve policy
+- **THEN** public restore command construction succeeds
+- **AND** the missing `data_dir` and its missing parents remain absent
+
+#### Scenario: Existing data directory has sufficient capacity
+
+- **WHEN** a restore dry-run targets an existing directory whose measured filesystem satisfies the existing reserve policy
+- **THEN** public restore command construction succeeds using that directory for capacity inspection
+
+#### Scenario: Measured capacity is insufficient
+
+- **WHEN** the selected existing inspection directory has less usable free space than the archive requires after applying the existing reserve policy
+- **THEN** restore planning fails with the existing typed insufficient-disk failure and reports the measured capacity and reserve
+
+#### Scenario: No configured data directory
+
+- **WHEN** restore planning has no configured `data_dir`
+- **THEN** the existing backup-directory fallback is used for filesystem measurement
+
+### Requirement: Restore disk inspection failures are truthful and actionable
+
+Restore disk preflight SHALL treat only a missing path component as a reason to continue searching toward the parent. It SHALL fail closed when path resolution or traversal fails, when the nearest existing entry is not a directory, or when filesystem capacity cannot be inspected. Such a failure SHALL use a dedicated typed backup-policy inspection error with a stable error code and sanitized details identifying the requested path, the attempted inspection path when available, and the operating-system reason.
+
+An unmeasured inspection failure MUST NOT be classified as insufficient disk space, MUST NOT fabricate zero available bytes or zero reserve bytes, and MUST NOT bypass archive capacity protection.
+
+#### Scenario: Existing path component is not a directory
+
+- **WHEN** a configured missing destination is nested under an existing regular file or another non-directory entry
+- **THEN** restore planning fails with the typed disk-inspection error and identifies the invalid path component
+- **AND** it does not report measured insufficient capacity
+
+#### Scenario: Filesystem inspection raises an operating-system error
+
+- **WHEN** resolving, traversing, or measuring the selected restore path raises a permission or I/O error
+- **THEN** restore planning fails with the typed disk-inspection error and actionable sanitized path diagnostics
+- **AND** no directory is created
+
+#### Scenario: Public machine-readable dry-run reports inspection failure once
+
+- **WHEN** public `db restore --dry-run` command construction cannot inspect the filesystem for the configured `data_dir`
+- **THEN** the CLI emits one machine-readable failure envelope whose message identifies disk/path inspection rather than insufficient measured capacity
+- **AND** no Odoo or PostgreSQL service is started or contacted

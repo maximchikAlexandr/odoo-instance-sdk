@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 import textwrap
 import uuid
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -14,6 +17,9 @@ import pytest
 
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
+    BackupCorruptError,
+    BackupInsufficientDiskError,
+    BackupNotAvailableError,
     ConfigError,
     DatabaseAlreadyExistsError,
     EnvironmentConflictError,
@@ -55,6 +61,8 @@ from odoo_instance_sdk.resources.environment import (
 from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
 from odoo_instance_sdk.resources.instance import OdooInstance
 
+FIXED_NOW = datetime(2026, 9, 26, 21, 30, tzinfo=UTC)
+
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
     from odoo_instance_sdk.project import ProjectConfig
@@ -82,7 +90,7 @@ def _copy_instance(env_client: OdooClient, *, target_exists: bool = False) -> An
         filename="comerta.zip",
         size_bytes=1,
         sha256="a" * 64,
-        downloaded_at=datetime.now(UTC),
+        downloaded_at=FIXED_NOW,
     )
     Path(backup.path).write_bytes(b"backup")
     lifecycle_client = MagicMock()
@@ -117,6 +125,7 @@ def _record_backup(env_client: OdooClient, backup: Backup) -> None:
         backup.filestore_requested,
         Path(backup.path),
         source_git_branch=backup.source_git_branch,
+        source_name=backup.source_name,
     )
     catalog.success_download(
         str(backup.id),
@@ -145,6 +154,40 @@ def _add_test_instance_config(
         + 'base_url = "https://example.test"\n'
         + 'database = "comerta"\n'
         + branch
+    )
+
+
+def _add_named_remote_config(project_manifest: Path, *, database: str = "staging_db") -> None:
+    manifest = project_manifest / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text()
+        + "\n[remote_instances.staging]\n"
+        + 'base_url = "https://staging.example"\n'
+        + f'database = "{database}"\n'
+        + 'git_branch = "main"\n'
+    )
+
+
+def _valid_retained_backup(tmp_path: Path, *, branch: str = "main") -> Backup:
+    path = tmp_path / "retained.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.json", json.dumps({"db_name": "comerta", "version": "19.0"}))
+        archive.writestr("dump.sql", "select 1;\n")
+        archive.writestr("filestore/comerta/asset", b"payload")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://staging.example",
+        database_name="comerta",
+        format=BackupFormat.ZIP,
+        filestore_requested=True,
+        path=str(path),
+        filename=path.name,
+        size_bytes=path.stat().st_size,
+        sha256=digest,
+        downloaded_at=FIXED_NOW,
+        source_git_branch=branch,
+        source_name="staging",
     )
 
 
@@ -259,6 +302,359 @@ class TestCheckoutPreflight:
 
         assert not get_catalog_path().exists()
 
+    def test_named_copy_plan_uses_source_branch_and_exposes_provenance(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        _add_named_remote_config(project_manifest)
+
+        plan = env_client.environments.plan_checkout(
+            project_manifest,
+            "feat/named-plan",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                remote_name="staging",
+                target_database="staging_copy",
+            ),
+        )
+
+        assert plan.effective_base_ref == "main"
+        assert plan.source_database == "staging_db"
+        assert plan.provenance.source_name == "staging"
+        assert plan.provenance.source_base_url == "https://staging.example"
+        assert plan.provenance.database_name == "staging_db"
+        assert plan.provenance.recorded_branch == "main"
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            pytest.param(
+                EnvironmentCheckoutOptions(
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    remote_name="staging",
+                    backup_id=uuid.uuid4(),
+                ),
+                id="remote-and-backup",
+            ),
+            pytest.param(
+                EnvironmentCheckoutOptions(
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    remote_name="staging",
+                ),
+                id="remote-in-shared-mode",
+            ),
+            pytest.param(
+                EnvironmentCheckoutOptions(
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    remote_name="staging",
+                    source_database="comerta",
+                ),
+                id="remote-and-explicit-source",
+            ),
+        ],
+    )
+    def test_named_copy_rejects_incompatible_selectors(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        options: EnvironmentCheckoutOptions,
+    ) -> None:
+        _add_named_remote_config(project_manifest)
+
+        with pytest.raises(ConfigError):
+            env_client.environments.plan_checkout(
+                project_manifest, "feat/invalid-selector", options=options
+            )
+
+    def test_retained_uuid_planning_is_offline_and_does_not_fallback(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backup = _valid_retained_backup(tmp_path)
+        _record_backup(env_client, backup)
+        factory_call = MagicMock(side_effect=AssertionError("retained UUID must be offline"))
+        monkeypatch.setattr(type(env_client.instance), "__call__", factory_call)
+
+        plan = env_client.environments.plan_checkout(
+            project_manifest,
+            "feat/retained-plan",
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                backup_id=backup.id,
+                target_database="retained_copy",
+            ),
+        )
+
+        assert plan.effective_base_ref == "main"
+        assert plan.provenance.backup_id == backup.id
+        assert plan.provenance.source_name == "staging"
+        factory_call.assert_not_called()
+
+    def test_named_plan_snapshot_rejects_source_profile_drift(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        _add_named_remote_config(project_manifest)
+        options = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.COPY,
+            remote_name="staging",
+            target_database="staging_copy",
+        )
+        snapshot = env_client.environments._build_checkout_snapshot(
+            project_manifest, "feat/named-stale", options=options
+        )
+        manifest = project_manifest / ".odcli" / "project.toml"
+        manifest.write_text(
+            manifest.read_text().replace('database = "staging_db"', 'database = "other_db"')
+        )
+
+        with pytest.raises(StalePlanError, match="resolved inputs"):
+            env_client.environments._command_from_snapshot(snapshot).run()
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_named_copy_downloads_once_without_default_switch_and_marks_borrowed(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        _add_named_remote_config(project_manifest)
+        local = _copy_instance(env_client)
+        remote_backup = _valid_retained_backup(project_manifest, branch="main")
+        remote_backup = Backup(
+            id=remote_backup.id,
+            source_base_url=remote_backup.source_base_url,
+            database_name="staging_db",
+            format=remote_backup.format,
+            filestore_requested=remote_backup.filestore_requested,
+            path=remote_backup.path,
+            filename=remote_backup.filename,
+            size_bytes=remote_backup.size_bytes,
+            sha256=remote_backup.sha256,
+            downloaded_at=remote_backup.downloaded_at,
+            source_git_branch=remote_backup.source_git_branch,
+            source_name="staging",
+        )
+        remote = MagicMock()
+        remote.databases.backup.return_value = remote_backup
+
+        def record_remote_backup(*_args: object, **_kwargs: object) -> Backup:
+            _record_backup(env_client, remote_backup)
+            return remote_backup
+
+        remote.databases.backup.side_effect = record_remote_backup
+        local.databases._restore_after_verified_absence.side_effect = (
+            lambda backup, target, **_kwargs: env_client.get_catalog().record_restore(
+                "localhost", 5432, target, str(backup.id)
+            )
+        )
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=local))
+        monkeypatch.setattr(InstanceFactory, "__call__", lambda *_args, **_kwargs: remote)
+        monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "staging-secret")
+        psql = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        psql.write_text(
+            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
+        )
+        psql.chmod(0o755)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable", lambda: str(psql)
+        )
+
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/named-copy",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                remote_name="staging",
+                target_database="staging_copy",
+            ),
+        )
+
+        remote.databases.backup.assert_called_once()
+        local.databases.backup.assert_not_called()
+        local.databases._restore_after_verified_absence.assert_called_once_with(
+            remote_backup,
+            "staging_copy",
+            copy=True,
+            neutralize_database=True,
+        )
+        journal = env_client.get_catalog().get_copy_journal(str(env.id))
+        assert env.backup_id == remote_backup.id
+        assert journal is not None and journal["backup_ownership"] == "borrowed"
+
+    def test_retained_corrupt_archive_fails_before_environment_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "corrupt.zip"
+        path.write_bytes(b"not-a-zip")
+        backup = Backup(
+            id=uuid.uuid4(),
+            source_base_url="https://staging.example",
+            database_name="comerta",
+            format=BackupFormat.ZIP,
+            filestore_requested=True,
+            path=str(path),
+            filename=path.name,
+            size_bytes=path.stat().st_size,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            downloaded_at=FIXED_NOW,
+            source_git_branch="main",
+            source_name="staging",
+        )
+        _record_backup(env_client, backup)
+
+        with pytest.raises(BackupCorruptError, match="corrupt"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/retained-corrupt",
+                options=EnvironmentCheckoutOptions(
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    backup_id=backup.id,
+                    target_database="retained_copy",
+                ),
+            )
+
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_retained_archive_rejects_insufficient_disk_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.backup_validation import RestoreDiskPreflight
+
+        backup = _valid_retained_backup(tmp_path)
+        _record_backup(env_client, backup)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.backup_validation.preflight_restore_disk_space",
+            lambda _bytes, _data_dir: RestoreDiskPreflight(
+                ok=False,
+                error_code="backup_insufficient_disk",
+                measured_bytes=10,
+                available_bytes=1,
+                reserve_bytes=1,
+            ),
+        )
+
+        with pytest.raises(BackupInsufficientDiskError, match="insufficient"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/retained-disk",
+                options=EnvironmentCheckoutOptions(
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    backup_id=backup.id,
+                    target_database="retained_copy",
+                ),
+            )
+
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_retained_archive_rejects_changed_input_identity_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+    ) -> None:
+        backup = _valid_retained_backup(tmp_path)
+        _record_backup(env_client, backup)
+        Path(backup.path).write_bytes(b"replaced input")
+
+        with pytest.raises(BackupNotAvailableError, match="content hash mismatch"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/retained-replaced",
+                options=EnvironmentCheckoutOptions(
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    backup_id=backup.id,
+                    target_database="retained_copy",
+                ),
+            )
+
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_retained_uuid_restores_offline_with_isolated_target_filestore(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.backup_validation import RestoreDiskPreflight
+        from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.backup_validation.preflight_restore_disk_space",
+            lambda measured_bytes, _data_dir: RestoreDiskPreflight(
+                ok=True,
+                measured_bytes=measured_bytes,
+                available_bytes=2 * 1024**3,
+                reserve_bytes=1024**3,
+            ),
+        )
+        backup = _valid_retained_backup(tmp_path)
+        _record_backup(env_client, backup)
+        local = _copy_instance(env_client)
+        local.databases._restore_after_verified_absence.side_effect = (
+            lambda selected, target, **_kwargs: env_client.get_catalog().record_restore(
+                "localhost", 5432, target, str(selected.id)
+            )
+        )
+        factory_call = MagicMock(
+            side_effect=AssertionError("retained UUID must not use a source HTTP client")
+        )
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=local))
+        monkeypatch.setattr(InstanceFactory, "__call__", factory_call)
+        psql = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        psql.write_text(
+            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
+        )
+        psql.chmod(0o755)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable", lambda: str(psql)
+        )
+
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/retained-copy",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                backup_id=backup.id,
+                target_database="retained_copy",
+            ),
+        )
+
+        factory_call.assert_not_called()
+        local.databases.backup.assert_not_called()
+        local.databases._restore_after_verified_absence.assert_called_once_with(
+            backup,
+            "retained_copy",
+            copy=True,
+            neutralize_database=True,
+        )
+        journal = env_client.get_catalog().get_copy_journal(str(env.id))
+        assert env.backup_id == backup.id
+        assert journal is not None and journal["backup_ownership"] == "borrowed"
+
     @pytest.mark.parametrize(
         "db_mode", [EnvironmentDatabaseMode.SHARED, EnvironmentDatabaseMode.COPY]
     )
@@ -283,7 +679,7 @@ class TestCheckoutPreflight:
             filename=backup_path.name,
             size_bytes=6,
             sha256="a" * 64,
-            downloaded_at=datetime.now(UTC),
+            downloaded_at=FIXED_NOW,
             source_git_branch="develop",
         )
         _record_backup(env_client, backup)
@@ -349,7 +745,7 @@ class TestCheckoutPreflight:
             tmp_path,
             name="dry-run-stale",
             branch="main",
-            downloaded_at=datetime.now(UTC) - timedelta(hours=2),
+            downloaded_at=FIXED_NOW - timedelta(hours=2),
         )
         _record_backup(env_client, stale)
         env_client.get_catalog().record_restore("localhost", 5432, "comerta", str(stale.id))
@@ -393,13 +789,13 @@ class TestCheckoutPreflight:
             tmp_path,
             name="stale",
             branch="main",
-            downloaded_at=datetime.now(UTC) - timedelta(hours=2),
+            downloaded_at=FIXED_NOW - timedelta(hours=2),
         )
         fresh = _catalog_backup(
             tmp_path,
             name="fresh",
             branch="main",
-            downloaded_at=datetime.now(UTC),
+            downloaded_at=FIXED_NOW,
         )
         _record_backup(env_client, stale)
         _record_backup(env_client, fresh)
@@ -443,7 +839,7 @@ class TestCheckoutPreflight:
             tmp_path,
             name="unpinned-stale",
             branch="main",
-            downloaded_at=datetime.now(UTC) - timedelta(hours=2),
+            downloaded_at=FIXED_NOW - timedelta(hours=2),
         )
         _record_backup(env_client, stale)
         env_client.get_catalog().record_restore("localhost", 5432, "comerta", str(stale.id))
@@ -511,7 +907,7 @@ class TestCheckoutPreflight:
             tmp_path,
             name="failed-stale",
             branch="main",
-            downloaded_at=datetime.now(UTC) - timedelta(hours=2),
+            downloaded_at=FIXED_NOW - timedelta(hours=2),
         )
         _record_backup(env_client, stale)
         env_client.get_catalog().record_restore("localhost", 5432, "comerta", str(stale.id))
@@ -546,8 +942,10 @@ class TestCheckoutPreflight:
         )
         assert explicit.provenance.status is BackupProvenanceStatus.UNKNOWN
         assert explicit.warnings == (
-            "Backup provenance is unknown for explicit source database 'comerta'; "
-            "branch compatibility could not be verified.",
+            (
+                "Backup provenance is unknown for explicit source database 'comerta'; "
+                "branch compatibility could not be verified."
+            ),
         )
 
         with pytest.raises(EnvironmentConflictError, match="--source-db"):
@@ -589,7 +987,7 @@ class TestCheckoutPreflight:
                 tmp_path,
                 name="legacy-stale",
                 branch=None,
-                downloaded_at=datetime.now(UTC) - timedelta(hours=2),
+                downloaded_at=FIXED_NOW - timedelta(hours=2),
             )
             _record_backup(env_client, stale)
             env_client.get_catalog().record_restore("localhost", 5432, "comerta", str(stale.id))
@@ -628,7 +1026,7 @@ class TestCheckoutPreflight:
             tmp_path,
             name="stale-without-test-instance",
             branch="main",
-            downloaded_at=datetime.now(UTC) - timedelta(hours=2),
+            downloaded_at=FIXED_NOW - timedelta(hours=2),
         )
         _record_backup(env_client, stale)
         env_client.get_catalog().record_restore("localhost", 5432, "comerta", str(stale.id))
@@ -666,7 +1064,7 @@ class TestCheckoutPreflight:
             tmp_path,
             name="unknown-nonfresh-no-test-instance",
             branch=None,
-            downloaded_at=datetime.now(UTC) - timedelta(hours=2),
+            downloaded_at=FIXED_NOW - timedelta(hours=2),
         )
         _record_backup(env_client, stale)
         env_client.get_catalog().record_restore("localhost", 5432, "comerta", str(stale.id))
@@ -1216,7 +1614,7 @@ class TestCheckoutCopy:
             filename="comerta.zip",
             size_bytes=1,
             sha256="a" * 64,
-            downloaded_at=datetime.now(UTC),
+            downloaded_at=FIXED_NOW,
         )
         Path(backup.path).write_bytes(b"backup")
         instance = env_client.instance("http://localhost:8069", master_password="admin")

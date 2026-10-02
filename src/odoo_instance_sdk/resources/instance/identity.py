@@ -57,13 +57,13 @@ from odoo_instance_sdk.resources.instance.auxiliary_restore import (
 )
 from odoo_instance_sdk.resources.instance.runtime import (
     T,
-    _build_cli_args,
-    _canonical_runtime_argv,
     _canonical_runtime_path,
+    _decode_launch_identity,
+    _encode_launch_identity,
     _iter_logfile,
-    _runtime_argv_matches,
+    _project_runtime_argv,
+    _runtime_argv_mismatch_components,
     _runtime_config_arg,
-    _runtime_expectations,
     _RuntimeBinding,
     _RuntimeCatalog,
     _RuntimeIdentity,
@@ -338,9 +338,10 @@ class _IdentityMixin:
             env, project_environment=self.config.project_environment
         )
         secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
+        executable_prefix = self._executable_prefix()
         step = PreparedStep(
             step_id="instance.foreground",
-            argv=(*self._executable_prefix(), *cli_args, *validated_args),
+            argv=(*executable_prefix, *cli_args, *validated_args),
             cwd=None if resolved_cwd is None else str(resolved_cwd),
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
@@ -354,12 +355,17 @@ class _IdentityMixin:
         from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
-        from odoo_instance_sdk.internal.dbprep.bootstrap import project_bootstrap_tmp_steps
+        from odoo_instance_sdk.internal.dbprep.bootstrap import (
+            bootstrap_record_action,
+            project_bootstrap_tmp_steps,
+        )
 
         bootstrap_steps = project_bootstrap_tmp_steps(cast("OdooInstance", self))
+        bootstrap_record = bootstrap_record_action() if bootstrap_steps else None
         prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (
             *dependency_steps,
             *bootstrap_steps,
+            *((bootstrap_record,) if bootstrap_record is not None else ()),
             step,
         )
         if (
@@ -422,6 +428,8 @@ class _IdentityMixin:
                                 handle.pid,
                                 snapshot,
                                 resolved_cwd,
+                                step,
+                                len(executable_prefix),
                                 context=context,
                             )
                     except BaseException:
@@ -507,6 +515,8 @@ class _IdentityMixin:
         root_pid: int,
         config: StartConfig,
         cwd: str | Path | None,
+        step: PreparedStep,
+        executable_prefix_length: int,
         context: RunContext[T] | None = None,
     ) -> None:
         """Persist the exact runtime identity before foreground waiting begins."""
@@ -515,6 +525,9 @@ class _IdentityMixin:
         if binding is None and environment_id is None:
             return
         create_time = _process_create_time(root_pid)
+        launch_identity_json = _encode_launch_identity(
+            step, executable_prefix_length=executable_prefix_length
+        )
         checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
         http_url = f"http://{config.http_interface}:{config.http_port}"
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())
@@ -533,6 +546,7 @@ class _IdentityMixin:
                 http_url=http_url,
                 http_port=config.http_port,
                 database_name=config.db_name or "",
+                launch_identity_json=launch_identity_json,
             )
             return
         assert environment_id is not None
@@ -547,6 +561,7 @@ class _IdentityMixin:
             http_url=http_url,
             http_port=config.http_port,
             database_name=config.db_name or "",
+            launch_identity_json=launch_identity_json,
         )
 
     def iter_logs(self, *, tail: int = 100, follow: bool = False) -> Iterator[str]:
@@ -871,18 +886,11 @@ class _IdentityMixin:
             create_time = float(str(runtime_row["create_time"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("runtime identity record is unreadable") from exc
-
-        if owner_kind == "environment":
-            env_row = catalog.get_environment(owner_id)
-            if env_row is None:
-                raise RuntimeError("environment identity record is unavailable")
-            expected_executable, expected_argv, expected_cwd, config_path = _runtime_expectations(
-                env_row
-            )
-        else:
-            expected_executable, expected_argv, expected_cwd, config_path = (
-                self._project_runtime_expectations()
-            )
+        try:
+            launch_identity_raw = runtime_row["launch_identity_json"]
+        except (KeyError, IndexError):
+            launch_identity_raw = None
+        launch_identity_json = cast("str | None", launch_identity_raw)
 
         def vanished_identity() -> _RuntimeIdentity:
             if sys.platform != "win32" and is_process_group_alive(root_pid):
@@ -892,12 +900,15 @@ class _IdentityMixin:
                 owner_id=owner_id,
                 project_id=project_id,
                 environment_id=environment_id,
+                launch_identity_json=launch_identity_json,
                 root_pid=root_pid,
                 create_time=create_time,
-                expected_executable=expected_executable,
-                expected_argv=expected_argv,
-                expected_cwd=expected_cwd,
-                expected_config_path=config_path,
+                expected_executable="",
+                expected_argv=(),
+                expected_cwd="",
+                expected_config_path="",
+                expected_sensitive_argv_indices=(),
+                expected_executable_prefix_length=0,
                 live_create_time=None,
                 live_executable=None,
                 live_argv=None,
@@ -932,20 +943,29 @@ class _IdentityMixin:
             TypeError,
         ) as exc:
             raise RuntimeError("runtime identity is inaccessible") from exc
+        launch_identity = _decode_launch_identity(launch_identity_json)
+        live_argv = _project_runtime_argv(
+            tuple(process.cmdline()),
+            sensitive_argv_indices=launch_identity.sensitive_argv_indices,
+            executable_prefix_length=launch_identity.executable_prefix_length,
+        )
         return _RuntimeIdentity(
             owner_kind=owner_kind,
             owner_id=owner_id,
             project_id=project_id,
             environment_id=environment_id,
+            launch_identity_json=launch_identity_json,
             root_pid=root_pid,
             create_time=create_time,
-            expected_executable=expected_executable,
-            expected_argv=expected_argv,
-            expected_cwd=expected_cwd,
-            expected_config_path=config_path,
+            expected_executable=launch_identity.executable,
+            expected_argv=launch_identity.argv,
+            expected_cwd=launch_identity.cwd,
+            expected_config_path=launch_identity.config_path,
+            expected_sensitive_argv_indices=launch_identity.sensitive_argv_indices,
+            expected_executable_prefix_length=launch_identity.executable_prefix_length,
             live_create_time=live_create_time,
             live_executable=live_executable,
-            live_argv=_canonical_runtime_argv(live_argv),
+            live_argv=live_argv,
             live_cwd=live_cwd,
             live_config_path=(
                 _canonical_runtime_path(config_arg)
@@ -953,28 +973,6 @@ class _IdentityMixin:
                 else None
             ),
             process_group_id=process_group_id,
-        )
-
-    def _project_runtime_expectations(self) -> tuple[str, tuple[str, ...], str, str]:
-        config = self.config.start_config
-        if config is None or config.config_path is None:
-            raise RuntimeError("project runtime identity configuration is unreadable")
-        executable_prefix = self._executable_prefix()
-        if not executable_prefix:
-            raise RuntimeError("project runtime identity configuration is unreadable")
-        effective_logfile = resolve_effective_logfile(config, self.config.default_cwd)
-        expected_argv = (
-            *executable_prefix,
-            *_build_cli_args(config),
-            "--logfile",
-            str(effective_logfile),
-            *resolve_runtime_argv_extra(self.config.default_run_args),
-        )
-        return (
-            _canonical_runtime_path(executable_prefix[0]),
-            _canonical_runtime_argv(expected_argv),
-            _canonical_runtime_path(str(self.config.default_cwd or Path.cwd())),
-            _canonical_runtime_path(config.config_path),
         )
 
     @staticmethod
@@ -986,11 +984,13 @@ class _IdentityMixin:
             mismatches.append("create_time")
         if identity.live_executable != identity.expected_executable:
             mismatches.append("executable")
-        if not _runtime_argv_matches(identity):
-            mismatches.append("argv")
+        mismatches.extend(_runtime_argv_mismatch_components(identity))
         if identity.live_cwd != identity.expected_cwd:
             mismatches.append("cwd")
-        if identity.live_config_path != identity.expected_config_path:
+        if (
+            identity.live_config_path != identity.expected_config_path
+            and "argv: --config" not in mismatches
+        ):
             mismatches.append("config")
         if sys.platform != "win32" and identity.process_group_id != identity.root_pid:
             mismatches.append("process_group")

@@ -5,6 +5,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.script import ScriptDirectory
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.execution import JsonValue
@@ -13,7 +15,14 @@ from odoo_instance_sdk.internal.applied_settings import (
     encode_applied_settings,
 )
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_revision
+from odoo_instance_sdk.storage.catalog_migrate import (
+    CATALOG_REVISION,
+    _alembic_config,
+    assert_schema_metadata_matches_revision,
+    catalog_revision,
+    ensure_catalog_migrated,
+    verify_schema_equivalence,
+)
 from odoo_instance_sdk.storage.catalog_schema import CATALOG_INDEXES, CATALOG_TABLES
 from tests.unit.monitor_support import make_env
 from tests.unit.storage.catalog_alpha_fixture import write_alpha_catalog
@@ -23,6 +32,71 @@ V16_CATALOG_FIXTURE = Path(__file__).parents[2] / "fixtures" / "catalog_v16.sql"
 
 def _assert_current_revision(conn: sqlite3.Connection) -> None:
     assert catalog_revision(conn) == CATALOG_REVISION
+
+
+def test_runtime_launch_identity_migration_is_idempotent_and_reversible(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "head")
+    conn = sqlite3.connect(str(db))
+    assert "launch_identity_json" in {row[1] for row in conn.execute("PRAGMA table_info(runtime)")}
+    command.upgrade(config, "head")
+    command.downgrade(config, "0003")
+    assert "launch_identity_json" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(runtime)")
+    }
+    conn.close()
+
+
+def test_legacy_0002_runtime_row_upgrades_with_null_launch_identity(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0003")
+
+    conn = sqlite3.connect(str(db))
+    assert "launch_identity_json" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(runtime)")
+    }
+    conn.execute(
+        """INSERT INTO runtime
+           (owner_kind, owner_id, root_pid, create_time, started_at, checkout_branch,
+            commit_sha, http_url, http_port, database_name, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "environment",
+            "legacy-environment",
+            4242,
+            12.5,
+            "2026-01-01T00:00:00+00:00",
+            "main",
+            "abc123",
+            "http://127.0.0.1:8069",
+            8069,
+            "mydb",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM runtime").fetchone()[0] == 1
+    conn.close()
+
+    command.upgrade(config, "head")
+
+    conn = sqlite3.connect(str(db))
+    assert catalog_revision(conn) == CATALOG_REVISION
+    assert (
+        conn.execute(
+            "SELECT launch_identity_json FROM runtime WHERE owner_id = ?",
+            ("legacy-environment",),
+        ).fetchone()[0]
+        is None
+    )
+    conn.close()
 
 
 def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
@@ -50,6 +124,41 @@ def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
     indexes = {row[1] for row in catalog._conn.execute("PRAGMA index_list(backups)")}
     assert "backups_point_order_idx" in indexes
     catalog.close()
+
+
+@pytest.mark.parametrize("prior_revision", ["0001", "0002"])
+def test_prior_catalog_revisions_upgrade_to_current_schema(
+    tmp_path: Path, prior_revision: str
+) -> None:
+    db = tmp_path / f"catalog-{prior_revision}.sqlite3"
+    command.upgrade(_alembic_config(db), prior_revision)
+    ensure_catalog_migrated(db)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        _assert_current_revision(conn)
+        backups = {row[1]: row for row in conn.execute("PRAGMA table_info(backups)")}
+        assert backups["source_name"][3] == 0
+        assert backups["pinned"][3] == 1
+        assert str(backups["pinned"][4]) in {"0", "'0'"}
+        journal = {
+            row[1]: row for row in conn.execute("PRAGMA table_info(environment_copy_journal)")
+        }
+        assert journal["backup_ownership"][3] == 0
+        assert str(journal["backup_ownership"][4]) == "'unknown'"
+        event_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'backup_events'"
+        ).fetchone()[0]
+        assert "'pin_set'" in event_sql
+        verify_schema_equivalence(conn)
+    finally:
+        conn.close()
+
+
+def test_current_catalog_has_one_head_and_metadata_equivalence(tmp_path: Path) -> None:
+    config = _alembic_config(tmp_path / "catalog.sqlite3")
+    assert ScriptDirectory.from_config(config).get_heads() == [CATALOG_REVISION]
+    assert_schema_metadata_matches_revision()
 
 
 def test_alpha_catalogue_is_backed_up_stamped_and_preserves_rows(tmp_path: Path) -> None:

@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from odoo_instance_sdk import __all__ as SDK_EXPORTS
-from odoo_instance_sdk import models
+from odoo_instance_sdk import __all__ as SDK_EXPORTS, models
 from odoo_instance_sdk.commands.output import OutputMode, build_envelope
 
 

@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal
 
@@ -318,7 +318,7 @@ def python_resolution_audit_is_valid(  # noqa: C901
         if not isinstance(expires, str):
             return False
         try:
-            if date.fromisoformat(expires) < date.today():
+            if datetime.fromisoformat(expires).date() < datetime.now(UTC).date():
                 return False
         except ValueError:
             return False

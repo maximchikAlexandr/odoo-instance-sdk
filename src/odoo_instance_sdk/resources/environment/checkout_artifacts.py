@@ -10,7 +10,6 @@ import sqlite3
 import subprocess
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -18,7 +17,6 @@ from typing import TYPE_CHECKING, Literal, cast
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     EnvironmentConflictError,
-    PlanValidationError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.applied_settings import (
@@ -60,7 +58,14 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _PlanningError as _PlanningError,
     _PlanningOutcome as _PlanningOutcome,
 )
+from odoo_instance_sdk.resources.environment import checkout_stages as _checkout_stages
 from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
+
+_capture_checkout_stage = _checkout_stages.capture_checkout_stage
+_normalize_checkout_stage = _checkout_stages.normalize_checkout_stage
+_planning_error_outcome = _checkout_stages.planning_error_outcome
+_planning_result = _checkout_stages.planning_result
+_validate_checkout_stage = _checkout_stages.validate_checkout_stage
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -257,7 +262,7 @@ def _row_to_backup(row: sqlite3.Row) -> Backup | None:
         return None
     if path is None or not Path(str(path)).is_file():
         return None
-        size_raw: JsonValue = None
+    size_raw: JsonValue = None
     with contextlib.suppress(KeyError, IndexError):
         size_raw = cast("JsonValue", r["size_bytes"])
     return Backup(
@@ -270,7 +275,12 @@ def _row_to_backup(row: sqlite3.Row) -> Backup | None:
         filename=str(r["filename"]) if r["filename"] else "",
         size_bytes=int(str(size_raw)) if size_raw is not None else 0,
         sha256=str(r["sha256"]) if r["sha256"] else "",
-        downloaded_at=datetime.fromisoformat(str(r["downloaded_at"])),
+        downloaded_at=datetime.fromisoformat(str(r["downloaded_at"] or r["started_at"])),
+        source_git_branch=(
+            str(r["source_git_branch"]) if r["source_git_branch"] is not None else None
+        ),
+        source_name=str(r["source_name"]) if r["source_name"] is not None else None,
+        pinned=bool(r["pinned"]) if "pinned" in r else False,
     )
 
 
@@ -421,7 +431,7 @@ def _restore_audit_backup_from_sqlite(
     )
 
 
-def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
+def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
     """Return the private steps that are projected and consumed by checkout."""
     from odoo_instance_sdk.internal.pg.builder import build_psql_specification
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
@@ -588,6 +598,23 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             )
         )
     if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is not None:
+        if plan.options.remote_name is not None:
+            steps.extend(
+                (
+                    PreparedAction(
+                        step_id="database.backup.wait",
+                        action="database.backup.wait",
+                        description="Wait for named remote backup response",
+                        mutating=True,
+                    ),
+                    PreparedAction(
+                        step_id="database.backup.transfer",
+                        action="database.backup.transfer",
+                        description="Transfer named remote backup bytes",
+                        mutating=True,
+                    ),
+                )
+            )
         raw_port = plan.config_values.get("db_port")
         try:
             db_port = int(raw_port) if raw_port else 5432
@@ -929,59 +956,3 @@ def _pgadmin_command_steps(
             ]
         )
     return tuple(steps)
-
-
-def _planning_result(
-    expression_api: _ExpressionApi, outcome: _PlanningOutcome
-) -> _ExpressionResult:
-    """Adapt one concrete pure stage outcome to the bounded Result type."""
-    if outcome.error is not None:
-        return expression_api.Error(outcome.error)
-    if outcome.state is None:
-        return expression_api.Error(PlanValidationError("checkout stage produced no state"))
-    return expression_api.Ok(outcome.state)
-
-
-def _planning_error_outcome(error: _PlanningError) -> _PlanningOutcome:
-    """Keep an expected planning failure typed while leaving the Result boundary."""
-    return _PlanningOutcome(error=error)
-
-
-def _validate_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
-    """Validate captured checkout invariants without touching external state."""
-    plan = state.private
-    if not plan.branch.strip():
-        return _PlanningOutcome(error=PlanValidationError("checkout branch must not be empty"))
-    if not plan.worktree_argv:
-        return _PlanningOutcome(error=PlanValidationError("checkout planning produced no command"))
-    if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is None:
-        return _PlanningOutcome(
-            error=PlanValidationError("copy checkout requires a target database")
-        )
-    return _PlanningOutcome(state=state)
-
-
-def _normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
-    """Build immutable public projections from already captured values."""
-    from odoo_instance_sdk.resources.environment.checkout_planning import (
-        _execution_plan,
-        _public_checkout_plan,
-    )
-
-    public = _public_checkout_plan(state.private, state.provenance, state.freshness, state.warnings)
-    execution_plan = _execution_plan(
-        state.private, state.provenance, state.freshness, state.warnings
-    )
-    return _PlanningOutcome(state=replace(state, public=public, execution_plan=execution_plan))
-
-
-def _capture_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
-    """Capture the final private/public pair without adding effects or locks."""
-    if state.public is None or state.execution_plan is None:
-        return _PlanningOutcome(error=PlanValidationError("checkout projections are incomplete"))
-    snapshot = _CheckoutSnapshot(
-        private=state.private,
-        public=state.public,
-        execution_plan=state.execution_plan,
-    )
-    return _PlanningOutcome(state=replace(state, snapshot=snapshot))

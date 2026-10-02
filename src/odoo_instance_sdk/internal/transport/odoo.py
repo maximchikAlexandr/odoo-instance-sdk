@@ -59,7 +59,7 @@ class _AdaptedStreamingResponse:
             return self._raw.json()
         except BaseException as exc:
             self._reraise_transport(exc)
-            raise AssertionError("unreachable transport conversion")
+            raise AssertionError("unreachable transport conversion") from exc
 
     def raise_for_status(self) -> None:
         try:

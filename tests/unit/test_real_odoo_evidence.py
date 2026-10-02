@@ -7,8 +7,7 @@ from typing import Literal
 
 import pytest
 
-from scripts import real_odoo_evidence as evidence
-from scripts import real_odoo_timing as timing
+from scripts import real_odoo_evidence as evidence, real_odoo_timing as timing
 from scripts.real_odoo_secrets import secret_variants, write_secret_registry
 from tests.unit.real_odoo_ci_support import _evidence_contract
 

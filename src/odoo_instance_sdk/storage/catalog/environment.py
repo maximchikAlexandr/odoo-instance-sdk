@@ -227,17 +227,22 @@ class _EnvironmentMixin:
         db_user: str | None,
         backup_id: str | None,
         stage: CopyJournalStage,
+        backup_ownership: str = "unknown",
     ) -> None:
         if not isinstance(stage, CopyJournalStage):
             raise TypeError("copy journal stage must be a CopyJournalStage")
+        if backup_ownership not in {"owned", "borrowed", "unknown"}:
+            raise ValueError("backup_ownership must be owned, borrowed, or unknown")
         self._conn.execute(
             """INSERT INTO environment_copy_journal
-               (environment_id,target_database,db_host,db_port,db_user,backup_id,stage,updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               (environment_id,target_database,db_host,db_port,db_user,backup_id,
+                backup_ownership,stage,updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(environment_id) DO UPDATE SET
                  target_database=excluded.target_database, db_host=excluded.db_host,
                  db_port=excluded.db_port, db_user=excluded.db_user,
-                 backup_id=excluded.backup_id, stage=excluded.stage, updated_at=excluded.updated_at""",
+                 backup_id=excluded.backup_id, backup_ownership=excluded.backup_ownership,
+                 stage=excluded.stage, updated_at=excluded.updated_at""",
             (
                 environment_id,
                 target_database,
@@ -245,6 +250,7 @@ class _EnvironmentMixin:
                 db_port,
                 db_user,
                 backup_id,
+                backup_ownership,
                 stage.value,
             ),
         )
@@ -257,6 +263,21 @@ class _EnvironmentMixin:
             self._conn.execute(
                 "SELECT * FROM environment_copy_journal WHERE environment_id=?", (environment_id,)
             ).fetchone(),
+        )
+
+    @_translate_sqlite_error
+    def is_owned_copy_backup(self, backup_id: str) -> bool:
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM environment_copy_journal "
+                "AS journal JOIN environments AS environment "
+                "ON environment.id=journal.environment_id "
+                "WHERE journal.backup_id=? AND journal.backup_ownership='owned' "
+                "AND journal.stage <> 'backup_deleted' AND environment.state='removing' "
+                "LIMIT 1",
+                (backup_id,),
+            ).fetchone()
+            is not None
         )
 
     @_translate_sqlite_error
@@ -400,6 +421,7 @@ class _EnvironmentMixin:
         http_url: str,
         http_port: int,
         database_name: str,
+        launch_identity_json: str | None = None,
     ) -> None:
         if owner_kind not in {"environment", "project"} or not owner_id.strip():
             raise BackupCatalogError("runtime owner must be exactly environment or project")
@@ -415,13 +437,14 @@ class _EnvironmentMixin:
         self._conn.execute(
             """INSERT INTO runtime
                (owner_kind, owner_id, root_pid, create_time, started_at, checkout_branch,
-                commit_sha, http_url, http_port, database_name, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                commit_sha, http_url, http_port, database_name, launch_identity_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
                  root_pid=excluded.root_pid, create_time=excluded.create_time,
                  started_at=excluded.started_at, checkout_branch=excluded.checkout_branch,
                  commit_sha=excluded.commit_sha, http_url=excluded.http_url,
                  http_port=excluded.http_port, database_name=excluded.database_name,
+                 launch_identity_json=excluded.launch_identity_json,
                  updated_at=excluded.updated_at""",
             (
                 owner_kind,
@@ -434,6 +457,7 @@ class _EnvironmentMixin:
                 http_url,
                 http_port,
                 database_name,
+                launch_identity_json,
             ),
         )
         self._conn.commit()
@@ -461,6 +485,7 @@ class _EnvironmentMixin:
         http_url: str,
         http_port: int,
         database_name: str,
+        launch_identity_json: str | None = None,
     ) -> None:
         self._upsert_runtime(
             "environment",
@@ -473,6 +498,7 @@ class _EnvironmentMixin:
             http_url=http_url,
             http_port=http_port,
             database_name=database_name,
+            launch_identity_json=launch_identity_json,
         )
 
     @_translate_sqlite_error
@@ -498,14 +524,15 @@ class _EnvironmentMixin:
         *,
         root_pid: int,
         create_time: float,
+        launch_identity_json: str | None = None,
     ) -> bool:
         if owner_kind not in {"environment", "project"}:
             raise BackupCatalogError("runtime owner must be exactly environment or project")
         with self._conn:
             cursor = self._conn.execute(
                 "DELETE FROM runtime WHERE owner_kind = ? AND owner_id = ? "
-                "AND root_pid = ? AND create_time = ?",
-                (owner_kind, owner_id, root_pid, create_time),
+                "AND root_pid = ? AND create_time = ? AND launch_identity_json IS ?",
+                (owner_kind, owner_id, root_pid, create_time, launch_identity_json),
             )
         return cursor.rowcount == 1
 

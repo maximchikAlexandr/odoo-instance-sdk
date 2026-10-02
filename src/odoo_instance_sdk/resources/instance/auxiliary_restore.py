@@ -27,10 +27,10 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
+    is_secret_environment_key,
     sanitized_child_environment,
 )
 from odoo_instance_sdk.internal.project_env import (
-    MASTER_PASSWORD_KEY,
     project_environment_secret_values,
 )
 from odoo_instance_sdk.internal.server import (
@@ -42,7 +42,7 @@ from odoo_instance_sdk.models import (
     OdooProcess,
     StartConfig,
 )
-from odoo_instance_sdk.resources.instance import auxiliary_restore_identity as _restore_identity
+from odoo_instance_sdk.resources.instance import runtime_identity as _restore_identity
 from odoo_instance_sdk.resources.instance.runtime import (
     _PROTECTED_RUNTIME_OPTIONS,
     T,
@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 _ContextResult = TypeVar("_ContextResult")
 _CommandResult = TypeVar("_CommandResult")
 
-_listener_owner_pids = _restore_identity._listener_owner_pids
 _project_runtime_owns_port = _restore_identity._project_runtime_owns_port
 _recorded_runtime_pid = _restore_identity._recorded_runtime_pid
 _socket_owned_by = _restore_identity._socket_owned_by
@@ -346,7 +345,7 @@ def _child_secret_values(
 ) -> tuple[str, ...]:
     values = list(project_environment_secret_values(project_environment))
     for key, value in (overrides or {}).items():
-        if key == MASTER_PASSWORD_KEY and value:
+        if is_secret_environment_key(key) and value:
             values.append(value)
     return tuple(dict.fromkeys(values))
 

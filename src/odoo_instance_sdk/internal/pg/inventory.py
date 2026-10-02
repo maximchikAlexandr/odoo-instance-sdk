@@ -123,7 +123,7 @@ def build_database_inventory_command(
     project_root: str | Path,
     *,
     tracked: bool = False,
-    catalog: BackupCatalog | None | _CatalogUnset = _CATALOG_UNSET,
+    catalog: BackupCatalog | _CatalogUnset | None = _CATALOG_UNSET,
     executor: ProcessExecutor | None = None,
 ) -> Command[DatabaseInventoryResult]:
     """Capture a direct PostgreSQL inventory without Odoo reconciliation."""

@@ -125,13 +125,13 @@ class ExecutionDeadline:
 
 
 type PrivateJsonValue = (
-    None
-    | bool
+    bool
     | int
     | float
     | str
     | tuple["PrivateJsonValue", ...]
     | Mapping[str, "PrivateJsonValue"]
+    | None
 )
 
 # The only private compatibility projection currently stored with a command is
@@ -237,6 +237,8 @@ class PreparedStep:
     secret_config_path: str | None = None
     public_input_preview: str | None = None
     timeout: float | None = None
+    max_output_bytes: int | None = None
+    max_combined_output_bytes: int | None = None
     mode: str = "captured"
     secret_values: tuple[str, ...] = ()
     read_only: bool = False

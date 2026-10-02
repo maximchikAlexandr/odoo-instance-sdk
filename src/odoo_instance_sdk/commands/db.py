@@ -129,6 +129,7 @@ def db_group() -> None:
     help="Reset base.user_admin after restoring.",
 )
 @click.option("--source-branch", default=None, help="Source Git branch provenance.")
+@click.option("--remote", "remote_name", default=None, help="Named remote source to refresh.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
 @output_options
@@ -139,6 +140,7 @@ def db_refresh(
     show_command_output: bool,
     reset_admin_password: bool,
     source_branch: str | None,
+    remote_name: str | None,
     dry_run: bool,
     no_input: bool,
     output_format: str | None,
@@ -170,6 +172,7 @@ def db_refresh(
                 options=DatabaseRefreshOptions(
                     restore=restore,
                     source_branch=source_branch,
+                    remote_name=remote_name,
                     reset_admin_password=reset_admin_password,
                 ),
                 admin_password=admin_password,
@@ -408,7 +411,14 @@ def db_restore(  # noqa: C901
                     auxiliary_restore_session(auxiliary_instance),
                 )
     except Exception as exc:
-        fail(output_mode, "db.restore", exc, dry_run=dry_run)
+        fail(
+            output_mode,
+            "db.restore",
+            exc,
+            dry_run=dry_run,
+            error_code=_error_code(exc),
+            details=_error_details(exc),
+        )
 
     source_label = "local archive" if archive_file is not None else f"backup {backup_id}"
 

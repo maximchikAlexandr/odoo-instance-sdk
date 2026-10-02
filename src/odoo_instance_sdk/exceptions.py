@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
 type PlanJsonValue = (
-    None | bool | int | float | str | list[PlanJsonValue] | dict[str, PlanJsonValue]
+    bool | int | float | str | list[PlanJsonValue] | dict[str, PlanJsonValue] | None
 )
 
 
@@ -53,6 +53,51 @@ class BackupInsufficientDiskError(BackupPolicyError):
     """Restore preflight found insufficient local disk space (``backup_insufficient_disk``)."""
 
     code = "backup_insufficient_disk"
+
+
+class BackupUnsupportedFormatError(BackupPolicyError):
+    """Recognized local backup format that this source cannot restore."""
+
+    code = "backup_unsupported_format"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "unsupported local backup format: PostgreSQL custom dump",
+            details={"format": "postgres_custom_dump"},
+        )
+
+
+class BackupUnknownFormatError(BackupPolicyError):
+    """Unrecognized local backup content."""
+
+    code = "backup_unknown_format"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "unrecognized local backup format",
+            details={"format": "unknown"},
+        )
+
+
+class BackupDiskInspectionError(BackupPolicyError):
+    """Restore preflight could not inspect the destination filesystem."""
+
+    code = "backup_disk_inspection"
+
+    def __init__(
+        self,
+        *,
+        requested_path: str,
+        inspection_path: str | None,
+        reason: str,
+    ) -> None:
+        details: dict[str, PlanJsonValue] = {
+            "requested_path": requested_path,
+            "reason": reason,
+        }
+        if inspection_path is not None:
+            details["inspection_path"] = inspection_path
+        super().__init__("restore disk inspection failed", details=details)
 
 
 class ConfigError(OdooInstanceSdkError):
@@ -203,6 +248,22 @@ class InvalidBaseUrlError(OdooInstanceSdkError):
 
 class InstanceConfigurationError(OdooInstanceSdkError):
     """Invalid or incomplete instance configuration."""
+
+
+class DetachedLaunchCleanupError(InstanceConfigurationError):
+    """Readiness failed and the process created by detached launch survived cleanup."""
+
+    code = "detached_cleanup_failed"
+
+    def __init__(self, pid: int, owner_kind: str, owner_id: str, reason: str) -> None:
+        self.pid = pid
+        self.owner_kind = owner_kind
+        self.owner_id = owner_id
+        self.reason = reason
+        super().__init__(
+            f"detached readiness cleanup failed; surviving owned process "
+            f"pid={pid} owner={owner_kind}:{owner_id}: {reason}"
+        )
 
 
 class LogfileAccessError(InstanceConfigurationError):

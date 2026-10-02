@@ -1,9 +1,7 @@
 ## Purpose
 
 Secret-free project manifest creation, including headless/wizard init and VS Code launch import.
-
 ## Requirements
-
 ### Requirement: Project manifest location
 
 `odcli init` MUST создавать один declarative manifest по пути `<repository-root>/.odcli/project.toml`.
@@ -488,3 +486,74 @@ The foreground `run` command SHALL capture the bootstrap spawn, probe, readiness
 
 - **WHEN** a foreground `odcli run` command is constructed for an owned Compose project
 - **THEN** its plan contains the bootstrap spawn, probe, readiness probe, and verification action that execution consumes
+
+### Requirement: Named remote sources in project configuration
+
+Project configuration SHALL support multiple named remote entries with normalized URL, explicit database and declared Git branch. Names SHALL match `[a-z][a-z0-9_]*`; invalid or duplicate names, unknown fields, and credential-bearing URLs SHALL fail validation. The public project-init surface SHALL expose listing, one immutable configure operation with explicit replace semantics, and immutable removal using the existing manifest; no additional client facade SHALL be introduced. Configuration commands SHALL capture canonical repository identity and manifest fingerprint, take the existing project lock, reject drift, preserve unrelated project values, and SHALL NOT contact remote servers or delete secrets or operational resources.
+
+#### Scenario: Configure lab and staging
+
+- **WHEN** a project adds lab and staging with different URLs, databases and branches
+- **THEN** both entries round-trip independently and can be selected by exact name
+
+#### Scenario: Idempotent and concurrent edits
+
+- **WHEN** the same entry is added again
+- **THEN** it is a no-op; a different existing entry requires explicit update
+- **AND** a manifest changed since planning causes a conflict without overwriting another edit
+
+#### Scenario: Remove a profile
+
+- **WHEN** an existing named entry is removed
+- **THEN** only that configuration entry is removed; backups, secrets and environments remain intact
+
+### Requirement: Initialization accepts named sources
+
+Init SHALL accept multiple typed remote entries in SDK and repeatable `--remote NAME URL DATABASE GIT_REF` in CLI, applying existing validation, no-input, overwrite and dry-run rules. Named entries SHALL satisfy the remote-configuration completeness check without requiring a legacy test entry. Re-init without remote inputs SHALL preserve existing entries. Credential availability SHALL be reported only as derived `ODCLI_REMOTE_<UPPER_NAME>_MASTER_PASSWORD` key names; secrets SHALL NOT be accepted by init, enter the manifest, or be written to `.odcli/.env`.
+
+#### Scenario: Headless initialization with two sources
+
+- **WHEN** complete local init options and two valid named sources are supplied with no-input
+- **THEN** init writes both entries without prompting for a legacy test source or a password
+- **AND** reports which named-source passwords still need configuration, without requesting origin approval variables
+
+#### Scenario: Preserve existing sources
+
+- **WHEN** init is repeated without remote options
+- **THEN** it retains every named and legacy remote entry
+
+#### Scenario: Dry-run or invalid inputs
+
+- **WHEN** init previews remote additions or receives conflicting duplicate names
+- **THEN** dry-run writes nothing and conflicting inputs fail before any init mutation
+
+### Requirement: Compose bootstrap appends exact lifecycle evidence
+
+After a self-contained Compose initialization or first project run actually creates database `tmp` and the existing SQL readiness check proves `base` is installed, the system SHALL append one `bootstrapped` event to the existing `database_events` lifecycle for the normalized cluster endpoint and exact database `tmp`. The event SHALL contain the exact current active `cluster_id` and project-owned data directory and SHALL keep restore-only fields null. The catalog write SHALL be an explicit mutating action in the same immutable command plan and SHALL validate the active cluster claim before committing.
+
+The bootstrap executor SHALL distinguish a database created by its captured spawn from a database that was already ready. Dry-run, external PostgreSQL, a skipped spawn, readiness failure, missing or pending cluster claim, identity mismatch, and a pre-existing unrecorded `tmp` SHALL NOT append or backfill `bootstrapped`. A catalog-write failure after database creation SHALL fail the operation and leave the database unauthorized for guarded deletion; later readiness SHALL NOT infer ownership.
+
+#### Scenario: Successful bootstrap appends exact event
+
+- **WHEN** the captured bootstrap spawn creates `tmp`, its readiness probe returns `installed`, and the current project cluster exactly matches an active catalog claim
+- **THEN** execution appends one `bootstrapped` event with that endpoint, `tmp`, `cluster_id`, and project-owned data directory and no restore provenance
+
+#### Scenario: Existing ready tmp is not adopted
+
+- **WHEN** the initial readiness probe finds an already valid `tmp` but the latest exact event is not `bootstrapped`
+- **THEN** the spawn and record action are skipped and no bootstrap evidence is appended or backfilled
+
+#### Scenario: Failed bootstrap creates no authority
+
+- **WHEN** the bootstrap spawn, readiness probe, active-claim validation, or event append fails
+- **THEN** initialization fails and no successful `bootstrapped` event is committed
+
+#### Scenario: Preview and external PostgreSQL are inert
+
+- **WHEN** bootstrap is previewed with `--dry-run` or the project uses external PostgreSQL
+- **THEN** the public plan remains secret-free and no `database_events` row is written
+
+#### Scenario: Bootstrap event action is inspectable
+
+- **WHEN** Compose initialization or first-run bootstrap is planned
+- **THEN** its immutable plan contains the bootstrap spawn, probes, readiness verification, and conditional `bootstrapped` record action that execution consumes without rebuilding process or identity inputs

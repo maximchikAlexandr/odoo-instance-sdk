@@ -41,9 +41,9 @@ client = OdooClient(config=OdooClientConfig(executable="odoo-bin"))
 instance = client.instance.from_config("./odoo.conf")
 
 command = instance.run_command(["--stop-after-init"], cwd=".")
-print(command.plan)       # redacted, ordered ExecutionPlan
-print(command.commands)   # captured process steps only
-result = command.run()    # runs that same captured snapshot
+print(command.plan)  # redacted, ordered ExecutionPlan
+print(command.commands)  # captured process steps only
+result = command.run()  # runs that same captured snapshot
 print(result.returncode)
 ```
 
@@ -55,8 +55,8 @@ preview and execution keep identical boundaries, order, and repeated values:
 native = instance.run_foreground_command(
     args=("--dev=reload", "--log-level", "debug", "--stop-after-init")
 )
-print(native.plan)       # redacted native argv
-result = native.run()    # inherited stdin/stdout/stderr, native exit code
+print(native.plan)  # redacted native argv
+result = native.run()  # inherited stdin/stdout/stderr, native exit code
 print(result)
 ```
 
@@ -283,9 +283,7 @@ staged files, the shared immutable command boundary, and the module catalogue
 for scope inference:
 
 ```python
-context = instance.git.commit_context(
-    "describe the staged change", ticket="PROJ-123", tag="DOC"
-)
+context = instance.git.commit_context("describe the staged change", ticket="PROJ-123", tag="DOC")
 print(context.message)
 
 check = instance.git.check(base="main")

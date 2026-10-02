@@ -35,6 +35,7 @@ from odoo_instance_sdk.commands.resource import (
     configure_catalog_path_provider as configure_resource_catalog_path_provider,
     resource_group,
 )
+from odoo_instance_sdk.commands.remote import remote_group
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.models import CommandResult
 
@@ -556,6 +557,7 @@ cli.add_command(
 )
 cli.add_command(db_group, name="db")
 cli.add_command(backup_group, name="backup")
+cli.add_command(remote_group, name="remote")
 cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")

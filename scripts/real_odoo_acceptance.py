@@ -48,70 +48,106 @@ EVIDENCE_EXECUTORS: Final[dict[str, tuple[str, ...]]] = {
     },
     **{
         f"E2E-CP-{number:02d}": (
-            "tests/integration/real_odoo/test_critical_path.py::"
-            "test_source_backed_full_critical_path",
+            (
+                "tests/integration/real_odoo/test_critical_path.py::"
+                "test_source_backed_full_critical_path"
+            ),
         )
         for number in range(1, 16)
     },
     "E2E-FC-01": (
-        "tests/integration/real_odoo/test_focused_auth_archive.py::"
-        "test_remote_auth_and_unreachable_source_fail_closed",
+        (
+            "tests/integration/real_odoo/test_focused_auth_archive.py::"
+            "test_remote_auth_and_unreachable_source_fail_closed"
+        ),
     ),
     "E2E-FC-02": (
-        "tests/integration/real_odoo/test_focused_auth_archive.py::"
-        "test_remote_auth_and_unreachable_source_fail_closed",
+        (
+            "tests/integration/real_odoo/test_focused_auth_archive.py::"
+            "test_remote_auth_and_unreachable_source_fail_closed"
+        ),
     ),
     "E2E-FC-03": (
-        "tests/integration/real_odoo/test_focused_auth_archive.py::"
-        "test_archive_and_restore_boundaries_publish_no_unowned_state[truncated]",
+        (
+            "tests/integration/real_odoo/test_focused_auth_archive.py::"
+            "test_archive_and_restore_boundaries_publish_no_unowned_state[truncated]"
+        ),
     ),
     "E2E-FC-04": (
-        "tests/integration/real_odoo/test_focused_auth_archive.py::"
-        "test_archive_and_restore_boundaries_publish_no_unowned_state[incompatible]",
+        (
+            "tests/integration/real_odoo/test_focused_auth_archive.py::"
+            "test_archive_and_restore_boundaries_publish_no_unowned_state[incompatible]"
+        ),
     ),
     "E2E-FC-05": (
-        "tests/integration/real_odoo/test_focused_auth_archive.py::"
-        "test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail",
+        (
+            "tests/integration/real_odoo/test_focused_auth_archive.py::"
+            "test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail"
+        ),
     ),
     "E2E-FC-06": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[db.reset-admin-password]",
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[shell]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[db.reset-admin-password]"
+        ),
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[shell]"
+        ),
     ),
     "E2E-FC-07": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[exec]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[exec]"
+        ),
     ),
     "E2E-FC-08": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[module.test]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[module.test]"
+        ),
     ),
     "E2E-FC-09": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[backup.rm]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[backup.rm]"
+        ),
     ),
     "E2E-FC-10": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[db.rm]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[db.rm]"
+        ),
     ),
     "E2E-FC-11": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[db.locks]",
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[db.stats]",
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[db.bloat]",
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[db.init-monitoring]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[db.locks]"
+        ),
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[db.stats]"
+        ),
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[db.bloat]"
+        ),
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[db.init-monitoring]"
+        ),
     ),
     "E2E-FC-12": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[psql]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[psql]"
+        ),
     ),
     "E2E-FC-13": (
-        "tests/integration/real_odoo/test_focused_leaves.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[logs]",
+        (
+            "tests/integration/real_odoo/test_focused_leaves.py::"
+            "test_remaining_focused_public_leaves_use_canonical_inventory[logs]"
+        ),
     ),
     "E2E-REC-01": (
         "tests/integration/real_odoo/test_focused_recovery.py::test_sigint_recovery_without_leaks",
@@ -120,20 +156,28 @@ EVIDENCE_EXECUTORS: Final[dict[str, tuple[str, ...]]] = {
         "tests/integration/real_odoo/test_focused_recovery.py::test_timeout_recovery_without_leaks",
     ),
     "E2E-REC-03": (
-        "tests/integration/real_odoo/test_focused_recovery.py::"
-        "test_partial_publication_recovery_without_leaks",
+        (
+            "tests/integration/real_odoo/test_focused_recovery.py::"
+            "test_partial_publication_recovery_without_leaks"
+        ),
     ),
     "E2E-SEC-01": (
-        "tests/integration/real_odoo/test_focused_auth_archive.py::"
-        "test_remote_auth_and_unreachable_source_fail_closed",
+        (
+            "tests/integration/real_odoo/test_focused_auth_archive.py::"
+            "test_remote_auth_and_unreachable_source_fail_closed"
+        ),
     ),
     "E2E-SEC-02": (
-        "tests/integration/real_odoo/test_focused_auth_archive.py::"
-        "test_remote_auth_and_unreachable_source_fail_closed",
+        (
+            "tests/integration/real_odoo/test_focused_auth_archive.py::"
+            "test_remote_auth_and_unreachable_source_fail_closed"
+        ),
     ),
     "E2E-SEC-03": (
-        "tests/integration/real_odoo/test_focused_recovery.py::"
-        "test_failed_debug_retention_contains_only_sanitized_files",
+        (
+            "tests/integration/real_odoo/test_focused_recovery.py::"
+            "test_failed_debug_retention_contains_only_sanitized_files"
+        ),
     ),
     "E2E-SEC-04": (
         "tests/unit/test_real_odoo_cache_audit.py::test_python_resolution_audit_rejects_unknown_scanner_finding",

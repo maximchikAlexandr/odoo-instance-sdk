@@ -8,7 +8,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
@@ -18,8 +18,13 @@ from odoo_instance_sdk.internal.generated_config import (
     render_config,
 )
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
+from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import StartConfig
-from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
+from odoo_instance_sdk.project import (
+    ProjectConfig,
+    TestInstanceProjectConfig,
+    normalize_remote_name,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
@@ -37,11 +42,28 @@ def _resolve_source_config_path(root: Path, source: Path | None) -> Path | None:
     return source_path if source_path.is_file() else None
 
 
-def verify_project_owned_data_dir(project_root: Path, data_dir: str | Path) -> Path:
-    """Verify a restore ``data_dir`` is a contained non-symlink project directory."""
+def verify_project_owned_data_dir(
+    project_root: Path, data_dir: str | Path, *, require_exists: bool = True
+) -> Path:
+    """Verify a contained non-symlink project directory."""
     root = Path(project_root).resolve()
     path = Path(data_dir)
-    if path.is_symlink() or not path.is_dir():
+    if not path.is_absolute():
+        path = root / path
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise InstanceConfigurationError(
+            f"project-owned data_dir must stay inside the project tree: {path}"
+        ) from None
+    current = root
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise InstanceConfigurationError(
+                f"project-owned data_dir must be a regular directory, not a symlink: {path}"
+            )
+    if (require_exists and not path.is_dir()) or (path.exists() and not path.is_dir()):
         raise InstanceConfigurationError(
             f"project-owned data_dir must be a regular directory, not a symlink: {path}"
         )
@@ -85,6 +107,16 @@ def manifest_dict(
             "database": config.test_instance.database,
             "git_branch": config.test_instance.git_branch,
         }
+    remote_instances: list[dict[str, JsonValue]] = [
+        {
+            "name": source.name,
+            "base_url": normalize_base_url(source.base_url),
+            "database": source.database,
+            "git_branch": source.git_branch,
+            "password_key": f"ODCLI_REMOTE_{normalize_remote_name(source.name).upper()}_MASTER_PASSWORD",
+        }
+        for source in sorted(config.remote_instances, key=lambda item: item.name)
+    ]
     return {
         "odoo_bin": str(config.odoo_bin) if config.odoo_bin else None,
         "python": str(config.python) if config.python else None,
@@ -95,6 +127,10 @@ def manifest_dict(
         "ticket_base_url": config.ticket_base_url,
         "refresh_after_hours": config.refresh_after_hours,
         "test_instance": test_instance,
+        "remote_instances": cast("JsonValue", remote_instances),
+        "remote_password_keys": cast(
+            "JsonValue", [item["password_key"] for item in remote_instances]
+        ),
         "preferred_http_port": config.preferred_http_port,
         "requirements": list(config.requirements),
         "default_run_args": list(config.default_run_args),
@@ -269,15 +305,10 @@ def write_project_env(
     origin_pins: str | None = None,
     master_password: str | None = None,
 ) -> Path:
-    """Write the project-owned dotenv under 0600, preserving unmanaged lines.
-
-    Only the ``ODCLI_TEST_INSTANCE_ORIGIN_PINS`` and ``ODCLI_TEST_MASTER_PASSWORD``
-    keys are managed; existing operator lines are preserved. The file is
-    created with 0600 permissions and never receives a secret from argv.
-    """
+    """Write the legacy password key without generating origin approvals."""
     dest = project_env_path(project_root)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    existing: dict[str, str] = {}
+    existing_master: str | None = None
     preserved: list[str] = []
     if dest.is_file():
         for line in dest.read_text(encoding="utf-8").splitlines():
@@ -285,22 +316,14 @@ def write_project_env(
             if stripped and "=" in stripped and not stripped.startswith("#"):
                 key, _, value = stripped.partition("=")
                 key = key.strip()
-                if key in (_ORIGIN_PINS_KEY, _MASTER_PASSWORD_KEY):
-                    existing[key] = value
+                if key == _MASTER_PASSWORD_KEY:
+                    existing_master = value
                     continue
             preserved.append(line)
     lines = list(preserved)
     if lines and lines[-1] != "":
         lines.append("")
-    pin_value = origin_pins if origin_pins is not None else existing.get(_ORIGIN_PINS_KEY, "")
-    lines.append(f"{_ORIGIN_PINS_KEY}={pin_value}")
-    master_value: str
-    if master_password is not None:
-        master_value = master_password
-    elif _MASTER_PASSWORD_KEY in existing:
-        master_value = existing[_MASTER_PASSWORD_KEY]
-    else:
-        master_value = ""
+    master_value = master_password if master_password is not None else (existing_master or "")
     lines.append(f"{_MASTER_PASSWORD_KEY}={master_value}")
     content = "\n".join(lines) + "\n"
     fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), suffix=".env.tmp", prefix=".env")
@@ -412,13 +435,13 @@ def evaluate_init_completeness(  # noqa: C901
     test_database = test_instance.database if test_instance is not None else None
     test_branch = test_instance.git_branch if test_instance is not None else None
 
-    if test_url is None:
+    if test_url is None and not config.remote_instances:
         missing.append("test_url")
         details["test_url"] = "no --test-url and no [test_instance].url"
-    if test_branch is None:
+    if test_branch is None and not config.remote_instances:
         missing.append("test_branch")
         details["test_branch"] = "no --test-branch and no [test_instance].git_branch"
-    if test_database is None:
+    if test_database is None and not config.remote_instances:
         if remote_database_names is not None and len(remote_database_names) == 1:
             details["test_database"] = f"resolved to {remote_database_names[0]!r}"
         else:

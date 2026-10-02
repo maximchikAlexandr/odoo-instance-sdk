@@ -11,6 +11,7 @@ not recreated; an invalid same-named database fails with ``init_bootstrap_failed
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -23,6 +24,7 @@ from odoo_instance_sdk.models import StartConfig
 if TYPE_CHECKING:
     from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 _ContextT = TypeVar("_ContextT")
 
@@ -37,6 +39,7 @@ _BOOTSTRAP_STEP_ID = "init.bootstrap.tmp"
 _BOOTSTRAP_PROBE_STEP_ID = "init.bootstrap.tmp.probe"
 _BOOTSTRAP_READY_STEP_ID = "init.bootstrap.tmp.ready"
 _BOOTSTRAP_VERIFY_ACTION_ID = "init.bootstrap.tmp.verify"
+_BOOTSTRAP_RECORD_ACTION_ID = "catalog.bootstrap.tmp.record"
 
 
 class BootstrapFailedError(InstanceConfigurationError):
@@ -46,6 +49,13 @@ class BootstrapFailedError(InstanceConfigurationError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+class BootstrapOutcome(StrEnum):
+    """Whether this invocation created ``tmp`` or reused a ready database."""
+
+    CREATED = "created"
+    ALREADY_READY = "already_ready"
 
 
 def _bootstrap_sql_step(
@@ -135,17 +145,27 @@ def bootstrap_tmp_steps(
     return spawn_step, probe_step, ready_step, ready_action
 
 
+def bootstrap_record_action() -> PreparedAction:
+    """Return the conditional lifecycle publication action for bootstrap."""
+    return PreparedAction(
+        step_id=_BOOTSTRAP_RECORD_ACTION_ID,
+        action="record-bootstrap-tmp",
+        description="Record exact lifecycle evidence for newly-created tmp",
+        mutating=True,
+    )
+
+
 def run_bootstrap_tmp(
     context: RunContext[_ContextT],
     spawn_step: PreparedStep,
     probe_step: PreparedStep,
     ready_step: PreparedStep,
-) -> bool:
+) -> BootstrapOutcome:
     """Execute or skip the bootstrap spawn using an existing run context."""
     if _probe_tmp_ready(context, probe_step):
         context.skip(spawn_step.step_id)
         context.skip(ready_step.step_id)
-        return True
+        return BootstrapOutcome.ALREADY_READY
     try:
         context.process_prepared(spawn_step)
     except BaseException as error:
@@ -154,7 +174,7 @@ def run_bootstrap_tmp(
         raise BootstrapFailedError(
             "tmp bootstrap failed: base module is not installed on tmp after --stop-after-init"
         )
-    return True
+    return BootstrapOutcome.CREATED
 
 
 def tmp_bootstrap_command(
@@ -186,9 +206,9 @@ def tmp_bootstrap_command(
 
     def run(context: RunContext[bool]) -> bool:
         context.action(ready_action.step_id)
-        result = run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
+        run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
         context.complete_action(ready_action.step_id)
-        return result
+        return True
 
     plan = ExecutionPlan(
         steps=(
@@ -241,8 +261,16 @@ def ensure_project_bootstrap_tmp(
         return
     spawn_step, probe_step, ready_step, ready_action = captured
     context.action(ready_action.step_id)
-    run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
+    outcome = run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
     context.complete_action(ready_action.step_id)
+    record_action = bootstrap_record_action()
+    if outcome is BootstrapOutcome.CREATED:
+        if context.planned(record_action.step_id):
+            context.action(record_action.step_id)
+            _record_bootstrap_event(instance)
+            context.complete_action(record_action.step_id)
+    elif context.planned(record_action.step_id):
+        context.skip(record_action.step_id)
 
 
 def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -> bool:
@@ -254,3 +282,56 @@ def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -
     stdout = (getattr(result, "stdout", "") or "").strip()
     returncode = getattr(result, "returncode", 1)
     return returncode == 0 and stdout == "installed"
+
+
+def _record_bootstrap_event(instance: OdooInstance) -> None:
+    """Publish bootstrap ownership using the already-resolved project identity."""
+    from odoo_instance_sdk.internal.project_init import (
+        verify_project_owned_data_dir,
+    )
+
+    cluster = instance._postgres_cluster
+    if cluster is None or not cluster.owned:
+        raise BootstrapFailedError("bootstrap cluster ownership is unavailable")
+    project_root = instance.config.default_cwd or Path.cwd()
+    configured_data_directory = (
+        instance.config.start_config.data_dir if instance.config.start_config else None
+    )
+    if configured_data_directory is None:
+        raise BootstrapFailedError("bootstrap data directory is not configured")
+    configured_path = Path(configured_data_directory)
+    if not configured_path.is_absolute():
+        configured_path = project_root / configured_path
+    try:
+        data_directory = verify_project_owned_data_dir(project_root, configured_path)
+    except InstanceConfigurationError as error:
+        raise BootstrapFailedError(
+            f"bootstrap data directory is not project-owned: {error}"
+        ) from error
+    record_bootstrap_event(cluster, data_directory)
+
+
+def record_bootstrap_event(cluster: PostgresCluster, data_directory: str | Path) -> None:
+    """Publish a bootstrap event for an active, exact Compose cluster claim."""
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    claim = catalog._get_postgres_cluster(cluster._project_id)
+    if claim is None or claim.state != "active":
+        catalog.close()
+        raise BootstrapFailedError("bootstrap cluster claim is not active")
+    try:
+        catalog._record_database_bootstrapped(
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+            BOOTSTRAP_DATABASE,
+            cluster_id=claim.cluster_id,
+            data_directory=data_directory,
+        )
+    except Exception as error:
+        if isinstance(error, BootstrapFailedError):
+            raise
+        raise BootstrapFailedError(f"bootstrap lifecycle publication failed: {error}") from error
+    finally:
+        catalog.close()

@@ -4,7 +4,9 @@ import contextlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -28,18 +30,22 @@ from odoo_instance_sdk.internal.project_init import (
     project_owned_data_dir,
     verify_project_owned_data_dir,
 )
-from odoo_instance_sdk.models import DatabaseRefreshOptions, StartConfig
+from odoo_instance_sdk.models import Backup, DatabaseRefreshOptions, StartConfig
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
     ProjectConfig,
-)
-from odoo_instance_sdk.project import (
+    RemoteSourceConfig,
     TestInstanceProjectConfig as RemoteTestInstanceConfig,
 )
 from odoo_instance_sdk.project_init import init_project, init_project_command
 from odoo_instance_sdk.resources.database import DatabaseResource
-from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
+from odoo_instance_sdk.resources.instance import (
+    AuxiliaryRestoreSession,
+    OdooInstance,
+    auxiliary_restore_session,
+)
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 @pytest.fixture(autouse=True)
@@ -240,8 +246,9 @@ def test_init_full_self_contained_writes_data_dir_and_dotenv(tmp_path: Path) -> 
     dotenv = tmp_path / ".odcli" / ".env"
     assert dotenv.is_file()
     assert dotenv.stat().st_mode & 0o777 == 0o600
-    assert "ODCLI_TEST_INSTANCE_ORIGIN_PINS=" in dotenv.read_text()
-    assert "ODCLI_TEST_MASTER_PASSWORD=" in dotenv.read_text()
+    dotenv_text = dotenv.read_text()
+    assert "ODCLI_TEST_INSTANCE_ORIGIN_PINS" not in dotenv_text
+    assert "ODCLI_TEST_MASTER_PASSWORD=" in dotenv_text
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")
@@ -280,6 +287,98 @@ def test_init_rerun_preserves_existing_test_instance(tmp_path: Path) -> None:
     manifest = (tmp_path / ".odcli" / "project.toml").read_text()
     assert "http://127.0.0.1:18069" in manifest
     assert 'database = "remote_db"' in manifest
+
+
+def test_named_remote_init_is_complete_repeatable_and_secret_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: tmp_path / "catalog.sqlite3",
+    )
+    runner = CliRunner()
+    common = [
+        "init",
+        "--no-input",
+        "--yes",
+        "--odoo-bin",
+        "/opt/odoo/odoo-bin",
+        "--python",
+        "python3",
+        "--config",
+        "odoo.conf",
+        "--project",
+        str(tmp_path),
+        "--format",
+        "json",
+    ]
+    first = runner.invoke(
+        cli,
+        [
+            *common,
+            "--remote",
+            "staging",
+            "https://staging.example/",
+            "staging",
+            "main",
+            "--remote",
+            "PROD",
+            "https://prod.example",
+            "production",
+            "release/19",
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    payload = json.loads(first.output)["result"]
+    assert payload["remote_password_keys"] == [
+        "ODCLI_REMOTE_PROD_MASTER_PASSWORD",
+        "ODCLI_REMOTE_STAGING_MASTER_PASSWORD",
+    ]
+    assert "remote-secret" not in first.output
+
+    second = runner.invoke(cli, common)
+    assert second.exit_code == 0, second.output
+    config = ProjectConfig.load(tmp_path)
+    assert [source.name for source in config.remote_instances] == ["prod", "staging"]
+    manifest = (tmp_path / ".odcli" / "project.toml").read_text(encoding="utf-8")
+    assert "ODCLI_REMOTE_" not in manifest
+    assert "remote-secret" not in manifest
+
+
+def test_named_remote_init_dry_run_is_inert_without_input(tmp_path: Path) -> None:
+    config = ProjectConfig(
+        repository_root=tmp_path,
+        odoo_bin=Path("/opt/odoo/odoo-bin"),
+        source_config=Path("odoo.conf"),
+        remote_instances=(
+            RemoteSourceConfig(
+                name="staging",
+                base_url="https://staging.example",
+                database="staging",
+                git_branch="main",
+            ),
+        ),
+    )
+    missing, _details = evaluate_init_completeness(
+        project_root=tmp_path,
+        config=config,
+        local_config=False,
+        postgres_image=None,
+        existing_test_instance=None,
+        dry_run=True,
+        remote_database_names=None,
+    )
+    assert missing == []
+    result = init_project(
+        tmp_path,
+        config,
+        postgres_allocated=False,
+        no_input=True,
+        dry_run=True,
+    )
+    assert result["remote_password_keys"] == ["ODCLI_REMOTE_STAGING_MASTER_PASSWORD"]
+    assert not (tmp_path / ".odcli" / "project.toml").exists()
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")
@@ -490,6 +589,41 @@ def test_init_dry_run_shows_bootstrap_step_without_spawn(tmp_path: Path) -> None
         dry_run=True,
     )
     assert any(step.step_id == "init.bootstrap.tmp" for step in command.plan.steps)
+    assert any(step.step_id == "catalog.bootstrap.tmp.record" for step in command.plan.steps)
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_rejects_symlinked_data_dir_without_bootstrap_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    config = _compose_config(tmp_path)
+    source_config = config.source_config
+    assert source_config is not None
+    source_config.parent.mkdir(parents=True)
+    source_config.write_text("[options]\nhttp_port = 8069\n", encoding="utf-8")
+    external = tmp_path.parent / "external-init-filestore"
+    external.mkdir()
+    data_directory = tmp_path / ".odcli" / "filestore"
+    data_directory.symlink_to(external, target_is_directory=True)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog.close()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: catalog_path,
+    )
+
+    with pytest.raises(InstanceConfigurationError, match="symlink"):
+        init_project_command(tmp_path, config, postgres_allocated=False, local_config=True)
+
+    with sqlite3.connect(catalog_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM database_events WHERE event_type='bootstrapped'"
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_auxiliary_restore_uses_bootstrap_database_in_argv(tmp_path: Path) -> None:
@@ -755,17 +889,27 @@ def test_first_foreground_run_captures_bootstrap_steps(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("odoo_version", ["13.0", "19.0"])
-@pytest.mark.usefixtures("stub_psql_resolution")
-def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    odoo_version: str,
-) -> None:
-    """Compose cluster, tmp bootstrap, stopped-project restore, 303, default switch."""
+@dataclass(slots=True)
+class _SelfContainedRestoreSetup:
+    project: ProjectConfig
+    client: MagicMock
+    backup: Backup
+    remote_database: str
+    auxiliary: OdooInstance
+    session: AuxiliaryRestoreSession
+    executor: RecordingExecutor
+    bootstrap_spawned: list[bool]
+    restore: MagicMock
+
+
+def _prepare_self_contained_restore_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, odoo_version: str
+) -> _SelfContainedRestoreSetup:
     from odoo_instance_sdk.config import InstanceConfig
     from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
     from odoo_instance_sdk.internal.project_manifest import write_manifest
+    from odoo_instance_sdk.models import BackupFormat
+    from tests.fixtures import make_backup
 
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -798,9 +942,6 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
     write_manifest(tmp_path, project)
     backup_file = tmp_path / "remote.zip"
     backup_file.write_bytes(b"zip-backup")
-    from odoo_instance_sdk.models import BackupFormat
-    from tests.fixtures import make_backup
-
     backup = make_backup(
         source_base_url="https://example.test",
         database_name=remote_database,
@@ -863,11 +1004,7 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
         _track_bootstrap,
     )
-    PostgresCluster._from_config(
-        project,
-        repository_root=tmp_path,
-        compose_runner=None,
-    )
+    PostgresCluster._from_config(project, repository_root=tmp_path, compose_runner=None)
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
         lambda _config: None,
@@ -912,11 +1049,24 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
     monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
     monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "https://example.test:443")
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
-
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", lambda *a, **k: None)
+    return _SelfContainedRestoreSetup(
+        project=project,
+        client=client,
+        backup=backup,
+        remote_database=remote_database,
+        auxiliary=auxiliary,
+        session=session,
+        executor=executor,
+        bootstrap_spawned=bootstrap_spawned,
+        restore=restore,
+    )
+
+
+def _run_self_contained_init(tmp_path: Path, setup: _SelfContainedRestoreSetup) -> None:
     init_command = init_project_command(
         tmp_path,
-        project,
+        setup.project,
         postgres_allocated=False,
         local_config=True,
         allow_partial=True,
@@ -924,18 +1074,36 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
     step_ids = [step.step_id for step in init_command.plan.steps]
     assert "init.bootstrap.tmp" in step_ids
     assert "init.bootstrap.tmp.probe" in step_ids
+    assert "catalog.bootstrap.tmp.record" in step_ids
     init_command.run()
-    assert bootstrap_spawned == [True]
 
+
+@pytest.mark.parametrize("odoo_version", ["13.0", "19.0"])
+@pytest.mark.usefixtures("stub_psql_resolution")
+def test_self_contained_init_bootstraps_before_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, odoo_version: str
+) -> None:
+    setup = _prepare_self_contained_restore_setup(tmp_path, monkeypatch, odoo_version)
+    _run_self_contained_init(tmp_path, setup)
+    assert setup.bootstrap_spawned == [True]
+
+
+@pytest.mark.parametrize("odoo_version", ["13.0", "19.0"])
+@pytest.mark.usefixtures("stub_psql_resolution")
+def test_self_contained_restore_switches_default_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, odoo_version: str
+) -> None:
+    setup = _prepare_self_contained_restore_setup(tmp_path, monkeypatch, odoo_version)
+    _run_self_contained_init(tmp_path, setup)
     result = CliRunner().invoke(cli, ["db", "refresh", "--restore", "--format", "json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["result"]["default_switched"] is True
-    assert backup.database_name == remote_database
-    assert backup.source_git_branch == f"develop-{odoo_version}"
-    restore.assert_called_once()
-    assert [step.step_id for step in executor.spawned] == [session.start_step.step_id]
-    client.unregister_process.assert_called_once()
+    assert setup.backup.database_name == setup.remote_database
+    assert setup.backup.source_git_branch == f"develop-{odoo_version}"
+    setup.restore.assert_called_once()
+    assert [step.step_id for step in setup.executor.spawned] == [setup.session.start_step.step_id]
+    setup.client.unregister_process.assert_called_once()
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")

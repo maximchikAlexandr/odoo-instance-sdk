@@ -247,7 +247,7 @@ def _process_table(
 ) -> Table:
     table = bordered_table(*_PROCESS_COLUMNS)
     if widths is not None:
-        for column, width in zip(table.columns, widths):
+        for column, width in zip(table.columns, widths, strict=True):
             column.width = width
     for row in rows:
         table.add_row(

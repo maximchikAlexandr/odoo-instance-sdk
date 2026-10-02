@@ -47,7 +47,7 @@ def _document(result: dict[str, JsonValue]) -> OutputDocument:
             id="aware-utc",
         ),
         pytest.param(
-            datetime(2026, 9, 16, 22, 30),
+            datetime(2026, 9, 16, 22, 30),  # noqa: DTZ001 - exercises naive SQLite data
             "naive-sqlite-utc",
             id="naive-sqlite-utc",
         ),

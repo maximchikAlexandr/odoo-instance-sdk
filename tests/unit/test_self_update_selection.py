@@ -24,7 +24,8 @@ from odoo_instance_sdk.internal.self_update import update_command
 from odoo_instance_sdk.internal.self_update_ancestry import git_revision_relation
 from odoo_instance_sdk.internal.self_update_commands import _preflight_error
 from odoo_instance_sdk.models.update import UpdateResult
-from tests.unit.test_self_update import (
+
+from .self_update_test_support import (
     _SHA_A,
     _SHA_B,
     _executor_factory,
@@ -176,8 +177,10 @@ def test_downgrade_fails_when_snapshot_state_is_not_restorable(
     ("source_url", "sentinels"),
     (
         (
-            "https://user-sentinel:password-sentinel@github.com/"
-            "maximchikAlexandr/odoo-instance-sdk.git",
+            (
+                "https://user-sentinel:password-sentinel@github.com/"
+                "maximchikAlexandr/odoo-instance-sdk.git"
+            ),
             ("user-sentinel", "password-sentinel"),
         ),
         (

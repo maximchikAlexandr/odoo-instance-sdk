@@ -17,8 +17,7 @@ if TYPE_CHECKING:
 
 REDACTION_MARKER = "<redacted>"
 type RedactionValue = (
-    None
-    | bool
+    bool
     | int
     | float
     | str
@@ -26,9 +25,10 @@ type RedactionValue = (
     | BaseException
     | Mapping[str, RedactionValue]
     | Sequence[RedactionValue]
+    | None
 )
 type RedactedValue = (
-    None | bool | int | float | str | list[RedactedValue] | dict[str, RedactedValue]
+    bool | int | float | str | list[RedactedValue] | dict[str, RedactedValue] | None
 )
 _SECRET_KEY = re.compile(
     r"(?:^|[-_ .])(?:password|passwd|pwd|secret|token|cookie|jwt|oauth|api[-_ ]?key|"

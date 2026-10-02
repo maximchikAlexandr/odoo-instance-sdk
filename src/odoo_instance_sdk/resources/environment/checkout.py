@@ -9,10 +9,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 
+import msgspec
+
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     EnvironmentConflictError,
-    InstanceConfigurationError,
     PlanError,
     PlanValidationError,
     StalePlanError,
@@ -22,19 +23,16 @@ from odoo_instance_sdk.internal.dbprep.source import (
     classify_freshness,
     compare_provenance,
 )
-from odoo_instance_sdk.internal.dependency_sync import revalidate_hash_lock
-from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import (
     exclusive_lock,
     provisioning_lock_path,
-    python_env_lock_path,
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_env import load_project_environment
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
-from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
+    Backup,
     BackupFreshness,
     BackupProvenanceComparison,
     BackupProvenanceStatus,
@@ -47,7 +45,6 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment.checkout_artifacts import (
     _capture_checkout_stage,
-    _checkout_applied_settings,
     _checkout_execution_plan_with_private_steps,
     _checkout_steps,
     _normalize_checkout_stage,
@@ -57,19 +54,17 @@ from odoo_instance_sdk.resources.environment.checkout_artifacts import (
     _row_to_env,
     _validate_checkout_stage,
 )
+from odoo_instance_sdk.resources.environment.checkout_execution import do_checkout
 from odoo_instance_sdk.resources.environment.checkout_planning import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
-    EnvironmentState,
     _checkout_public_plan,
     _CheckoutPlan,
     _CheckoutPlanningState,
     _CheckoutSnapshot,
-    _encode_runtime_json,
     _ExpressionApi,
     _ExpressionResult,
     _PlanningOutcome,
-    _process_stderr,
     _PythonMode,
     _resolve_checkout_dependency_inputs,
     _resolve_checkout_hash_lock,
@@ -86,7 +81,7 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession
-    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 class _CheckoutMixin:
@@ -152,6 +147,9 @@ class _CheckoutMixin:
             source_db: str,
             target_db: str,
             repo_root: Path,
+            project: ProjectConfig,
+            remote_name: str | None,
+            selected_backup: Backup | None,
         ) -> uuid.UUID: ...
 
         def _cleanup_on_failure(
@@ -166,6 +164,51 @@ class _CheckoutMixin:
             error: BaseException,
             context: RunContext[DevelopmentEnvironment],
         ) -> None: ...
+
+    def _copy_source_metadata(
+        self, project: ProjectConfig, options: EnvironmentCheckoutOptions
+    ) -> tuple[str | None, str | None, str | None, str, Backup | None]:
+        """Resolve one explicit COPY source without contacting a remote."""
+        if options.remote_name is not None and options.backup_id is not None:
+            raise ConfigError("COPY accepts exactly one of remote_name or backup_id")
+        if options.remote_name is not None and options.source_database is not None:
+            raise ConfigError("--remote cannot be combined with --source-db")
+        if options.backup_id is not None and options.source_database is not None:
+            raise ConfigError("--backup cannot be combined with --source-db")
+
+        if options.remote_name is not None:
+            from odoo_instance_sdk.internal.dbprep.source import resolve_test_source
+
+            source = resolve_test_source(
+                project, DatabaseRefreshOptions(remote_name=options.remote_name)
+            )
+            assert source.config.database is not None
+            return (
+                source.source_name,
+                source.config.base_url,
+                source.branch,
+                source.config.database,
+                None,
+            )
+
+        if options.backup_id is not None:
+            try:
+                backup_id = uuid.UUID(str(options.backup_id))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ConfigError("catalogue backup identifier must be a complete UUID") from exc
+            projection = self._client.get_catalog()._resolve_backup_projection(str(backup_id))
+            if projection.state.value != "available":
+                raise ConfigError("catalogue backup is not available")
+            backup = projection.backup
+            return (
+                backup.source_name,
+                backup.source_base_url,
+                backup.source_git_branch,
+                backup.database_name,
+                backup,
+            )
+
+        return None, None, None, "", None
 
     def _prepare_checkout(
         self,
@@ -188,6 +231,11 @@ class _CheckoutMixin:
         # the observable result of a rejected checkout.
         catalog = None
 
+        if options.db_mode is not EnvironmentDatabaseMode.COPY and (
+            options.remote_name is not None or options.backup_id is not None
+        ):
+            raise ConfigError("remote_name and backup_id are valid only for COPY checkout")
+
         from odoo_instance_sdk.internal.git_worktree import (
             local_branch_exists,
             remote_branches,
@@ -203,7 +251,17 @@ class _CheckoutMixin:
 
         self._verify_tools()
 
-        base_ref = options.base_ref or project_cfg.default_base_ref or "HEAD"
+        source_name, source_base_url, source_git_branch, _copy_source_database, selected_backup = (
+            self._copy_source_metadata(project_cfg, options)
+            if options.db_mode is EnvironmentDatabaseMode.COPY
+            else (None, None, None, "", None)
+        )
+        if options.backup_id is not None and options.base_ref is None and source_git_branch is None:
+            raise EnvironmentConflictError(
+                "backup_provenance_unknown",
+                "retained backup provenance is unknown; pass --base explicitly",
+            )
+        base_ref = options.base_ref or source_git_branch or project_cfg.default_base_ref or "HEAD"
         from odoo_instance_sdk.internal.git_worktree import rev_parse_verify
 
         base_revision = rev_parse_verify(repo_root, base_ref)
@@ -323,6 +381,10 @@ class _CheckoutMixin:
             worktree_argv=worktree_argv,
             created_at=now,
             options=options,
+            source_name=source_name,
+            source_base_url=source_base_url,
+            source_git_branch=source_git_branch,
+            selected_backup=selected_backup,
         )
 
     def _plan_checkout(
@@ -423,10 +485,50 @@ class _CheckoutMixin:
         project_config = (
             project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
         )
+        if options.db_mode is EnvironmentDatabaseMode.COPY and (
+            options.remote_name is not None or options.backup_id is not None
+        ):
+            source_name, source_base_url, source_branch, source_database, backup = (
+                self._copy_source_metadata(project_config, options)
+            )
+            effective_base = (
+                options.base_ref or source_branch or project_config.default_base_ref or "HEAD"
+            )
+            if source_branch is None and options.base_ref is None:
+                raise EnvironmentConflictError(
+                    "backup_provenance_unknown",
+                    "retained backup provenance is unknown; pass --base explicitly",
+                )
+            comparison = compare_provenance(effective_base, source_branch)
+            if comparison.status is BackupProvenanceStatus.MISMATCHED:
+                raise EnvironmentConflictError(
+                    "backup_provenance_mismatch",
+                    "backup source branch does not match checkout base ref",
+                    details={
+                        "expected_base_ref": comparison.expected_base_ref,
+                        "recorded_branch": comparison.recorded_branch,
+                    },
+                )
+            selector_warnings = (
+                ("Backup provenance is unknown; branch compatibility could not be verified.",)
+                if comparison.status is BackupProvenanceStatus.UNKNOWN
+                else ()
+            )
+            return (
+                msgspec.structs.replace(
+                    comparison,
+                    source_name=source_name,
+                    source_base_url=source_base_url,
+                    database_name=source_database,
+                    backup_id=backup.id if backup is not None else None,
+                ),
+                BackupFreshness.FRESH,
+                selector_warnings,
+            )
         root = project_config.repository_root
         source_config = self._resolve_source_config(options, project_config, root)
         config_values = parse_odoo_config(source_config) if source_config is not None else {}
-        source_database, _ = self._resolve_dbs(
+        resolved_source_database, _ = self._resolve_dbs(
             options,
             project_config,
             config_values,
@@ -442,13 +544,13 @@ class _CheckoutMixin:
         provenance_backup = _restore_audit_backup(
             self._client,
             config_values,
-            source_database,
+            resolved_source_database,
             available=False,
         )
         available_backup = _restore_audit_backup(
             self._client,
             config_values,
-            source_database,
+            resolved_source_database,
             available=True,
         )
         recorded_branch = (
@@ -466,17 +568,19 @@ class _CheckoutMixin:
             )
         warnings: tuple[str, ...] = ()
         if comparison.status is BackupProvenanceStatus.UNKNOWN:
-            if options.source_database is not None and source_database is not None:
+            if options.source_database is not None and resolved_source_database is not None:
                 warnings = (
-                    f"Backup provenance is unknown for explicit source database "
-                    f"{source_database!r}; branch compatibility could not be verified.",
+                    (
+                        f"Backup provenance is unknown for explicit source database "
+                        f"{resolved_source_database!r}; branch compatibility could not be verified."
+                    ),
                 )
             else:
                 raise EnvironmentConflictError(
                     "backup_provenance_unknown",
                     "backup provenance is unknown; pass --source-db explicitly or refresh a "
                     "provenance-bearing backup",
-                    details={"source_database": source_database},
+                    details={"source_database": resolved_source_database},
                 )
         freshness = classify_freshness(available_backup, project_config.refresh_after_hours)
         if (
@@ -584,24 +688,32 @@ class _CheckoutMixin:
             private_projection=snapshot.public,
         )
         command = Command.from_prepared(snapshot.execution_plan, prepared)
-        if snapshot.private.db_mode is not EnvironmentDatabaseMode.COPY:
-            return command
-        if (source_session := self._copy_auxiliary_session(snapshot.private)) is None:
-            return command
-        from odoo_instance_sdk.resources.instance.auxiliary_restore import (
-            _attach_auxiliary_restore_runtime,
-        )
+        if snapshot.private.db_mode is EnvironmentDatabaseMode.COPY:
+            source_session = self._copy_auxiliary_session(snapshot.private)
+            if source_session is not None:
+                from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+                    _attach_auxiliary_restore_runtime,
+                )
 
-        return cast(
-            "Command[DevelopmentEnvironment]",
-            _attach_auxiliary_restore_runtime(
-                command,
-                source_session,
-                before_step_id="checkout.catalog",
-            ),
+                command = cast(
+                    "Command[DevelopmentEnvironment]",
+                    _attach_auxiliary_restore_runtime(
+                        command,
+                        source_session,
+                        before_step_id="checkout.catalog",
+                    ),
+                )
+        from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
+
+        return attach_auto_prune(
+            command,
+            backups=self._client.backups,
+            project=snapshot.private.project.repository_root,
         )
 
     def _copy_auxiliary_session(self, plan: _CheckoutPlan) -> AuxiliaryRestoreSession | None:
+        if plan.options.remote_name is not None or plan.options.backup_id is not None:
+            return None
         if plan.source_config is None:
             return None
         from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
@@ -644,7 +756,7 @@ class _CheckoutMixin:
             context.complete_action("checkout.catalog")
             return result
 
-    def _validate_checkout_snapshot(
+    def _validate_checkout_snapshot(  # noqa: C901 -- snapshot validation keeps all drift guards together
         self,
         snapshot: _CheckoutSnapshot,
         *,
@@ -714,7 +826,17 @@ class _CheckoutMixin:
             plan.branch,
             plan.repo_root,
         )
-        current_base_ref = plan.options.base_ref or current_project.default_base_ref or "HEAD"
+        current_source_branch = None
+        if plan.options.remote_name is not None or plan.options.backup_id is not None:
+            _, _, current_source_branch, _, _ = self._copy_source_metadata(
+                current_project, plan.options
+            )
+        current_base_ref = (
+            plan.options.base_ref
+            or current_source_branch
+            or current_project.default_base_ref
+            or "HEAD"
+        )
         if (
             current_base_ref != plan.base_ref
             or current_source != plan.source_database
@@ -725,6 +847,17 @@ class _CheckoutMixin:
 
         current_provenance, current_freshness, current_warnings = self._audit_checkout_plan(
             plan.repo_root, plan.branch, plan.options
+        )
+        current_provenance = msgspec.structs.replace(
+            current_provenance,
+            source_name=plan.source_name,
+            source_base_url=plan.source_base_url,
+            resolved_base_revision=plan.base_revision,
+            backup_id=(
+                plan.selected_backup.id
+                if plan.selected_backup is not None
+                else current_provenance.backup_id
+            ),
         )
         if (
             current_provenance != snapshot.public.provenance
@@ -823,173 +956,19 @@ class _CheckoutMixin:
                 host=plan.http_interface,
                 exclude_project=plan.repo_root,
             )
-        except EnvironmentConflictError:
+        except EnvironmentConflictError as exc:
             raise EnvironmentConflictError(
                 "port_in_use", f"Port {plan.http_port} is no longer available"
-            )
+            ) from exc
 
-    def _do_checkout(  # noqa: C901
+    def _do_checkout(
         self,
         catalog: BackupCatalog,
         plan: _CheckoutPlan,
         *,
         context: RunContext[DevelopmentEnvironment],
     ) -> DevelopmentEnvironment:
-        runtime_json = _encode_runtime_json(plan.odoo_bin, plan.runtime_cwd)
-        env_row: dict[str, CatalogValue] = {
-            "id": str(plan.env_id),
-            "name": plan.name,
-            "repository_root": str(plan.repo_root),
-            "git_common_dir": plan.git_common_dir,
-            "branch": plan.branch,
-            "base_ref": plan.base_ref,
-            "worktree_path": str(plan.worktree),
-            "generated_config_path": str(plan.generated_config),
-            "python_environment_path": plan.python_path,
-            "python_environment_owned": plan.python_owned,
-            "dependency_lock_path": str(plan.dependency_lock),
-            "db_mode": plan.db_mode,
-            "source_db_name": plan.source_database,
-            "target_db_name": plan.target_database,
-            "backup_id": None,
-            "runtime_json": runtime_json,
-            "state": EnvironmentState.CREATING,
-            "created_at": plan.created_at,
-            "last_used_at": None,
-            "removed_at": None,
-            "last_error": None,
-        }
-
-        cat = catalog
-        cat.create_environment(env_row)
-        cat.add_environment_event(str(plan.env_id), "checkout", "started")
-
-        created_paths: list[Path] = []
-        backup_id: uuid.UUID | None = None
-        try:
-            plan.worktree.parent.mkdir(parents=True, exist_ok=True)
-            # Register the path before invoking Git.  ``git worktree add`` can
-            # be interrupted after creating the administrative entry but
-            # before returning; failure cleanup must then remove that partial
-            # worktree instead of leaving a stale catalog row and lock.
-            created_paths.append(plan.worktree)
-            worktree_result = cast("ProcessResult", context.process("checkout.worktree"))
-            if worktree_result.returncode != 0:
-                stderr = str(worktree_result.stderr or "").strip()
-                if "is already checked out at" in stderr or "already used by worktree" in stderr:
-                    raise EnvironmentConflictError(  # noqa: TRY301
-                        "branch_in_use", f"Branch {plan.branch!r} is already checked out"
-                    )
-                raise ConfigError(f"git worktree add failed: {stderr}")  # noqa: TRY301
-            if plan.source_config is not None:
-                context.action("checkout.generated_config")
-                db_name_for_config = (
-                    plan.target_database
-                    if plan.db_mode == EnvironmentDatabaseMode.COPY
-                    else plan.source_database
-                )
-                if db_name_for_config is None:
-                    db_name_for_config = plan.source_database or ""
-                generate_config(
-                    plan.source_config,
-                    plan.generated_config,
-                    repo_root=plan.repo_root,
-                    worktree=plan.worktree,
-                    http_interface=plan.http_interface,
-                    http_port=plan.http_port,
-                    db_name=db_name_for_config,
-                )
-                created_paths.append(plan.generated_config)
-                # Create the environment-owned logfile with the other artifacts
-                # so detached launch and `logs` share one resolved path.
-                env_logfile = plan.generated_config.parent / "odoo.log"
-                env_logfile.touch(exist_ok=True)
-                created_paths.append(env_logfile)
-                context.complete_action("checkout.generated_config")
-
-            if plan.options.create_venv and plan.python_selector is not None:
-                venv_result = cast("ProcessResult", context.process("checkout.venv"))
-                if venv_result.returncode != 0:
-                    raise ConfigError(  # noqa: TRY301
-                        f"uv venv failed: {_process_stderr(venv_result)}".strip()
-                    )
-                created_paths.append(plan.venv)
-
-            env_obj = self._get_env_row(cat, plan.env_id)
-            with exclusive_lock(python_env_lock_path(env_obj.python_environment_path)):
-                if plan.hash_lock is not None or plan.dependency_inputs:
-                    if plan.hash_lock is None:
-                        compile_result = cast(
-                            "ProcessResult", context.process("checkout.dependencies.compile")
-                        )
-                        if compile_result.returncode != 0 and not plan.dependency_lock.is_file():
-                            raise ConfigError(  # noqa: TRY301
-                                "uv pip compile failed and no prior lock: "
-                                f"{_process_stderr(compile_result)}"
-                            )
-                    else:
-                        revalidate_hash_lock(plan.hash_lock, plan.options.hash_lock_sha256)
-                    install_result = cast(
-                        "ProcessResult", context.process("checkout.dependencies.install")
-                    )
-                    if install_result.returncode != 0:
-                        raise ConfigError(  # noqa: TRY301
-                            f"uv pip install failed: {_process_stderr(install_result)}".strip()
-                        )
-                    if plan.hash_lock is None:
-                        created_paths.append(plan.dependency_lock)
-
-            if plan.python_owned:
-                preflight = cast("ProcessResult", context.process("checkout.runtime.preflight"))
-                if preflight.returncode != 0:
-                    diagnostic = sanitize_last_error(_process_stderr(preflight).strip())
-                    detail = f": {diagnostic}" if diagnostic else ""
-                    raise InstanceConfigurationError(  # noqa: TRY301
-                        "owned runtime preflight failed "
-                        f"(returncode={preflight.returncode}){detail}"
-                    )
-
-            context.action("checkout.database")
-
-            if (
-                plan.db_mode == EnvironmentDatabaseMode.COPY
-                and plan.source_database is not None
-                and plan.target_database is not None
-            ):
-                backup_id = self._do_copy_restore(
-                    context=context,
-                    cat=cat,
-                    env_id=plan.env_id,
-                    source_config=plan.source_config,
-                    cfg_dict=plan.config_values,
-                    source_db=plan.source_database,
-                    target_db=plan.target_database,
-                    repo_root=plan.repo_root,
-                )
-
-            cat._finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))
-            context.action("checkout.cleanup")
-            if context.planned("checkout.cleanup.worktree"):
-                context.skip("checkout.cleanup.worktree")
-            context.complete_action("checkout.cleanup")
-            context.complete_action("checkout.database")
-            return self._get_env_row(cat, plan.env_id)
-
-        except BaseException as exc:
-            if not context.consumed("checkout.cleanup"):
-                context.action("checkout.cleanup")
-            self._cleanup_on_failure(
-                cat=cat,
-                env_id=plan.env_id,
-                repo_root=plan.repo_root,
-                created_paths=created_paths,
-                env_root=plan.env_root,
-                backup_id=backup_id,
-                error=exc,
-                context=context,
-            )
-            context.complete_action("checkout.cleanup")
-            raise
+        return do_checkout(self, catalog, plan, context=context)
 
     def _get_env_row(self, cat: BackupCatalog, env_id: uuid.UUID) -> DevelopmentEnvironment:
 

@@ -40,8 +40,6 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.internal.cli_format import (
     human_bytes as _human_bytes,
-)
-from odoo_instance_sdk.internal.cli_format import (
     rich_cell,
 )
 

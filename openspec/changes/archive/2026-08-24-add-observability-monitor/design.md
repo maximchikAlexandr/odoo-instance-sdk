@@ -61,11 +61,15 @@ class ProcessProvider(Protocol):
         self, root_pid: int, create_time: float, *, prev_cpu_point: object | None
     ) -> ProcessTreeResult | None: ...
 
+
 class GitProvider(Protocol):
     def collect(self, worktree: Path) -> GitActivity: ...
 
+
 class DockerProvider(Protocol):
-    def inspect_stats(self, container_ids: tuple[str, ...]) -> dict[str, ClusterResourceSnapshot]: ...
+    def inspect_stats(
+        self, container_ids: tuple[str, ...]
+    ) -> dict[str, ClusterResourceSnapshot]: ...
 ```
 
 Default `None` → collector использует `internal/process_metrics.py`, `internal/git_activity.py`, `internal/cluster_resources.py`. `EnvironmentMonitor` — единственная public реализация; не оборачивать в ABC/Protocol с одним impl.
@@ -124,10 +128,10 @@ class ProcessTreeResult:
     cpu_percent: float | None
     rss_bytes: int | None
 
+
 def collect_process_tree(
     root_pid: int, create_time: float, *, prev_cpu_point: object | None
-) -> ProcessTreeResult | None:
-    ...
+) -> ProcessTreeResult | None: ...
 ```
 
 Returns `None` (collector maps to `RuntimeMetrics.state=STOPPED`, all resource fields null, `child_pids=()`, `process_count=0`) when: PID missing, `create_time` mismatch (`!=` exact float), `NoSuchProcess`, `AccessDenied` on the **root** process, or `ZombieProcess` on the root. Child `AccessDenied`/`ZombieProcess`: skip that child, still return root metrics.
@@ -237,8 +241,12 @@ Built React assets включаются в package via `uv_build` including `src
 `exceptions.py` (наследники `OdooInstanceSdkError`):
 
 ```python
-class MonitorError(OdooInstanceSdkError): """Base."""
-class MonitorExtrasMissingError(MonitorError): """psutil/fastapi/uvicorn not installed."""
+class MonitorError(OdooInstanceSdkError):
+    """Base."""
+
+
+class MonitorExtrasMissingError(MonitorError):
+    """psutil/fastapi/uvicorn not installed."""
 ```
 
 Component failures изолируются в snapshot (`complete=False`/`unavailability_reason`), не отдельным exception; catalog SQLite error → `MonitorError`. `MonitorSnapshotError` не добавляется (нет concrete scenario, который его raises — Ponytail). Redacted messages (без secrets/absolute paths).

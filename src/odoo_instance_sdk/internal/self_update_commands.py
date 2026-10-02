@@ -15,7 +15,7 @@ from odoo_instance_sdk.exceptions import (
     UnsupportedInstallError,
     UpdateError,
 )
-from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.locks import exclusive_lock
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
@@ -27,7 +27,6 @@ from odoo_instance_sdk.internal.proc import (
     prepared_command,
 )
 from odoo_instance_sdk.internal.self_update import (
-    _DEFAULT_REF,
     _JOURNAL_VERSION,
     _MAINTENANCE_ENV,
     _MANUAL_INSTALL_ARGV,
@@ -57,24 +56,21 @@ from odoo_instance_sdk.internal.self_update import (
 )
 from odoo_instance_sdk.internal.self_update_ancestry import (
     RevisionRelation,
-)
-from odoo_instance_sdk.internal.self_update_ancestry import (
     revision_probe_steps as _revision_probe_steps,
-)
-from odoo_instance_sdk.internal.self_update_ancestry import (
     run_revision_probe as _run_revision_probe,
 )
 from odoo_instance_sdk.internal.self_update_policy import (
     preflight_error as _policy_preflight_error,
-)
-from odoo_instance_sdk.internal.self_update_policy import (
     probe_source_repo as _probe_source_repo,
-)
-from odoo_instance_sdk.internal.self_update_policy import (
     skip_revision_probe as _skip_revision_probe,
-)
-from odoo_instance_sdk.internal.self_update_policy import (
     source_origin_step as _source_origin_step,
+)
+from odoo_instance_sdk.internal.self_update_recovery import (
+    build_update_recovery_projection,
+    journal_resume_phase,
+    journal_snapshot_sha,
+    journal_target_ref,
+    recovery_step_for_snapshot,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdateResult
 
@@ -123,6 +119,10 @@ def _build_check_command(
             read_only=True,
         )
     )
+    recovery_projection = build_update_recovery_projection(
+        _update_journal_path().parent.parent,
+        provenance.uv_tool_bin_path,
+    )
 
     def callback(context: RunContext[UpdateResult]) -> UpdateResult:
         context.action("update.inspect")
@@ -150,6 +150,26 @@ def _build_check_command(
                 )
             target_sha = resolved_sha
         context.complete_action("update.resolve")
+        recovery = recovery_projection.state
+        if recovery.has_evidence:
+            recovery_argv = (
+                recovery_projection.resume_command.argv
+                if recovery_projection.resume_command is not None
+                else None
+            )
+            return _failure_result(
+                "update_incomplete",
+                provenance=provenance,
+                target_sha=recovery.target_ref or target_sha,
+                recovery_argv=recovery_argv,
+                snapshot_state=recovery.snapshot_state,
+                journal_state=recovery.journal_state,
+                next_step=(
+                    "run the recorded recovery_argv to resume the interrupted update"
+                    if recovery_argv is not None
+                    else recovery.diagnostic or "update recovery evidence is incomplete"
+                ),
+            )
         outcome: UpdateOutcome = (
             "already_current"
             if provenance.commit_id is not None and target_sha == provenance.commit_id
@@ -244,32 +264,8 @@ def _skip_planned_steps(context: RunContext[UpdateResult], *step_ids: str) -> No
             context.skip(step_id)
 
 
-def _journal_resume_phase(journal: dict[str, JsonValue] | None) -> str | None:
-    if journal is None:
-        return None
-    phase = journal.get("phase")
-    return phase if isinstance(phase, str) else None
-
-
-def _journal_target_ref(journal: dict[str, JsonValue] | None) -> str | None:
-    if journal is None:
-        return None
-    raw = journal.get("target_ref")
-    if isinstance(raw, str) and _is_full_sha(raw):
-        return raw.lower()
-    raise UpdateError("unfinished update journal has no immutable target_ref")
-
-
-def _journal_snapshot_sha(
-    journal: dict[str, JsonValue] | None,
-    provenance: InstalledProvenance,
-) -> str | None:
-    if journal is not None:
-        raw = journal.get("snapshot_sha")
-        if isinstance(raw, str) and _is_full_sha(raw):
-            return raw.lower()
-        raise UpdateError("unfinished update journal has no immutable snapshot_sha")
-    return provenance.commit_id
+def _skip_verification_steps(context: RunContext[UpdateResult]) -> None:
+    _skip_planned_steps(context, "update.verify", "update.verify.version", "update.commit")
 
 
 def _preflight_error(
@@ -286,14 +282,6 @@ def _preflight_error(
         allow_downgrade=allow_downgrade,
         relation=relation,
         source_origin_verified=source_origin_verified,
-    )
-
-
-def _recovery_step_for_snapshot(snapshot_sha: str | None) -> PreparedStep:
-    return PreparedStep(
-        step_id="update.recovery",
-        argv=_install_argv(snapshot_sha or _DEFAULT_REF),
-        mutating=True,
     )
 
 
@@ -324,6 +312,7 @@ class _UpdateSession:
     allow_downgrade: bool
     install_step: PreparedStep
     maintenance_step: PreparedStep
+    verify_step: PreparedStep
     ancestry_steps: tuple[PreparedStep, ...]
     source_origin_step: PreparedStep | None
     cleanup_step_id: str | None
@@ -343,9 +332,9 @@ class _UpdateSession:
         self.journal_path = _update_journal_path()
         self.snapshot_dir = _update_snapshot_dir()
         journal = _read_journal(self.journal_path)
-        self.resume_phase = _journal_resume_phase(journal)
-        self.snapshot_sha = _journal_snapshot_sha(journal, self.provenance)
-        self.journal_target_ref = _journal_target_ref(journal)
+        self.resume_phase = journal_resume_phase(journal)
+        self.snapshot_sha = journal_snapshot_sha(journal, self.provenance)
+        self.journal_target_ref = journal_target_ref(journal)
         if self.journal_target_ref is not None:
             if _is_full_sha(self.ref) and self.ref.lower() != self.journal_target_ref:
                 raise UpdateError("requested ref conflicts with the unfinished update journal")
@@ -473,7 +462,7 @@ class _UpdateSession:
                 "maintenance_pid": None,
             },
         )
-        recovery_step = _recovery_step_for_snapshot(self.snapshot_sha)
+        recovery_step = recovery_step_for_snapshot(self.snapshot_sha)
         self.recovery_step = recovery_step
         result = cast("ProcessResult", self.context.process_prepared(self.maintenance_step))
         self.maintenance_result = result
@@ -499,7 +488,7 @@ class _UpdateSession:
         if rollback == "restored":
             _clear_journal(self.journal_path)
             _clear_snapshot(self.snapshot_dir)
-            _skip_planned_steps(self.context, "update.verify", "update.commit")
+            _skip_verification_steps(self.context)
             return _failure_result(
                 "rolled_back",
                 provenance=self.provenance,
@@ -507,7 +496,7 @@ class _UpdateSession:
                 next_step="maintenance failed; the previous revision was restored",
                 phase_durations=_phase_durations(self.durations),
             )
-        _skip_planned_steps(self.context, "update.verify", "update.commit")
+        _skip_verification_steps(self.context)
         return _failure_result(
             "update_incomplete",
             provenance=self.provenance,
@@ -539,12 +528,32 @@ class _UpdateSession:
         self.context.action("update.verify")
         try:
             self.maintenance_result_model = self._parse_maintenance_stdout(stdout)
-            _verify_installed_revision(None, target_ref=self.ref)
-        except UpdateError:
-            raise
-        except (json.JSONDecodeError, msgspec.ValidationError) as exc:
+            version_result = cast("ProcessResult", self.context.process_prepared(self.verify_step))
+            if version_result.returncode != 0:
+                raise UpdateError("odcli --version failed after update")  # noqa: TRY301
+            _verify_installed_revision(
+                None,
+                target_ref=self.ref,
+                version_result=version_result,
+            )
+        except UpdateError as exc:
             self.context.fail_action("update.verify", exc)
             _skip_planned_steps(self.context, "update.commit")
+            self._finish("verify", started)
+            return _failure_result(
+                "update_incomplete",
+                provenance=self.provenance,
+                recovery_argv=self.recovery_step.argv if self.recovery_step else None,
+                rollback_outcome="not_attempted",
+                snapshot_state="present",
+                journal_state="present",
+                next_step=str(exc),
+                phase_durations=_phase_durations(self.durations),
+            )
+        except (json.JSONDecodeError, msgspec.ValidationError) as exc:
+            self.context.fail_action("update.verify", exc)
+            _skip_planned_steps(self.context, "update.verify.version", "update.commit")
+            self._finish("verify", started)
             return _failure_result(
                 "update_incomplete",
                 provenance=self.provenance,
@@ -625,6 +634,7 @@ class _UpdateSession:
                 "update.install",
                 "update.migrate",
                 "update.verify",
+                "update.verify.version",
                 "update.commit",
             )
             return _failure_result(
@@ -645,6 +655,7 @@ class _UpdateSession:
                     return migration_failure
                 maintenance_result = self.maintenance_result
                 if maintenance_result is None:
+                    _skip_verification_steps(self.context)
                     return _failure_result(
                         "update_incomplete",
                         provenance=self.provenance,
@@ -877,6 +888,11 @@ def _build_mutating_command(
         environment=((_MAINTENANCE_ENV, "1"),),
         mutating=True,
     )
+    verify_step = PreparedStep(
+        step_id="update.verify.version",
+        argv=(str(Path(executable).absolute()), "--version"),
+        read_only=True,
+    )
     origin_step = _source_origin_step(provenance)
     canonical_source_repo = _probe_source_repo(provenance)
     ancestry_steps = (
@@ -934,6 +950,7 @@ def _build_mutating_command(
             description="Verify the new executable, schema, and journal",
             read_only=True,
         ),
+        verify_step,
         PreparedAction(
             step_id="update.commit",
             action="commit",
@@ -951,6 +968,7 @@ def _build_mutating_command(
             allow_downgrade=allow_downgrade,
             install_step=install_step,
             maintenance_step=maintenance_step,
+            verify_step=verify_step,
             ancestry_steps=ancestry_steps,
             source_origin_step=origin_step,
             cleanup_step_id=cleanup_action.step_id if cleanup_action else None,

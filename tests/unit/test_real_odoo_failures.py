@@ -97,8 +97,7 @@ def test_secret_scan_rejects_each_variant_inside_a_binary_zip(tmp_path: Path, va
 def test_recovery_input_is_removed_while_diagnostics_are_retained(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
-    from tests.integration.real_odoo import conftest as fixtures
-    from tests.integration.real_odoo import test_focused_recovery as recovery
+    from tests.integration.real_odoo import conftest as fixtures, test_focused_recovery as recovery
     from tests.integration.real_odoo.archive import SourceBackupPlan, archive_identity
 
     run_id = "a" * 32

@@ -432,7 +432,7 @@ def test_command(  # noqa: C901
         )
         _changed_result(exc.plan, result)
         _emit_result(mode=mode, command="test", result=result, dry_run=dry_run, diagnostic=str(exc))
-        raise click.exceptions.Exit(1)
+        raise click.exceptions.Exit(1) from exc
     except Exception as exc:
         fail(mode, "test", str(exc), dry_run=dry_run)
 

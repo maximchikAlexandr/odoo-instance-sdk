@@ -59,7 +59,11 @@ SDK сам формирует `[executable, *args]` по полям `StartConfig
 ```python
 def _default_backup_dir() -> Path:
     if sys.platform == "win32":
-        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "odoo-instance-sdk" / "backups"
+        return (
+            Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+            / "odoo-instance-sdk"
+            / "backups"
+        )
     xdg = os.environ.get("XDG_CACHE_HOME")
     base = Path(xdg) if xdg else Path.home() / ".cache"
     return base / "odoo-instance-sdk" / "backups"

@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 import odoo_instance_sdk.commands.cli_parts.callbacks as _cli_callbacks  # noqa: F401
 from odoo_instance_sdk.cli import _rich_shell_projection, cli
-from odoo_instance_sdk.commands import output as output_commands
+from odoo_instance_sdk.commands import (
+    backup as _backup_commands,
+    backup_retention as _backup_retention_commands,
+    output as output_commands,
+    remote as _remote_commands,
+)
 from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.commands.output import (
     JsonValue,
@@ -295,6 +300,60 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="public `--hash-lock`/digest sync, `--require-hashes`, and idempotency",
     ),
     PublicLeafCase(
+        ("remote", "ls"),
+        ("remote", "ls"),
+        "bounded-read-only",
+        False,
+        sdk_primitive="list_remote_sources",
+        e2e_disposition="not-applicable",
+        e2e_rationale="offline project manifest projection",
+    ),
+    PublicLeafCase(
+        ("remote", "add"),
+        (
+            "remote",
+            "add",
+            "staging",
+            "--url",
+            "https://staging.example.test",
+            "--database",
+            "staging",
+            "--branch",
+            "staging",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="configure_remote_source_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="manifest-only configuration mutation",
+    ),
+    PublicLeafCase(
+        ("remote", "update"),
+        (
+            "remote",
+            "update",
+            "staging",
+            "--branch",
+            "release",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="configure_remote_source_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="manifest-only configuration mutation",
+    ),
+    PublicLeafCase(
+        ("remote", "remove"),
+        ("remote", "remove", "staging", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="remove_remote_source_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="manifest-only configuration mutation",
+    ),
+    PublicLeafCase(
         ("backup", "ls"),
         ("backup", "ls"),
         "bounded-read-only",
@@ -304,6 +363,42 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-09",),
         e2e_rationale="downloaded catalog row",
+    ),
+    PublicLeafCase(
+        ("backup", "retention"),
+        ("backup", "retention", "--days", "14", "--auto", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="BackupResource.set_retention_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="user-level policy projection is outside the Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("backup", "pin"),
+        ("backup", "pin", "00000000-0000-0000-0000-000000000007", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="BackupResource.set_pinned_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="catalogue retention policy is covered by focused tests",
+    ),
+    PublicLeafCase(
+        ("backup", "unpin"),
+        ("backup", "unpin", "00000000-0000-0000-0000-000000000007", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="BackupResource.set_pinned_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="catalogue retention policy is covered by focused tests",
+    ),
+    PublicLeafCase(
+        ("backup", "prune"),
+        ("backup", "prune", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="BackupResource.prune_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="catalogue retention policy is covered by focused tests",
     ),
     PublicLeafCase(
         ("backup", "inspect"),
@@ -914,15 +1009,80 @@ def test_bounded_catalogue_list_inventory_is_explicit() -> None:
     }
 
 
-def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper() -> None:
-    """Keep the canonical inventory coupled to the executable composition path."""
-    for case in PUBLIC_LEAF_CASES:
-        if not case.requires_dry_run or case.path == ("module", "install-order"):
-            continue
-        callback = _command(case.path).callback
-        assert callback is not None
-        callback = inspect.unwrap(callback)
-        assert {"run_or_preview", "_run_shell_command"} & set(callback.__code__.co_names), case.path
+def _invoke_backup_pin_preview_helper(
+    spy: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pinned: bool,
+) -> None:
+    monkeypatch.setattr(_backup_retention_commands, "run_or_preview", spy)
+    monkeypatch.setattr(_backup_commands, "_catalog", MagicMock)
+    monkeypatch.setattr(
+        _backup_commands,
+        "_backup_resource",
+        lambda _catalog: (MagicMock(), MagicMock()),
+    )
+    _backup_retention_commands._run_backup_pin(
+        "backup-id",
+        pinned=pinned,
+        dry_run=True,
+        output_format=None,
+        json_output=False,
+    )
+
+
+def _invoke_remote_update_preview_helper(
+    spy: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    command_name: str,
+) -> None:
+    monkeypatch.setattr(_remote_commands, "run_or_preview", spy)
+    _remote_commands._run_remote_update(
+        command=cast("Any", MagicMock()),
+        command_name=command_name,
+        dry_run=True,
+        output_format=None,
+        json_output=False,
+    )
+
+
+_PREVIEW_HELPER_INVOCATIONS: dict[
+    tuple[str, ...], Callable[[MagicMock, pytest.MonkeyPatch], None]
+] = {
+    ("backup", "pin"): lambda spy, monkeypatch: _invoke_backup_pin_preview_helper(
+        spy, monkeypatch, pinned=True
+    ),
+    ("backup", "unpin"): lambda spy, monkeypatch: _invoke_backup_pin_preview_helper(
+        spy, monkeypatch, pinned=False
+    ),
+    ("remote", "add"): lambda spy, monkeypatch: _invoke_remote_update_preview_helper(
+        spy, monkeypatch, command_name="remote.add"
+    ),
+    ("remote", "update"): lambda spy, monkeypatch: _invoke_remote_update_preview_helper(
+        spy, monkeypatch, command_name="remote.update"
+    ),
+    ("remote", "remove"): lambda spy, monkeypatch: _invoke_remote_update_preview_helper(
+        spy, monkeypatch, command_name="remote.remove"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, id=".".join(case.path))
+        for case in PUBLIC_LEAF_CASES
+        if case.requires_dry_run and case.path in _PREVIEW_HELPER_INVOCATIONS
+    ],
+)
+def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper(
+    case: PublicLeafCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spy = MagicMock(return_value=(1, None))
+    _PREVIEW_HELPER_INVOCATIONS[case.path](spy, monkeypatch)
+    spy.assert_called_once()
 
 
 def _matrix_checkout_plan(*, name: str = "demo") -> EnvironmentCheckoutPlan:
@@ -1250,6 +1410,41 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
+    if path[:1] == ("remote",):
+        from odoo_instance_sdk.project import RemoteSourceConfig
+
+        manifest_dir = tmp_path / ".odcli"
+        manifest_dir.mkdir(exist_ok=True)
+        project = ProjectConfig(
+            repository_root=tmp_path,
+            python=sys.executable,
+            odoo_bin=Path(sys.executable),
+            remote_instances=(
+                RemoteSourceConfig(
+                    name="staging",
+                    base_url="https://staging.example.test",
+                    database="staging",
+                    git_branch="staging",
+                ),
+            ),
+        )
+        (manifest_dir / "project.toml").write_text(project.to_manifest(), encoding="utf-8")
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.remote.resolve_project_path", lambda _ctx: tmp_path
+        )
+        if failing:
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.remote.list_remote_sources", fail_operation
+            )
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.remote.configure_remote_source_command",
+                fail_operation,
+            )
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.remote.remove_remote_source_command", fail_operation
+            )
+        return
+
     if path[:2] == ("env", "create"):
         from odoo_instance_sdk.commands.env.checkout import _TicketAllocation
 
@@ -1307,6 +1502,25 @@ def _patch_leaf_external(  # noqa: C901
 
         from odoo_instance_sdk.commands import backup as backup_commands
         from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        manifest_dir = tmp_path / ".odcli"
+        manifest_dir.mkdir(exist_ok=True)
+        project = ProjectConfig(
+            repository_root=tmp_path,
+            python=sys.executable,
+            odoo_bin=Path(sys.executable),
+        )
+        (manifest_dir / "project.toml").write_text(project.to_manifest(), encoding="utf-8")
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.backup.resolve_project_path", lambda _ctx: tmp_path
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.backup_retention.retention_path",
+            lambda: tmp_path / "user.toml",
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.backup._project_id", lambda _project: "project_test"
+        )
 
         if failing:
             monkeypatch.setattr(backup_commands, "_catalog", fail_operation)
@@ -4194,7 +4408,10 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
     assert result.exit_code == 0, result.output
     assert "Environment demo" in result.output
     assert "Checkout plan" in result.output
-    assert 'provenance: {"expected_base_ref": "main"' in result.output
+    assert (
+        'provenance: {"backup_id": null, "database_name": null, "expected_base_ref": "main"'
+        in result.output
+    )
     assert 'freshness: "stale"' in result.output
     assert 'preparation_actions: ["download", "restore", "switch_default"]' in result.output
     assert "backup is stale and will be refreshed" in result.output

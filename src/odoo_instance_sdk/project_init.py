@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import msgspec
+
+from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.project_init import (
     evaluate_init_completeness,
     fetch_remote_database_names_for_init,
@@ -21,8 +25,13 @@ from odoo_instance_sdk.internal.project_init import (
     write_project_env,
     write_project_generated_config,
 )
-from odoo_instance_sdk.internal.project_manifest import write_manifest
-from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
+from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
+from odoo_instance_sdk.project import (
+    ProjectConfig,
+    RemoteSourceConfig,
+    TestInstanceProjectConfig,
+    normalize_remote_name,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
@@ -39,14 +48,24 @@ class _ComposeFollowup:
 
 @dataclass(frozen=True, slots=True)
 class _BootstrapFollowup:
+    cluster: PostgresCluster
     spawn_step: PreparedStep
     probe_step: PreparedStep
     ready_step: PreparedStep
     verify_action: PreparedAction
+    record_action: PreparedAction
+    project_root: Path
+    data_directory: Path
 
     @property
     def steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
-        return (self.spawn_step, self.probe_step, self.ready_step, self.verify_action)
+        return (
+            self.spawn_step,
+            self.probe_step,
+            self.ready_step,
+            self.verify_action,
+            self.record_action,
+        )
 
 
 def _execute_remote_database_names_phase(
@@ -134,11 +153,28 @@ def _execute_compose_followup_phase(
 def _execute_bootstrap_followup_phase(
     context: RunContext[dict[str, JsonValue]], followup: _BootstrapFollowup
 ) -> None:
-    from odoo_instance_sdk.internal.dbprep.bootstrap import run_bootstrap_tmp
+    from odoo_instance_sdk.internal.dbprep.bootstrap import (
+        BootstrapOutcome,
+        record_bootstrap_event,
+        run_bootstrap_tmp,
+    )
+    from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
 
+    verify_project_owned_data_dir(
+        followup.project_root, followup.data_directory, require_exists=False
+    )
     context.action(followup.verify_action.step_id)
-    run_bootstrap_tmp(context, followup.spawn_step, followup.probe_step, followup.ready_step)
+    outcome = run_bootstrap_tmp(
+        context, followup.spawn_step, followup.probe_step, followup.ready_step
+    )
     context.complete_action(followup.verify_action.step_id)
+    if outcome is BootstrapOutcome.CREATED:
+        context.action(followup.record_action.step_id)
+        data_directory = verify_project_owned_data_dir(
+            followup.project_root, followup.data_directory
+        )
+        record_bootstrap_event(followup.cluster, data_directory)
+        context.complete_action(followup.record_action.step_id)
     for step in followup.steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
             context.skip(step.step_id)
@@ -152,6 +188,7 @@ def init_project_command(
     local_config: bool = False,
     postgres_image: str | None = None,
     existing_test_instance: TestInstanceProjectConfig | None = None,
+    remote_instances: tuple[RemoteSourceConfig, ...] | None = None,
     allow_partial: bool = False,
     no_input: bool = False,
     dry_run: bool = False,
@@ -168,6 +205,8 @@ def init_project_command(
         if isinstance(existing_test_instance, TestInstanceProjectConfig)
         else None
     )
+    if remote_instances is not None:
+        config = msgspec.structs.replace(config, remote_instances=remote_instances)
     effective_config = merge_preserved_test_instance(config, resolved_existing)
     show_remote_names_step = (
         effective_config.test_instance is not None
@@ -263,9 +302,13 @@ def _compose_followup_steps(
     dry_run: bool,
 ) -> tuple[_ComposeFollowup, _BootstrapFollowup]:
     """Return postgres ensure-running and bootstrap ``tmp`` steps for compose init."""
-    from odoo_instance_sdk.internal.dbprep.bootstrap import bootstrap_tmp_steps
+    from odoo_instance_sdk.internal.dbprep.bootstrap import (
+        bootstrap_record_action,
+        bootstrap_tmp_steps,
+    )
     from odoo_instance_sdk.internal.generated_config import project_generated_config_path
     from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+    from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
     from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
     from odoo_instance_sdk.models import StartConfig
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -298,9 +341,9 @@ def _compose_followup_steps(
     start_config.db_port = cluster.endpoint_port
     start_config.db_user = config.postgres.user if config.postgres is not None else "odoo"
     start_config.db_password = password
-    from odoo_instance_sdk.internal.project_init import project_owned_data_dir
-
-    start_config.data_dir = str(project_owned_data_dir(root))
+    data_directory = root / ".odcli" / "filestore"
+    verify_project_owned_data_dir(root, data_directory, require_exists=False)
+    start_config.data_dir = str(data_directory)
     command_prefix = _planned_command_prefix(root, config)
     spawn_step, probe_step, ready_step, ready_action = bootstrap_tmp_steps(
         command_prefix=command_prefix,
@@ -318,10 +361,14 @@ def _compose_followup_steps(
             steps=postgres_steps,
         ),
         _BootstrapFollowup(
+            cluster=cluster,
             spawn_step=spawn_step,
             probe_step=probe_step,
             ready_step=ready_step,
             verify_action=ready_action,
+            record_action=bootstrap_record_action(),
+            project_root=root,
+            data_directory=data_directory,
         ),
     )
 
@@ -340,6 +387,7 @@ def init_project(
     local_config: bool = False,
     postgres_image: str | None = None,
     existing_test_instance: TestInstanceProjectConfig | None = None,
+    remote_instances: tuple[RemoteSourceConfig, ...] | None = None,
     allow_partial: bool = False,
     no_input: bool = False,
     dry_run: bool = False,
@@ -359,6 +407,8 @@ def init_project(
     resolved_existing: TestInstanceProjectConfig | None = None
     if isinstance(existing_test_instance, TestInstanceProjectConfig):
         resolved_existing = existing_test_instance
+    if remote_instances is not None:
+        config = msgspec.structs.replace(config, remote_instances=remote_instances)
     effective_config = merge_preserved_test_instance(config, resolved_existing)
     if missing is None or details is None:
         missing, details = evaluate_init_completeness(
@@ -386,20 +436,12 @@ def init_project(
     write_manifest(project_path, effective_config)
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
         write_project_generated_config(project_path, effective_config)
-        origin_pins = ""
         if effective_config.test_instance is not None:
-            from odoo_instance_sdk.internal.urls import canonical_origin
-
-            try:
-                origin_pins = canonical_origin(effective_config.test_instance.base_url)
-            except Exception:
-                origin_pins = ""
-        existing_env = read_project_env(project_path)
-        write_project_env(
-            project_path,
-            origin_pins=origin_pins or None,
-            master_password=existing_env.get("ODCLI_TEST_MASTER_PASSWORD"),
-        )
+            existing_env = read_project_env(project_path)
+            write_project_env(
+                project_path,
+                master_password=existing_env.get("ODCLI_TEST_MASTER_PASSWORD"),
+            )
     register_initialized_project(project_path)
     result = manifest_dict(effective_config, postgres_allocated=postgres_allocated)
     if missing:
@@ -417,11 +459,14 @@ def init_completeness_preview(
     local_config: bool,
     postgres_image: str | None,
     existing_test_instance: TestInstanceProjectConfig | None,
+    remote_instances: tuple[RemoteSourceConfig, ...] | None = None,
     dry_run: bool,
     remote_database_names: list[str] | None,
     postgres_allocated: bool,
 ) -> dict[str, JsonValue]:
     """Project init manifest output including completeness metadata."""
+    if remote_instances is not None:
+        config = msgspec.structs.replace(config, remote_instances=remote_instances)
     effective_config = merge_preserved_test_instance(config, existing_test_instance)
     missing, details = evaluate_init_completeness(
         project_root=project_path.resolve(),
@@ -438,3 +483,171 @@ def init_completeness_preview(
         result["missing"] = list(missing)
         result["missing_details"] = dict(details)
     return result
+
+
+def list_remote_sources(project: ProjectConfig | str | Path) -> tuple[RemoteSourceConfig, ...]:
+    """List named sources in deterministic manifest order."""
+    config = project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
+    return tuple(sorted(config.remote_instances, key=lambda source: source.name))
+
+
+def _manifest_snapshot(
+    project: ProjectConfig | str | Path,
+) -> tuple[ProjectConfig, Path, Path, str]:
+    config = project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
+    root = config.repository_root.resolve()
+    manifest = manifest_path(root)
+    content = manifest.read_bytes() if manifest.is_file() else config.to_manifest().encode()
+    from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
+
+    canonical_root, common, _ = _planned_project_identity(root)
+    return config, canonical_root, common, hashlib.sha256(content).hexdigest()
+
+
+def _assert_manifest_snapshot(*, root: Path, common: Path, fingerprint: str) -> ProjectConfig:
+    from odoo_instance_sdk.exceptions import StalePlanError
+    from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
+
+    current_root, current_common, _ = _planned_project_identity(root)
+    if current_root != root or current_common != common:
+        raise StalePlanError("project repository identity changed before manifest update")
+    manifest = manifest_path(root)
+    if not manifest.is_file():
+        raise StalePlanError("project manifest disappeared before update")
+    current_bytes = manifest.read_bytes()
+    current_fingerprint = hashlib.sha256(current_bytes).hexdigest()
+    if current_fingerprint != fingerprint:
+        raise StalePlanError(
+            "project manifest changed before update",
+            expected=fingerprint,
+            actual=current_fingerprint,
+        )
+    return ProjectConfig.load(root)
+
+
+def _remote_config_command(
+    project: ProjectConfig | str | Path,
+    *,
+    source: RemoteSourceConfig | None,
+    name: str | None,
+    replace: bool,
+) -> Command[tuple[RemoteSourceConfig, ...]]:
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor, prepared_command
+
+    baseline, root, common, fingerprint = _manifest_snapshot(project)
+    if source is not None:
+        source = RemoteSourceConfig(
+            name=source.name,
+            base_url=source.base_url,
+            database=source.database,
+            git_branch=source.git_branch,
+        )
+        action = "project.remote.configure"
+        description = "Configure a named remote source"
+    else:
+        assert name is not None
+        normalized_name = normalize_remote_name(name)
+        action = "project.remote.remove"
+        description = "Remove a named remote source"
+
+    planned_sources = {item.name: item for item in baseline.remote_instances}
+    if source is not None:
+        planned_sources[source.name] = source
+    else:
+        planned_sources.pop(normalized_name, None)
+    planned_config = msgspec.structs.replace(
+        baseline,
+        remote_instances=tuple(sorted(planned_sources.values(), key=lambda item: item.name)),
+    )
+
+    step = PreparedAction(
+        step_id=action,
+        action=action,
+        description=description,
+        details={
+            "repository_root": str(root),
+            "git_common_dir": str(common),
+            "manifest_fingerprint": fingerprint,
+            "resulting_manifest": planned_config.to_manifest(),
+        },
+        mutating=True,
+    )
+
+    def run(context: RunContext[tuple[RemoteSourceConfig, ...]]) -> tuple[RemoteSourceConfig, ...]:
+        context.action(action)
+        with exclusive_lock(
+            project_manifest_lock_path(hashlib.sha256(str(common).encode()).hexdigest())
+        ):
+            current = _assert_manifest_snapshot(root=root, common=common, fingerprint=fingerprint)
+            sources = {item.name: item for item in current.remote_instances}
+            if source is not None:
+                existing = sources.get(source.name)
+                if existing is not None and not replace and existing != source:
+                    raise ValueError(
+                        f"remote source {source.name!r} exists; pass replace=True to update it"
+                    )
+                if existing == source:
+                    result = tuple(sorted(sources.values(), key=lambda item: item.name))
+                else:
+                    sources[source.name] = source
+                    updated = msgspec.structs.replace(
+                        current,
+                        remote_instances=tuple(
+                            sorted(sources.values(), key=lambda item: item.name)
+                        ),
+                    )
+                    write_manifest(root, updated)
+                    result = updated.remote_instances
+            else:
+                sources.pop(normalized_name, None)
+                if len(sources) != len(current.remote_instances):
+                    updated = msgspec.structs.replace(
+                        current,
+                        remote_instances=tuple(
+                            sorted(sources.values(), key=lambda item: item.name)
+                        ),
+                    )
+                    write_manifest(root, updated)
+                    result = updated.remote_instances
+                else:
+                    result = current.remote_instances
+        context.complete_action(action)
+        return result
+
+    return Command.from_prepared(
+        ExecutionPlan(steps=(step.public_projection(),)),
+        prepared_command(run, (step,), executor=SubprocessExecutor()),
+    )
+
+
+def configure_remote_source_command(
+    project: ProjectConfig | str | Path,
+    source: RemoteSourceConfig,
+    *,
+    replace: bool = False,
+) -> Command[tuple[RemoteSourceConfig, ...]]:
+    """Capture an atomic named-source add/update operation."""
+    return _remote_config_command(project, source=source, name=None, replace=replace)
+
+
+def configure_remote_source(
+    project: ProjectConfig | str | Path,
+    source: RemoteSourceConfig,
+    *,
+    replace: bool = False,
+) -> tuple[RemoteSourceConfig, ...]:
+    return configure_remote_source_command(project, source, replace=replace).run()
+
+
+def remove_remote_source_command(
+    project: ProjectConfig | str | Path, name: str
+) -> Command[tuple[RemoteSourceConfig, ...]]:
+    """Capture an atomic named-source removal operation."""
+    return _remote_config_command(project, source=None, name=name, replace=False)
+
+
+def remove_remote_source(
+    project: ProjectConfig | str | Path, name: str
+) -> tuple[RemoteSourceConfig, ...]:
+    return remove_remote_source_command(project, name).run()

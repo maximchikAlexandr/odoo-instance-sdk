@@ -37,24 +37,12 @@ from tests.integration.real_odoo.focused_support import (
     _isolated_catalog,
     _project,
     _project_database_probe,
-    project_filestore,
-)
-from tests.integration.real_odoo.focused_support import (
     catalog_state as _catalog_state,
-)
-from tests.integration.real_odoo.focused_support import (
     invoke_in_registered_worktree as _invoke_in_registered_worktree,
-)
-from tests.integration.real_odoo.focused_support import (
     observe_failure as _observe_failure,
-)
-from tests.integration.real_odoo.focused_support import (
+    project_filestore,
     record as _record,
-)
-from tests.integration.real_odoo.focused_support import (
     registered_worktree as _registered_worktree,
-)
-from tests.integration.real_odoo.focused_support import (
     seed_backup as _seed_backup,
 )
 
