@@ -21,12 +21,12 @@ from multica_py import ClientConfig, Issue, MulticaClient, Page, Project, Projec
 from multica_py.models.issue_activity import TaskProjectResourceData
 from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
 from multica_py.models.system import DaemonStatus, DaemonWorkspace, RepositoryCheckoutResult
-from odcli_multica import (  # type: ignore[import-untyped]
+from odcli_multica import (
     ContextRequest,
     MulticaOdooClient,
     PreparationRequest,
 )
-from odcli_multica.models import (  # type: ignore[import-untyped]
+from odcli_multica.models import (
     MULTICA_PY_REVISION,
     MULTICA_PY_VERSION,
     MulticaCompatibility,
