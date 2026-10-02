@@ -4,7 +4,7 @@ import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 
 from click.testing import CliRunner
 from multica_py import CommandCancelledError
@@ -93,3 +93,42 @@ def test_cli_error_and_interruption_are_bounded(
     interrupted = _invoke_context(monkeypatch, _CliClient(KeyboardInterrupt()), tmp_path)
     assert interrupted.exit_code == 1
     assert json.loads(interrupted.output)["error"]["code"] == "interrupted"
+
+
+def test_cli_initialization_preserves_interruption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = importlib.import_module("odcli_multica.cli")
+
+    def interrupting_client(
+        _profile: str | None, _workspace_id: str | None, _odoo_bin: str
+    ) -> NoReturn:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(module, "_client", interrupting_client)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    result = CliRunner().invoke(
+        cli,
+        [
+            "context",
+            str(checkout),
+            "--project",
+            str(project),
+            "--multica-project",
+            "project",
+            "--issue",
+            "issue",
+            "--run",
+            "run",
+            "--repository-url",
+            "https://example.test/repo",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"]["code"] == "interrupted"

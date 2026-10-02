@@ -22,10 +22,7 @@ from multica_py.models.issue_activity import TaskProjectResourceData
 from multica_py.models.system import DaemonStatus, DaemonWorkspace, RepositoryCheckoutResult
 from odcli_multica import ContextRequest, MulticaOdooClient
 from odcli_multica.models import (
-    MULTICA_PY_REVISION,
-    MULTICA_PY_VERSION,
     ContextVerificationError,
-    MulticaCompatibility,
     PreparationRequest,
 )
 
@@ -74,6 +71,9 @@ class _Daemon:
 
     def status(self) -> DaemonStatus:
         return self.status_value
+
+    def status_command(self, *, options: OperationOptions | None = None) -> _Command[DaemonStatus]:
+        return _Command(self.status_value)
 
 
 class _Repositories:
@@ -127,6 +127,10 @@ def _fixture(
     project_root = tmp_path / "core"
     (project_root / ".odcli").mkdir(parents=True)
     (project_root / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
+    (project_root / ".git").mkdir()
+    (project_root / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://example.test/repo\n', encoding="utf-8"
+    )
     multica_project = Project(
         "project", "Project", ProjectStatus.in_progress, workspace_id="workspace"
     )
@@ -173,16 +177,8 @@ def _fixture(
         run="run",
         repository_url="https://example.test/repo",
     )
-    compatibility = MulticaCompatibility(
-        package_version=MULTICA_PY_VERSION,
-        package_revision=MULTICA_PY_REVISION,
-        native_cli_version="0.5.3",
-        typed_checkout=True,
-        typed_daemon_status=True,
-        observed=True,
-    )
     return (
-        MulticaOdooClient(core, cast("MulticaClient", multica), compatibility=compatibility),
+        MulticaOdooClient(core, cast("MulticaClient", multica)),
         request,
         repositories,
         environments,
@@ -230,8 +226,10 @@ def test_context_rejects_forwarded_or_missing_filesystem_evidence(tmp_path: Path
 
 class _FakeMultica:
     config: ClientConfig
+    projects: _Projects
     issues: _Issues
     daemon: _Daemon
+    repositories: _Repositories
 
 
 def test_context_rejects_repository_mismatch_and_ambiguity(tmp_path: Path) -> None:
@@ -253,11 +251,20 @@ def test_context_rejects_repository_mismatch_and_ambiguity(tmp_path: Path) -> No
 def test_context_rejects_missing_core_identity_and_manifest(tmp_path: Path) -> None:
     client, request, _, _ = _fixture(tmp_path)
     missing = msgspec.structs.replace(request, repository_url=None)
-    with pytest.raises(ContextVerificationError, match="core repository identity"):
-        client.context(missing)
+    assert client.context(missing).repository_url == "https://example.test/repo"
 
     request.core_project.joinpath(".odcli", "project.toml").unlink()
     with pytest.raises(ContextVerificationError, match="core project repository identity"):
+        client.context(request)
+
+
+def test_context_rejects_matching_manifest_with_different_git_repository(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    request.core_project.joinpath(".git", "config").write_text(
+        '[remote "origin"]\n\turl = https://other.test/repo\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ContextVerificationError, match="does not match"):
         client.context(request)
 
 
@@ -284,18 +291,6 @@ def test_context_rejects_scope_runtime_server_and_boundary_conflicts(tmp_path: P
 
 def test_compatibility_is_required_and_daemon_fields_are_observed(tmp_path: Path) -> None:
     client, request, _, _ = _fixture(tmp_path)
-    client.compatibility = None
-    with pytest.raises(ContextVerificationError, match="compatibility evidence"):
-        client.context(request)
-
-    client.compatibility = MulticaCompatibility(
-        package_version=MULTICA_PY_VERSION,
-        package_revision=MULTICA_PY_REVISION,
-        native_cli_version="0.5.3",
-        typed_checkout=True,
-        typed_daemon_status=True,
-        observed=True,
-    )
     fake_multica = cast("_FakeMultica", client.multica)
     fake_multica.daemon.status_value = DaemonStatus(
         status="ready",
@@ -305,6 +300,27 @@ def test_compatibility_is_required_and_daemon_fields_are_observed(tmp_path: Path
     )
     with pytest.raises(ContextVerificationError, match="below"):
         client.context(request)
+
+    fake_multica.daemon.status_value = DaemonStatus(
+        status="ready",
+        daemon_id="daemon",
+        server_url="http://127.0.0.1:8765",
+        cli_version=None,
+    )
+    observed_client = MulticaOdooClient(client.core, client.multica)
+    with pytest.raises(ContextVerificationError, match="below"):
+        observed_client.context(request)
+
+    incomplete = SimpleNamespace(
+        config=fake_multica.config,
+        projects=fake_multica.projects,
+        issues=fake_multica.issues,
+        daemon=fake_multica.daemon,
+        repositories=SimpleNamespace(),
+    )
+    incomplete_client = MulticaOdooClient(client.core, cast("MulticaClient", incomplete))
+    with pytest.raises(ContextVerificationError, match="typed Multica capability"):
+        incomplete_client.checkout("https://example.test/repo")
 
 
 @pytest.mark.parametrize(

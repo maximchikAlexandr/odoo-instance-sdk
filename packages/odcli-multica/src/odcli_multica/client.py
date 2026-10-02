@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import configparser
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from urllib.parse import urlsplit
 
 from odcli_multica.models import (
     MULTICA_PY_REVISION,
@@ -68,11 +72,11 @@ class MulticaOdooClient:
     ) -> None:
         self.core = core_client
         self.multica = multica_client
-        self.compatibility = compatibility
+        self._compatibility = _observe_compatibility(multica_client)
 
     def _require_contract(self) -> None:
-        identity = self.compatibility
-        if identity is None or not identity.observed:
+        identity = self._compatibility
+        if not identity.observed:
             raise ContextVerificationError("typed Multica compatibility evidence is unavailable")
         if not identity.typed_checkout or not identity.typed_daemon_status:
             raise ContextVerificationError("required typed Multica capability is unavailable")
@@ -198,8 +202,10 @@ class MulticaOdooClient:
         if request.runtime_id is not None and request.runtime_id != runtime_id:
             raise ContextVerificationError("requested runtime conflicts with the run")
         task_root = _task_root(run, checkout)
-        _verify_core_project(request.core_project)
-        repository_url = _repository_url(run, request.core_repository_url or request.repository_url)
+        core_repository_url = _verify_core_project(request.core_project)
+        repository_url = _repository_url(
+            run, core_repository_url, request.core_repository_url or request.repository_url
+        )
         daemon = self.multica.daemon.status()
         daemon_id = _required(daemon.daemon_id, "daemon identity")
         _verify_daemon(
@@ -232,6 +238,34 @@ def _canonical_checkout(value: Path) -> Path:
     if not checkout.is_dir():
         raise ContextVerificationError("checkout path is not a directory")
     return checkout
+
+
+def _observe_compatibility(multica: MulticaClient) -> MulticaCompatibility:
+    """Observe the public package, capability, and daemon contract once."""
+    try:
+        daemon = multica.daemon.status()
+    except AttributeError as exc:
+        raise ContextVerificationError("typed daemon status capability is unavailable") from exc
+    direct_url_text = metadata.distribution("multica-py").read_text("direct_url.json")
+    if direct_url_text is None:
+        raise ContextVerificationError("multica-py revision evidence is unavailable")
+    direct_url = json.loads(direct_url_text)
+    vcs_info = direct_url.get("vcs_info") if isinstance(direct_url, dict) else None
+    revision = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
+    if not isinstance(revision, str):
+        raise ContextVerificationError("multica-py revision evidence is unavailable")
+    repositories = getattr(multica, "repositories", None)
+    daemon_resource = getattr(multica, "daemon", None)
+    return MulticaCompatibility(
+        package_version=metadata.version("multica-py"),
+        package_revision=revision,
+        native_cli_version=daemon.cli_version or "",
+        typed_checkout=callable(getattr(repositories, "checkout_command", None))
+        and callable(getattr(repositories, "checkout", None)),
+        typed_daemon_status=callable(getattr(daemon_resource, "status_command", None))
+        and callable(getattr(daemon_resource, "status", None)),
+        observed=True,
+    )
 
 
 def _find_run(page: Page[TaskRun], run_id: str) -> TaskRun:
@@ -268,7 +302,7 @@ def _task_root(run: TaskRun, checkout: Path) -> Path:
     )
 
 
-def _verify_core_project(path: Path) -> None:
+def _verify_core_project(path: Path) -> str:
     if not path.is_dir():
         raise ContextVerificationError("core project path is not a directory")
     try:
@@ -277,9 +311,37 @@ def _verify_core_project(path: Path) -> None:
         raise ContextVerificationError("core project repository identity is unavailable") from exc
     if project.repository_root.resolve() != path.resolve():
         raise ContextVerificationError("core project repository identity conflicts with its path")
+    try:
+        config_path = _git_config_path(path)
+        parser = configparser.ConfigParser(interpolation=None)
+        if not config_path.is_file():
+            raise ContextVerificationError("core project Git identity is unavailable")
+        parser.read(config_path, encoding="utf-8")
+        origin = parser.get('remote "origin"', "url", fallback="").strip()
+    except (OSError, configparser.Error) as exc:
+        raise ContextVerificationError("core project Git identity is unavailable") from exc
+    if not origin:
+        raise ContextVerificationError("core project Git identity is unavailable")
+    return origin
 
 
-def _repository_url(run: TaskRun, selected: str | None) -> str:
+def _git_config_path(path: Path) -> Path:
+    git_marker = path / ".git"
+    if git_marker.is_dir():
+        return git_marker / "config"
+    if not git_marker.is_file():
+        raise ContextVerificationError("core project Git identity is unavailable")
+    marker = git_marker.read_text(encoding="utf-8").strip()
+    if not marker.lower().startswith("gitdir:"):
+        raise ContextVerificationError("core project Git identity is unavailable")
+    git_dir = (path / marker.split(":", 1)[1].strip()).resolve()
+    common_dir = git_dir / "commondir"
+    if common_dir.is_file():
+        git_dir = (git_dir / common_dir.read_text(encoding="utf-8").strip()).resolve()
+    return git_dir / "config"
+
+
+def _repository_url(run: TaskRun, core_url: str, selected: str | None) -> str:
     values = tuple(
         resource.resource_ref
         for resource in run.project_resources
@@ -289,15 +351,24 @@ def _repository_url(run: TaskRun, selected: str | None) -> str:
     if len(values) != 1:
         raise ContextVerificationError("repository identity is absent or ambiguous")
     native = values[0]
-    if selected is None:
-        raise ContextVerificationError("core repository identity is unavailable")
-    if _normalize_url(selected) != _normalize_url(native):
+    if _normalize_url(core_url) != _normalize_url(native):
         raise ContextVerificationError("core repository does not match the native repository")
+    if selected is not None and _normalize_url(selected) != _normalize_url(core_url):
+        raise ContextVerificationError("selected repository does not match the core repository")
     return native
 
 
 def _normalize_url(value: str) -> str:
-    return value.strip().rstrip("/")
+    raw = value.strip()
+    if "://" in raw:
+        parsed = urlsplit(raw)
+        return f"{parsed.netloc.lower()}/{parsed.path.strip('/').removesuffix('.git').lower()}"
+    if raw.startswith("git@") and ":" in raw:
+        authority, path = raw.split(":", 1)
+        return (
+            f"{authority.split('@', 1)[1].lower()}/{path.strip('/').removesuffix('.git').lower()}"
+        )
+    return raw.rstrip("/").removesuffix(".git").lower()
 
 
 def _verify_daemon(
