@@ -2,8 +2,8 @@
 
 ## 1. Dependency revalidation and observed contracts
 
-- [ ] 1.1 Consume the exact public core source/COPY operations, types, failure semantics, and migration head recorded by the mandatory post-dependency planning revision. Add focused compatibility/contract tests and do not duplicate predecessor source, restore, retention, readiness, or cleanup behavior.
-- [ ] 1.2 Consume the exact public typed native-checkout and daemon-status command/result contracts and compatible `multica-py` revision/version recorded by the mandatory post-#93 planning revision. Verify cancellation/unknown-outcome and redaction behavior without raw `cli.command_command()`, local output decoders, or private transport.
+- [ ] 1.1 Consume current core `EnvironmentCheckoutOptions(remote_name=...|backup_id=...)` source/COPY selection and its provenance, restore, readiness, retention, failure and cleanup contracts from the integrated PR #110 base. Add focused compatibility tests and do not duplicate those predecessor behaviors.
+- [ ] 1.2 Consume `MulticaClient.repositories.checkout_command()/checkout()` with `RepositoryCheckoutResult` and `MulticaClient.daemon.status_command()/status()` with `DaemonStatus` from exact `multica-py` PR #95 merge revision; enforce its package/CLI compatibility and verify timeout/cancellation, ambiguous-version and redaction behavior without raw `cli.command_command()`, local output decoders, or private transport.
 
 ## 2. Core adoption and owned-only lifecycle
 
@@ -14,7 +14,7 @@
 
 ## 3. Minimal integration package
 
-- [ ] 3.1 Add only the independently versioned `odcli-multica` workspace member with compatible published core and `multica-py` dependencies. Verify no-sources wheel builds, standalone/combined tool installation, package-qualified release metadata, and no undeclared/private imports.
+- [ ] 3.1 Add only the independently versioned `odcli-multica` workspace member with a core dependency containing PR #110 and an exact `multica-py` PR #95 revision pin until an equivalent unique release exists. Verify no-sources wheel builds, standalone/combined tool installation, package-qualified release metadata, and no undeclared/private imports.
 - [ ] 3.2 Add the small integration client and frozen task context using the observed typed checkout, issue/run, and daemon-status operations. Test explicit workspace/project/issue/run/repository/runtime identity, same-host containment, pagination, missing/forwarded filesystem evidence, cancellation/unknown outcome, and redaction without a second checkout or persistence layer.
 - [ ] 3.3 Add thin inspectable preparation and delegating convenience/CLI operations: bounded context preflight followed by the exact captured core adoption command/result. Test no implicit bind/start/task mutation, pre-effect context failure, partial recovery, and idempotent retry; document two-phase composition and caller persistence of separate context plus environment UUID.
 - [ ] 3.4 Document and test the narrow extension-facing subset of the existing public core output API. Verify Rich/JSON/TOON equivalence, one bounded machine document, redaction, dry-run, error, and interruption behavior without a new facade, serializer, runner, or leaf registry.

@@ -4,7 +4,7 @@
 
 The public environment SDK SHALL support an inspectable `adopt_command(project, checkout_path, options=...)` and delegating `adopt()` operation returning the existing frozen environment result type. Adoption SHALL prepare Odoo against an existing canonical Git working directory without creating, copying, moving, resetting or renaming its code or branch. It SHALL support both linked worktrees and independent clones. Existing SDK-owned checkout behavior SHALL remain unchanged.
 
-Adoption SHALL require COPY mode, an explicit compatible base and exactly one explicit supported COPY source. It SHALL reuse existing source selection, credential handling, archive verification, neutralization, isolated database/filestore, Python selection, port allocation and recovery semantics. It SHALL NOT enable creation of a virtual environment implicitly, change a project default database or mark a merely provisioned environment as HTTP-ready.
+Adoption SHALL require COPY mode, an explicit compatible base and exactly one explicit supported COPY source: the integrated `EnvironmentCheckoutOptions.remote_name` named-source selector or `EnvironmentCheckoutOptions.backup_id` retained catalogue UUID selector. It SHALL reuse existing source selection, credential handling, archive verification, provenance, neutralization, isolated database/filestore, Python selection, port allocation, readiness, retention and recovery semantics. It SHALL NOT enable creation of a virtual environment implicitly, change a project default database or mark a merely provisioned environment as HTTP-ready.
 
 #### Scenario: Adopt a native external checkout
 

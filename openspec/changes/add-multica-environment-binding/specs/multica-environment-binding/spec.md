@@ -2,7 +2,7 @@
 
 ### Requirement: Reuse native checkout through the typed Multica SDK
 
-The integration SHALL use the public typed native-repository-checkout operation delivered by the supported `multica-py` revision that completes issue #93. It SHALL preserve scoped server/workspace configuration, active-task credentials, current task directory, explicit ref, timeout, cancellation, inspectable command capture, typed result, redaction, and native code ownership. It SHALL NOT use raw CLI argv, parse stdout/stderr, call private HTTP/storage, copy a process runner, or implement checkout registration. Forced fresh checkout SHALL NOT be part of this flow.
+The integration SHALL use `MulticaClient.repositories.checkout_command(url, *, ref=..., fresh=False, options=...)` and its delegating `checkout()` sibling from exact `multica-py` PR #95 merge revision, consuming frozen `RepositoryCheckoutResult.path`. It SHALL preserve scoped server/workspace configuration, active-task credentials, current task directory, explicit ref, timeout, cancellation, inspectable command capture, typed result, redaction, and native code ownership. It SHALL NOT use raw CLI argv, parse stdout/stderr, call private HTTP/storage, copy a process runner, or implement checkout registration. Forced fresh checkout SHALL NOT be part of this flow.
 
 Checkout and Odoo preparation SHALL remain separately captured phases. No general-purpose extension checkout clone or core integrated checkout flag SHALL be added.
 
@@ -25,7 +25,7 @@ Checkout and Odoo preparation SHALL remain separately captured phases. No genera
 
 The extension SHALL expose a finite read-only context SDK operation and CLI equivalent. Inputs SHALL identify the selected core project/repository, checkout path, expected Multica project, issue, and run; existing scoped Multica configuration SHALL supply server/workspace credentials. It SHALL NOT persist a project-link file or infer identities from names, branches, task prose, or list order.
 
-Context SHALL compose public typed issue/run and daemon-status operations from the supported `multica-py` revision. It SHALL verify issue/project/workspace/run membership, owning local daemon/runtime identity, repository identity, and containment beneath the run's absolute current/durable directory. It SHALL return frozen facts and observation time. Raw daemon commands, local JSON decoders, private transports, and reduced status models SHALL NOT be used.
+Context SHALL compose public typed issue/run operations with `MulticaClient.daemon.status_command()/status()` and frozen `DaemonStatus` from exact `multica-py` PR #95 merge revision. It SHALL verify issue/project/workspace/run membership, owning local daemon/runtime identity, repository identity, and containment beneath the run's absolute current/durable directory. It SHALL return frozen facts and observation time. Raw daemon commands, local JSON decoders, private transports, and reduced status models SHALL NOT be used.
 
 #### Scenario: Matching local run
 
@@ -98,23 +98,23 @@ The package SHALL provide finite operations only. Native checkout lifetime SHALL
 - **WHEN** a caller saves the context result and environment UUID
 - **THEN** it can inspect, start, stop, and remove the environment through core without an extension registry or repeated native checkout
 
-### Requirement: Implementation requires dependency revalidation
+### Requirement: Implementation requires exact post-dependency approval
 
-Planning artifacts MAY be reviewed and published while dependencies are incomplete, but implementation SHALL NOT start until the core predecessor and all of `multica-py` #93 are implemented, verified, integrated/available, and inspected. After both complete, the Planner SHALL record their actual public APIs and versions, reconcile every affected planning artifact, rerun applicable validation and estimation, publish a new exact SHA, and obtain independent Plan Verifier approval.
+The implementation SHALL use the post-dependency planning revision that records integrated Odoo Instance SDK PR #110 and complete `multica-py` PR #95 public contracts, selected base, compatible version evidence, recomputed estimate properties and validated delivery topology. Its exact SHA SHALL be pushed unchanged and independently approved by Plan Verifier before implementation begins.
 
-An implementation parent created earlier SHALL remain in backlog. No WP child or implementation run SHALL start from a planning-only SHA.
+The parked implementation parent SHALL remain in backlog. No WP child or implementation run SHALL start from an earlier planning SHA or merely from dependency completion.
 
-#### Scenario: Only documentation is ready
+#### Scenario: Dependencies are complete but revision is not approved
 
-- **WHEN** this OpenSpec is validated and approved while either implementation dependency remains incomplete
-- **THEN** planning is ready but implementation remains prohibited
+- **WHEN** both dependency implementations are available and the post-dependency planning revision exists but lacks independent exact-SHA approval
+- **THEN** the implementation gate remains closed and no WP is materialized or started
 
-#### Scenario: Dependency is cancelled or partially implemented
+#### Scenario: Post-dependency exact SHA is approved
 
-- **WHEN** a dependency closes without its full required implementation or `multica-py` #93 supplies only checkout/status
-- **THEN** the implementation gate remains closed
+- **WHEN** Plan Verifier confirms that the pushed exact SHA matches the fully validated post-dependency package and its recorded compatibility evidence
+- **THEN** the implementation parent may open the gate and materialize the delivery-plan WPs
 
-#### Scenario: Both dependencies complete
+#### Scenario: Contract drift appears after approval
 
-- **WHEN** both complete implementations are available
-- **THEN** implementation remains prohibited until observed contracts are incorporated into a newly validated, independently approved, exact-SHA planning revision
+- **WHEN** the selected base or dependency API/version no longer matches the approved evidence in a scope-, topology-, or threshold-affecting way
+- **THEN** implementation remains or becomes closed until a new planning revision is validated and independently approved

@@ -1,83 +1,80 @@
 # Checkout integration research
 
-## Evidence baseline — 2026-09-26
+## Post-dependency evidence baseline — 2026-10-02
 
 This is source and contract inspection, not a live Multica/Odoo acceptance run. No application task, runtime, project resource, checkout, database, or daemon lifecycle was mutated.
 
-| Source | Inspected revision/state | Finding |
+| Source | Inspected revision/state | Observed contract |
 |---|---|---|
-| Odoo Instance SDK planning base | `f7c3f7c9093529d6744c30745e220efb9aea8f80` | COPY checkout, external-file restore, command parity, and guarded cleanup exist; caller-owned checkout adoption does not. |
-| Current planning input | `cb638fa4d575b0dbb8ca5d4452897568102484ca` | Existing OpenSpec used two raw `multica-py` command calls and local decoders; this revision replaces that target design. |
-| MYL-271 / MYL-272 | planning `in_review`; implementation `in_progress`; no linked PR reported by Multica | Source/COPY predecessor is not yet a verified integrated implementation. WP-01 and WP-04 evidence exists on MYL-272, but partial WP evidence does not open the gate. |
-| `multica-py` issue #93 | OPEN; baseline `d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06`; upstream target v0.5.3 / `ff8b285497809e084915016c40c2bc5e5991ffbc` | Requires full public CLI parity. Finding B1 requires typed native checkout; finding A1/D1 requires correct complete daemon status. Generic raw command invocation explicitly does not satisfy typed parity. |
-| Multica native checkout | upstream v0.5.3 source | Task-bound checkout owns repository cache/branch/path association; project/daemon-wide `local_directory` is not an issue-level selector. |
+| Odoo Instance SDK implementation base | `c1e57b79f39e529a50c25818134c06309384ee23` | Current `main`; includes the completed MYL-272 implementation and subsequent integrated changes. |
+| MYL-272 / PR #110 | merge `11ff3403f2108adc901154ebeb9ee509add46ef5`; issue `done` | Named-source and exact retained-backup COPY selection, provenance, restoration, readiness, retention and owned cleanup are integrated. |
+| `multica-py` #93 / PR #95 | merge `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed`; issue closed | Complete public CLI parity is integrated, including typed native checkout and full daemon status. |
+| `multica-py` package metadata | version `0.1.0`; no containing release tag at inspected revision | Exact revision pin is required until an equivalent uniquely versioned distribution exists. |
+| Native Multica CLI compatibility | checkout step minimum `0.5.3` | Compatibility is enforced by the SDK command plan; the extension does not reproduce it. |
 
-The dependency states above are observations, not completion claims. Before implementation, refresh every row against the integrated code and record the exact compatible revisions/versions.
+The former dependency gates are complete. Implementation remains closed only until this post-dependency exact planning SHA is independently approved.
 
-## Native checkout traced end to end
+## Observed Odoo Instance SDK contracts
 
-1. Native `repo checkout` uses the active task credential, daemon endpoint, current task directory, URL, and requested ref. It creates or reuses a daemon-managed checkout and returns its path.
-2. The daemon authenticates workspace/task ownership and controls repository cache, ref fetching, branch naming, collisions, and checkout retention. The extension must not reproduce or bypass those rules.
-3. A zero exit/result does not by itself prove requested HEAD or a clean checkout: cached refs and retained dirty/unpushed work are valid native outcomes. Core adoption therefore verifies repository, HEAD/base, and clean state on first use without resetting code.
-4. Native task/runtime lifecycle owns checkout availability. Odoo preparation is a separate phase and cannot promise permanent checkout retention.
+`EnvironmentResource.checkout_command(project, branch, *, options=EnvironmentCheckoutOptions()) -> Command[DevelopmentEnvironment]`, `checkout()` and `checkout_with_plan()` remain the public SDK-owned checkout surfaces. `EnvironmentCheckoutOptions` now includes:
 
-## Why project `local_directory` is not selected
+- `remote_name: str | None` for one configured named source;
+- `backup_id: uuid.UUID | str | None` for one available retained catalogue backup;
+- the existing explicit `base_ref`, COPY mode, source/target database, Python, config, port and lock inputs.
 
-The local-directory resource is scoped to a project and daemon and rejects ambiguous multiple matches. It deliberately routes relevant tasks to one shared directory; it does not select a distinct checkout per issue. Replacing it per task or creating a project per environment would introduce routing and lifecycle machinery outside this change.
+For COPY, `remote_name` and `backup_id` are mutually exclusive and each is mutually exclusive with `source_database`. Named-source resolution uses `DatabaseRefreshOptions(remote_name=...)`; retained selection requires a complete UUID and an available catalogue projection. The selected backup carries source name/base URL/database/source Git branch, digest and pin state. Checkout captures a plan, revalidates under lock, restores through the existing COPY pipeline, records provenance, and returns the existing frozen `DevelopmentEnvironment`.
 
-| Model | Decision | Reason |
-|---|---|---|
-| OdCLI worktree plus rewritten project resource | Reject | Mutates a project-wide route and can create a second checkout. |
-| Native Multica checkout plus core adoption | Select | Preserves native task registration and introduces one reusable core primitive. |
-| Private Multica storage/HTTP emulation | Reject | Bypasses public ownership and compatibility contracts. |
-| Extension-side checkout registry | Reject | Duplicates native checkout identity and requires reconciliation/GC. |
+The integrated predecessor already owns source selection, credentials, backup download/catalogue, provenance comparison, restore/neutralization, readiness, replacement recovery, retention and COPY cleanup. This change adds only caller-owned code adoption and the evidence needed to keep that code outside cleanup. It SHALL NOT add a second source selector, restore pipeline, readiness loop, retention implementation, or backup deletion policy.
 
-## Current core seams
+Caller-owned adoption is still absent from current `main`: normal checkout plans a Git worktree and cleanup derives code ownership from the SDK-created layout. Independent native clones also do not share the configured project's Git common directory. The required remaining core seam is therefore unchanged: bypass only Git acquisition, retain explicit configured-project plus actual-checkout identities, and reuse post-acquisition provisioning and lifecycle.
 
-- `resources/environment/checkout.py`, `checkout_planning.py`, and `checkout_artifacts.py` capture worktree creation and COPY provisioning in one path; adoption must reuse the latter without Git acquisition.
-- `resources/environment/cleanup.py` derives removal steps from `worktree_path` and assumes an SDK-created worktree. Caller-owned code requires an explicit ownership branch before adoption is safe.
-- Project filtering uses Git common-directory identity. Independent native clones need explicit configured-project identity plus separate actual-checkout identity.
-- `models/backup.py` and the catalog currently lack the complete ownership/artifact evidence required for safe adopted cleanup.
-- Existing environment runtime, status, diagnostics, stop, remove, and backup resources are sufficient post-provisioning surfaces; no extension runtime manager is needed.
+## Observed `multica-py` contracts
 
-## `multica-py` parity dependency
+At PR #95 merge revision, `MulticaClient.repositories` is `RepositoryResource` and exposes:
 
-The input design treated `CliResource.command_command()` as sufficient. Issue #93 supersedes that assumption:
+- `checkout_command(url, *, ref=None, fresh=False, options=None) -> Command[RepositoryCheckoutResult]`;
+- `checkout(url, *, ref=None, fresh=False, options=None) -> RepositoryCheckoutResult`;
+- frozen `RepositoryCheckoutResult(path: str)`, also implementing `__str__` and `__fspath__`.
 
-- B1 requires a public typed native-checkout operation rather than raw argv.
-- A1 and D1 require daemon status to decode real lifecycle values and retain identity, OS, server, workspace/runtime, and related fields.
-- The completion boundary requires all approved public CLI families, inputs, response variants, and transports; closing only checkout/status is insufficient.
-- A raw command escape hatch alone does not count as typed resource/model coverage.
+The command executes native `repo checkout`, validates a nonblank URL/ref and nonempty returned path, and declares CLI minimum `0.5.3`. This integration leaves `fresh=False` so it never discards retained native work.
 
-Therefore this change specifies the semantics it consumes but does not invent method names or wire shapes. After #93 is fully implemented, research SHALL identify the exact public command siblings, result types, cancellation/unknown-outcome behavior, redaction guarantees, and supported revision/version. The OpenSpec SHALL then be updated and republished at a new exact SHA before implementation.
+`MulticaClient.daemon` is `DaemonResource` and exposes:
 
-## Core predecessor dependency
+- `status_command(*, options=None) -> Command[DaemonStatus]`;
+- `status(*, options=None) -> DaemonStatus`.
 
-MYL-271 is the planning issue; MYL-272 is the implementation issue. They are one functional gate, not two separate dependencies. Required evidence is:
+Frozen `DaemonStatus` includes status/PID/uptime, OS/profile, daemon/device/server/CLI identity, launch identity, task and maintenance counters, agent projections, reload reason and typed workspace projections. The legacy optional `running` field exists only for old fixture decoding and is not the primary health contract.
 
-- the planning issue is closed;
-- the MYL-272 implementation is complete, independently verified, and integrated into the selected implementation base;
-- the actual named-source and/or exact-retained-backup COPY operations consumed here exist as public contracts with tests;
-- adoption does not duplicate source selection, restore, retention, readiness, or cleanup behavior already provided by the predecessor.
+Both resources consume `OperationOptions(profile, workspace_id, timeout, cwd, environment)`, preserve inspectable `Command.commands`, and delegate execution to `Command.run()`. Public failures include compatibility, timeout, cancellation and execution errors. A timeout or cancellation cannot prove that native checkout had no effect, so preparation remains a separate explicit phase and never begins automatically after such a failure.
 
-MYL-272 being `in_progress`, having accepted individual WP SHAs, or lacking a linked PR is not evidence of integrated completion. At revalidation, inspect the final merge/integration SHA rather than relying on the issue description.
+No raw `CliResource.command_command()`, stdout/status decoder, private transport, HTTP call, or copied process runner is required or allowed.
 
-## Scope allocation
+## Native checkout and context boundary
 
-- Deployment/operator policy chooses approved code/base/source and passes exact selections into these primitives.
-- Existing core project configuration remains the source of Odoo repository/config/secret-root identity.
-- Skills/scripts/workers compose checkout, context, preparation, and lifecycle commands and persist their results.
-- Infrastructure owns topology, domains/proxy, anonymization, and restrictive credentials.
-- GitHub #105 owns later telemetry and inventory enrichment.
+1. Native repository checkout remains task-owned and returns its path through `RepositoryCheckoutResult`.
+2. The extension canonicalizes and verifies that path against the explicitly selected core project/repository and the typed issue/run/daemon context.
+3. It requires same-host/shared-filesystem evidence and containment beneath the run's absolute current or durable directory; equal strings or reachability are insufficient.
+4. Core adoption validates repository/HEAD/cleanliness on first use, persists explicit ownership evidence, and reuses the predecessor COPY pipeline.
+5. Later core lifecycle uses the environment UUID. Multica continues to own code lifetime; core cleanup owns only independently proven SDK artifacts.
 
-## Mandatory re-research checklist
+Project `local_directory` remains unsuitable because it is project/daemon-wide rather than issue-scoped. A binding registry remains unnecessary because the caller can retain the verified context plus environment UUID.
 
-Implementation remains prohibited until a new planning revision records all of the following:
+## Compatibility and packaging consequence
 
-1. Exact integrated MYL-272 base SHA and the public source/COPY types and operation signatures actually used.
-2. Exact `multica-py` revision/version completing all of #93 and the typed checkout/daemon-status APIs actually used.
-3. Updated compatibility constraints, packaging metadata, test fixtures, and any changed failure/cancellation semantics.
-4. Reconciled proposal, design, every delta spec, tasks, issue-70 disposition, and delivery plan.
-5. Recomputed estimate properties when evidence or scope changes, strict OpenSpec validation, repository checks, independent Plan Verifier approval, normal push, and remote-SHA equality for the new exact SHA.
+The observed `multica-py` revision declares package version `0.1.0` but has no containing release tag. The extension must therefore pin `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed` in dependency/lock evidence until a uniquely versioned equivalent distribution is available. An arbitrary `multica-py==0.1.0` is not sufficient identity. Installed-wheel and no-sources tests must prove that the extension uses only the public types above and a supported CLI (`>=0.5.3` for checkout).
 
-No raw-command fallback, local output decoder, private HTTP call, or speculative signature may be introduced to bypass this checklist.
+The core base also declares `0.1.0`; implementation shall bind to the integrated base/release containing PR #110 rather than assume every artifact with that version has the required source/COPY behavior.
+
+## Reconciliation result
+
+- **Scope:** unchanged. The new evidence confirms the selected thin-extension plus generic-adoption design and removes provisional API discovery work; it adds no product capability.
+- **Topology:** unchanged. Core adoption/catalog remains the shared foundation; core lifecycle and the extension package remain a real disjoint parallel frontier; integrated acceptance and final publication remain the fan-in.
+- **Estimate threshold:** unchanged. Uncertainty is lower, but the remaining catalog/adoption/lifecycle/package/integration work still exceeds the authoritative multi-WP threshold. Exact totals live only in issue properties.
+- **Issue #70 split:** unchanged. Context and preparation remain here; telemetry, usage allocation and inventory enrichment remain #105.
+
+## Implementation authorization checklist
+
+1. Strictly validate and push this complete post-dependency package at one exact SHA.
+2. Verify the remote branch resolves to that exact SHA and the managed worktree is cleanly removed.
+3. Obtain independent Plan Verifier approval of that SHA.
+4. Only then may the parked implementation parent materialize/start the recorded WPs; any incompatible base, API, version or estimate-threshold drift returns to planning.

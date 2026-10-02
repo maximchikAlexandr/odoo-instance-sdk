@@ -1,15 +1,15 @@
 ## Why
 
-The analysis workflow needs Multica's native task checkout and Odoo's isolated runtime to operate on the same code without creating a second checkout or registry. The integration must consume the final public typed Multica SDK and core source/COPY contracts rather than freeze temporary raw-CLI workarounds while those contracts are still being implemented.
+The analysis workflow needs Multica's native task checkout and Odoo's isolated runtime to operate on the same code without creating a second checkout or registry. Both prerequisite implementations are now integrated, so this revision binds the design to their observed public typed Multica SDK and core source/COPY contracts instead of the earlier provisional raw-CLI assumptions.
 
 ## What Changes
 
-- Deliver independently installed `odcli-multica` using public typed operations from compatible `multica-py` and Odoo Instance SDK releases; core remains independent of Multica.
-- Reuse the native typed Multica checkout and daemon-status operations delivered by `multica-py` #93. Do not retain `cli.command_command()` calls or local checkout/status decoders as the product design.
+- Deliver independently installed `odcli-multica` using public typed operations from the verified dependency revisions or equivalent uniquely versioned releases; core remains independent of Multica.
+- Reuse `MulticaClient.repositories.checkout_command()/checkout()` returning `RepositoryCheckoutResult` and `MulticaClient.daemon.status_command()/status()` returning `DaemonStatus`, as delivered by `multica-py` #93. Do not retain `cli.command_command()` calls or local checkout/status decoders.
 - Add generic core caller-owned-checkout adoption, reusing COPY provisioning while separating code ownership, SDK artifact ownership, configured project identity, and actual checkout identity.
 - Expose finite read-only context and Odoo preparation operations. Native checkout and preparation remain two explicit phases; the caller retains their results.
 - Reuse existing core lifecycle, diagnostics, retry, and owned-only cleanup surfaces. Do not add a binding registry, checkout registry, task dispatcher, or workflow engine.
-- Separate planning readiness from implementation readiness. Planning proceeds now; implementation remains gated until both prerequisite implementations are complete and this package is re-researched, updated, strictly validated, reviewed, and published at a new exact SHA.
+- Publish this post-dependency planning revision against current `main`; implementation remains gated only on independent approval of its new exact SHA.
 
 ## Capabilities
 
@@ -26,6 +26,6 @@ The analysis workflow needs Multica's native task checkout and Odoo's isolated r
 
 Core changes affect environment planning/catalog evidence, COPY provisioning, lookup, runtime/config resolution, diagnostics, and cleanup. The extension lives in `packages/odcli-multica` and consumes public typed `multica-py` checkout, issue/run, and daemon-status contracts.
 
-Implementation has two mandatory gates: (1) MYL-271 planning plus the verified, integrated MYL-272 implementation of the consumed core source/COPY contracts; and (2) complete implementation of `multica-py` #93 with an available supported revision/version. Closing documentation alone, cancelling either dependency, or implementing only checkout/status does not open the gate. Once both are complete, the actual APIs and versions SHALL be inspected, all affected artifacts SHALL be revised, and a new exact verified SHA SHALL be published before any implementation work starts.
+The dependency gates are satisfied by Odoo Instance SDK PR #110 merge `11ff3403f2108adc901154ebeb9ee509add46ef5`, present in the selected `main` base, and `multica-py` PR #95 merge `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed` (`multica-py` package version `0.1.0`, native CLI floor `0.5.3`). The remaining implementation gate is independent approval of this post-dependency exact planning SHA; the parked implementation parent and its WPs SHALL NOT start before that approval.
 
 Telemetry/inventory enrichment remains in GitHub #105. Project CRUD, persistent binding, business workflow, skills, Temporal workers, reports, dashboard, billing, access-policy implementation, and automatic package/daemon installation remain out of scope.

@@ -2,41 +2,33 @@
 
 ## Readiness contract
 
-This package is planning-ready only. Implementation remains blocked until both external dependencies satisfy `design.md` D6 and `research.md` is refreshed against their actual integrated/available code. The Planner SHALL then reconcile this entire package, publish a new exact SHA, and obtain independent Plan Verifier approval. An implementation parent may remain parked in backlog; no WP child or implementation run starts from the present planning-only SHA.
+This is the mandatory post-dependency planning revision. MYL-272 is integrated by PR #110 merge `11ff3403f2108adc901154ebeb9ee509add46ef5` and present in selected base `c1e57b79f39e529a50c25818134c06309384ee23`; complete `multica-py` #93 is integrated by PR #95 merge `c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed` with package version `0.1.0` and native checkout CLI floor `0.5.3`. `research.md` records the observed APIs and compatibility consequence.
 
-The two gates are:
-
-1. MYL-271 is closed and the MYL-272 implementation is complete, independently verified, and integrated into the selected base.
-2. All approved scope of `multica-py` #93 is implemented and an exact supported revision/version is available. Partial checkout/status work, cancellation, or documentary closure does not satisfy this gate.
+Implementation remains blocked only until the new exact SHA of this complete revision is independently approved by Plan Verifier. The implementation parent remains parked in backlog; no WP child or implementation run starts before that approval.
 
 ## Estimate and delivery mode
 
 The authoritative estimate totals are stored only in this planning issue's `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours` properties and were verified by read-back. The estimate covers remaining active developer effort for one experienced developer familiar with Python SDK/CLI, immutable command plans, SQLite/Alembic, Git worktrees, Odoo COPY restore, packaging, and the repository's test gates. External dependency waiting and human approval queues are excluded.
 
-Confidence is **low-to-medium** and calibration is **uncalibrated**. Evidence includes the complete OpenSpec package, current checkout/adoption/cleanup/catalog code, existing test and packaging contracts, the exact input revision, MYL-271/272 state, and the full `multica-py` #93 scope. The principal uncertainty is contract drift before both dependencies land, plus live daemon/Odoo acceptance and cross-package compatibility repair. Tests were not run to manufacture estimate timing.
+Confidence is **medium** and calibration is **uncalibrated**. Evidence includes the complete OpenSpec package, current checkout/cleanup/catalog code, the integrated MYL-272 source/COPY implementation, the exact final typed `multica-py` checkout/status contracts, and existing test and packaging boundaries. The principal uncertainty is the size of the new adoption/catalog migration, live daemon/Odoo acceptance, and cross-package compatibility repair; dependency API discovery is no longer estimated. Tests were not run to manufacture estimate timing.
 
 The authoritative `Estimate, hours` property exceeds the multi-WP threshold. Delivery mode is `dag`: five atomic WPs with one genuine parallel frontier. Each OpenSpec task appears exactly once.
 
-## External pre-start gate
+## Pre-start gate
 
-Before materializing or starting any WP, the implementation parent SHALL record:
-
-- integrated MYL-272 evidence and the exact implementation base SHA;
-- the exact complete-#93 `multica-py` revision/version;
-- the post-dependency OpenSpec exact SHA and independent approval;
-- `implementation_gate=open` only after all three agree.
+Before materializing or starting any WP, the implementation parent SHALL record the selected base, the exact `multica-py` revision/version above, this post-dependency OpenSpec exact SHA and its independent approval. `implementation_gate=open` is valid only after those facts agree.
 
 If observed APIs change product scope, compatibility, estimate threshold, task coverage, contract dependencies, or write-zone ownership, return to planning and publish a new delivery-plan revision. Operational status/assignee changes do not revise this topology.
 
 ## WP-01 — Dependency contracts and adoption foundation
 
 - **Tasks:** `1.1`, `1.2`, `2.1`, `2.2`.
-- **Depends on:** none inside the DAG; the external pre-start gate applies.
+- **Depends on:** none inside the DAG; the pre-start gate applies.
 - **Stage / level:** 1.
 - **Deliverable:** the observed core and Multica public contracts are consumed with compatibility tests, and core can safely adopt a caller-owned checkout through the existing COPY pipeline with persisted ownership/project/checkout/artifact evidence.
 - **Owned responsibility scope:** dependency compatibility adapters/tests; environment catalog schema and migration; checkout planning/artifacts/adoption entrypoints; focused adoption, migration, provenance, concurrency, and retry tests. Directly coupled fixtures/docs belong here.
 - **Critical shared files:** environment models/catalog/migrations and checkout planning/artifact modules. Later WPs treat these as frozen predecessor contracts.
-- **Contract surface:** public typed dependency operations; additive ownership/project/checkout/artifact evidence; inspectable adoption command/result; first-adoption validation; matching-ready UUID retry; conflict/recovery behavior; no raw Multica command or decoder.
+- **Contract surface:** observed `repositories.checkout_command()/checkout()` and `daemon.status_command()/status()` types; observed `remote_name`/`backup_id` COPY selectors; additive ownership/project/checkout/artifact evidence; inspectable adoption command/result; first-adoption validation; matching-ready UUID retry; conflict/recovery behavior; no raw Multica command or decoder.
 - **DoD / evidence:** observed dependency versions match planning research; fresh/upgrade schema equivalence and one head; linked-worktree/clone adoption; wrong/dirty/source/base/secret/concurrency/retry matrices; plan/execution parity; existing SDK-owned checkout regression coverage; focused Ruff/mypy/tests pass.
 - **Parallel safety:** foundation is deliberately serial because both downstream WPs consume its persisted and public contracts.
 
@@ -84,7 +76,7 @@ If observed APIs change product scope, compatibility, estimate threshold, task c
 - **Deliverable:** one publication-ready integrated SHA with complete repository, package, compatibility, OpenSpec, and release evidence.
 - **Owned responsibility scope:** final cross-domain fixes, installed-wheel and all-member checks, release metadata/docs, and evidence collation. No new product scope is allowed.
 - **Critical shared files:** any file may be repaired only to close verified integration/quality findings; scope changes return to planning.
-- **Contract surface:** unchanged approved behavior, compatible published dependencies, independent package release, and complete architecture/output/typing/mutation gates.
+- **Contract surface:** unchanged approved behavior, exact verified dependencies or equivalent uniquely versioned releases, independent package release, and complete architecture/output/typing/mutation gates.
 - **DoD / evidence:** core-only, extension-only, combined installed-wheel, compatibility, and available all-member smoke pass; focused/full tests as required; Ruff format/check, strict mypy, schema/architecture/command/mutation gates, `git diff --check`, and strict OpenSpec validation pass; exact SHA is pushed and remote equality verified.
 - **Parallel safety:** final serial join and publication owner.
 
