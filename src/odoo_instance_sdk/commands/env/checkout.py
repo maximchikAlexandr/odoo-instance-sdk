@@ -20,12 +20,8 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.text import Text
 
-from odoo_instance_sdk.commands.context import (
-    CliContext,
-    pass_cli_context,
-    resolve_environment,
-    resolve_project_path,
-)
+from odoo_instance_sdk.commands import context as _cli_context
+from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.env.display import (
     _ENV_LIST_COLUMNS,  # noqa: F401
     _ENV_LIST_COMPACT_COLUMNS,
@@ -105,6 +101,16 @@ def rev_parse_git_common_dir(path: Path) -> Path:
 
 def rev_parse_toplevel(path: Path) -> Path:
     return git_worktree.rev_parse_toplevel(path)
+
+
+def resolve_environment(
+    client: OdooClient, explicit: str | None, *, cwd: Path | None = None
+) -> DevelopmentEnvironment:
+    return _cli_context.resolve_environment(client, explicit, cwd=cwd)
+
+
+def resolve_project_path(cli_context: CliContext) -> Path:
+    return _cli_context.resolve_project_path(cli_context)
 
 
 def select_snapshot_environment(
