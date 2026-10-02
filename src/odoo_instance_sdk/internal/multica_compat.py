@@ -7,6 +7,8 @@ typed client through these public-operation protocols.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Protocol, TypeVar
 
 MULTICA_PY_VERSION = "0.1.0"
@@ -21,6 +23,15 @@ DaemonCommandT_co = TypeVar("DaemonCommandT_co", covariant=True)
 
 class MulticaCompatibilityError(RuntimeError):
     """The installed optional client cannot provide the pinned public API."""
+
+
+@dataclass(frozen=True, slots=True)
+class MulticaCompatibility:
+    """Identity captured from the public SDK/package and daemon status."""
+
+    package_version: str
+    package_revision: str
+    native_cli_version: str
 
 
 class RepositoryOperations(Protocol[CheckoutCommandT_co, CheckoutResultT_co]):
@@ -59,12 +70,18 @@ class MulticaClient(
     def daemon(self) -> DaemonOperations[DaemonCommandT_co, DaemonStatusT_co]: ...
 
 
-def require_contract(*, version: str | None, revision: str | None) -> None:
-    """Reject unavailable or ambiguous package identity before use."""
-    if version is None or revision is None:
+def require_contract(compatibility: MulticaCompatibility | None) -> None:
+    """Reject unavailable or ambiguous package/CLI identity before use."""
+    if compatibility is None:
         raise MulticaCompatibilityError("multica-py compatibility metadata is unavailable")
-    if version != MULTICA_PY_VERSION or revision != MULTICA_PY_REVISION:
+    if (
+        compatibility.package_version != MULTICA_PY_VERSION
+        or compatibility.package_revision != MULTICA_PY_REVISION
+    ):
         raise MulticaCompatibilityError("multica-py compatibility metadata is ambiguous")
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", compatibility.native_cli_version)
+    if match is None or tuple(map(int, match.groups())) < (0, 5, 3):
+        raise MulticaCompatibilityError("native Multica CLI is below the supported floor")
 
 
 def checkout_command(
@@ -75,8 +92,10 @@ def checkout_command(
     *,
     ref: str | None = None,
     options: object | None = None,
+    compatibility: MulticaCompatibility | None,
 ) -> CheckoutCommandT_co:
     """Consume the typed repository command without a CLI or wire decoder."""
+    require_contract(compatibility)
     return client.repositories.checkout_command(url, ref=ref, fresh=False, options=options)
 
 
@@ -88,8 +107,10 @@ def checkout(
     *,
     ref: str | None = None,
     options: object | None = None,
+    compatibility: MulticaCompatibility | None,
 ) -> CheckoutResultT_co:
     """Consume the typed repository result and preserve SDK errors unchanged."""
+    require_contract(compatibility)
     return client.repositories.checkout(url, ref=ref, fresh=False, options=options)
 
 
@@ -99,8 +120,10 @@ def daemon_status_command(
     ],
     *,
     options: object | None = None,
+    compatibility: MulticaCompatibility | None,
 ) -> DaemonCommandT_co:
     """Consume the complete typed daemon-status command."""
+    require_contract(compatibility)
     return client.daemon.status_command(options=options)
 
 
@@ -110,6 +133,8 @@ def daemon_status(
     ],
     *,
     options: object | None = None,
+    compatibility: MulticaCompatibility | None,
 ) -> DaemonStatusT_co:
     """Consume the typed daemon status without locally decoding output."""
+    require_contract(compatibility)
     return client.daemon.status(options=options)

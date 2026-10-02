@@ -1,0 +1,2 @@
+# Install this optional compatibility gate from the exact untagged public SDK.
+multica-py @ git+https://github.com/maximchikAlexandr/multica-py.git@c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed

@@ -777,10 +777,6 @@ class _CheckoutMixin:
                 catalog = self._client.get_catalog()
                 if plan.project_id is None or plan.adoption_input_fingerprint is None:
                     raise PlanValidationError("adoption plan is missing project identity evidence")
-                # Validate the captured Git identity before looking up a ready
-                # row.  A ready row must never bypass moved-ref or dirty-tree
-                # checks just because its path and fingerprint still match.
-                self._validate_checkout_snapshot(snapshot, context=context)
                 self._validate_adoption_retry_identity(plan)
                 existing = catalog.adopted_environment_for(
                     project_id=plan.project_id,
@@ -810,7 +806,10 @@ class _CheckoutMixin:
                         f"existing adoption is {state}; recover or remove it before retrying",
                         details={"existing_id": str(existing["id"]), "state": state},
                     )
-            if not plan.adopted:
+            # A new adoption must prove the requested checkout/base identity.
+            # A matching ready row has already proved that identity; ordinary
+            # caller edits and commits are explicitly allowed on that retry.
+            if not plan.adopted or existing is None:
                 self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:
                 plan.branch_revalidator(context)
@@ -847,7 +846,6 @@ class _CheckoutMixin:
             plan.worktree,
             Path(plan.git_common_dir),
             plan.options,
-            base_revision=plan.base_revision,
             source_name=current_source[0],
             source_base_url=current_source[1],
             source_git_branch=current_source[2],
@@ -1045,20 +1043,18 @@ class _CheckoutMixin:
         checkout_common: Path,
         options: EnvironmentCheckoutOptions,
         *,
-        base_revision: str,
         source_name: str | None,
         source_base_url: str | None,
         source_git_branch: str | None,
         source_database: str,
         selected_backup_id: uuid.UUID | None,
     ) -> str:
-        """Hash resolved, secret-free evidence that defines one adoption identity."""
+        """Hash requested, secret-free evidence that defines one adoption identity."""
         payload = {
             "project_id": project_id,
             "checkout_path": str(checkout_path),
             "checkout_git_common_dir": str(checkout_common),
             "base_ref": options.base_ref,
-            "base_revision": base_revision,
             "source_name": source_name,
             "source_base_url_digest": (
                 hashlib.sha256(source_base_url.encode()).hexdigest()
@@ -1147,7 +1143,6 @@ class _CheckoutMixin:
             actual_root,
             common,
             options,
-            base_revision=private.base_revision,
             source_name=private.source_name,
             source_base_url=private.source_base_url,
             source_git_branch=private.source_git_branch,

@@ -256,7 +256,7 @@ def test_ready_adoption_identity_binds_resolved_base_and_source_evidence(
     first, _, _ = _capture_adoption_command(
         env_client, project_manifest, checkout, fake_python, monkeypatch
     )
-    first.run()  # type: ignore[attr-defined]
+    expected = first.run()  # type: ignore[attr-defined]
 
     changed_source, _, _ = _capture_adoption_command(
         env_client, project_manifest, checkout, fake_python, monkeypatch
@@ -266,14 +266,25 @@ def test_ready_adoption_identity_binds_resolved_base_and_source_evidence(
     with pytest.raises(StalePlanError, match="source identity changed"):
         changed_source.run()  # type: ignore[attr-defined]
 
-    (checkout / "move-ready-base.txt").write_text("new base")
-    subprocess.run(["git", "add", "move-ready-base.txt"], cwd=checkout, check=True)
-    subprocess.run(["git", "commit", "-m", "move ready base"], cwd=checkout, check=True)
-    moved_base, _, _ = _capture_adoption_command(
+    changed_ready, _, _ = _capture_adoption_command(
         env_client, project_manifest, checkout, fake_python, monkeypatch
     )
     with pytest.raises(EnvironmentConflictError, match="different inputs"):
-        moved_base.run()  # type: ignore[attr-defined]
+        changed_ready.run()  # type: ignore[attr-defined]
+
+    moved_source.write_text(moved_source.read_text().replace("changed.example", "staging.example"))
+    ordinary_edit = checkout / "ordinary-edit.txt"
+    ordinary_edit.write_text("uncommitted development edit")
+    edited_retry, _, _ = _capture_adoption_command(
+        env_client, project_manifest, checkout, fake_python, monkeypatch
+    )
+    assert edited_retry.run().id == expected.id  # type: ignore[attr-defined]
+    subprocess.run(["git", "add", "ordinary-edit.txt"], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-m", "ordinary development commit"], cwd=checkout, check=True)
+    committed_retry, _, _ = _capture_adoption_command(
+        env_client, project_manifest, checkout, fake_python, monkeypatch
+    )
+    assert committed_retry.run().id == expected.id  # type: ignore[attr-defined]
 
 
 def test_concurrent_adoption_reservation_conflict_and_recovery_are_explicit(
@@ -323,7 +334,7 @@ def test_adoption_rejects_dirty_or_moved_base_and_allows_retry_after_revert(
     with pytest.raises(EnvironmentConflictError, match="uncommitted changes"):
         command.run()  # type: ignore[attr-defined]
     marker.unlink()
-    assert command.run().state is EnvironmentState.READY  # type: ignore[attr-defined]
+    expected = command.run()  # type: ignore[attr-defined]
 
     moved, _, _ = _capture_adoption_command(
         env_client, project_manifest, checkout, fake_python, monkeypatch
@@ -331,8 +342,7 @@ def test_adoption_rejects_dirty_or_moved_base_and_allows_retry_after_revert(
     (checkout / "base-moved.txt").write_text("new base")
     subprocess.run(["git", "add", "base-moved.txt"], cwd=checkout, check=True)
     subprocess.run(["git", "commit", "-m", "move base"], cwd=checkout, check=True)
-    with pytest.raises(StalePlanError, match="Git identity changed"):
-        moved.run()  # type: ignore[attr-defined]
+    assert moved.run().id == expected.id  # type: ignore[attr-defined]
 
 
 def test_adoption_failure_cleans_only_sdk_artifacts(
