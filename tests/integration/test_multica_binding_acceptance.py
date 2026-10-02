@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from multica_py import ClientConfig, Issue, MulticaClient, Page, Project, ProjectStatus, TaskRun
 from multica_py.models.issue_activity import TaskProjectResourceData
+from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
 from multica_py.models.system import DaemonStatus, DaemonWorkspace, RepositoryCheckoutResult
 from odcli_multica import (  # type: ignore[import-untyped]
     ContextRequest,
@@ -103,9 +104,19 @@ class _Daemon:
         return _TypedCommand(self.status)
 
 
+class _ProjectResources:
+    def __init__(self, page: Page[ProjectResourceRecord]) -> None:
+        self.page = page
+
+    def list(self, project_id: str) -> Page[ProjectResourceRecord]:
+        assert project_id == "project"
+        return self.page
+
+
 class _Projects:
-    def __init__(self, project: Project) -> None:
+    def __init__(self, project: Project, resources: _ProjectResources) -> None:
         self.project = project
+        self.resources = resources
 
     def get(self, project_id: str) -> Project:
         assert project_id == self.project.id
@@ -252,6 +263,20 @@ def _fake_client(
     multica_project = Project(
         "project", "Project", ProjectStatus.in_progress, workspace_id="workspace"
     )
+    resources = _ProjectResources(
+        Page(
+            items=(
+                ProjectResourceRecord(
+                    id="repository",
+                    project_id="project",
+                    resource_type="github_repo",
+                    resource_ref=GithubRepoResourceRef(url="https://example.test/repo.git"),
+                ),
+            ),
+            offset=0,
+            total=1,
+        )
+    )
     issues = {}
     runs = {}
     for issue_id in ("issue-1", "issue-2"):
@@ -285,7 +310,7 @@ def _fake_client(
     )
     multica = SimpleNamespace(
         config=ClientConfig(workspace_id="workspace", server_url="http://127.0.0.1:8765"),
-        projects=_Projects(multica_project),
+        projects=_Projects(multica_project, resources),
         issues=_Issues(issues, runs),
         daemon=daemon,
         repositories=repositories,
@@ -456,6 +481,8 @@ def _write_live_evidence(
     phases: list[str],
     daemon_status: DaemonStatus,
     task_run: TaskRun,
+    authoritative_project_id: str,
+    resource_page: Page[ProjectResourceRecord],
     odoo_executable: str,
     artifact_root: Path,
     artifact_root_existed_before_cleanup: bool,
@@ -517,6 +544,21 @@ def _write_live_evidence(
                     "work_dir_matches_task_cwd": Path(task_run.work_dir or "").resolve()
                     == task_root,
                     "project_resource_count": resource_count,
+                },
+                "authoritative_project_resources": {
+                    "issue_project_id": authoritative_project_id,
+                    "page_complete": (
+                        not resource_page.has_more
+                        and resource_page.next_cursor is None
+                        and resource_page.offset in (None, 0)
+                        and resource_page.total == len(resource_page.items)
+                    ),
+                    "total": resource_page.total,
+                    "github_repo_count": sum(
+                        resource.resource_type == "github_repo"
+                        and isinstance(resource.resource_ref, GithubRepoResourceRef)
+                        for resource in resource_page.items
+                    ),
                 },
                 "copy_adoption": {
                     "database_mode": environment.db_mode.value,
@@ -582,6 +624,12 @@ def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:
     bridge = MulticaOdooClient(core, multica)
     daemon_status = multica.daemon.status()
     task_run = next(item for item in multica.issues.runs(issue).items if item.id == run)
+    issue_record = multica.issues.get(issue)
+    authoritative_project_id = multica_project
+    if issue_record.project_id != authoritative_project_id:
+        pytest.fail("Issue.project_id does not match the selected project")
+    project = multica.projects.get(authoritative_project_id)
+    resource_page = multica.projects.resources.list(project.id)
     checkout = bridge.checkout(repository_url, ref=ref)
     environment: DevelopmentEnvironment | None = None
     process = None
@@ -633,6 +681,8 @@ def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:
                 phases=phases,
                 daemon_status=daemon_status,
                 task_run=task_run,
+                authoritative_project_id=project.id,
+                resource_page=resource_page,
                 odoo_executable=odoo_executable,
                 artifact_root=artifact_root,
                 artifact_root_existed_before_cleanup=artifact_root_existed_before_cleanup,

@@ -19,6 +19,7 @@ from multica_py import (
     UnknownCommandError,
 )
 from multica_py.models.issue_activity import TaskProjectResourceData
+from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
 from multica_py.models.system import DaemonStatus, DaemonWorkspace, RepositoryCheckoutResult
 from odcli_multica import ContextRequest, MulticaOdooClient
 from odcli_multica.models import (
@@ -57,9 +58,25 @@ class _Issues:
         return self.runs_page
 
 
+class _ProjectResources:
+    def __init__(self, page: Page[ProjectResourceRecord]) -> None:
+        self.page = page
+        self.error: BaseException | None = None
+
+    def list(self, project_id: str) -> Page[ProjectResourceRecord]:
+        assert project_id == "project"
+        if self.error is not None:
+            raise self.error
+        return self.page
+
+    def list_command(self, project_id: str) -> _Command[Page[ProjectResourceRecord]]:
+        return _Command(self.list(project_id))
+
+
 class _Projects:
-    def __init__(self, project: Project) -> None:
+    def __init__(self, project: Project, resources: _ProjectResources) -> None:
         self.project = project
+        self.resources = resources
 
     def get(self, _project_id: str) -> Project:
         return self.project
@@ -134,6 +151,20 @@ def _fixture(
     multica_project = Project(
         "project", "Project", ProjectStatus.in_progress, workspace_id="workspace"
     )
+    resources = _ProjectResources(
+        Page(
+            items=(
+                ProjectResourceRecord(
+                    id="repository",
+                    project_id="project",
+                    resource_type="github_repo",
+                    resource_ref=GithubRepoResourceRef(url="https://example.test/repo"),
+                ),
+            ),
+            offset=0,
+            total=1,
+        )
+    )
     issue = Issue("issue", "Issue", "in_progress", project_id="project")
     run = TaskRun(
         "run",
@@ -163,7 +194,7 @@ def _fixture(
     environments = _Environments()
     multica = SimpleNamespace(
         config=ClientConfig(workspace_id="workspace", server_url="http://127.0.0.1:8765"),
-        projects=_Projects(multica_project),
+        projects=_Projects(multica_project, resources),
         issues=_Issues(issue, Page(items=(run,), total=1)),
         daemon=_Daemon(daemon),
         repositories=repositories,
@@ -193,6 +224,83 @@ def test_context_verifies_typed_membership_and_containment(tmp_path: Path) -> No
     assert result.workspace_id == "workspace"
     assert result.runtime_id == "runtime"
     assert result.checkout_path == str((tmp_path / "task" / "checkout").resolve())
+
+
+def test_context_accepts_task_run_without_duplicate_project_snapshot(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    fake_multica = cast("_FakeMultica", client.multica)
+    run = fake_multica.issues.runs_page.items[0]
+    fake_multica.issues.runs_page = Page(
+        items=(msgspec.structs.replace(run, project_id=None, project_resources=()),),
+        total=1,
+    )
+
+    result = client.context(request)
+
+    assert result.multica_project_id == "project"
+
+
+def test_context_accepts_matching_local_run_snapshot(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+
+    result = client.context(request)
+
+    assert result.repository_url == "https://example.test/repo"
+
+
+def test_context_rejects_project_repository_evidence_unavailable(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    fake_multica = cast("_FakeMultica", client.multica)
+    fake_multica.projects.resources.error = RuntimeError("resource API unavailable")
+
+    with pytest.raises(ContextVerificationError, match="evidence is unavailable"):
+        client.context(request)
+
+    fake_multica.projects.resources.error = None
+    fake_multica.projects.resources.page = Page(items=(), offset=0, total=0)
+
+    with pytest.raises(ContextVerificationError, match="absent or ambiguous"):
+        client.context(request)
+
+
+def test_context_rejects_wrong_host_or_incomplete_evidence(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    fake_multica = cast("_FakeMultica", client.multica)
+    fake_multica.projects.resources.page = Page(
+        items=fake_multica.projects.resources.page.items,
+        offset=0,
+        total=1,
+        has_more=True,
+        next_cursor="next",
+    )
+
+    with pytest.raises(ContextVerificationError, match="paginated and incomplete"):
+        client.context(request)
+
+    fake_multica.projects.resources.page = Page(
+        items=(
+            ProjectResourceRecord(
+                id="repository",
+                project_id="project",
+                resource_type="github_repo",
+                resource_ref=GithubRepoResourceRef(url="https://example.test/repo"),
+            ),
+        ),
+        offset=0,
+        total=1,
+    )
+    wrong_host = tmp_path / "wrong-host"
+    wrong_host.mkdir()
+    fake_multica.daemon.status_value = DaemonStatus(
+        status="ready",
+        daemon_id="daemon",
+        server_url="http://127.0.0.1:8765",
+        cli_version="0.5.3",
+        workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",), path=str(wrong_host)),),
+    )
+
+    with pytest.raises(ContextVerificationError, match="outside the daemon workspace"):
+        client.context(request)
 
 
 def test_context_rejects_incomplete_run_page(tmp_path: Path) -> None:
@@ -244,7 +352,7 @@ def test_context_rejects_repository_mismatch_and_ambiguity(tmp_path: Path) -> No
         items=(msgspec.structs.replace(run, project_resources=run.project_resources * 2),),
         total=1,
     )
-    with pytest.raises(ContextVerificationError, match="ambiguous"):
+    with pytest.raises(ContextVerificationError, match="snapshot conflicts"):
         client.context(request)
 
 
