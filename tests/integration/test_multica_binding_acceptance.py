@@ -50,6 +50,10 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.integration
 
+_APPROVED_NATIVE_REPOSITORY = "https://github.com/odoo/odoo.git"
+_APPROVED_NATIVE_REF = "cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
+_APPROVED_NATIVE_REMOTE = "disposable-native-source"
+
 
 class _TypedCommand:
     def __init__(self, callback: Any) -> None:
@@ -583,7 +587,7 @@ def _write_live_evidence(
 
 
 @pytest.mark.real_odoo
-def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:
+def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:  # noqa: C901
     """Run the live flow only with an explicitly disposable approved fixture."""
     if os.environ.get("ODCLI_MULTICA_LIVE_ENABLE") != "1":
         pytest.skip("set ODCLI_MULTICA_LIVE_ENABLE=1 for the disposable live fixture")
@@ -596,21 +600,24 @@ def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:
 
     executable = _required_live("ODCLI_MULTICA_EXECUTABLE")
     repository_url = _required_live("ODCLI_MULTICA_REPOSITORY_URL")
+    if repository_url != _APPROVED_NATIVE_REPOSITORY:
+        pytest.fail("live fixture must use the approved Odoo repository")
     core_project = Path(_required_live("ODCLI_MULTICA_CORE_PROJECT")).resolve()
     multica_project = _required_live("ODCLI_MULTICA_PROJECT")
     issue = _required_live("ODCLI_MULTICA_ISSUE")
     run = _required_live("ODCLI_MULTICA_RUN")
     task_root = Path(_required_live("ODCLI_MULTICA_TASK_ROOT")).resolve()
     base_ref = _required_live("ODCLI_MULTICA_BASE_REF")
+    if base_ref != _APPROVED_NATIVE_REF:
+        pytest.fail("live fixture must use the pinned Odoo base ref")
     odoo_executable = _required_live("ODCLI_MULTICA_ODOO_EXECUTABLE")
     evidence_root = Path(_required_live("ODCLI_MULTICA_EVIDENCE_ROOT")).resolve()
-    ref = os.environ.get("ODCLI_MULTICA_REF")
+    ref = _required_live("ODCLI_MULTICA_REF")
+    if ref != _APPROVED_NATIVE_REF:
+        pytest.fail("live fixture must use the pinned Odoo checkout ref")
     remote_name = os.environ.get("ODCLI_MULTICA_REMOTE_NAME")
-    backup_id = os.environ.get("ODCLI_MULTICA_BACKUP_ID")
-    if (remote_name is None) == (backup_id is None):
-        pytest.fail(
-            "live fixture must provide exactly one of ODCLI_MULTICA_REMOTE_NAME or ODCLI_MULTICA_BACKUP_ID"
-        )
+    if remote_name != _APPROVED_NATIVE_REMOTE:
+        pytest.fail("live fixture must provide only the approved named disposable source")
 
     multica = MulticaClient(
         ClientConfig(
@@ -649,7 +656,6 @@ def test_approved_native_daemon_odoo_fixture(tmp_path: Path) -> None:
             context=request,
             base_ref=base_ref,
             remote_name=remote_name,
-            backup_id=backup_id,
         )
         environment = bridge.prepare(preparation)
         phases.append("copy_adoption")
