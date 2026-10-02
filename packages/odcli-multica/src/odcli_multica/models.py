@@ -18,9 +18,12 @@ MULTICA_CLI_MINIMUM = "0.5.3"
 class MulticaCompatibility:
     """Verified package/CLI identity required before a native operation."""
 
-    package_version: str = MULTICA_PY_VERSION
-    package_revision: str = MULTICA_PY_REVISION
-    native_cli_version: str = MULTICA_CLI_MINIMUM
+    package_version: str
+    package_revision: str
+    native_cli_version: str
+    typed_checkout: bool
+    typed_daemon_status: bool
+    observed: bool
 
 
 class ContextRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -32,6 +35,7 @@ class ContextRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     issue: str
     run: str
     repository_url: str | None = None
+    core_repository_url: str | None = None
     workspace_id: str | None = None
     runtime_id: str | None = None
 

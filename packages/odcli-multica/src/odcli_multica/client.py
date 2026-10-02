@@ -23,6 +23,7 @@ from odoo_instance_sdk import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     OdooClient,
+    ProjectConfig,
 )
 from odoo_instance_sdk.commands.output import action_command
 from odoo_instance_sdk.execution import ExecutionPlan
@@ -67,10 +68,14 @@ class MulticaOdooClient:
     ) -> None:
         self.core = core_client
         self.multica = multica_client
-        self.compatibility = compatibility or MulticaCompatibility()
+        self.compatibility = compatibility
 
     def _require_contract(self) -> None:
         identity = self.compatibility
+        if identity is None or not identity.observed:
+            raise ContextVerificationError("typed Multica compatibility evidence is unavailable")
+        if not identity.typed_checkout or not identity.typed_daemon_status:
+            raise ContextVerificationError("required typed Multica capability is unavailable")
         if identity.package_version != MULTICA_PY_VERSION:
             raise ContextVerificationError("multica-py package version is ambiguous")
         if identity.package_revision != MULTICA_PY_REVISION:
@@ -193,12 +198,18 @@ class MulticaOdooClient:
         if request.runtime_id is not None and request.runtime_id != runtime_id:
             raise ContextVerificationError("requested runtime conflicts with the run")
         task_root = _task_root(run, checkout)
-        repository_url = _repository_url(run, request.repository_url)
+        _verify_core_project(request.core_project)
+        repository_url = _repository_url(run, request.core_repository_url or request.repository_url)
         daemon = self.multica.daemon.status()
         daemon_id = _required(daemon.daemon_id, "daemon identity")
-        _verify_daemon(daemon, workspace_id, runtime_id, task_root, checkout)
-        if not request.core_project.is_dir():
-            raise ContextVerificationError("core project path is not a directory")
+        _verify_daemon(
+            daemon,
+            workspace_id,
+            runtime_id,
+            task_root,
+            checkout,
+            expected_server_url=self.multica.config.server_url,
+        )
         return VerifiedTaskContext(
             checkout_path=str(checkout),
             task_root=str(task_root),
@@ -257,20 +268,36 @@ def _task_root(run: TaskRun, checkout: Path) -> Path:
     )
 
 
-def _repository_url(run: TaskRun, requested: str | None) -> str:
+def _verify_core_project(path: Path) -> None:
+    if not path.is_dir():
+        raise ContextVerificationError("core project path is not a directory")
+    try:
+        project = ProjectConfig.load(path)
+    except Exception as exc:
+        raise ContextVerificationError("core project repository identity is unavailable") from exc
+    if project.repository_root.resolve() != path.resolve():
+        raise ContextVerificationError("core project repository identity conflicts with its path")
+
+
+def _repository_url(run: TaskRun, selected: str | None) -> str:
     values = tuple(
         resource.resource_ref
         for resource in run.project_resources
         if resource.resource_type in {"github_repo", "git_repository", "repository"}
         and isinstance(resource.resource_ref, str)
     )
-    if requested is not None:
-        if requested not in values:
-            raise ContextVerificationError("selected repository is not a project resource")
-        return requested
     if len(values) != 1:
         raise ContextVerificationError("repository identity is absent or ambiguous")
-    return values[0]
+    native = values[0]
+    if selected is None:
+        raise ContextVerificationError("core repository identity is unavailable")
+    if _normalize_url(selected) != _normalize_url(native):
+        raise ContextVerificationError("core repository does not match the native repository")
+    return native
+
+
+def _normalize_url(value: str) -> str:
+    return value.strip().rstrip("/")
 
 
 def _verify_daemon(
@@ -279,9 +306,36 @@ def _verify_daemon(
     runtime_id: str,
     task_root: Path,
     checkout: Path,
+    *,
+    expected_server_url: str | None,
 ) -> None:
+    _verify_daemon_identity(daemon, expected_server_url)
+    _verify_daemon_filesystem(daemon, workspace_id, runtime_id, task_root, checkout)
+
+
+def _verify_daemon_identity(daemon: DaemonStatus, expected_server_url: str | None) -> None:
     if daemon.status.lower() not in {"ready", "running", "active"}:
         raise ContextVerificationError("owning daemon is not ready")
+    if daemon.cli_version is None:
+        raise ContextVerificationError("daemon CLI compatibility evidence is unavailable")
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", daemon.cli_version)
+    if match is None or tuple(int(part) for part in match.groups()) < (0, 5, 3):
+        raise ContextVerificationError("native Multica CLI is below the supported floor")
+    if daemon.server_url is None or not daemon.server_url.strip():
+        raise ContextVerificationError("daemon server identity is unavailable")
+    if expected_server_url is not None and _normalize_url(daemon.server_url) != _normalize_url(
+        expected_server_url
+    ):
+        raise ContextVerificationError("daemon server identity conflicts with the client scope")
+
+
+def _verify_daemon_filesystem(
+    daemon: DaemonStatus,
+    workspace_id: str,
+    runtime_id: str,
+    task_root: Path,
+    checkout: Path,
+) -> None:
     if daemon.workspaces is None:
         raise ContextVerificationError("daemon filesystem evidence is unavailable")
     workspace = next((item for item in daemon.workspaces if item.id == workspace_id), None)

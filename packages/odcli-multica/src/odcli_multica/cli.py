@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import os
+from importlib import metadata
 from pathlib import Path
 
 import click
 from multica_py import ClientConfig, MulticaClient
 
 from odcli_multica.client import MulticaOdooClient, PrepareCommand
-from odcli_multica.models import ContextRequest, PreparationRequest
+from odcli_multica.models import (
+    ContextRequest,
+    ContextVerificationError,
+    MulticaCompatibility,
+    PreparationRequest,
+)
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
@@ -25,10 +32,39 @@ def _mode(value: str) -> OutputMode:
     return OutputMode(value)
 
 
+def _package_revision() -> str:
+    direct_url_text = metadata.distribution("multica-py").read_text("direct_url.json")
+    if direct_url_text is None:
+        raise ContextVerificationError("multica-py revision evidence is unavailable")
+    direct_url = json.loads(direct_url_text)
+    revision = (
+        direct_url.get("vcs_info", {}).get("commit_id")
+        if isinstance(direct_url, dict) and isinstance(direct_url.get("vcs_info"), dict)
+        else None
+    )
+    if not isinstance(revision, str):
+        raise ContextVerificationError("multica-py revision evidence is unavailable")
+    return revision
+
+
 def _client(profile: str | None, workspace_id: str | None, odoo_bin: str) -> MulticaOdooClient:
     multica = MulticaClient(ClientConfig(profile=profile, workspace_id=workspace_id))
     core = OdooClient(config=OdooClientConfig(executable=odoo_bin))
-    return MulticaOdooClient(core, multica)
+    try:
+        daemon = multica.daemon.status()
+        compatibility = MulticaCompatibility(
+            package_version=metadata.version("multica-py"),
+            package_revision=_package_revision(),
+            native_cli_version=daemon.cli_version or "",
+            typed_checkout=callable(multica.repositories.checkout_command)
+            and callable(multica.repositories.checkout),
+            typed_daemon_status=callable(multica.daemon.status_command)
+            and callable(multica.daemon.status),
+            observed=True,
+        )
+    except BaseException:
+        compatibility = None
+    return MulticaOdooClient(core, multica, compatibility=compatibility)
 
 
 def _request(
@@ -37,6 +73,7 @@ def _request(
     multica_project: str,
     issue: str,
     run: str,
+    repository_url: str,
 ) -> ContextRequest:
     return ContextRequest(
         checkout_path=checkout_path,
@@ -44,6 +81,7 @@ def _request(
         multica_project=multica_project,
         issue=issue,
         run=run,
+        repository_url=repository_url,
     )
 
 
@@ -140,6 +178,7 @@ def cli() -> None:
 @click.option("--multica-project", required=True)
 @click.option("--issue", required=True)
 @click.option("--run", "run_id", required=True)
+@click.option("--repository-url", required=True)
 @click.option("--profile", default=None)
 @click.option("--workspace-id", default=None)
 @click.option("--odoo-bin", default=lambda: os.environ.get("ODCLI_ODOO_BIN", "odoo"))
@@ -153,6 +192,7 @@ def context_command(
     multica_project: str,
     issue: str,
     run_id: str,
+    repository_url: str,
     profile: str | None,
     workspace_id: str | None,
     odoo_bin: str,
@@ -162,7 +202,7 @@ def context_command(
     """Verify one native task checkout without mutating any system."""
     _run_context(
         _client(profile, workspace_id, odoo_bin),
-        _request(checkout_path, project, multica_project, issue, run_id),
+        _request(checkout_path, project, multica_project, issue, run_id, repository_url),
         _mode(output_format),
         dry_run,
     )
@@ -179,6 +219,7 @@ def env() -> None:
 @click.option("--multica-project", required=True)
 @click.option("--issue", required=True)
 @click.option("--run", "run_id", required=True)
+@click.option("--repository-url", required=True)
 @click.option("--base", "base_ref", required=True)
 @click.option("--remote", "remote_name", default=None)
 @click.option("--backup-id", default=None)
@@ -196,6 +237,7 @@ def prepare_command(
     multica_project: str,
     issue: str,
     run_id: str,
+    repository_url: str,
     base_ref: str,
     remote_name: str | None,
     backup_id: str | None,
@@ -207,7 +249,7 @@ def prepare_command(
     dry_run: bool,
 ) -> None:
     """Verify context, then prepare one isolated COPY environment."""
-    request = _request(checkout_path, project, multica_project, issue, run_id)
+    request = _request(checkout_path, project, multica_project, issue, run_id, repository_url)
     _run_prepare(
         _client(profile, workspace_id, odoo_bin),
         PreparationRequest(
