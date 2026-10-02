@@ -131,7 +131,9 @@ The implementation SHALL use the blocker-revised planning revision that records 
 
 ### Requirement: Disposable native acceptance fixture
 
-Task 4.2 SHALL run in a dedicated disposable Multica project, issue, and active TaskRun on the same native daemon and shared filesystem as the acceptance executor. The project SHALL contain exactly one `github_repo` resource for `https://github.com/odoo/odoo.git`; typed native checkout SHALL use `fresh=False`, ref `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, and an owner-only absolute task root reported by that TaskRun. A different project/run, a forwarded daemon, a pre-existing checkout, or customer workspace/data/credentials SHALL NOT qualify.
+Before task 4.2 creates its acceptance fixture, the platform owner SHALL provide a current checkout-readiness certificate for the same native daemon and repository cache. In a separate disposable probe project, issue, and TaskRun, the supported public checkout path SHALL return success within its public RPC deadline for `https://github.com/odoo/odoo.git` at `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, produce that exact commit beneath the probe task root, leave no running fetch/index-pack, and retire the probe through public lifecycle. A timeout, cancellation, eventual unobserved cache warming, private HTTP, direct bare-cache mutation, unrelated clone, or reused probe worktree SHALL NOT qualify. If current platform behavior cannot produce this certificate, task 4.2 SHALL remain blocked until a supported platform release or configuration completes the checkout RPC; changing only an outer SDK timeout SHALL NOT be accepted as proof.
+
+After that prerequisite passes, task 4.2 SHALL run in a distinct dedicated disposable Multica project, issue, and active TaskRun on the certified native daemon and shared filesystem as the acceptance executor. The project SHALL contain exactly one `github_repo` resource for `https://github.com/odoo/odoo.git`; typed native checkout SHALL use `fresh=False`, ref `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, and an owner-only absolute task root reported by that TaskRun. A different project/run, a forwarded daemon, a pre-existing checkout, the probe worktree, or customer workspace/data/credentials SHALL NOT qualify.
 
 The fixture SHALL create a separate core-project clone of the same repository/ref, an audited native Odoo/Python environment, a unique fixture-only PostgreSQL role, a native loopback source database initialized with `base` and no demo data, and a separate target database/filestore. The configured source SHALL be named `disposable-native-source`, and live preparation SHALL select exactly `remote_name=disposable-native-source`. It SHALL NOT accept `backup_id`, `source_database`, a default source, a pre-existing catalogue entry, or any source whose disposable ownership is unproven.
 
@@ -139,8 +141,18 @@ The adopted target SHALL start, report ready/running, stop, and be removed throu
 
 #### Scenario: Approved fixture completes native flow
 
-- **WHEN** the dedicated same-host fixture passes fail-closed preflight and preparation uses the prescribed named source
+- **WHEN** the matching platform-readiness certificate exists, the distinct dedicated same-host fixture passes fail-closed preflight, and preparation uses the prescribed named source
 - **THEN** the typed native checkout flows through verified context, COPY adoption, native start/status, stop/remove, sanitized evidence capture, and complete owned-resource cleanup while the Multica-owned checkout survives core cleanup
+
+#### Scenario: Native checkout RPC readiness is unavailable
+
+- **WHEN** the supported probe checkout times out, is cancelled, lacks exact commit/result evidence, leaves an active fetch/index-pack, or would require private transport or direct cache mutation
+- **THEN** task 4.2 fails closed before the acceptance project, checkout, role, database, filestore, credentials, or core environment is created, and `WP-04` remains blocked on the platform prerequisite
+
+#### Scenario: Certified cache serves a distinct acceptance task
+
+- **WHEN** the readiness probe succeeded and was retired, and a new acceptance TaskRun on the same certified daemon/cache requests the exact repository/ref with typed `fresh=False` checkout
+- **THEN** acceptance uses only the new TaskRun result and records certificate identity plus exact checkout equality without reusing the probe worktree
 
 #### Scenario: Fixture identity or ownership is unsafe
 
