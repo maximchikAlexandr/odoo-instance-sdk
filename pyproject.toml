@@ -41,6 +41,14 @@ odcli = "odoo_instance_sdk.cli:cli"
 [project.urls]
 Source = "https://github.com/maximchikAlexandr/odoo-instance-sdk"
 
+[tool.odoo-instance-sdk.multica]
+# The optional package consumes this untagged public SDK revision; core does
+# not import or install multica-py.
+distribution = "multica-py"
+version = "0.1.0"
+revision = "c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed"
+native_cli_minimum = "0.5.3"
+
 [build-system]
 requires = ["uv_build>=0.10.8,<0.11.0"]
 build-backend = "uv_build"

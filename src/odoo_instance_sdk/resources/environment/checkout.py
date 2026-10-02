@@ -777,6 +777,11 @@ class _CheckoutMixin:
                 catalog = self._client.get_catalog()
                 if plan.project_id is None or plan.adoption_input_fingerprint is None:
                     raise PlanValidationError("adoption plan is missing project identity evidence")
+                # Validate the captured Git identity before looking up a ready
+                # row.  A ready row must never bypass moved-ref or dirty-tree
+                # checks just because its path and fingerprint still match.
+                self._validate_checkout_snapshot(snapshot, context=context)
+                self._validate_adoption_retry_identity(plan)
                 existing = catalog.adopted_environment_for(
                     project_id=plan.project_id,
                     checkout_path=str(plan.worktree),
@@ -792,13 +797,21 @@ class _CheckoutMixin:
                         )
                     state = str(existing["state"])
                     if state == EnvironmentState.READY.value:
+                        from odoo_instance_sdk.resources.environment.checkout_artifacts import (
+                            _checkout_steps,
+                        )
+
+                        for step in _checkout_steps(plan):
+                            if context.planned(step.step_id) and not context.consumed(step.step_id):
+                                context.skip(step.step_id)
                         return _row_to_env(existing)
                     raise EnvironmentConflictError(
                         "adoption_recovery_required",
                         f"existing adoption is {state}; recover or remove it before retrying",
                         details={"existing_id": str(existing["id"]), "state": state},
                     )
-            self._validate_checkout_snapshot(snapshot, context=context)
+            if not plan.adopted:
+                self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:
                 plan.branch_revalidator(context)
             from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
@@ -824,6 +837,25 @@ class _CheckoutMixin:
             result = self._do_checkout(catalog, plan, context=context)
             context.complete_action("checkout.catalog")
             return result
+
+    def _validate_adoption_retry_identity(self, plan: _CheckoutPlan) -> None:
+        """Re-capture adoption evidence before reusing a ready catalog row."""
+        current_project = ProjectConfig.load(plan.project.repository_root)
+        current_source = self._copy_source_metadata(current_project, plan.options)
+        current_fingerprint = self._adoption_fingerprint(
+            plan.project_id or "",
+            plan.worktree,
+            Path(plan.git_common_dir),
+            plan.options,
+            base_revision=plan.base_revision,
+            source_name=current_source[0],
+            source_base_url=current_source[1],
+            source_git_branch=current_source[2],
+            source_database=current_source[3],
+            selected_backup_id=(current_source[4].id if current_source[4] is not None else None),
+        )
+        if current_fingerprint != plan.adoption_input_fingerprint:
+            raise StalePlanError("adoption resolved base or source identity changed after planning")
 
     def _validate_checkout_snapshot(  # noqa: C901 -- snapshot validation keeps all drift guards together
         self,
@@ -1012,13 +1044,32 @@ class _CheckoutMixin:
         checkout_path: Path,
         checkout_common: Path,
         options: EnvironmentCheckoutOptions,
+        *,
+        base_revision: str,
+        source_name: str | None,
+        source_base_url: str | None,
+        source_git_branch: str | None,
+        source_database: str,
+        selected_backup_id: uuid.UUID | None,
     ) -> str:
-        """Hash only non-secret inputs that define one adoption identity."""
+        """Hash resolved, secret-free evidence that defines one adoption identity."""
         payload = {
             "project_id": project_id,
             "checkout_path": str(checkout_path),
             "checkout_git_common_dir": str(checkout_common),
             "base_ref": options.base_ref,
+            "base_revision": base_revision,
+            "source_name": source_name,
+            "source_base_url_digest": (
+                hashlib.sha256(source_base_url.encode()).hexdigest()
+                if source_base_url is not None
+                else None
+            ),
+            "source_git_branch": source_git_branch,
+            "resolved_source_database": source_database,
+            "selected_backup_id": (
+                str(selected_backup_id) if selected_backup_id is not None else None
+            ),
             "db_mode": options.db_mode.value,
             "source_database": options.source_database,
             "target_database": options.target_database,
@@ -1091,7 +1142,20 @@ class _CheckoutMixin:
             dry_run_paths=True,
             checkout_path=actual_root,
         )
-        fingerprint = self._adoption_fingerprint(project_id, actual_root, common, options)
+        fingerprint = self._adoption_fingerprint(
+            project_id,
+            actual_root,
+            common,
+            options,
+            base_revision=private.base_revision,
+            source_name=private.source_name,
+            source_base_url=private.source_base_url,
+            source_git_branch=private.source_git_branch,
+            source_database=private.source_database or "",
+            selected_backup_id=(
+                private.selected_backup.id if private.selected_backup is not None else None
+            ),
+        )
         private = replace(
             private,
             project_id=project_id,
