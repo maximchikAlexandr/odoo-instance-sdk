@@ -45,6 +45,9 @@ Source = "https://github.com/maximchikAlexandr/odoo-instance-sdk"
 requires = ["uv_build>=0.10.8,<0.11.0"]
 build-backend = "uv_build"
 
+[tool.uv.workspace]
+members = ["packages/odcli-multica"]
+
 [tool.uv.build-backend]
 # Built React assets (web/dist/) live under the module root and are included
 # automatically in sdist + wheel. Exclude the Node.js dependency tree and

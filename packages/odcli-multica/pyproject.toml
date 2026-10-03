@@ -1,0 +1,30 @@
+[project]
+name = "odcli-multica"
+version = "0.1.0"
+description = "Typed Multica checkout and Odoo environment preparation"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@80a9f021dac6e8674faa84ebeee8d404d2852c05",
+    "multica-py @ git+https://github.com/maximchikAlexandr/multica-py.git@c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed",
+    "click>=8.2,<9",
+]
+
+[project.scripts]
+odcli-multica = "odcli_multica.cli:cli"
+
+[build-system]
+requires = ["uv_build>=0.10.8,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+
+[tool.uv.sources]
+odoo-instance-sdk = { workspace = true }
+
+[dependency-groups]
+test = ["pytest>=8.0"]
+lint = ["ruff>=0.16.7,<0.17"]
+type-check = ["mypy>=2.0"]
