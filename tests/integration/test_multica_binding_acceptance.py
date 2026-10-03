@@ -17,6 +17,10 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+
+pytest.importorskip("multica_py", reason="Multica integration requires the extension dependency")
+pytest.importorskip("odcli_multica", reason="Multica integration requires the extension package")
+
 from multica_py import ClientConfig, Issue, MulticaClient, Page, Project, ProjectStatus, TaskRun
 from multica_py.models.issue_activity import TaskProjectResourceData
 from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord

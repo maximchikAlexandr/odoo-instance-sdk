@@ -80,6 +80,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentResource,
 )
+from odoo_instance_sdk.resources.environment.checkout_artifacts import _row_to_env
 from odoo_instance_sdk.resources.monitor.collection_parts import EnvironmentMonitor
 from odoo_instance_sdk.resources.monitor.planning import SnapshotSelection
 
@@ -809,7 +810,7 @@ def _catalog_worktree_paths(
         ) from exc
     paths: dict[str, str] = {}
     for row in rows:
-        paths[str(row["id"])] = str(row["worktree_path"])
+        paths[str(row["id"])] = str(_row_to_env(row).worktree_path)
     return paths
 
 

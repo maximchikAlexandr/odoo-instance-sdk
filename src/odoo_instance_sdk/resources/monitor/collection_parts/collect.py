@@ -243,6 +243,8 @@ class _CollectMixin:
             return {}
         finally:
             catalog.close()
+        from odoo_instance_sdk.resources.environment.checkout_artifacts import _row_to_env
+
         environment_ids = {env.id for env in snapshot.environments}
         for row in rows:
             env_id = str(row["id"])
@@ -255,7 +257,7 @@ class _CollectMixin:
                 )
                 if resolved_project != project_id:
                     continue
-            paths[env_id] = str(row["worktree_path"])
+            paths[env_id] = str(_row_to_env(row).worktree_path)
         return paths
 
     def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:

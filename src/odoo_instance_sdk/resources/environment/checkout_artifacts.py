@@ -31,7 +31,10 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_db_names,
     parse_odoo_config,
 )
-from odoo_instance_sdk.internal.paths import resolve_environment_artifact_paths
+from odoo_instance_sdk.internal.paths import (
+    is_legacy_environment_path,
+    resolve_environment_artifact_paths,
+)
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
@@ -216,13 +219,12 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         backup_raw = cast("JsonValue", row["backup_id"])
     env_id = str(_get("id"))
     python_owned = bool(_get("python_environment_owned"))
-    # Stored paths are authoritative for adopted checkouts.  Fall back to the
-    # canonical resolver for pre-0006 rows and older hand-written fixtures.
     worktree_value = _opt("worktree_path")
     generated_value = _opt("generated_config_path")
     lock_value = _opt("dependency_lock_path")
     artifact_value = _opt("artifact_root")
-    if worktree_value is None or generated_value is None or lock_value is None:
+    path_values = (worktree_value, generated_value, lock_value, artifact_value)
+    if any(map(is_legacy_environment_path, path_values)) or None in path_values[:3]:
         artifacts = resolve_environment_artifact_paths(
             environment_id=env_id,
             repository_root=str(_get("repository_root")),
@@ -234,7 +236,7 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         generated_value = str(artifacts.generated_config_path)
         lock_value = str(artifacts.dependency_lock_path)
         artifact_value = artifact_value or str(artifacts.env_root)
-    http_interface, http_port = _http_fields_from_generated_config(generated_value)
+    http_interface, http_port = _http_fields_from_generated_config(cast("str", generated_value))
 
     return DevelopmentEnvironment(
         id=uuid.UUID(env_id),
@@ -243,11 +245,11 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         git_common_dir=str(_get("git_common_dir")),
         branch=str(_get("branch")),
         base_ref=str(_get("base_ref")),
-        worktree_path=worktree_value,
-        generated_config_path=generated_value,
+        worktree_path=cast("str", worktree_value),
+        generated_config_path=cast("str", generated_value),
         python_environment_path=str(_get("python_environment_path")),
         python_environment_owned=python_owned,
-        dependency_lock_path=lock_value,
+        dependency_lock_path=cast("str", lock_value),
         http_interface=http_interface,
         http_port=http_port,
         db_mode=EnvironmentDatabaseMode(str(_get("db_mode"))),
