@@ -154,16 +154,25 @@ def test_compose_down_waits_for_released_ports_without_masking_leaks(
 ) -> None:
     compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
     monkeypatch.setattr(
         "tests.integration.real_odoo.cleanup.subprocess.run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+        run,
     )
     states = iter(((8069,), ()))
     monkeypatch.setattr(
         "tests.integration.real_odoo.cleanup._bound_ports", lambda _ports: next(states)
     )
     monkeypatch.setattr("tests.integration.real_odoo.cleanup.time.sleep", lambda _seconds: None)
-    e2e_cleanup.compose_down(compose_file, "odcli-e2e-project", timeout=1.0, ports=(8069,))
+    e2e_cleanup.compose_down(compose_file, "odcli-e2e-project", timeout=2.5, ports=(8069,))
+    command, kwargs = calls[0]
+    process_timeout = kwargs["timeout"]
+    assert isinstance(process_timeout, float) and float(command[-3]) < process_timeout
 
     monkeypatch.setattr("tests.integration.real_odoo.cleanup._bound_ports", lambda _ports: (8069,))
     with pytest.raises(RuntimeError, match="left owned ports bound"):
@@ -372,11 +381,86 @@ def test_default_database_probe_checks_both_fixture_postgres_roles(
     ]
 
 
+def test_compose_down_timeout_waits_before_reporting_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    events: list[str] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        events.append("compose")
+        process_timeout = kwargs["timeout"]
+        assert isinstance(process_timeout, float)
+        raise subprocess.TimeoutExpired(args, process_timeout)
+
+    def wait(_ports: tuple[int, ...], *, timeout: float) -> tuple[int, ...]:
+        events.append("ports")
+        assert timeout > 0
+        return ()
+
+    subprocess_module = getattr(e2e_cleanup, "subprocess")
+    monkeypatch.setattr(subprocess_module, "run", run)
+    monkeypatch.setattr(e2e_cleanup, "wait_for_ports_free", wait)
+    with pytest.raises(RuntimeError, match="timed out"):
+        e2e_cleanup.compose_down(compose_file, "odcli-e2e-project", timeout=2.5, ports=(8069,))
+
+    command, kwargs = calls[0]
+    grace = float(command[command.index("--timeout") + 1])
+    process_timeout = kwargs["timeout"]
+    assert isinstance(process_timeout, float)
+    assert 0 <= grace < process_timeout < 2.5
+    assert events == ["compose", "ports"]
+
+
+@pytest.mark.parametrize(
+    ("remaining", "message"),
+    [
+        pytest.param((), "Compose cleanup failed", id="compose-failure"),
+        pytest.param((8069,), "left owned ports bound", id="port-leak-precedence"),
+    ],
+)
+def test_compose_down_nonzero_exit_waits_and_prioritizes_port_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remaining: tuple[int, ...],
+    message: str,
+) -> None:
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    events: list[str] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        events.append("compose")
+        return subprocess.CompletedProcess(args, 1, "", "stop failed")
+
+    def wait(_ports: tuple[int, ...], *, timeout: float) -> tuple[int, ...]:
+        del timeout
+        events.append("ports")
+        return remaining
+
+    subprocess_module = getattr(e2e_cleanup, "subprocess")
+    monkeypatch.setattr(subprocess_module, "run", run)
+    monkeypatch.setattr(e2e_cleanup, "wait_for_ports_free", wait)
+    try:
+        e2e_cleanup.compose_down(compose_file, "odcli-e2e-project", timeout=2.5, ports=(8069,))
+    except RuntimeError as error:
+        events.append("failure")
+        assert message in str(error)
+    else:
+        pytest.fail("nonzero Compose exit was not reported")
+
+    assert events == ["compose", "ports", "failure"]
+
+
 def test_fixture_failure_still_unwinds_created_compose_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = e2e_fixtures._make_runtime(tmp_path, "d" * 32)
-    cleaned: list[str] = []
+    events: list[str] = []
 
     class FailingLifecycle:
         def __init__(self, compose_file: Path, project_name: str) -> None:
@@ -390,16 +474,18 @@ def test_fixture_failure_still_unwinds_created_compose_resources(
     monkeypatch.setattr(e2e_fixtures, "ComposeLifecycle", FailingLifecycle)
     monkeypatch.setattr(e2e_fixtures, "wait_for_compose_pg_isready", lambda *args: None)
     monkeypatch.setattr(
-        e2e_fixtures, "compose_down", lambda *args, **kwargs: cleaned.append("compose")
+        e2e_fixtures, "compose_down", lambda *args, **kwargs: events.append("compose")
     )
-    monkeypatch.setattr(e2e_fixtures, "audit_no_leaks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        e2e_fixtures, "audit_no_leaks", lambda *args, **kwargs: events.append("audit")
+    )
     with pytest.raises(RuntimeError, match="injected"):
         try:
             e2e_fixtures._provision(runtime)
         except RuntimeError as error:
             e2e_fixtures._finalize(runtime, error)
             raise
-    assert cleaned == ["compose"]
+    assert events == ["compose", "audit"]
     assert not runtime.root.exists()
 
 
