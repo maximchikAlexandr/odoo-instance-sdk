@@ -18,6 +18,10 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.dependency_sync import (
     resolve_hash_lock,
 )
+from odoo_instance_sdk.internal.project_init import (
+    project_owned_data_dir,
+    verify_project_owned_data_dir,
+)
 from odoo_instance_sdk.models import (
     Backup,
     BackupFreshness,
@@ -25,6 +29,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     EnvironmentCheckoutPlan,
     EnvironmentPythonMode,
+    EnvironmentCodeOwnership,
     DevelopmentEnvironment as _DevelopmentEnvironment,
     EnvironmentDatabaseMode as _EnvironmentDatabaseMode,
     EnvironmentState as _EnvironmentState,
@@ -73,6 +78,14 @@ _APPLIED_CONFIG_BINDINGS = frozenset(
         "logfile",
     }
 )
+
+
+def _resolve_checkout_data_dir(project: ProjectConfig, repo_root: Path) -> Path | None:
+    if project.postgres is None or project.postgres.mode != "compose":
+        return None
+    data_dir = project_owned_data_dir(repo_root)
+    verify_project_owned_data_dir(repo_root, data_dir, require_exists=False)
+    return data_dir
 
 
 class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
@@ -189,6 +202,13 @@ class _CheckoutPlan:
     selected_backup: Backup | None = None
     branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
     data_dir: Path | None = None
+    project_root: Path | None = None
+    project_id: str | None = None
+    checkout_commit_sha: str | None = None
+    code_ownership: EnvironmentCodeOwnership = EnvironmentCodeOwnership.SDK_OWNED
+    artifact_root: Path | None = None
+    adoption_input_fingerprint: str | None = None
+    adopted: bool = False
 
 
 @dataclass(frozen=True, slots=True)

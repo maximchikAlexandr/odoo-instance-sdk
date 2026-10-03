@@ -90,6 +90,29 @@ def rev_parse_verify(repo_root: Path, ref: str) -> str:
     return proc.stdout.strip()
 
 
+def rev_parse_branch(repo_root: Path) -> str:
+    """Return the current local branch, rejecting detached HEADs."""
+    proc = _run(
+        ["git", "-C", str(repo_root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise EnvironmentConflictError(
+            "detached_checkout", f"checkout is detached; a local branch is required: {repo_root}"
+        )
+    return proc.stdout.strip()
+
+
+def remote_url(repo_root: Path, name: str = "origin") -> str | None:
+    """Return a configured remote URL without treating it as a credential."""
+    proc = _run(
+        ["git", "-C", str(repo_root), "remote", "get-url", name],
+        check=False,
+    )
+    value = proc.stdout.strip()
+    return value or None
+
+
 def is_tracked_path(path: Path) -> bool:
     """Return whether an enclosing Git index owns this exact path."""
     candidate = Path(path).absolute()

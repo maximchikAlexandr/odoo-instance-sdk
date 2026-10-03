@@ -21,6 +21,7 @@ from odoo_instance_sdk.internal.paths import (
     resolve_environment_artifact_paths,
 )
 from odoo_instance_sdk.internal.repo_key import parse_git_common_dir
+from odoo_instance_sdk.models import EnvironmentCodeOwnership
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
@@ -358,6 +359,11 @@ def _environment_http_port_preflight(
 
 def _canonical_environment(env_obj: DevelopmentEnvironment) -> DevelopmentEnvironment:
     """Project catalogue-backed paths onto the canonical ``~/.odcli`` layout."""
+    # Adopted rows deliberately point at a caller-owned checkout and retain
+    # their separately recorded artifact paths.  Replacing those paths with a
+    # canonical worktree would silently start a different checkout.
+    if env_obj.code_ownership is not EnvironmentCodeOwnership.SDK_OWNED:
+        return env_obj
     artifacts = resolve_environment_artifact_paths(
         environment_id=str(env_obj.id),
         repository_root=env_obj.repository_root,
@@ -395,6 +401,23 @@ def _verify_env_runtime(env_obj: DevelopmentEnvironment) -> None:
     worktree = Path(env_obj.worktree_path)
     if not worktree.is_dir():
         raise RuntimeError(f"worktree missing: {worktree}")
+    if env_obj.code_ownership is EnvironmentCodeOwnership.CALLER_OWNED:
+        if worktree.is_symlink():
+            raise RuntimeError(f"worktree identity is replaced by a symlink: {worktree}")
+        try:
+            from odoo_instance_sdk.internal.git_worktree import (
+                rev_parse_git_common_dir,
+                rev_parse_toplevel,
+            )
+
+            actual_root = rev_parse_toplevel(worktree)
+            actual_common = rev_parse_git_common_dir(actual_root)
+        except Exception as exc:
+            raise RuntimeError(f"worktree Git identity is unavailable: {worktree}") from exc
+        expected_root = Path(env_obj.checkout_repository_root or env_obj.repository_root).resolve()
+        expected_common = Path(env_obj.checkout_git_common_dir or env_obj.git_common_dir).resolve()
+        if actual_root.resolve() != expected_root or actual_common.resolve() != expected_common:
+            raise RuntimeError(f"worktree Git identity was replaced: {worktree}")
     config_path = Path(env_obj.generated_config_path)
     if not config_path.is_file():
         raise RuntimeError(f"generated config missing: {config_path}")

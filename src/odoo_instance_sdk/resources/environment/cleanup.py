@@ -27,6 +27,7 @@ from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
     Backup,
+    EnvironmentCodeOwnership,
 )
 from odoo_instance_sdk.models.backup import DevelopmentEnvironment
 from odoo_instance_sdk.project import ProjectConfig
@@ -176,8 +177,11 @@ class _CleanupMixin:
                 common_path = Path(_text(common).strip())
                 if not common_path.is_absolute():
                     common_path = project_path / common_path
+                common_path = common_path.resolve()
+                project_id = f"project_{repo_key(project_path.resolve(), common_path)}"
                 rows = catalog.list_environments(
-                    git_common_dir=str(common_path.resolve()),
+                    git_common_dir=str(common_path),
+                    project_id=project_id,
                     include_removed=include_removed,
                 )
             return [_row_to_env(row) for row in rows]
@@ -208,7 +212,7 @@ class _CleanupMixin:
         )
         steps: tuple[PreparedStep | PreparedAction, ...] = ()
         worktree = Path(env.worktree_path)
-        if worktree.is_dir():
+        if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED and worktree.is_dir():
             steps = (
                 PreparedStep(
                     step_id="environment.remove.worktree-dirty",
@@ -426,7 +430,7 @@ class _CleanupMixin:
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
 
-        env_root = Path(env.worktree_path).parent
+        env_root = Path(env.artifact_root or Path(env.worktree_path).parent)
         repo_root = Path(env.repository_root)
         worktree = Path(env.worktree_path)
         generated_cfg = Path(env.generated_config_path)
@@ -547,19 +551,20 @@ class _CleanupMixin:
         # deletion must never make the cluster identity unverifiable.
         cleanup_failed = self._remove_files(generated_cfg, lock_file, failures) or cleanup_failed
         cleanup_failed = self._remove_venv(env_root, venv, failures) or cleanup_failed
-        cleanup_failed = (
-            self._remove_worktree(
-                cat,
-                env,
-                repo_root,
-                worktree,
-                failures,
-                dirty_checked=context is not None
-                and context.planned("environment.remove.worktree-dirty"),
-                context=context,
+        if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED:
+            cleanup_failed = (
+                self._remove_worktree(
+                    cat,
+                    env,
+                    repo_root,
+                    worktree,
+                    failures,
+                    dirty_checked=context is not None
+                    and context.planned("environment.remove.worktree-dirty"),
+                    context=context,
+                )
+                or cleanup_failed
             )
-            or cleanup_failed
-        )
 
         if cleanup_failed:
             msg = "; ".join(failures)[:2000]
@@ -575,7 +580,7 @@ class _CleanupMixin:
             if env_root.is_dir() and not any(env_root.iterdir()):
                 env_root.rmdir()
 
-    def _preflight_remove(
+    def _preflight_remove(  # noqa: C901 -- ownership and durable recovery guards stay fail-closed together
         self,
         catalog: BackupCatalog,
         env: DevelopmentEnvironment,
@@ -596,15 +601,23 @@ class _CleanupMixin:
             / repo_key(repo_root, Path(env.git_common_dir))
             / str(env.id)
         )
-        env_root = Path(env.worktree_path).parent
-        if env_root.absolute() != expected_root.absolute() or _has_symlink_component(env_root):
+        env_root = Path(env.artifact_root or Path(env.worktree_path).parent)
+        if (
+            env_root.absolute() != expected_root.absolute()
+            or _has_symlink_component(env_root)
+            or not env_root.is_dir()
+        ):
             raise EnvironmentConflictError(
                 "unsafe_environment_path", "environment root is not owned"
             )
-        expected: tuple[tuple[Path, Path, Literal["file", "dir"]], ...] = (
-            (Path(env.worktree_path), env_root / "worktree", "dir"),
-            (Path(env.generated_config_path), env_root / "odoo.conf", "file"),
-            (Path(env.dependency_lock_path), env_root / "requirements.lock", "file"),
+        expected: list[tuple[Path, Path, Literal["file", "dir"]]] = []
+        if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED:
+            expected.append((Path(env.worktree_path), env_root / "worktree", "dir"))
+        expected.extend(
+            (
+                (Path(env.generated_config_path), env_root / "odoo.conf", "file"),
+                (Path(env.dependency_lock_path), env_root / "requirements.lock", "file"),
+            )
         )
         for path, owned, kind in expected:
             _validate_owned_artifact(path, owned, kind)
@@ -612,7 +625,9 @@ class _CleanupMixin:
             _validate_owned_artifact(Path(env.python_environment_path), env_root / "venv", "dir")
         worktree = Path(env.worktree_path)
         status_step_id = "environment.remove.worktree-dirty"
-        if context is not None and context.planned(status_step_id):
+        if env.code_ownership is not EnvironmentCodeOwnership.SDK_OWNED:
+            is_dirty = False
+        elif context is not None and context.planned(status_step_id):
             status_result = cast("ProcessResult", context.process(status_step_id))
             status_output = status_result.stdout
             status_text = (

@@ -712,8 +712,9 @@ def collect_resource_inventory(
             env_sources = tuple(
                 EnvironmentResourceSource(
                     environment_id=str(row["id"]),
-                    project_id=(
-                        f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                    project_id=str(
+                        row["project_id"]
+                        or f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
                     ),
                     name=str(row["name"]),
                     worktree_path=Path(str(row["worktree_path"])),
