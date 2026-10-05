@@ -145,7 +145,7 @@ After `changes_requested`, the author edits `report.md`, repeats local validatio
 
 ### Requirement: Portable `odcli-bug-report` agent skill
 
-A portable skill `odcli-bug-report` SHALL live under `.agents/skills/` with `name` and `description` frontmatter. It SHALL be runtime-agnostic and SHALL NOT bind to a single subagent API. The main `SKILL.md` SHALL contain the short sequence: detect problem → check requirements/obvious duplicate → `init` → fill report → local preview → independent review with the limited cycle → `submit` → report URL or block → return to the main task. A reviewer prompt reference SHALL be offloaded to one reference file if it reduces main context. The schema of report/review SHALL match the CLI implementation; a second validator or template SHALL NOT be created.
+A portable skill `odcli-bug-report` SHALL live under `.agents/skills/` with `name` and `description` frontmatter. It SHALL be runtime-agnostic and SHALL NOT bind to a single subagent API. The main `SKILL.md` SHALL contain the short sequence: detect a defect or missing useful capability → check requirements/obvious duplicate → `odcli bug-report init` → fill report → local preview → independent review with the limited cycle → `odcli bug-report submit` → report URL or block → return to the main task. A missing capability SHALL be described as a scenario and expectation, not as a fabricated failure of an existing command. A reviewer prompt reference SHALL be offloaded to one reference file if it reduces main context. The schema of report/review SHALL match the CLI implementation; a second validator or template SHALL NOT be created.
 
 Before proposing a solution, the agent and reviewer SHALL read the applicable SDK rules and the project constraints where the failure appeared. Working from another Odoo repository SHALL NOT exempt from SDK rules. If SDK sources/docs are unavailable for substantive verification, the agent SHALL explicitly request the needed context and SHALL NOT claim conformance. The skill SHALL apply Ponytail criteria when Ponytail is available and SHALL work without Ponytail by applying the written criteria: reuse existing mechanism, limit change to the cause, compare with a smaller fix, and do not add a universal abstraction for one case.
 
@@ -161,20 +161,41 @@ The skill SHALL NOT require the author to pre-implement a fix, run a large audit
 - **WHEN** Ponytail is not available
 - **THEN** the skill applies the written simplicity criteria and remains operational
 
+### Requirement: Autonomous OdCLI problem coordination
+
+A separate `odcli-autonomous-work` skill SHALL coordinate the decision before invoking `odcli-bug-report`; it SHALL NOT replace the public `odcli bug-report init` or `submit` commands. It SHALL ask a separate read-only Codex session to classify the concrete defect or missing capability and the proposed workaround as `no_issue`, `report_only`, `workaround`, or `blocked`. `no_issue` SHALL return to supported usage; `report_only` SHALL create a report without stopping the main task; `workaround` SHALL create a report and continue only through the reviewed safe workaround; `blocked` SHALL create a report and pursue a minimal hotfix. The reviewer SHALL also check the completed report in a second gate before publication. An unavailable reviewer SHALL NOT be silently replaced by self-approval. The Codex CLI wrapper and `uv`-managed fix tool SHALL be skill-local tools, not SDK runtime dependencies or new `odcli` subcommands.
+
+#### Scenario: missing capability is reportable without blocking
+
+- **WHEN** an agent needs a useful OdCLI capability that does not exist and the reviewer confirms a safe supported way to complete the main task
+- **THEN** the agent prepares and reviews a bug report for the capability gap and continues through that way without inventing a broken-command reproduction
+
+#### Scenario: reviewer cannot be started
+
+- **WHEN** the separate reviewer session cannot return a valid verdict
+- **THEN** the agent does not self-approve a workaround or report submission and states the unresolved review gate
+
 ### Requirement: Emergency unblock of main work
 
-The normal skill mode ends with a verified bug report and does NOT require the discovering agent to implement a fix. An emergency unblock applies ONLY when all of the following hold: a confirmed OdCLI bug directly blocks the agent's main work, OdCLI provides no supported safe workaround to continue without changing the work's requirements, and manual unblock would require direct SQLite/internal-catalog edits, bypassing the public CLI/SDK, or other actions that could break ownership/provenance/runtime-identity/state consistency.
+The normal skill mode ends with a verified bug report and does NOT require the discovering agent to implement a fix. An emergency unblock applies when a confirmed OdCLI defect or missing capability directly blocks the main work and no reviewed supported safe workaround preserves that work's requirements. A direct SQLite/internal-catalog edit or bypass of the public CLI/SDK SHALL NOT count as a safe workaround.
 
-In that case the agent SHALL NOT apply a dangerous workaround to the user's project and SHALL NOT leave the work blocked by a single bug report. After preparing and independently reviewing the report, the agent SHALL perform a minimal fix in the OdCLI repository: work from the current target branch in a separate feature branch, limit the diff to the confirmed root cause, preserve safety contracts, add a regression test reproducing the block via the public CLI/SDK boundary, run the relevant mandatory gates, publish the feature branch with write-access, create a PR with appropriate rights, link it to the bug report, and report the branch/PR URL, check results, and whether the main work can safely resume. The agent SHALL NOT merge, release, or install the fix into the user's environment without separate permission.
+In that case the agent SHALL NOT apply a dangerous workaround to the user's project and SHALL NOT leave the work blocked by a single bug report. After preparing and independently reviewing the report, the agent SHALL perform a minimal fix in the OdCLI repository: work from the current target branch in a separate feature branch, limit the diff to the confirmed cause, preserve safety contracts, add a regression test for a broken operation or an acceptance scenario for a missing capability through the public CLI/SDK boundary, run the relevant mandatory gates, publish the feature branch with write-access, create a PR with appropriate rights, and include `Fixes #N` in the PR body only when the PR targets the default branch and fully resolves that GitHub issue. The agent SHALL report the branch/PR URL, check results, and whether the main work can safely resume. The agent SHALL NOT merge or release the fix without separate permission.
+
+To continue before merge, the agent MAY use a pinned `odcli-fix-<issue-number>` test command for its reviewed fix revision. It SHALL first verify that this exact revision preserves compatibility with the **shared** `~/.odcli` catalog/storage format, migrations, locking, and other agents' concurrent operations. It SHALL NOT copy `~/.odcli` or replace the canonical `odcli`. Unknown or incompatible shared-state changes SHALL block test-tool use and be escalated to the user. Each test command SHALL warn before forwarding arguments to its pinned revision. Skill-managed `odcli update` SHALL retire it only when the linked PR is merged into the default branch, the installed canonical revision contains that merge, and no local unmerged or checked-out branch would be lost; a closed issue alone SHALL NOT prove this. A direct user-run `odcli update` SHALL NOT be claimed to perform skill-managed cleanup.
 
 If checkout, publish, or PR is unavailable due to missing sources, authorization, or rights, the agent SHALL keep a ready local commit/patch, report the missing capability, and SHALL NOT substitute the fix with a risky manual state edit. The blockage SHALL NOT expand the fix beyond the cause or bypass independent review.
 
 #### Scenario: emergency unblock produces a minimal PR
 
 - **WHEN** all emergency-unblock conditions hold
-- **THEN** the agent opens a minimal PR linked to the bug report, preserves safety contracts, and reports whether the main work can resume
+- **THEN** the agent opens a minimal PR linked to the bug report, preserves safety contracts, and may resume only through a reviewed compatible pinned test command while awaiting the user's merge decision
 
 #### Scenario: no dangerous workaround
 
-- **WHEN** a supported safe workaround exists or manual unblock would not require bypassing public boundaries
+- **WHEN** a reviewed supported safe workaround preserves the main task's requirements
 - **THEN** the emergency unblock does not apply and the agent reports the bug normally
+
+#### Scenario: concurrent hotfix revisions share one catalog
+
+- **WHEN** two agents need different unmerged OdCLI fixes concurrently
+- **THEN** each uses its own pinned `odcli-fix-<issue-number>` command only after compatibility review of that revision, both use the same `~/.odcli`, and either agent escalates if its fix needs an incompatible shared-state change
