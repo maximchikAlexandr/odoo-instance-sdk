@@ -168,6 +168,17 @@ def _add_named_remote_config(project_manifest: Path, *, database: str = "staging
     )
 
 
+def _add_compose_config(project_manifest: Path) -> None:
+    manifest = project_manifest / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text()
+        + "\n[postgres]\n"
+        + 'mode = "compose"\n'
+        + 'image = "postgres:16"\n'
+        + "port = 5432\n"
+    )
+
+
 def _valid_retained_backup(tmp_path: Path, *, branch: str = "main") -> Backup:
     path = tmp_path / "retained.zip"
     with zipfile.ZipFile(path, "w") as archive:
@@ -1257,6 +1268,128 @@ class TestCheckoutShared:
         assert "comerta" in content
         assert f"http_port = {env.http_port}" in content
 
+    def test_managed_compose_shared_checkout_binds_project_filestore(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        source_config: Path,
+    ) -> None:
+        source_config.write_text(
+            source_config.read_text().replace("data_dir = /tmp/odoo_data\n", "")
+        )
+        _add_compose_config(project_manifest)
+
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/shared-compose-filestore",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+
+        from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+        config = parse_odoo_config(Path(env.generated_config_path))
+        assert env.state is EnvironmentState.READY
+        assert Path(config["data_dir"]) == (project_manifest / ".odcli" / "filestore").resolve()
+
+    def test_external_checkout_preserves_explicit_source_filestore(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/external-filestore",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+
+        from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+        config = parse_odoo_config(Path(env.generated_config_path))
+        assert config["data_dir"] == "/tmp/odoo_data"
+
+    def test_unsafe_managed_filestore_fails_before_checkout_state(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+    ) -> None:
+        _add_compose_config(project_manifest)
+        outside = tmp_path / "outside-filestore"
+        outside.mkdir()
+        (project_manifest / ".odcli" / "filestore").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(InstanceConfigurationError, match="regular directory"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/unsafe-filestore",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    source_database="comerta",
+                ),
+            )
+
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_in_repo_managed_filestore_symlink_fails_before_checkout_state(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        _add_compose_config(project_manifest)
+        target = project_manifest / "sensitive-filestore"
+        target.mkdir()
+        (project_manifest / ".odcli" / "filestore").symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(InstanceConfigurationError, match="regular directory"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/in-repo-unsafe-filestore",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    source_database="comerta",
+                ),
+            )
+
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_managed_filestore_symlink_swap_fails_before_checkout_state(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+    ) -> None:
+        _add_compose_config(project_manifest)
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/swapped-filestore",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+        outside = tmp_path / "swapped-filestore"
+        outside.mkdir()
+        filestore = project_manifest / ".odcli" / "filestore"
+        filestore.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(InstanceConfigurationError, match="regular directory"):
+            command.run()
+
+        assert env_client.environments.list(project=project_manifest) == []
+
     def test_applied_snapshot_separates_generated_bindings_and_addons(
         self,
         env_client: OdooClient,
@@ -1470,6 +1603,31 @@ class TestCheckoutCopy:
         assert env.state is EnvironmentState.READY
         assert journal is not None and journal["stage"] == "restored"
         assert env.backup_id == instance.databases.backup.return_value.id
+
+    def test_managed_compose_copy_checkout_binds_project_filestore(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        source_config: Path,
+    ) -> None:
+        source_config.write_text(
+            source_config.read_text().replace("data_dir = /tmp/odoo_data\n", "")
+        )
+        _add_compose_config(project_manifest)
+        instance = _copy_instance(env_client, target_exists=True)
+        _record_backup(env_client, instance.databases.backup.return_value)
+
+        self._checkout_copy(
+            env_client, project_manifest, fake_python, "feat/copy-compose-filestore", instance
+        )
+
+        from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        config = parse_odoo_config(Path(env.generated_config_path))
+        assert env.state is EnvironmentState.READY
+        assert Path(config["data_dir"]) == (project_manifest / ".odcli" / "filestore").resolve()
 
     def test_copy_restore_creates_exactly_one_restore_audit_record(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path

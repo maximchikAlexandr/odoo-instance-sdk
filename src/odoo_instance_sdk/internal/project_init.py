@@ -84,7 +84,7 @@ def project_owned_data_dir(project_root: Path) -> Path:
     project tree so restore can record a proven path and ``db rm`` can clean
     the exact contained filestore without guessing by database name.
     """
-    return (project_root.resolve() / ".odcli" / "filestore").resolve()
+    return project_root.resolve() / ".odcli" / "filestore"
 
 
 def manifest_dict(

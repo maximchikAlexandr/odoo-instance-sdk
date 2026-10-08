@@ -30,6 +30,10 @@ from odoo_instance_sdk.internal.locks import (
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_env import load_project_environment
+from odoo_instance_sdk.internal.project_init import (
+    project_owned_data_dir,
+    verify_project_owned_data_dir,
+)
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import (
     Backup,
@@ -82,6 +86,14 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+
+def _resolve_checkout_data_dir(project: ProjectConfig, repo_root: Path) -> Path | None:
+    if project.postgres is None or project.postgres.mode != "compose":
+        return None
+    data_dir = project_owned_data_dir(repo_root)
+    verify_project_owned_data_dir(repo_root, data_dir, require_exists=False)
+    return data_dir
 
 
 class _CheckoutMixin:
@@ -246,6 +258,7 @@ class _CheckoutMixin:
         repo_root = rev_parse_toplevel(project_path)
         git_common = rev_parse_git_common_dir(repo_root)
         git_common_str = str(git_common)
+        data_dir = _resolve_checkout_data_dir(project_cfg, repo_root)
 
         hash_lock = _resolve_checkout_hash_lock(options, repo_root)
 
@@ -385,6 +398,7 @@ class _CheckoutMixin:
             source_base_url=source_base_url,
             source_git_branch=source_git_branch,
             selected_backup=selected_backup,
+            data_dir=data_dir,
         )
 
     def _plan_checkout(
@@ -738,6 +752,8 @@ class _CheckoutMixin:
         self, context: RunContext[DevelopmentEnvironment], snapshot: _CheckoutSnapshot
     ) -> DevelopmentEnvironment:
         plan = snapshot.private
+        if plan.data_dir is not None:
+            verify_project_owned_data_dir(plan.repo_root, plan.data_dir, require_exists=False)
         with exclusive_lock(provisioning_lock_path()):
             self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:

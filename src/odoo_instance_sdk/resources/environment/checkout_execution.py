@@ -136,6 +136,7 @@ def do_checkout(  # noqa: C901
                 http_interface=plan.http_interface,
                 http_port=plan.http_port,
                 db_name=db_name_for_config,
+                data_dir=plan.data_dir,
             )
             created_paths.append(plan.generated_config)
             # Create the environment-owned logfile with the other artifacts
