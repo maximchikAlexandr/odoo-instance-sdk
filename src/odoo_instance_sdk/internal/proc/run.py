@@ -105,6 +105,10 @@ class ProcessTimeoutError(ProcessExecutionError):
         )
 
 
+class ProcessOutputLimitError(ProcessExecutionError):
+    """A captured process exceeded its configured output bound."""
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
     """Typed result of one process invocation."""
@@ -428,7 +432,7 @@ def _run_pump(  # noqa: C901
                 if output_exceeded or combined_exceeded:
                     terminate_and_reap()
                     drain_after_termination()
-                    raise ProcessExecutionError(  # noqa: TRY301
+                    raise ProcessOutputLimitError(  # noqa: TRY301
                         prepared.argv,
                         "output exceeded configured limit",
                         duration=time.perf_counter() - started,

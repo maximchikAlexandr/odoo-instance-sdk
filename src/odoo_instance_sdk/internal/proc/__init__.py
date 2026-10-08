@@ -757,6 +757,7 @@ __all__ = [
     "ProcessExecutionError",
     "ProcessExecutor",
     "ProcessHandle",
+    "ProcessOutputLimitError",
     "ProcessResult",
     "ProcessResultLike",
     "ProcessSpawnError",
@@ -789,6 +790,7 @@ __all__ = [
 from .run import (  # noqa: E402
     ProcessExecutionError,
     ProcessHandle,
+    ProcessOutputLimitError,
     ProcessResult,
     ProcessSpawnError,
     ProcessTimeoutError,
