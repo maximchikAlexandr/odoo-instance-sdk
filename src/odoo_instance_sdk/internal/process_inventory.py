@@ -120,6 +120,8 @@ BackendAttributionCollector = "collections.abc.Callable[[Sequence[_BackendAttrib
 
 def _classify_backend_failure(returncode: int, stderr: str) -> BackendUnavailabilityReason:
     text = (stderr or "").lower()
+    if "psql" in text and ("missing" in text or "not found" in text):
+        return "psql_missing"
     if returncode in (12,):
         return "timeout"
     if "authentication" in text or "password" in text:
@@ -137,23 +139,23 @@ def _classify_backend_failure(returncode: int, stderr: str) -> BackendUnavailabi
 
 def _parse_pg_stat_activity_rows(
     stdout: str,
-) -> tuple[dict[str, list[BackendSession]], dict[int, BackendSession]]:
+) -> tuple[dict[str, list[BackendSession]], dict[int, BackendSession]] | None:
     """Decode the bounded ``pg_stat_activity`` JSON payload.
 
     Returns a mapping of ``datname -> sessions`` and a mapping of
     ``pid -> session`` for host-visible PID verification.
     """
     try:
-        payload = json.loads(stdout or "[]")
+        payload = json.loads(stdout)
     except (TypeError, json.JSONDecodeError):
-        return {}, {}
+        return None
     if not isinstance(payload, list):
-        return {}, {}
+        return None
     by_database: dict[str, list[BackendSession]] = {}
     by_pid: dict[int, BackendSession] = {}
     for row in payload:
         if not isinstance(row, Mapping):
-            continue
+            return None
         database = row.get("datname")
         if not isinstance(database, str) or not database:
             continue
@@ -236,26 +238,36 @@ def _unavailable(database: str, reason: BackendUnavailabilityReason) -> _Backend
     )
 
 
-def _collect_one_attribution(
+def _attribution_unavailability_reason(
+    request: _BackendAttributionInput,
+    *,
+    runner: BackendRunner | None,
+) -> BackendUnavailabilityReason | None:
+    cluster = request.cluster
+    if cluster is None or cluster.mode == "external":
+        return "maintenance_database_unavailable"
+    if cluster.state.value != "healthy":
+        return "server_unreachable"
+    if request.credentials is None or request.credentials.user is None:
+        return "credentials_missing"
+    if runner is None:
+        return "psql_missing"
+    return None
+
+
+def _normalize_attribution_response(
     request: _BackendAttributionInput,
     *,
     scope: PidScope,
-    runner: BackendRunner | None,
+    response: tuple[int, str, str],
 ) -> _BackendAttributionResult:
-    cluster = request.cluster
-    if cluster is None or cluster.mode == "external":
-        return _unavailable(request.database, "maintenance_database_unavailable")
-    if cluster.state.value != "healthy":
-        return _unavailable(request.database, "server_unreachable")
-    if request.credentials is None or request.credentials.user is None:
-        return _unavailable(request.database, "credentials_missing")
-    if runner is None:
-        returncode, stdout, stderr = _run_pg_stat_activity(request)
-    else:
-        returncode, stdout, stderr = runner(request)
+    returncode, stdout, stderr = response
     if returncode != 0:
         return _unavailable(request.database, _classify_backend_failure(returncode, stderr))
-    _by_database, sessions_by_pid = _parse_pg_stat_activity_rows(stdout)
+    parsed = _parse_pg_stat_activity_rows(stdout)
+    if parsed is None:
+        return _unavailable(request.database, "invalid_response")
+    _by_database, sessions_by_pid = parsed
     sessions = tuple(
         sessions_by_pid.get(item.pid, item) for item in _by_database.get(request.database, ())
     )
@@ -288,6 +300,19 @@ def _collect_one_attribution(
     )
 
 
+def _collect_one_attribution(
+    request: _BackendAttributionInput,
+    *,
+    scope: PidScope,
+    runner: BackendRunner | None,
+) -> _BackendAttributionResult:
+    reason = _attribution_unavailability_reason(request, runner=runner)
+    if reason is not None:
+        return _unavailable(request.database, reason)
+    assert runner is not None
+    return _normalize_attribution_response(request, scope=scope, response=runner(request))
+
+
 def _collect_backend_attributions(
     inputs: Sequence[_BackendAttributionInput],
     *,
@@ -297,7 +322,8 @@ def _collect_backend_attributions(
 
     The ``runner`` callable returns ``(returncode, stdout, stderr)`` for one
     bounded ``pg_stat_activity`` query against the cluster's maintenance
-    database. When ``runner`` is ``None`` the production transport is used.
+    database. Captured callers pass the runner for the prepared step; without
+    one this helper returns the typed ``psql_missing`` result.
     """
     if not inputs:
         return ()
@@ -305,31 +331,6 @@ def _collect_backend_attributions(
     return tuple(
         _collect_one_attribution(request, scope=scope, runner=runner) for request in inputs
     )
-
-
-def _run_pg_stat_activity(
-    request: _BackendAttributionInput,
-) -> tuple[int, str, str]:
-    """Run one bounded ``pg_stat_activity`` query through the shared transport."""
-    from odoo_instance_sdk.internal.pg.transport import run_psql
-
-    credentials = request.credentials
-    if credentials is None:
-        return 0, "[]", ""
-    port = credentials.port if credentials.port is not None else 5432
-    completed = run_psql(
-        host=credentials.host,
-        port=port,
-        user=credentials.user,
-        password=credentials.password,
-        query=_pg_stat_activity_query(),
-        timeout=5.0,
-        database="postgres",
-        step_id=f"process_inventory.{request.project_id}.{request.database}.pg_stat_activity",
-    )
-    if completed is None:
-        return 0, "[]", ""
-    return completed.returncode, completed.stdout, completed.stderr
 
 
 def _build_backend_group(

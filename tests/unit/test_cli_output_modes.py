@@ -2302,6 +2302,70 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert failure_documents[0][0]["dry_run"] is failure_dry_run  # type: ignore[index]
 
 
+def _assert_rich_process_inventory(output: str) -> None:
+    assert "Process inventory" in output
+
+
+def _assert_json_process_inventory(output: str) -> None:
+    assert _decode_document(output, "json")["ok"] is True  # type: ignore[index]
+
+
+def _assert_toon_process_inventory(output: str) -> None:
+    assert _decode_document(output, "toon")["ok"] is True  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("mode", "assert_output"),
+    [
+        ("rich", _assert_rich_process_inventory),
+        ("json", _assert_json_process_inventory),
+        ("toon", _assert_toon_process_inventory),
+    ],
+)
+def test_ps_formats_execute_one_captured_process_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    assert_output: Callable[[str], None],
+) -> None:
+    counters = {"commands": 0, "runs": 0, "snapshots": 0, "backend_samples": 0}
+    inventory = ProcessInventory(
+        schema_version=1,
+        generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+        sample_time=datetime(2020, 1, 1, tzinfo=UTC),
+        project_id=None,
+    )
+
+    def make_command() -> Command[ProcessInventory]:
+        def execute(_context: object) -> ProcessInventory:
+            counters["runs"] += 1
+            counters["snapshots"] += 1
+            counters["backend_samples"] += 1
+            return inventory
+
+        return Command.create(ExecutionPlan(), execute)
+
+    class FakePsMonitor:
+        def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:
+            counters["commands"] += 1
+            return make_command()
+
+        def processes(self, project_id: str | None = None) -> ProcessInventory:
+            raise AssertionError("CLI must not use the legacy second-sampling path")
+
+    monkeypatch.setattr("odoo_instance_sdk.commands.ps.EnvironmentMonitor", FakePsMonitor)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.ps.resolve_monitor_project_id", lambda *_args: None
+    )
+
+    result = CliRunner().invoke(cli, ["ps", "--format", mode])
+    assert result.exit_code == 0, result.output
+    assert counters["commands"] == 1
+    assert counters["runs"] == 1
+    assert counters["snapshots"] == 1
+    assert counters["backend_samples"] == 1
+    assert_output(result.stdout)
+
+
 def _rich_case_args(case: PublicLeafCase, tmp_path: Path) -> list[str]:
     args = list(case.args)
     if case.path in (("backup", "ls"), ("resource", "ls")):

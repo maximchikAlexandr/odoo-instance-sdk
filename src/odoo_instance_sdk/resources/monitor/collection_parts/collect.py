@@ -271,11 +271,41 @@ class _CollectMixin:
         backend attribution boundary.
         """
         from odoo_instance_sdk.execution import Command as _Command, ExecutionPlan
+        from odoo_instance_sdk.internal.pg.builder import (
+            PsqlSpecification,
+            build_psql_specification,
+        )
         from odoo_instance_sdk.internal.proc import (
             PreparedAction,
             prepared_command,
         )
-        from odoo_instance_sdk.internal.process_inventory import build_process_inventory
+        from odoo_instance_sdk.internal.process_inventory import (
+            _BackendAttributionInput,
+            _pg_stat_activity_query,
+            build_process_inventory,
+        )
+
+        snapshot_command = self.snapshot_command(project_id=project_id, include_removed=False)
+        credentials = self._process_inventory_credentials(project_id=project_id)
+        credentials_by_database = {item.database: item for item in credentials}
+        psql_specifications: dict[str, PsqlSpecification] = {
+            database: build_psql_specification(
+                host=item.host,
+                port=item.port or 5432,
+                user=item.user,
+                password=item.password,
+                database="postgres",
+                args=("-c", _pg_stat_activity_query()),
+                _trusted_args=("-t", "-A"),
+                timeout=5.0,
+                max_output_bytes=1024 * 1024,
+                max_combined_output_bytes=1024 * 1024,
+                step_id=f"process_inventory.{project_id or ''}.{database}.pg_stat_activity",
+                _require_binary=False,
+            )
+            for database, item in sorted(credentials_by_database.items())
+            if item.user
+        }
 
         action = PreparedAction(
             step_id="monitor.processes",
@@ -285,37 +315,68 @@ class _CollectMixin:
             read_only=True,
         )
 
+        def backend_runner(request: _BackendAttributionInput) -> tuple[int, str, str]:
+            from odoo_instance_sdk.internal.pg.transport import execute_psql
+            from odoo_instance_sdk.internal.proc import (
+                ProcessOutputLimitError,
+                ProcessSpawnError,
+                ProcessTimeoutError,
+            )
+
+            specification = psql_specifications.get(request.database)
+            if specification is None:
+                return 127, "", "psql missing: attribution step was not captured"
+            try:
+                result = execute_psql(specification)
+            except ProcessSpawnError:
+                return 127, "", "psql missing"
+            except ProcessTimeoutError:
+                return 12, "", "timeout"
+            except ProcessOutputLimitError:
+                return 1, "", "output exceeded configured limit"
+            stdout = result.stdout if isinstance(result.stdout, str) else ""
+            stderr = result.stderr if isinstance(result.stderr, str) else ""
+            return result.returncode, stdout, stderr
+
         def execute(context: RunContext[ProcessInventory]) -> ProcessInventory:
             context.action(action.step_id)
             try:
-                snapshot = self.snapshot_command(project_id=project_id, include_removed=False).run()
-                credential_resolver = self._process_inventory_credential_resolver(
-                    project_id=project_id
-                )
+                snapshot = snapshot_command.run()
+
+                def credential_resolver(database: str) -> DatabaseCredentials | None:
+                    return credentials_by_database.get(database)
+
                 inventory = build_process_inventory(
                     snapshot,
                     project_id=project_id,
                     credential_resolver=credential_resolver,
+                    backend_runner=backend_runner,
                 )
                 context.complete_action(action.step_id)
                 return inventory
             finally:
                 context.skip_remaining()
 
-        plan = ExecutionPlan(steps=(action.public_projection(),)).with_fingerprint()
+        captured_steps: tuple[PreparedAction | PreparedStep, ...] = (
+            action,
+            *(spec.prepared_step for spec in psql_specifications.values()),
+        )
+        plan = ExecutionPlan(
+            steps=tuple(step.public_projection() for step in captured_steps)
+        ).with_fingerprint()
         return _Command.from_prepared(
             plan,
-            prepared_command(execute, (action,), executor=self._executor),
+            prepared_command(execute, captured_steps, executor=self._executor),
         )
 
-    def _process_inventory_credential_resolver(
+    def _process_inventory_credentials(
         self, *, project_id: str | None
-    ) -> Callable[[str], DatabaseCredentials | None] | None:
-        """Build a credential resolver from catalogue environment config paths.
+    ) -> tuple[DatabaseCredentials, ...]:
+        """Capture one deterministic credential record for each selected database.
 
         ponytail: reads the generated config once per database; the per-project
-        environment count is small. Returns ``None`` when the catalogue is
-        unavailable so backend attribution degrades gracefully.
+        environment count is small. Missing config values remain typed records
+        so attribution can degrade as ``credentials_missing``.
         """
         import sqlite3
 
@@ -326,7 +387,7 @@ class _CollectMixin:
         try:
             catalog = BackupCatalog(db_path=db_path)
         except (BackupCatalogError, sqlite3.Error, OSError):
-            return None
+            return ()
         credentials_by_database: dict[str, DatabaseCredentials] = {}
         try:
             rows = catalog._monitor_snapshot_rows(include_removed=False)
@@ -347,23 +408,20 @@ class _CollectMixin:
                 try:
                     config = StartConfig.from_odoo_config(str(row["generated_config_path"]))
                 except Exception:
-                    continue
-                credentials_by_database[database_name] = DatabaseCredentials(
-                    database=database_name,
-                    host=config.db_host,
-                    port=config.db_port,
-                    user=config.db_user,
-                    password=config.db_password,
-                )
+                    credentials_by_database[database_name] = DatabaseCredentials(
+                        database=database_name
+                    )
+                else:
+                    credentials_by_database[database_name] = DatabaseCredentials(
+                        database=database_name,
+                        host=config.db_host,
+                        port=config.db_port,
+                        user=config.db_user,
+                        password=config.db_password,
+                    )
         finally:
             catalog.close()
-        if not credentials_by_database:
-            return None
-
-        def resolve(database: str) -> DatabaseCredentials | None:
-            return credentials_by_database.get(database)
-
-        return resolve
+        return tuple(credentials_by_database[name] for name in sorted(credentials_by_database))
 
     def snapshot_command(
         self, project_id: str | None = None, *, include_removed: bool = False
