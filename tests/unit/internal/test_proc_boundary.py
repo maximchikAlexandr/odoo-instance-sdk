@@ -19,6 +19,7 @@ from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessExecutionError,
     ProcessHandle,
+    ProcessOutputLimitError,
     ProcessResult,
     ProcessSpawnError,
     ProcessTimeoutError,
@@ -1654,6 +1655,20 @@ def test_run_captured_limited_budget_boundaries() -> None:
         run_captured_limited(
             _python("import sys; sys.stdout.buffer.write(b'x')"), max_output_bytes=0
         )
+
+
+def test_real_executor_terminates_oversized_stdout_and_stderr() -> None:
+    step = PreparedStep(
+        step_id="oversized-output",
+        argv=_python(
+            "import sys; sys.stdout.buffer.write(b'o' * 4096); sys.stderr.buffer.write(b'e' * 4096)"
+        ),
+        text=False,
+        max_output_bytes=1024,
+        max_combined_output_bytes=2048,
+    )
+    with pytest.raises(ProcessOutputLimitError, match="output exceeded"):
+        SubprocessExecutor().execute(step)
 
 
 def test_run_captured_limited_timeout_and_spawn_errors() -> None:

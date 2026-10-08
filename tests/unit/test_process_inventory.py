@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
+from odoo_instance_sdk.commands.output import model_to_dict
+from odoo_instance_sdk.exceptions import DuplicateStepError, UnplannedStepError
+from odoo_instance_sdk.internal.pg.builder import PsqlSpecification
+from odoo_instance_sdk.internal.proc import (
+    ProcessExecutionError,
+    ProcessOutputLimitError,
+    ProcessResult,
+    ProcessSpawnError,
+    ProcessTimeoutError,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.internal.process_inventory import (
     DatabaseCredentials,
     _BackendAttributionInput,
@@ -460,6 +473,310 @@ def test_processes_command_returns_immutable_command() -> None:
     assert command.plan.fingerprint is not None
     assert command.plan.steps
     assert all(step.read_only for step in command.plan.steps if hasattr(step, "read_only"))
+
+
+def _captured_process_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+    executor: RecordingExecutor,
+    *,
+    snapshot: Snapshot | None = None,
+    credentials: tuple[DatabaseCredentials, ...] | None = None,
+) -> EnvironmentMonitor:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable",
+        lambda: None,
+    )
+    captured_snapshot = (
+        snapshot
+        if snapshot is not None
+        else _snapshot(
+            (_project(project_id="project-1", cluster=_healthy_cluster()),),
+            (_environment(database="demo"),),
+        )
+    )
+    captured_credentials = (
+        credentials
+        if credentials is not None
+        else (
+            DatabaseCredentials(
+                database="demo",
+                host="127.0.0.1",
+                port=5432,
+                user="odoo",
+                password="super-secret",
+            ),
+        )
+    )
+
+    class SnapshotCommand:
+        def run(self) -> Snapshot:
+            return captured_snapshot
+
+    monkeypatch.setattr(
+        EnvironmentMonitor,
+        "snapshot_command",
+        lambda self, project_id=None, include_removed=False: SnapshotCommand(),
+    )
+    monkeypatch.setattr(
+        EnvironmentMonitor,
+        "_process_inventory_credentials",
+        lambda self, project_id=None: captured_credentials,
+    )
+    return EnvironmentMonitor(_executor=executor)
+
+
+def test_processes_command_preplans_and_consumes_backend_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("psutil.pid_exists", lambda pid: True)
+
+    def result_factory(step: object) -> ProcessResult:
+        prepared = step
+        return ProcessResult(
+            argv=prepared.argv,  # type: ignore[attr-defined]
+            returncode=0,
+            stdout=json.dumps([{"pid": 700, "datname": "demo", "state": "idle"}]),
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,  # type: ignore[attr-defined]
+            environment=prepared.environment,  # type: ignore[attr-defined]
+        )
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    monitor = _captured_process_monitor(monkeypatch, executor)
+    command = monitor.processes_command(project_id="project-1")
+
+    process_steps = command.plan.process_steps
+    assert len(process_steps) == 1
+    assert process_steps[0].step_id == "process_inventory.project-1.demo.pg_stat_activity"
+    assert process_steps[0].executable == "psql"
+    public_plan = repr(command.plan)
+    assert "super-secret" not in public_plan
+    assert "super-secret" not in command.plan.fingerprint
+    assert "super-secret" not in repr(model_to_dict(command.plan))
+
+    inventory = command.run()
+
+    assert len(executor.executed) == 1
+    assert inventory.environments[0].backend_groups[0].connection_count == 1
+    assert inventory.environments[0].backend_groups[0].unavailability_reason is None
+
+
+def _spawn_failure(argv: tuple[str, ...]) -> ProcessExecutionError:
+    return ProcessSpawnError(
+        argv,
+        "spawn denied super-secret",
+        duration=0.0,
+        secrets=("super-secret",),
+    )
+
+
+def _timeout_failure(argv: tuple[str, ...]) -> ProcessExecutionError:
+    return ProcessTimeoutError(
+        argv,
+        5.0,
+        duration=5.0,
+        secrets=("super-secret",),
+        stderr_tail="timed out with super-secret",
+    )
+
+
+def _output_limit_failure(argv: tuple[str, ...]) -> ProcessExecutionError:
+    return ProcessOutputLimitError(
+        argv,
+        "output exceeded configured limit super-secret",
+        duration=0.0,
+        secrets=("super-secret",),
+    )
+
+
+def _two_backend_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+    executor: RecordingExecutor,
+) -> EnvironmentMonitor:
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("psutil.pid_exists", lambda pid: True)
+    snapshot = _snapshot(
+        (_project(project_id="project-1", cluster=_healthy_cluster()),),
+        (
+            _environment(database="demo", runtime=_running_runtime("demo")),
+            _environment(env_id="env-2", name="healthy", database="healthy"),
+        ),
+    )
+    credentials = (
+        DatabaseCredentials(
+            database="demo", host="127.0.0.1", port=5432, user="odoo", password="super-secret"
+        ),
+        DatabaseCredentials(
+            database="healthy", host="127.0.0.1", port=5432, user="odoo", password="healthy"
+        ),
+    )
+    return _captured_process_monitor(
+        monkeypatch, executor, snapshot=snapshot, credentials=credentials
+    )
+
+
+def _assert_two_backend_preservation(
+    inventory: ProcessInventory,
+    executor: RecordingExecutor,
+    reason: str,
+) -> None:
+    groups = {
+        group.database: group
+        for environment in inventory.environments
+        for group in environment.backend_groups
+    }
+    assert groups["demo"].unavailability_reason == reason
+    assert groups["healthy"].unavailability_reason is None
+    assert inventory.environments[0].odoo is not None
+    assert inventory.environments[0].odoo.state is RuntimeState.READY
+    assert len(executor.executed) == 2
+
+
+@pytest.mark.parametrize(
+    ("error_factory", "reason"),
+    [
+        (_spawn_failure, "psql_missing"),
+        (_timeout_failure, "timeout"),
+        (_output_limit_failure, "query_failed"),
+    ],
+)
+def test_processes_command_maps_captured_transport_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    error_factory: Callable[[tuple[str, ...]], ProcessExecutionError],
+    reason: str,
+) -> None:
+    errors: list[BaseException] = []
+
+    def result_factory(step: object) -> ProcessResult:
+        prepared = step
+        if ".demo." in prepared.step_id:  # type: ignore[attr-defined]
+            error = error_factory(prepared.argv)  # type: ignore[attr-defined]
+            errors.append(error)
+            raise error
+        return ProcessResult(
+            argv=prepared.argv,  # type: ignore[attr-defined]
+            returncode=0,
+            stdout=json.dumps([{"pid": 701, "datname": "healthy", "state": "idle"}]),
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,  # type: ignore[attr-defined]
+            environment=prepared.environment,  # type: ignore[attr-defined]
+        )
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    monitor = _two_backend_monitor(monkeypatch, executor)
+
+    inventory = monitor.processes_command(project_id="project-1").run()
+
+    _assert_two_backend_preservation(inventory, executor, reason)
+    assert errors
+    assert "super-secret" not in str(errors[0])
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "reason"),
+    [
+        (1, "", "permission denied for pg_stat_activity", "privilege_denied"),
+        (0, "{}", "", "invalid_response"),
+    ],
+)
+def test_processes_command_maps_completed_backend_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    reason: str,
+) -> None:
+    def result_factory(step: object) -> ProcessResult:
+        prepared = step
+        if ".healthy." not in prepared.step_id:  # type: ignore[attr-defined]
+            return ProcessResult(
+                argv=prepared.argv,  # type: ignore[attr-defined]
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+                duration=0.0,
+                cwd=prepared.cwd,  # type: ignore[attr-defined]
+                environment=prepared.environment,  # type: ignore[attr-defined]
+            )
+        return ProcessResult(
+            argv=prepared.argv,  # type: ignore[attr-defined]
+            returncode=0,
+            stdout=json.dumps([{"pid": 702, "datname": "healthy", "state": "idle"}]),
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,  # type: ignore[attr-defined]
+            environment=prepared.environment,  # type: ignore[attr-defined]
+        )
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    monitor = _two_backend_monitor(monkeypatch, executor)
+
+    inventory = monitor.processes_command(project_id="project-1").run()
+
+    _assert_two_backend_preservation(inventory, executor, reason)
+
+
+def _mismatch_execution(
+    execute: Callable[[PsqlSpecification], ProcessResult],
+    specification: PsqlSpecification,
+) -> ProcessResult:
+    bad_step = replace(
+        specification.prepared_step,
+        argv=(*specification.prepared_step.argv, "--mismatch"),
+    )
+    return execute(replace(specification, prepared_step=bad_step))
+
+
+def _duplicate_execution(
+    execute: Callable[[PsqlSpecification], ProcessResult],
+    specification: PsqlSpecification,
+) -> ProcessResult:
+    result = execute(specification)
+    execute(specification)
+    return result
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (_mismatch_execution, UnplannedStepError),
+        (_duplicate_execution, DuplicateStepError),
+    ],
+)
+def test_processes_command_propagates_postgresql_ledger_invariants(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: Callable[
+        [Callable[[PsqlSpecification], ProcessResult], PsqlSpecification], ProcessResult
+    ],
+    expected: type[UnplannedStepError | DuplicateStepError],
+) -> None:
+    def result_factory(step: object) -> ProcessResult:
+        prepared = step
+        return ProcessResult(
+            argv=prepared.argv,  # type: ignore[attr-defined]
+            returncode=0,
+            stdout=json.dumps([{"pid": 700, "datname": "demo", "state": "idle"}]),
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,  # type: ignore[attr-defined]
+            environment=prepared.environment,  # type: ignore[attr-defined]
+        )
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    monitor = _captured_process_monitor(monkeypatch, executor)
+    from odoo_instance_sdk.internal.pg import transport
+
+    original_execute = transport.execute_psql
+
+    def invalid_execute(specification: PsqlSpecification) -> ProcessResult:
+        return operation(original_execute, specification)
+
+    monkeypatch.setattr(transport, "execute_psql", invalid_execute)
+    with pytest.raises(expected):
+        monitor.processes_command(project_id="project-1").run()
 
 
 def test_processes_delegates_to_processes_command_without_second_sample(
