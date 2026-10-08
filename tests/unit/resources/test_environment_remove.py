@@ -136,17 +136,37 @@ class TestEnvRemove:
         assert updated.state == EnvironmentState.READY
 
     def test_shared_source_db_never_dropped(
-        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        manifest = project_manifest / ".odcli" / "project.toml"
+        manifest.write_text(
+            manifest.read_text()
+            + "\n[postgres]\n"
+            + 'mode = "compose"\n'
+            + 'image = "postgres:16"\n'
+            + "port = 5432\n"
+        )
+        filestore = project_manifest / ".odcli" / "filestore"
+        filestore.mkdir()
+        marker = filestore / "source-data"
+        marker.write_text("keep")
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/rm-shared", options=opts)
+        drop = MagicMock()
+        monkeypatch.setattr("odoo_instance_sdk.internal.pg.drop.build_database_drop_command", drop)
         env_client.environments.remove(env)
         removed = env_client.environments.get(str(env.id))
         assert removed.state == EnvironmentState.REMOVED
+        drop.assert_not_called()
+        assert marker.read_text() == "keep"
 
     def test_idempotent_missing_artifact(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path

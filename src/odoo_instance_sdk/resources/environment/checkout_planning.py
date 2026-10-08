@@ -188,6 +188,7 @@ class _CheckoutPlan:
     source_git_branch: str | None = None
     selected_backup: Backup | None = None
     branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
+    data_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

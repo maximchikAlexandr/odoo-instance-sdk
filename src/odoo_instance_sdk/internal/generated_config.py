@@ -87,7 +87,7 @@ def render_config(
     # Self-contained Compose projects own a project-local filestore so restore
     # can record and `db rm` can clean a proven directory inside the project.
     if data_dir is not None:
-        options["data_dir"] = str(Path(data_dir).resolve())
+        options["data_dir"] = str(Path(data_dir))
 
     output = io.StringIO()
     src.write(output)
