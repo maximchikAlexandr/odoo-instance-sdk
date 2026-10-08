@@ -255,6 +255,31 @@ one progress-free document on stdout and put sanitized diagnostics on stderr.
 The public SDK exposes these typed operations directly while CLI-only resource
 diagnosis remains CLI-private.
 
+### Resumable lifecycle recovery
+
+Project initialization and database preparation retain durable intent while
+keeping success truthful. An identical Compose init resumes the existing
+cluster and SQL bootstrap checks when either postcondition is missing; once
+both are proven, a complete retry verifies them without recreating `tmp`. The
+CLI's Rich, JSON, and TOON no-op envelopes preserve the requested `dry_run`
+value.
+
+Restore failure context and `DatabaseInventoryItem.restore_state` distinguish
+an `incomplete` target from a completed restore. The state is published only
+after the captured existence probe proves the exact selected database in the
+active owned cluster, with the selected source provenance. It is diagnostic
+and recoverable, never ready or default. The existing guarded drop/retry path
+revalidates cluster, endpoint, target, provenance, volume, active-use, and
+filestore containment at execution time; no exact binding means no destructive
+authority.
+
+Successful project-owned default switching updates the manifest and generated
+`db_name`/`dbfilter` together under the preparation lock while preserving
+unrelated settings. External source configs remain byte-for-byte unchanged.
+Atomic per-file replacement and ordinary-exception compensation cover normal
+write failures; a host crash between replacements is a documented recovery
+window repaired by later init or preparation drift reconciliation.
+
 ## Modules and translations
 
 Module discovery is exposed from an instance and reads safe literal manifests

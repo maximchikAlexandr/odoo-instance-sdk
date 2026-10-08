@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
+from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.project_init import (
     evaluate_init_completeness,
@@ -102,6 +103,7 @@ def _execute_manifest_phase(
     no_input: bool,
     confirm_partial: Callable[[list[str], dict[str, str]], None] | None,
     remote_database_names: list[str] | None,
+    resume_existing: bool,
 ) -> dict[str, JsonValue]:
     from odoo_instance_sdk.exceptions import InstanceConfigurationError
 
@@ -114,12 +116,29 @@ def _execute_manifest_phase(
         dry_run=False,
         remote_database_names=remote_database_names,
     )
-    if missing and confirm_partial is not None:
+    if missing and confirm_partial is not None and not resume_existing:
         confirm_partial(missing, details)
-    if missing and no_input and not allow_partial:
+    if missing and no_input and not allow_partial and not resume_existing:
         raise InstanceConfigurationError(
             f"init_incomplete: missing capabilities {missing} ({details})"
         )
+    if resume_existing:
+        from odoo_instance_sdk.exceptions import StalePlanError
+
+        root, common, _ = _planned_project_identity(project_path)
+        lock_id = hashlib.sha256(str(common).encode()).hexdigest()
+        with exclusive_lock(project_manifest_lock_path(lock_id)):
+            current = ProjectConfig.load(root)
+            if manifest_dict(current) != manifest_dict(effective_config):
+                raise StalePlanError(
+                    "project manifest changed before Compose init resume",
+                    expected=manifest_dict(effective_config),
+                    actual=manifest_dict(current),
+                )
+            context.action("init")
+            register_initialized_project(root)
+            context.complete_action("init")
+            return manifest_dict(current)
     context.action("init")
     result = init_project(
         project_path,
@@ -190,6 +209,7 @@ def init_project_command(
     existing_test_instance: TestInstanceProjectConfig | None = None,
     remote_instances: tuple[RemoteSourceConfig, ...] | None = None,
     allow_partial: bool = False,
+    resume_existing: bool = False,
     no_input: bool = False,
     dry_run: bool = False,
     remote_database_names: list[str] | None = None,
@@ -227,6 +247,7 @@ def init_project_command(
         preliminary_missing
         and no_input
         and not allow_partial
+        and not resume_existing
         and not (show_remote_names_step and not dry_run)
     ):
         from odoo_instance_sdk.exceptions import InstanceConfigurationError
@@ -251,9 +272,12 @@ def init_project_command(
 
     init_action = PreparedAction(
         step_id="init",
-        action="init",
-        description="Write project manifest",
-        mutating=True,
+        action="verify-init-manifest" if resume_existing else "init",
+        description=(
+            "Verify existing project manifest" if resume_existing else "Write project manifest"
+        ),
+        read_only=resume_existing,
+        mutating=not resume_existing,
     )
     prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (
         *((remote_names_step,) if remote_names_step is not None else ()),
@@ -282,6 +306,7 @@ def init_project_command(
             no_input=no_input,
             confirm_partial=confirm_partial,
             remote_database_names=resolved_remote_names,
+            resume_existing=resume_existing,
         )
         if compose_followup is not None:
             _execute_compose_followup_phase(context, compose_followup)

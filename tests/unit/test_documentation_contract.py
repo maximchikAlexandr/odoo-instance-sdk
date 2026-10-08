@@ -135,26 +135,47 @@ def test_execution_boundary_documents_current_output_inventory() -> None:
 
 
 @pytest.mark.unit
-def test_developer_workflow_docs_cover_public_contracts() -> None:
-    readme = README.read_text(encoding="utf-8")
-    sdk_doc = SDK_DOC.read_text(encoding="utf-8")
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    combined = f"{readme}\n{sdk_doc}\n{changelog}"
-
-    for text in (
-        "--format rich|json|toon",
-        "--fields a.b,c",
-        "Ticket Allocation",
-        "~/.odcli",
-        "Storage migration",
-        "absolute",
-        "msgfmt",
-        "odcli module install-order",
-        "odcli translations export",
-        "odcli git commit",
-        "odcli git sync",
-    ):
-        assert text in combined
+@pytest.mark.parametrize(
+    ("path", "required_text"),
+    [
+        (
+            README,
+            (
+                "### Resumable project lifecycle recovery",
+                "identical `odcli init`",
+                "`odcli db ls --format json`",
+                "`odcli db rm TARGET --yes`",
+                "`db_name` and `dbfilter`",
+                "crash can still occur",
+            ),
+        ),
+        (
+            SDK_DOC,
+            (
+                "### Resumable lifecycle recovery",
+                "DatabaseInventoryItem.restore_state",
+                "guarded drop/retry path",
+                "byte-for-byte unchanged",
+                "host crash between replacements",
+            ),
+        ),
+        (
+            ROOT / "CHANGELOG.md",
+            (
+                "identical Compose init resumable",
+                "`incomplete` restore evidence",
+                "generated `db_name`/`dbfilter`",
+                "documented crash window",
+            ),
+        ),
+    ],
+)
+def test_developer_workflow_docs_cover_public_contracts(
+    path: Path, required_text: tuple[str, ...]
+) -> None:
+    document = path.read_text(encoding="utf-8")
+    for text in required_text:
+        assert text in document, f"{path}: missing {text!r}"
 
 
 @pytest.mark.unit

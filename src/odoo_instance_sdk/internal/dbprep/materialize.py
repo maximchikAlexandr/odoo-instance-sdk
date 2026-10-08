@@ -3,10 +3,9 @@ from __future__ import annotations  # noqa: I001 -- keep dbprep source bindings 
 import contextlib
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 
@@ -17,10 +16,6 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentConflictError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
-)
-from odoo_instance_sdk.internal.dbprep.materialize_steps import (
-    _preparation_action_steps,
-    _preparation_process_steps,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.dbprep.source import (
@@ -64,6 +59,10 @@ from odoo_instance_sdk.internal.dbprep.source_binding import (
     _manifest_after_preparation as _manifest_after_preparation,
     build_target_instance as build_target_instance,
 )
+from odoo_instance_sdk.internal.dbprep.materialize_steps import (
+    _captured_restore_exists as _captured_restore_exists,
+    _restore_failure_probe_evidence as _restore_failure_probe_evidence,
+)
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
     database_preparation_lock_path,
@@ -80,6 +79,7 @@ from odoo_instance_sdk.internal.project_env import (
     load_project_environment,
 )
 from odoo_instance_sdk.internal.project_manifest import write_manifest
+from odoo_instance_sdk.internal.project_init import switch_project_default
 from odoo_instance_sdk.internal.project_runtime import (
     resolve_project_http_port,
 )
@@ -91,6 +91,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
+    RestoreState,
     StartConfig,
 )
 from odoo_instance_sdk.project import ProjectConfig
@@ -98,13 +99,18 @@ from odoo_instance_sdk.project import ProjectConfig
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.pg.drop import (
+        DatabaseDropExecutionContext,
+        DatabaseDropRestoreExpectation,
+        DatabaseDropRestoreExpectationHolder,
+        DatabaseDropResult,
+    )
     from odoo_instance_sdk.internal.proc import (
-        PreparedAction,
-        PreparedStep,
         ProcessExecutor,
         RunContext,
     )
     from odoo_instance_sdk.models import DevelopmentEnvironment
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
 @contextlib.contextmanager
@@ -113,6 +119,163 @@ def _wait_for_preparation_lock(project_id: str, *, timeout: float = 300.0) -> It
         database_preparation_lock_path(project_id), time.monotonic() + timeout
     ):
         yield
+
+
+def _record_incomplete_restore(  # noqa: C901
+    client: OdooClient,
+    preflight: RestorePreflight,
+    *,
+    exists_before: bool | None,
+    exists_after: bool | None,
+    backup: Backup | None,
+    local_restore: SelectedBackupRestorePayload | None,
+) -> bool:
+    """Record exact recovery evidence, returning false for any missing proof."""
+    if exists_before is not False or exists_after is not True:
+        return False
+    provenance = getattr(preflight.postgres_cluster, "_restore_provenance", None)
+    if not callable(provenance):
+        return False
+    try:
+        cluster_id, data_directory = provenance()
+    except Exception:
+        return False
+    if not isinstance(cluster_id, str) or not cluster_id:
+        return False
+    if data_directory is None:
+        try:
+            start_config = StartConfig.from_odoo_config(preflight.source_config)
+            if isinstance(start_config.data_dir, str) and start_config.data_dir:
+                data_directory = str(
+                    _resolve_data_dir(start_config.data_dir, preflight.source_config)
+                )
+        except (ConfigError, OSError, ValueError, InstanceConfigurationError):
+            return False
+    source = preflight.restore_source
+    source_kind: str
+    source_sha256: str | None = None
+    backup_id: str | None = None
+    if isinstance(source, _LocalArchiveRestoreSource):
+        if local_restore is None:
+            return False
+        source_kind = "local_archive"
+        source_sha256 = local_restore.verified_sha256
+    else:
+        if backup is None:
+            return False
+        source_kind = "catalogue"
+        backup_id = str(backup.id)
+    if data_directory is not None and not isinstance(data_directory, str | Path):
+        data_directory = None
+    try:
+        catalog = client.get_catalog()
+        catalog.record_restore(
+            preflight.postgres_cluster.endpoint_host,
+            preflight.postgres_cluster.endpoint_port,
+            preflight.target_database,
+            backup_id,
+            source_kind=source_kind,
+            source_sha256=source_sha256,
+            cluster_id=cluster_id,
+            data_directory=data_directory,
+            state=RestoreState.INCOMPLETE,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _matches_incomplete_restore(  # noqa: C901
+    client: OdooClient,
+    cluster: PostgresCluster,
+    target_database: str,
+    restore_source: _RestoreSource,
+    backup: Backup | None,
+    local_restore: SelectedBackupRestorePayload | None,
+) -> DatabaseDropRestoreExpectation | None:
+    try:
+        latest_binding = getattr(client.get_catalog(), "_latest_restore_binding", None)
+        if not callable(latest_binding):
+            return None
+        cluster_id, data_directory = cluster._restore_provenance()
+        binding = latest_binding(
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+            target_database,
+        )
+    except Exception:
+        return None
+    if binding is None or binding["state"] != RestoreState.INCOMPLETE.value:
+        return None
+    if binding["cluster_id"] != str(cluster_id):
+        return None
+    recorded_directory = binding["data_directory"]
+    if (recorded_directory is None) != (data_directory is None):
+        return None
+    if recorded_directory is not None and str(recorded_directory) != str(data_directory):
+        return None
+    if isinstance(restore_source, _CatalogueRestoreSource):
+        if not (
+            backup is not None
+            and binding["source_kind"] == "catalogue"
+            and binding["backup_id"] == str(backup.id)
+            and binding["source_sha256"] is None
+        ):
+            return None
+    elif isinstance(restore_source, _LocalArchiveRestoreSource):
+        if not (
+            local_restore is not None
+            and binding["source_kind"] == "local_archive"
+            and binding["backup_id"] is None
+            and binding["source_sha256"] == local_restore.verified_sha256
+        ):
+            return None
+    else:
+        return None
+    from odoo_instance_sdk.internal.pg.drop import DatabaseDropRestoreExpectation
+
+    return DatabaseDropRestoreExpectation(
+        cluster_id=str(cluster_id),
+        backup_id=binding["backup_id"],
+        source_kind=str(binding["source_kind"]),
+        source_sha256=binding["source_sha256"],
+        data_directory=str(data_directory) if data_directory is not None else None,
+        restore_state=RestoreState.INCOMPLETE.value,
+    )
+
+
+def _build_incomplete_retry_command(
+    client: OdooClient,
+    project: ProjectConfig | str | Path,
+    target_database: str,
+    *,
+    executor: ProcessExecutor,
+    expected_restore: DatabaseDropRestoreExpectationHolder,
+) -> Command[DatabaseDropResult]:
+    from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
+
+    initial, root = _load_project(project)
+    local_instance = client.instance.from_project(initial)
+    return build_database_drop_command(
+        local_instance,
+        root,
+        target_database,
+        command_origin="database-restore-retry",
+        defer_planning=True,
+        executor=executor,
+        expected_restore=lambda: expected_restore.value,
+    )
+
+
+def _reconcile_incomplete_restore(
+    retry_command: Command[DatabaseDropResult],
+    context: RunContext[DatabasePreparationResult],
+) -> None:
+    callback = cast(
+        "Callable[[DatabaseDropExecutionContext], DatabaseDropResult]",
+        retry_command._prepared().callback,
+    )
+    callback(cast("DatabaseDropExecutionContext", context))
 
 
 @contextlib.contextmanager
@@ -127,6 +290,7 @@ def _restore_preflight(  # noqa: C901
     restore_source: _RestoreSourceInput = None,
     selected_restore: SelectedBackupRestorePayload | None = None,
     remote_password: str | None = None,
+    retry_expectation: DatabaseDropRestoreExpectationHolder | None = None,
 ) -> Iterator[RestorePreflight]:
     """Own the complete restore preflight and preparation-lock lifetime."""
     if not options.restore:
@@ -228,6 +392,7 @@ def _restore_preflight(  # noqa: C901
         # later public ``db.drop`` can validate the same ownership evidence.
         local._postgres_cluster = cluster
         resolved_database: str | None = None
+        reconcile_incomplete = False
         if (
             isinstance(selected_source, _RemoteRestoreSource)
             and source is not None
@@ -260,9 +425,21 @@ def _restore_preflight(  # noqa: C901
         else:
             validate_db_name(target_database)
             if local.databases.exists(target_database):
-                raise DatabaseAlreadyExistsError(
-                    f"Database {target_database!r} already exists on {local_url}"
+                expectation = _matches_incomplete_restore(
+                    client,
+                    cluster,
+                    target_database,
+                    selected_source,
+                    catalogue_backup,
+                    selected_restore,
                 )
+                if expectation is None:
+                    raise DatabaseAlreadyExistsError(
+                        f"Database {target_database!r} already exists on {local_url}"
+                    )
+                reconcile_incomplete = True
+                if retry_expectation is not None:
+                    retry_expectation.value = expectation
             target = target_database
         yield RestorePreflight(
             project=current,
@@ -277,6 +454,7 @@ def _restore_preflight(  # noqa: C901
             target_database=target,
             resolved_database=resolved_database,
             selected_restore=selected_restore,
+            reconcile_incomplete=reconcile_incomplete,
         )
 
 
@@ -292,6 +470,9 @@ def prepare_restore(  # noqa: C901
     target_database: str | None = None,
     admin_password: str | None = None,
     admin_password_provenance: str = "environment",
+    retry_drop_command: Command[DatabaseDropResult] | None = None,
+    execution_context: RunContext[DatabasePreparationResult] | None = None,
+    retry_expectation: DatabaseDropRestoreExpectationHolder | None = None,
 ) -> DatabasePreparationResult:
     """Run the full restore preparation while retaining the project lock."""
     if not options.restore:
@@ -323,35 +504,17 @@ def prepare_restore(  # noqa: C901
         else None
     )
     try:
-        if selected_restore is None:
-            preflight_context = _restore_preflight(
-                client,
-                project,
-                options=options,
-                coalesce=coalesce,
-                target_database=restore_inputs[0] if restore_inputs is not None else None,
-                remote_password=remote_password,
-            )
-        else:
-            preflight_context = _restore_preflight(
-                client,
-                project,
-                options=options,
-                coalesce=coalesce,
-                target_database=restore_inputs[0] if restore_inputs is not None else None,
-                remote_password=remote_password,
-                selected_restore=selected_restore,
-            )
-        if not isinstance(selected_source, _RemoteRestoreSource):
+        preflight_target = restore_inputs[0] if restore_inputs is not None else None
+        if isinstance(selected_source, _RemoteRestoreSource):
             if selected_restore is None:
                 preflight_context = _restore_preflight(
                     client,
                     project,
                     options=options,
                     coalesce=coalesce,
-                    target_database=restore_inputs[0] if restore_inputs is not None else None,
-                    restore_source=selected_source,
+                    target_database=preflight_target,
                     remote_password=remote_password,
+                    retry_expectation=retry_expectation,
                 )
             else:
                 preflight_context = _restore_preflight(
@@ -359,11 +522,34 @@ def prepare_restore(  # noqa: C901
                     project,
                     options=options,
                     coalesce=coalesce,
-                    target_database=restore_inputs[0] if restore_inputs is not None else None,
-                    restore_source=selected_source,
+                    target_database=preflight_target,
                     remote_password=remote_password,
                     selected_restore=selected_restore,
+                    retry_expectation=retry_expectation,
                 )
+        elif selected_restore is None:
+            preflight_context = _restore_preflight(
+                client,
+                project,
+                options=options,
+                coalesce=coalesce,
+                target_database=preflight_target,
+                restore_source=selected_source,
+                remote_password=remote_password,
+                retry_expectation=retry_expectation,
+            )
+        else:
+            preflight_context = _restore_preflight(
+                client,
+                project,
+                options=options,
+                coalesce=coalesce,
+                target_database=preflight_target,
+                restore_source=selected_source,
+                remote_password=remote_password,
+                selected_restore=selected_restore,
+                retry_expectation=retry_expectation,
+            )
         with preflight_context as preflight:
             current = preflight.project
             root = current.repository_root
@@ -423,6 +609,30 @@ def prepare_restore(  # noqa: C901
                     _assert_verified_snapshot_unchanged(restore_payload)
                 else:
                     assert backup is not None
+                if preflight.reconcile_incomplete:
+                    _consume_action_if_planned("database.restore.incomplete-retry")
+                    expectation = _matches_incomplete_restore(
+                        client,
+                        preflight.postgres_cluster,
+                        preflight.target_database,
+                        preflight.restore_source,
+                        backup,
+                        local_restore,
+                    )
+                    if expectation is None:
+                        raise ConfigError(  # noqa: TRY301
+                            "incomplete restore source changed before retry"
+                        )
+                    if retry_expectation is not None:
+                        retry_expectation.value = expectation
+                    if retry_drop_command is None or execution_context is None:
+                        raise ConfigError(  # noqa: TRY301
+                            "incomplete restore retry requires a prepared command execution"
+                        )
+                    _reconcile_incomplete_restore(
+                        retry_drop_command,
+                        execution_context,
+                    )
                 from odoo_instance_sdk.internal.restore_stages import (
                     restore_stage as _restore_stage,
                 )
@@ -488,7 +698,7 @@ def prepare_restore(  # noqa: C901
                 )
 
                 with _restore_stage("default_switch"):
-                    write_manifest(root, switched)
+                    switch_project_default(root, switched, write_manifest_fn=write_manifest)
                 default_switch_confirmed = True
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
@@ -505,6 +715,16 @@ def prepare_restore(  # noqa: C901
                 )
             except BaseException as exc:
                 _consume_action_if_planned("database.prepare.rollback")
+                exists_before, exists_after = _restore_failure_probe_evidence()
+                retained_incomplete = _record_incomplete_restore(
+                    client,
+                    preflight,
+                    exists_before=exists_before,
+                    exists_after=exists_after,
+                    backup=backup,
+                    local_restore=local_restore,
+                )
+                database_confirmed = retained_incomplete
                 _annotate_retained_failure(
                     error=exc,
                     backup=backup,
@@ -515,6 +735,7 @@ def prepare_restore(  # noqa: C901
                         else None
                     ),
                     database_confirmed=database_confirmed,
+                    restore_state=("incomplete" if retained_incomplete else None),
                     default_switch_confirmed=default_switch_confirmed,
                     source_kind=(
                         "local_archive"
@@ -554,6 +775,7 @@ def prepare_restore(  # noqa: C901
                 "postgres.ensure.final.health",
                 "database.restore.exists-before",
                 "database.restore.exists-after",
+                "database.restore.incomplete-retry",
                 "instance.shell_script",
             )
         )
@@ -739,262 +961,6 @@ def _assert_source_plan_current(
         )
 
 
-@dataclass(slots=True)
-class DatabasePreparationCoordinator:
-    client: OdooClient
-
-    def prepare(
-        self,
-        project: ProjectConfig | str | Path,
-        *,
-        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        coalesce: bool = False,
-        restore_source: _RestoreSourceInput = None,
-        target_database: str | None = None,
-        admin_password: str | None = None,
-        admin_password_provenance: str = "environment",
-    ) -> DatabasePreparationResult:
-        return self.prepare_command(
-            project,
-            options=options,
-            coalesce=coalesce,
-            restore_source=restore_source,
-            target_database=target_database,
-            admin_password=admin_password,
-            admin_password_provenance=admin_password_provenance,
-        ).run()
-
-    def prepare_command(
-        self,
-        project: ProjectConfig | str | Path,
-        *,
-        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        coalesce: bool = False,
-        restore_source: _RestoreSourceInput = None,
-        target_database: str | None = None,
-        admin_password: str | None = None,
-        admin_password_provenance: str = "environment",
-        executor: ProcessExecutor | None = None,
-    ) -> Command[DatabasePreparationResult]:
-        planned_source = None
-        if isinstance(_coerce_restore_source(restore_source), _RemoteRestoreSource):
-            planned_project, _planned_root = _load_project(project)
-            planned_source = _source_identity(resolve_test_source(planned_project, options))
-        selected_restore = (
-            _capture_selected_restore(project, restore_source) if options.restore else None
-        )
-        restore_inputs = _capture_restore_inputs(
-            project,
-            options,
-            restore_source=restore_source,
-            client=self.client,
-            target_database=target_database,
-            selected_restore=selected_restore,
-        )
-        steps: tuple[PreparedStep | PreparedAction, ...] = (
-            *_preparation_action_steps(
-                operation="prepare", options=options, restore_source=restore_source
-            ),
-            *_preparation_process_steps(
-                project,
-                options=options,
-                restore_inputs=restore_inputs,
-                admin_password=admin_password,
-            ),
-        )
-        return self._action_command(
-            "database.prepare",
-            "Prepare a project database",
-            lambda: self._prepare_impl(
-                project,
-                options=options,
-                coalesce=coalesce,
-                restore_inputs=restore_inputs,
-                restore_source=restore_source,
-                selected_restore=selected_restore,
-                target_database=target_database,
-                admin_password=admin_password,
-                admin_password_provenance=admin_password_provenance,
-                planned_source=planned_source,
-            ),
-            executor=executor,
-            steps=steps,
-            optional_steps=tuple(
-                step.step_id
-                for step in steps
-                if step.step_id
-                in {
-                    "database.restore.exists-reservation",
-                    "database.restore.exists-before",
-                    "database.restore.exists-after",
-                    "database.prepare.rollback",
-                    "database.prepare.local-archive.cleanup",
-                }
-            ),
-        )
-
-    def _prepare_impl(
-        self,
-        project: ProjectConfig | str | Path,
-        *,
-        options: DatabaseRefreshOptions,
-        coalesce: bool,
-        restore_inputs: tuple[str, Path] | None = None,
-        restore_source: _RestoreSourceInput = None,
-        selected_restore: SelectedBackupRestorePayload | None = None,
-        target_database: str | None = None,
-        admin_password: str | None = None,
-        admin_password_provenance: str = "environment",
-        planned_source: tuple[str | None, str, str | None, str | None] | None = None,
-    ) -> DatabasePreparationResult:
-        _assert_source_plan_current(project, options, planned_source)
-        if options.restore:
-            return prepare_restore(
-                self.client,
-                project,
-                options=options,
-                coalesce=coalesce,
-                restore_inputs=restore_inputs,
-                restore_source=restore_source,
-                selected_restore=selected_restore,
-                target_database=target_database,
-                admin_password=admin_password,
-                admin_password_provenance=admin_password_provenance,
-            )
-        return prepare_download(self.client, project, options=options, wait_for_lock=True)
-
-    def refresh_database(
-        self,
-        project: ProjectConfig | str | Path,
-        *,
-        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSourceInput = None,
-        target_database: str | None = None,
-        admin_password: str | None = None,
-        admin_password_provenance: str = "environment",
-    ) -> DatabasePreparationResult:
-        return self.refresh_database_command(
-            project,
-            options=options,
-            restore_source=restore_source,
-            target_database=target_database,
-            admin_password=admin_password,
-            admin_password_provenance=admin_password_provenance,
-        ).run()
-
-    def refresh_database_command(
-        self,
-        project: ProjectConfig | str | Path,
-        *,
-        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSourceInput = None,
-        target_database: str | None = None,
-        admin_password: str | None = None,
-        admin_password_provenance: str = "environment",
-        executor: ProcessExecutor | None = None,
-    ) -> Command[DatabasePreparationResult]:
-        planned_source = None
-        if isinstance(_coerce_restore_source(restore_source), _RemoteRestoreSource):
-            planned_project, _planned_root = _load_project(project)
-            planned_source = _source_identity(resolve_test_source(planned_project, options))
-        selected_restore = (
-            _capture_selected_restore(project, restore_source) if options.restore else None
-        )
-        restore_inputs = _capture_restore_inputs(
-            project,
-            options,
-            restore_source=restore_source,
-            client=self.client,
-            target_database=target_database,
-            selected_restore=selected_restore,
-        )
-        steps: tuple[PreparedStep | PreparedAction, ...] = (
-            *_preparation_action_steps(
-                operation="refresh", options=options, restore_source=restore_source
-            ),
-            *_preparation_process_steps(
-                project,
-                options=options,
-                restore_inputs=restore_inputs,
-                admin_password=admin_password,
-            ),
-        )
-        command = self._action_command(
-            "database.refresh",
-            "Refresh a project database",
-            lambda: self._prepare_impl(
-                project,
-                options=options,
-                coalesce=False,
-                restore_inputs=restore_inputs,
-                restore_source=restore_source,
-                selected_restore=selected_restore,
-                target_database=target_database,
-                admin_password=admin_password,
-                admin_password_provenance=admin_password_provenance,
-                planned_source=planned_source,
-            ),
-            executor=executor,
-            steps=steps,
-            optional_steps=tuple(
-                step.step_id
-                for step in steps
-                if step.step_id
-                in {
-                    "database.restore.exists-reservation",
-                    "database.restore.exists-before",
-                    "database.restore.exists-after",
-                    "database.prepare.rollback",
-                    "database.prepare.local-archive.cleanup",
-                }
-            ),
-        )
-        from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
-
-        return attach_auto_prune(
-            command,
-            backups=self.client.backups,
-            project=project,
-        )
-
-    def _action_command(
-        self,
-        step_id: str,
-        description: str,
-        callback: Callable[[], T],
-        *,
-        executor: ProcessExecutor | None,
-        steps: Sequence[PreparedStep | PreparedAction] = (),
-        optional_steps: Sequence[str] = (),
-    ) -> Command[T]:
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
-        from odoo_instance_sdk.internal.proc import (
-            PreparedAction,
-            SubprocessExecutor,
-            prepared_command,
-        )
-
-        step = PreparedAction(
-            step_id=step_id, action=step_id, description=description, mutating=True
-        )
-
-        def run(context: RunContext[T]) -> T:
-            context.action(step_id)
-            result = callback()
-            for optional_step_id in optional_steps:
-                if not context.consumed(optional_step_id):
-                    context.skip(optional_step_id)
-            return result
-
-        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)
-
-        return Command.from_prepared(
-            ExecutionPlan(
-                steps=tuple(item.public_projection() for item in prepared_steps),
-            ),
-            prepared_command(
-                run,
-                prepared_steps,
-                executor=executor or SubprocessExecutor(),
-            ),
-        )
+from odoo_instance_sdk.internal.dbprep.coordinator import (  # noqa: E402
+    DatabasePreparationCoordinator as DatabasePreparationCoordinator,
+)

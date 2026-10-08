@@ -118,6 +118,7 @@ def _annotate_retained_failure(
     target_database: str | None,
     backup_id: uuid.UUID | None = None,
     database_confirmed: bool = False,
+    restore_state: Literal["complete", "incomplete"] | None = None,
     default_switch_confirmed: bool = False,
     source_kind: str | None = None,
     source_sha256: str | None = None,
@@ -130,6 +131,7 @@ def _annotate_retained_failure(
         retained_database=target_database if database_confirmed else None,
         backup_id=backup.id if backup is not None else backup_id,
         database_confirmed=database_confirmed,
+        restore_state=restore_state,
         default_switch_confirmed=default_switch_confirmed,
         restore_stage_id=restore_stage_id if isinstance(restore_stage_id, str) else None,
         restore_stage_elapsed=(

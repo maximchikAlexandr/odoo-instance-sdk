@@ -1,5 +1,3 @@
-"""CLI-private, fail-closed PostgreSQL database deletion operation."""
-
 from __future__ import annotations
 
 import json
@@ -7,6 +5,7 @@ import os
 import shutil
 import stat
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -27,6 +26,14 @@ from odoo_instance_sdk.internal.files import open_directory_path_without_symlink
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.pg.context import DatabaseContext, resolve_database_context
+from odoo_instance_sdk.internal.pg.drop_types import (
+    DatabaseDropExecutionContext,
+    DatabaseDropRestoreExpectation,
+    DatabaseDropRestoreExpectationHolder,
+    DropOwnershipEvidence as _DropOwnershipEvidence,
+    assert_restore_expectation,
+    catalog_database_in_use,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -38,6 +45,8 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
+
+_catalog_database_in_use = catalog_database_in_use
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -125,35 +134,6 @@ class _DropInspection:
     exists: bool
     is_template: bool
     sessions: tuple[DatabaseDropSession, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _DropOwnershipEvidence:
-    event_type: str
-    event_sequence: int
-    cluster_id: str
-    compose_project: str
-    volume_name: str
-    backup_id: str | None
-    source_kind: str
-    source_sha256: str | None
-    data_directory: str | None
-
-
-def _catalog_database_in_use(
-    catalog: BackupCatalog, database: str, *, allow_environment_id: str | None = None
-) -> bool:
-    """Return whether catalogue evidence still binds the database to live work."""
-    snapshot = catalog._monitor_snapshot_rows(include_removed=False)
-    for environment, runtime in snapshot.environments:
-        if str(environment["id"]) != allow_environment_id and database in {
-            environment["source_db_name"],
-            environment["target_db_name"],
-        }:
-            return True
-        if runtime is not None and runtime["database_name"] == database:
-            return True
-    return any(runtime["database_name"] == database for runtime in snapshot.project_runtimes)
 
 
 def _validate_allowed_environment(
@@ -413,7 +393,6 @@ def _drop_ownership_evidence(  # noqa: C901
     allow_environment_backup_id: str | None = None,
     allow_environment_rollback_database: str | None = None,
 ) -> _DropOwnershipEvidence | None:
-    """Require exact active managed evidence when the real catalogue is available."""
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -496,6 +475,7 @@ def _drop_ownership_evidence(  # noqa: C901
             source_kind="bootstrap",
             source_sha256=None,
             data_directory=event["data_directory"],
+            restore_state="complete",
         )
     if event["event_type"] != "restored":
         raise ConfigError("database drop requires an exact current lifecycle event")
@@ -504,6 +484,8 @@ def _drop_ownership_evidence(  # noqa: C901
     )
     if binding is None or binding["cluster_id"] != str(claim.cluster_id):
         raise ConfigError("database drop requires an exact active restore binding")
+    if binding["state"] not in {"complete", "incomplete"}:
+        raise ConfigError("database drop restore binding state is invalid")
     source_kind = binding["source_kind"]
     source_sha256 = binding["source_sha256"]
     backup_id = binding["backup_id"]
@@ -547,11 +529,11 @@ def _drop_ownership_evidence(  # noqa: C901
         source_kind=source_kind,
         source_sha256=source_sha256,
         data_directory=data_directory_value,
+        restore_state=str(binding["state"]),
     )
 
 
 def _safe_proven_filestore(data_directory: str | None, database: str) -> bool:
-    """Require an existing, non-symlink filestore root for local evidence."""
     if data_directory is None:
         return False
     base = Path(data_directory)
@@ -651,6 +633,8 @@ def build_database_drop_command(  # noqa: C901
     idempotent_absent: bool = False,
     step_prefix: str = "",
     command_origin: str | None = None,
+    defer_planning: bool = False,
+    expected_restore: Callable[[], DatabaseDropRestoreExpectation | None] | None = None,
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
     database = database_name
@@ -686,22 +670,26 @@ def build_database_drop_command(  # noqa: C901
     cluster = binding.cluster
     if cluster is None:
         raise ConfigError("database drop requires the resolved project's PostgreSQL cluster")
-    ownership = _drop_ownership_evidence(
-        instance,
-        cluster,
-        database,
-        allow_environment_id=allow_environment_id,
-        allow_environment_backup_id=allow_environment_backup_id,
-        allow_environment_rollback_database=allow_environment_rollback_database,
-    )
     process_executor = executor or SubprocessExecutor()
     planning_step = _inspect_command_step(
         binding, database=database, step_id=_PLANNING_INSPECT_STEP, timeout=timeout
     )
-    planning_result = process_executor.execute(planning_step)
-    if not isinstance(planning_result, ProcessResult):
-        raise ConfigError("database safety inspection returned no process result")
-    inspection = _decode_inspection(planning_result, database)
+    ownership: _DropOwnershipEvidence | None = None
+    if defer_planning:
+        inspection = _DropInspection(exists=True, is_template=False, sessions=())
+    else:
+        ownership = _drop_ownership_evidence(
+            instance,
+            cluster,
+            database,
+            allow_environment_id=allow_environment_id,
+            allow_environment_backup_id=allow_environment_backup_id,
+            allow_environment_rollback_database=allow_environment_rollback_database,
+        )
+        planning_result = process_executor.execute(planning_step)
+        if not isinstance(planning_result, ProcessResult):
+            raise ConfigError("database safety inspection returned no process result")
+        inspection = _decode_inspection(planning_result, database)
     project_default = project.default_source_database
     preconditions = _safety_preconditions(
         inspection,
@@ -734,7 +722,7 @@ def build_database_drop_command(  # noqa: C901
         step_ids=(_PLANNING_INSPECT_STEP,),
         budget_seconds=timeout,
         read_only=True,
-        executed_during_planning=True,
+        executed_during_planning=not defer_planning,
     )
 
     inspect_prepared_step = _inspect_command_step(
@@ -811,6 +799,7 @@ def build_database_drop_command(  # noqa: C901
             description="Drop one exact database from the bound project cluster",
             mutating=True,
         ),
+        *((planning_step,) if defer_planning else ()),
         ownership_volume_step,
         ownership_container_step,
         inspect_prepared_step,
@@ -835,6 +824,14 @@ def build_database_drop_command(  # noqa: C901
             allow_environment_backup_id=allow_environment_backup_id,
             allow_environment_rollback_database=allow_environment_rollback_database,
         )
+        expected = expected_restore() if expected_restore is not None else None
+        if command_origin == "database-restore-retry":
+            if expected is None or current_ownership is None:
+                raise ConfigError("incomplete restore ownership evidence is unavailable")
+            try:
+                assert_restore_expectation(current_ownership, expected)
+            except ValueError as error:
+                raise ConfigError(str(error)) from error
         if current_ownership is None:
             for step_id in (ownership_volume_step_id, ownership_container_step_id):
                 if context.planned(step_id) and not context.consumed(step_id):
@@ -842,6 +839,18 @@ def build_database_drop_command(  # noqa: C901
         if ownership is not None and current_ownership != ownership:
             raise ConfigError("database drop ownership evidence changed before mutation")
         current_project_default = current_default()
+        if defer_planning:
+            planned_before_lock = _decode_inspection(
+                _process_result(context, _PLANNING_INSPECT_STEP), database
+            )
+            _assert_safe(
+                planned_before_lock,
+                database=database,
+                project_default=current_project_default,
+                force_default=force_default,
+                force_connections=force_connections,
+                command_origin=command_origin,
+            )
         planned = _decode_inspection(_process_result(context, inspect_step_id), database)
         if idempotent_absent and not planned.exists:
             for step_id in (
@@ -979,8 +988,11 @@ def build_database_drop_command(  # noqa: C901
 
 
 __all__ = [
+    "DatabaseDropExecutionContext",
     "DatabaseDropFailureContext",
     "DatabaseDropPartialError",
+    "DatabaseDropRestoreExpectation",
+    "DatabaseDropRestoreExpectationHolder",
     "DatabaseDropResult",
     "DatabaseDropSafetyError",
     "DatabaseDropSession",
