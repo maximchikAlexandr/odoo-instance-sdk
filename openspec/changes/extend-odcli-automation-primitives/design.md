@@ -1,147 +1,100 @@
 ## Context
 
-The current `origin/main` baseline already provides most low-level mechanics that this change must reuse:
+The current baseline already contains the hard parts that should remain authoritative: project/environment selection through `ResolvedContext` and `RuntimeView`, the common `internal/dbprep` pipeline, atomic project manifest replacement, detached runtime identity/readiness/stop, safe `ModuleResource` discovery, `GitResource` plus exact-lease sync, owner-only dotenv loading, central process redaction, the canonical monitor/msgspec/OpenAPI/generated-TypeScript path, and the React/Mantine panel.
 
-- `commands/context.py` resolves project and environment owners into one `RuntimeView`; `db refresh` and `db restore` already converge on `EnvironmentResource.refresh_database_command()` and can run a bounded auxiliary Database Manager for a stopped project.
-- `internal/dbprep/` validates sources, restores databases, retains failure artifacts, and atomically changes `ProjectConfig.default_source_database`; `resources/instance/runtime.py` consumes that field for project launches.
-- detached launches persist project/environment runtime identity and implement bounded readiness and safe stop semantics.
-- `ModuleResource` safely parses ordered addon roots and `GitResource` already implements commit/check/absorb/sync through `internal/proc`, but module facts are single-worktree/filesystem-centric and sync rejects HTTPS publication.
-- `EnvironmentMonitor` owns the canonical typed snapshot, FastAPI exports it through one msgspec/OpenAPI bridge, and the React client is generated from that schema. The server currently enforces loopback Host/bind rules and the UI opens local runtime URLs.
-- the canonical user root, owner-only project dotenv loader, central process redaction, catalog migrations, and output inventory provide the required safety foundations.
-
-The repository does not contain a merged Multica checkout-adoption/identity integration or a Caddy/GitLab control plane. The planning attachments describe earlier research against a different snapshot; this design uses the current base `c1e57b79f39e529a50c25818134c06309384ee23` and treats unmerged branches as evidence, not as available implementation.
+The missing behavior is integration at those seams: a paired project database/filestore binding, registration of a Multica-owned checkout, root-creator credentials for Git/GitLab, richer read-only module facts, one Caddy publication file, and publication fields in the existing monitor/UI path. This revision applies `ponytail full`: no subsystem is added where an existing resource, file, process boundary, or generated contract suffices.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Make database preparation, runtime launch/status/stop, module context, Git/GitLab, and publication independently composable through typed SDK operations and CLI leaves.
-- Keep one owner-neutral project/environment runtime path and one database preparation path.
-- Resolve all GitLab authority from the human creator of the root Multica issue, with no caller-provided user identity or machine-account fallback.
-- Publish stable HTTPS addresses through an OdCLI-owned Caddy aggregate without risking existing routes on a failed update.
-- Preserve the canonical monitor/OpenAPI/TypeScript data path and make external panel access explicit and fail-closed.
-- Keep secrets out of argv, remote URLs, persisted public state, plans, fingerprints, logs, and errors.
+- Add independently callable project, adoption, module, Git/GitLab, publication, and panel primitives by extending existing concrete resources.
+- Keep database/filestore publication atomic and preserve exact runtime/process ownership.
+- Resolve GitLab authority from the root Multica issue's human creator and keep credentials child/request-local.
+- Publish stable HTTPS routes with one locked, validated OdCLI-owned Caddy file.
+- Preserve one monitor/OpenAPI/TypeScript/UI data path and fail closed at proxy/security boundaries.
 
 **Non-Goals:**
 
-- Skill orchestration, LLM analysis, automatic task-status updates, or a monolithic “prepare everything” command.
-- Creating worktrees during adoption, taking ownership of Multica checkout files, or updating adopted code outside the credential-aware Git wrapper.
-- Managing arbitrary Caddy/Nginx configuration, DNS zones, certificates outside Caddy, public Caddy administration, or unrestricted on-demand TLS.
-- Publishing pgAdmin, bypassing Odoo authentication/authorization, or using Basic Auth as application-level authorization.
-- Supporting non-GitLab forge APIs, SSH credential substitution, automatic MR merge, force push without an exact lease, or automatic retry of non-idempotent provider calls.
-- Executing addon manifests or maintaining a second module index.
+- A workflow coordinator, plugin/provider registry, second module index, publication database, generic ingress control plane, or reusable abstraction with one implementation.
+- A separate `odcli-multica` distribution/extra, private Multica HTTP calls, caller-provided user IDs, or machine-account fallback.
+- DNS management, Nginx or non-GitLab providers, public Caddy administration, pgAdmin publication, automatic merge, or arbitrary addon roots.
+- A new acceptance harness, requirement-trace database, duplicate architecture inventory, or test matrices beyond the smallest checks that prove each changed boundary.
 
 ## Decisions
 
-### 1. Extend the existing owner-neutral seams
+### 1. Extend concrete resources; do not add an orchestration layer
 
-New bounded operations attach to existing resources instead of adding a workflow service. Project and environment selectors continue to resolve through `ResolvedContext`/`RuntimeView`; database work continues through `refresh_database_command()`; runtime work continues through `OdooInstance`; module and Git work extend their concrete resources; monitor remains the only snapshot authority.
+Project/environment selection remains in `RuntimeView`; preparation remains in `internal/dbprep`; runtime work remains in `OdooInstance`; module and Git work stay in their existing resources; monitor remains the snapshot authority. New commands are thin adapters over those SDK operations.
 
-Alternative considered: an `odcli-multica prepare` command coordinating refresh, run, publish, and MR. Rejected because the issue requires independently callable steps and such a coordinator would duplicate compensation, output, and process boundaries.
+Alternative: a new service coordinating prepare, run, publish, and MR. Rejected because the requested steps are independently callable and the service would duplicate plans, errors, and compensation.
 
-### 2. Keep the project database/filestore binding in one atomically replaced manifest
+### 2. Store the paired project binding in the existing manifest
 
-Extend `ProjectConfig` with a managed filestore binding paired with `default_source_database`. Preparation captures the current manifest identity, performs all existing restore/postcondition stages, validates the restored filestore as a contained non-symlink path, and writes both fields in one existing atomic manifest replacement. Download-only does not write either field. Execution re-reads the manifest under the preparation lock before replacement, so a concurrent successful binding produces a stale-plan failure rather than lost update.
+Add only the managed filestore identity and ordered addon repositories needed beside `default_source_database`. After the existing restore postconditions pass, compare the captured binding and atomically replace the manifest once. Project runtime reads that pair; download-only and failed/stale operations keep the prior pair.
 
-Project runtime construction uses only this pair for the main checkout: the database becomes `StartConfig.db_name` and the contained filestore parent becomes the effective `data_dir`/filestore source. The source `odoo.conf` remains immutable. Existing retained-artifact behavior applies if binding publication fails after restore.
+Alternative: a project-binding catalog table. Rejected because it creates a second authority for data already owned by the project manifest.
 
-Alternative considered: a new catalog-only `project_bindings` table. Rejected because the current project default is already manifest-backed and used by runtime/doctor/PostgreSQL paths; a second authority would require reconciliation and could split database from filestore.
+### 3. Adoption reuses the environment record with one ownership discriminator
 
-### 3. Represent adoption as an externally owned environment
+`env adopt` fills the existing environment record from the proven external checkout and adds only `checkout_owner = multica|odcli`. It does not create a worktree or prepare a database. Existing owner-neutral runtime/database/module/monitor paths then work unchanged. Sync and removal branch only where filesystem ownership matters, so an adopted checkout is never moved, reset, cleaned, or deleted.
 
-Add a concrete `adopt_command()` beside existing checkout operations. It captures canonical worktree, Git common directory, branch/HEAD, Multica binding, project configuration, database/runtime inputs, and stores `checkout_owner = "multica"` plus the immutable external checkout identity in the environment catalog. Adoption runs no Git or database/runtime mutation.
+Alternative: a parallel adopted-environment model. Rejected because it would duplicate environment identity, runtime, and database behavior.
 
-Lifecycle code branches only at filesystem ownership boundaries: runtime, database, module, monitor, publication, and credential-aware Git reuse the normal owner-neutral path; generic sync and worktree deletion are prohibited. Removal may clean OdCLI-owned generated config, database, publication, and catalog state only after it proves runtime/route cleanup, but never modifies the external checkout.
+### 4. Use one concrete Multica adapter and one small mapping file
 
-Alternative considered: treating a Multica checkout as a main project only. Rejected because multiple task checkouts require stable environment identities, database/runtime isolation, monitor rows, and independent publication while remaining externally owned.
+Add the required public `multica-py` dependency and one in-package adapter. It resolves the checkout binding, follows a finite same-workspace parent chain, and requires a human root creator. A small owner-only `multica.toml` maps user ID plus exact GitLab host to login and token environment-key name; the existing project dotenv loader supplies the token. No interface, factory, optional package, provider registry, or persistence model is introduced.
 
-### 4. Expand module context without weakening containment
+Alternative: an optional integration distribution. Rejected because there is one required provider and optional packaging adds import/configuration paths without reducing scope.
 
-Add ordered `addon_repositories` declarations to project configuration. A root is eligible only when it is contained by the selected main/adopted checkout or one declared canonical repository. `ModuleResource` keeps first-root precedence and safe `ast.literal_eval`; the new context result enriches each candidate with repository identity and Git change facts from the existing Git process boundary.
+### 5. Reuse the process and HTTP boundaries for Git/GitLab
 
-Installed state is queried read-only from the selected ready database through the existing Odoo shell/transport seam and represented independently from filesystem presence/version. Component availability is an enum/result per source, so a database failure cannot masquerade as “not installed.” No cache or provider registry is added.
+For a proven HTTPS GitLab host, the existing process plan receives `GIT_TERMINAL_PROMPT=0` and a child-only `GIT_ASKPASS` helper. Remote URL, argv, and Git configuration remain unchanged. Raw passthrough prepends only `git -C <root>`; local commands skip credential resolution. Existing sync retains rebase/check/exact-lease behavior. MR publication uses installed `httpx`, exact project/source/target matching, one bounded description file, and create-or-update with no automatic retry of create.
 
-Alternative considered: recursively scanning parent directories or accepting arbitrary absolute addon roots. Rejected because it breaks the current traversal/symlink boundary and can mix client repositories.
+Alternative: a Git credential store or forge client framework. Rejected because both persist or generalize beyond the one requested GitLab flow.
 
-### 5. Put Multica/GitLab identity in a concrete optional integration
+### 6. Build module context on demand
 
-Ship an `odcli-multica` optional integration module/extra in this distribution, lazily imported only by adoption or credential-requiring Git/GitLab operations. It pins a compatible public `multica-py` release and uses its typed checkout/project/issue/workspace resources. The resolver requires one checkout binding, walks parents with a visited set and workspace invariant, and accepts only a human root creator.
+Extend `ModuleResource` to traverse ordered allowed repositories using its current safe manifest parsing and first-root precedence. Query Git facts through the existing process boundary and installed versions through the selected database path. Each unavailable source returns one bounded availability reason. No cache, provider registry, recursive parent scan, or second index is created.
 
-Project manifest configuration stores non-secret rows keyed by Multica user ID: exact normalized GitLab host, login, and a reserved dotenv token-key name. The existing owner-only `.odcli/.env` parser supplies values with process precedence. One private frozen context is shared by Git and MR construction; public models retain only safe identifiers.
+### 7. Use one OdCLI-owned Caddy route file as publication state
 
-Alternative considered: accept `--user-id`, use the issue assignee, or let Git's global helper decide. Rejected because each violates the explicit root-creator attribution and isolation contract.
+User settings name the domain, local Caddy control target, Basic Auth values, trusted proxies, panel label, and one owned route file. A global publication lock protects read-modify-write. Publish/unpublish generates a complete candidate, validates it, atomically swaps the owned file for reload, and restores the prior bytes if reload fails; the existing live configuration therefore remains usable. Stable URLs are derived from existing project/environment IDs. Monitor reads this generated file and the exact runtime record; there is no publication table, route repository, rollback journal, or second state model.
 
-### 6. Use a process-local Git credential helper
+The owned file contains only OdCLI routes. Caddy handles HTTPS and Basic Auth natively. Route templates cover the Odoo HTTP/assets/attachments/bus paths and the panel route; unknown hosts match nothing.
 
-For an allowed HTTPS GitLab host, the command snapshot sets `GIT_TERMINAL_PROMPT=0` and a packaged non-interactive `GIT_ASKPASS` helper only for that child. Login and token are private environment values covered by central redaction. The origin URL and Git configs remain unchanged. Before injection, a read-only resolver derives exactly one remote host from explicit URL arguments or named repository remotes; an ambiguous/unmapped host fails.
+Alternative: Caddy Admin API mutations plus a catalog-backed route control plane. Rejected because one locked file already provides deterministic ownership, validation, reload, and retry.
 
-`GitResource.passthrough_command()` prepends only `git -C <root>` and the exact post-delimiter arguments. Local commands skip identity resolution. Remote commands, `ls-remote`, fetch, and push share the same credential snapshot. Existing sync rebase/check/exact-lease transitions stay intact; only the SSH-only precondition becomes SSH-or-proven-HTTPS.
+### 8. Extend the existing monitor and panel end to end
 
-Alternative considered: embedding the token in the remote URL or running `git credential approve`. Rejected because both leak/persist credentials and couple concurrent users.
+Add one minimal publication value to the canonical Python snapshot: state, external URL, and reason. OpenAPI and generated TypeScript carry it to React. Local runtime URL stays separate. `create_app()` gets an explicit trusted-proxy policy; loopback remains the default, while external mode accepts only exact proxy peers/Hosts and validates forwarded origin for secure CSRF. React changes only the existing views and uses the server-provided URL.
 
-### 7. Make GitLab MR publication idempotent by exact key
+Alternative: a publication HTTP service or handwritten frontend type. Rejected because both duplicate the current canonical pipeline.
 
-Use the existing bounded `httpx` transport family with a GitLab adapter. The lookup key is `(host, project, source_branch, target_branch, state=open)`. Zero matches leads to create; one leads to update; more than one fails. The UTF-8 description file is opened without following symlinks, bounded, fingerprinted during planning, and revalidated before mutation. The canonical Multica issue link is appended once. Assignee input resolves to exactly one GitLab user before mutation.
+### 9. Verify each boundary once
 
-Create is not retried automatically. Update revalidates the unique MR identity immediately before the request. Results expose provider ID/URL and `created|updated`, never response headers or credential material.
-
-Alternative considered: match by title or update the newest MR. Rejected because both can mutate the wrong review.
-
-### 8. Use one locked OdCLI-owned Caddy aggregate
-
-Add owner-only `~/.odcli/config/publication.toml` and an OdCLI-owned generated aggregate below the canonical user root. Settings contain the normalized domain suffix, Caddy executable/control target, panel label, Basic Auth username/password hash, and trusted proxy addresses. Plaintext passwords are invalid.
-
-Catalog migration adds publication rows keyed by `(owner_kind, owner_id)` with route identity, external URL, captured local endpoint/runtime identity, desired/observed state, sanitized last error, and timestamps. A single publication lock serializes changes. Mutation reads current rows, constructs a deterministic complete candidate for OdCLI routes, writes a private temporary file, runs `caddy validate`, then `caddy reload` through `internal/proc`. Only after reload succeeds are the aggregate and catalog state atomically published. Failed validation/reload leaves the prior authoritative file and rows unchanged. The configured Caddy instance must dedicate that aggregate to OdCLI; unowned ingress files are never edited.
-
-Stable host labels are derived from already stable project/environment IDs and remain within one DNS label. Routes enforce HTTPS, hashed Basic Auth, explicit Host match, standard proxy headers, Odoo HTTP/static/download paths, and the Odoo 19 bus/WebSocket path. No catch-all route exists.
-
-Alternative considered: mutate Caddy's live JSON tree per route. Rejected because partial multi-call updates complicate rollback and ownership. Alternative Nginx support is excluded because the issue selects Caddy and the attached research identifies Caddy's simpler dedicated-node TLS path.
-
-### 9. Preserve route identity across stop, clean it before environment deletion
-
-Stop does not remove a route row; monitor combines the saved publication with the exact runtime identity and reports `backend_unavailable`. Republish after restart updates the backend while retaining the external URL. Explicit unpublish removes the route and row idempotently.
-
-Environment removal inserts route cleanup before destructive environment finalization. Failure leaves the environment retryable as `cleanup_failed`; the externally owned checkout remains untouched. No missing-directory heuristic removes a project route.
-
-Alternative considered: automatically unpublish on every stop. Rejected because it destroys stable availability identity and creates unnecessary Caddy churn during normal restarts.
-
-### 10. Add a strict proxy mode rather than relaxing loopback checks
-
-`create_app()` receives a typed proxy policy. Local mode keeps current loopback bind and Host middleware. External mode binds only the configured proxy-facing local interface, checks the direct peer against exact trusted addresses, accepts only configured panel Host, and trusts forwarded scheme/host only from that peer. The CSRF cookie becomes `Secure`; same-origin comparison uses the validated effective HTTPS origin. Caddy remains the Basic Auth boundary.
-
-The canonical snapshot gains one `PublicationSnapshot` used by project and environment rows. Local `RuntimeMetrics.http_url` stays separate. OpenAPI/codegen propagate the type to React. The UI never synthesizes URLs: `Open Odoo` uses an available external URL or is disabled with the typed reason. External mode disables loopback-only pgAdmin. Styling changes remain within the existing Mantine application but use compact Odoo-like navigation, table/list density, status pills, colors, typography, and controls.
-
-Alternative considered: accept arbitrary Host/Forwarded headers or replace local URLs with external ones. Rejected because the former enables host-header/proxy spoofing and the latter loses operational observability.
-
-### 11. Keep migrations and compatibility additive
-
-Catalog migrations add adoption ownership/evidence and publication rows without changing existing environment/runtime identifiers. Legacy managed environments default to SDK-owned; absence of publication rows means `unpublished`. Project manifests without the new filestore/addon/mapping settings continue to load, but project run after a newly restored binding requires the paired safe filestore. Existing SSH sync, local monitor, environment checkout, project restore, and generated API fields remain compatible.
-
-Verification includes unit matrices for lineage/credential failures, secret canaries, Git host parsing and concurrent users, MR create/update/ambiguity, project binding stale/failure paths, adoption non-ownership, module partial availability, publication rollback/concurrency, proxy spoofing/CSRF, schema/codegen determinism, UI behavior, and catalog migrations. Integration tests use fake Multica/GitLab/Caddy boundaries plus native Git HTTPS-helper fixtures; opt-in acceptance covers disposable Odoo 19 login/assets/redirect/attachment/bus behavior through Caddy.
+Each non-trivial change gets the smallest focused check that proves its branch, parser, or trust boundary. Existing repository format/lint/type/unit/integration/dashboard/codegen/package gates run once after integration. Existing disposable Odoo fixtures may perform one opt-in Caddy smoke when prerequisites exist; no new acceptance harness, trace matrix, inventory suite, or repeated full-gate work is added to domain packages.
 
 ## Risks / Trade-offs
 
-- **[Public `multica-py` surface differs from the research snapshot]** → Pin one compatible release, isolate calls in the concrete integration adapter, and test missing/ambiguous parent/creator cases without private HTTP fallback.
-- **[Token leaks through Git prompts or provider diagnostics]** → Use private environment snapshots, central secret-canary redaction, non-interactive helpers, bounded outputs, and architecture tests forbidding token-bearing URLs/argv/config writes.
-- **[Cross-user Git concurrency]** → Never mutate process-global environment or Git configuration; each command carries an immutable child-only environment and tests simultaneous users.
-- **[Caddy reload disrupts working routes]** → Serialize, validate a complete deterministic candidate, reload before persistent publication, and retain the last known-good aggregate/rows on every failure.
-- **[DNS/TLS is externally unavailable]** → Treat route application, DNS reachability, certificate readiness, and backend readiness as distinct typed states; do not claim availability from file generation alone.
-- **[Proxy trust is misconfigured]** → Reject incomplete/wildcard trust settings and direct untrusted peers; local mode remains the default.
-- **[Project binding spans manifest, restored DB, and filestore]** → Hold the existing preparation lock, atomically replace paired fields only after all postconditions, and surface retained artifacts without rolling back the old binding.
-- **[Adopted checkout cleanup deletes caller data]** → Persist external ownership, centralize the removal guard, and test that no worktree Git/file mutation is planned.
-- **[Large cross-cutting implementation conflicts]** → Delivery packages isolate foundation, identity/Git, runtime/publication, module context, and panel surfaces with shared model/schema predecessors and explicit file ownership.
+- **Public `multica-py` lacks the required checkout/issue traversal** → fail the integration explicitly and plan the missing upstream API; do not add private HTTP fallback.
+- **Token reaches child/provider diagnostics** → use per-command private values plus the existing redaction boundary and one secret-canary check.
+- **Concurrent route edits lose entries** → serialize the single owned file with the existing lock convention and test one concurrent update case.
+- **Caddy reload rejects a candidate** → validate first, restore prior bytes on reload failure, and never edit unowned ingress files.
+- **Proxy trust is misconfigured** → reject wildcard/incomplete peers or Hosts; keep local mode as default.
+- **Adopted checkout cleanup touches caller data** → persist the ownership discriminator and guard the existing sync/remove filesystem steps.
+- **Single route file is not a general ingress database** → accepted by design; add a richer store only if future requirements need multiple writers or non-Caddy backends.
 
 ## Migration Plan
 
-1. Add compatible configuration/model/catalog migrations and preserve legacy defaults.
-2. Implement project binding and adoption foundations with migration and failure-recovery tests.
-3. Add concrete Multica identity/credential resolution, Git passthrough/HTTPS sync, and GitLab MR publication behind the optional integration extra.
-4. Add publication persistence, Caddy candidate/reload boundary, lifecycle reconciliation, and focused integration tests.
-5. Extend canonical monitor/OpenAPI/generated TypeScript, then update trusted proxy mode and React presentation.
-6. Run format, lint, strict typing, architecture inventory, unit/integration/dashboard/codegen/package gates, strict OpenSpec validation, and opt-in Caddy/Odoo acceptance where prerequisites exist.
+1. Add backward-compatible project fields and one additive environment ownership column; existing environments default to OdCLI-owned.
+2. Add adoption/Multica identity and project binding on the current resources.
+3. Add Git/GitLab, module context, and the single-file Caddy publisher at their existing boundaries.
+4. Extend monitor/OpenAPI/generated TypeScript and update the current panel.
+5. Run focused checks and the existing repository gates once; run the optional Caddy/Odoo smoke only when its existing prerequisites are available.
 
-Rollback disables external monitor mode, unpublishes owned routes through the recorded owner set, restores the last known-good Caddy aggregate, and deploys the prior package. Additive catalog columns/tables and manifest fields remain readable/ignorable; restored databases and caller-owned checkouts are never deleted merely by package rollback.
+Rollback disables external monitor mode, uses `unpublish` for owned routes, and deploys the previous package. Additive manifest fields and the ownership column remain backward-compatible; caller-owned checkouts and restored databases are not deleted by rollback.
 
 ## Open Questions
 
-None. DNS delegation, a dedicated reachable Caddy instance, valid TLS issuance prerequisites, and operator-supplied user/credential mappings are deployment prerequisites; their absence is a typed runtime failure, not an implementation choice.
+None. DNS/TLS reachability, a dedicated Caddy instance that includes the OdCLI-owned file, valid user mappings, and a compatible public `multica-py` release are deployment prerequisites, not new implementation subsystems.

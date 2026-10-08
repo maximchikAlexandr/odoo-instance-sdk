@@ -13,7 +13,7 @@ OdCLI SHALL store publication settings in the canonical owner-only user configur
 - **THEN** publication fails before probing the runtime or changing Caddy configuration
 
 ### Requirement: Typed publish and unpublish operations
-The public SDK SHALL expose inspectable `publish_command()` and `unpublish_command()` operations and delegating convenience methods for exactly one project or environment runtime. The CLI SHALL expose `odcli publish` and `odcli unpublish` with mutually exclusive `--project PATH` and `--env ENV` selectors. Publish SHALL resolve the persisted runtime identity and local endpoint, require Odoo readiness, apply the owner route, persist publication identity/state, and return owner identity, local endpoint, external URL, and status. Unpublish SHALL remove only that owner's route, be idempotent when already absent, and retain an auditable stopped state without deleting runtime data.
+The public SDK SHALL expose inspectable `publish_command()` and `unpublish_command()` operations and delegating convenience methods for exactly one project or environment runtime. The CLI SHALL expose `odcli publish` and `odcli unpublish` with mutually exclusive `--project PATH` and `--env ENV` selectors. Publish SHALL resolve the persisted runtime identity and local endpoint, require Odoo readiness, apply the owner route in the single owned route file, and return owner identity, local endpoint, external URL, and status. Unpublish SHALL remove only that owner's route, be idempotent when already absent, and leave runtime data unchanged.
 
 #### Scenario: Publish a ready project runtime
 - **WHEN** `odcli publish --project PATH` selects the captured ready project runtime and Caddy accepts the candidate configuration
@@ -27,12 +27,12 @@ The public SDK SHALL expose inspectable `publish_command()` and `unpublish_comma
 - **WHEN** `odcli unpublish --env ENV` selects a published environment
 - **THEN** only that environment's route is removed and a repeated call succeeds as already absent
 
-### Requirement: Transactional OdCLI-owned Caddy configuration
-Publication mutations SHALL hold one canonical publication lock, read the current persisted route set, produce a complete deterministic candidate for only the OdCLI-owned Caddy aggregate, validate it with the configured Caddy executable, and reload it through the shared process boundary. The persisted route set SHALL change only after a successful reload. Validation or reload failure SHALL leave the prior file, route records, and live working configuration unchanged; OdCLI SHALL NOT edit or replace unowned ingress configuration or expose Caddy's administrative endpoint externally.
+### Requirement: Validated OdCLI-owned Caddy configuration
+Publication mutations SHALL hold one canonical publication lock, read the current owned route file, produce a complete deterministic candidate for only that file, validate it with the configured Caddy executable, and reload it through the shared process boundary. The canonical file SHALL be atomically replaced only as part of the validated reload operation; reload failure SHALL restore its prior bytes while Caddy retains its prior live configuration. OdCLI SHALL NOT create a publication database, edit unowned ingress configuration, or expose Caddy's administrative endpoint externally.
 
 #### Scenario: Candidate configuration is rejected
 - **WHEN** candidate validation or reload fails
-- **THEN** the prior aggregate remains byte-for-byte authoritative, prior routes continue to work, and the result reports a bounded sanitized failure
+- **THEN** the prior owned file remains byte-for-byte authoritative, prior live routes continue to work, and the result reports a bounded sanitized failure
 
 #### Scenario: Concurrent publications
 - **WHEN** two owners are published concurrently
@@ -50,7 +50,7 @@ Every Odoo route SHALL enforce HTTPS and configured Basic Auth, preserve the val
 - **THEN** Caddy rejects it without forwarding to Odoo or the monitor
 
 ### Requirement: Publication lifecycle reconciliation
-Stopping a runtime SHALL preserve its stable route identity but report publication as `backend_unavailable` with a reason and no actionable external link. Restart plus republish SHALL reactivate the same address. Environment removal SHALL delete its route before final environment removal and SHALL enter `cleanup_failed` if route cleanup cannot be proven; explicit unpublish SHALL be available for retry. Project removal SHALL NOT be inferred from a missing directory.
+Stopping a runtime SHALL leave its deterministic route entry in place but report publication as `backend_unavailable` with a reason and no actionable external link. Restart plus republish SHALL reactivate the same address. Environment removal SHALL delete its route before final environment removal and SHALL enter `cleanup_failed` if route cleanup cannot be proven; explicit unpublish SHALL be available for retry. Project removal SHALL NOT be inferred from a missing directory.
 
 #### Scenario: Published runtime stops and restarts
 - **WHEN** a published runtime stops and is later restarted and republished

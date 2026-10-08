@@ -7,10 +7,10 @@ Future Multica skills need independently callable, typed OdCLI primitives for pr
 - Extend main-checkout database refresh/restore and detached runtime operations so `--project PATH` can prepare, bind, start, inspect, and stop one project-owned database/filestore/runtime without creating a worktree.
 - Add explicit adoption of a caller-owned Multica checkout while keeping ordinary environment creation responsible for its own worktree.
 - Extend module inventory with repository provenance, installed state, versions, dependency paths, and related Git changes across ordered, explicitly allowed addon roots; unavailable sources remain distinguishable from empty results.
-- Add an `odcli-multica` integration contract that resolves the current checkout to a Multica issue/workspace, walks to the root issue, resolves its human creator, and maps that identity to host-scoped GitLab credentials loaded from the existing owner-only project dotenv.
+- Add one concrete Multica adapter inside the existing distribution that resolves the current checkout through public `multica-py`, walks to the root issue, resolves its human creator, and maps that identity to host-scoped GitLab credentials loaded from the existing owner-only project dotenv.
 - Extend `odcli git` with native `--` passthrough and HTTPS credentials scoped to one child process/host; reuse the same resolver for `git sync` while preserving rebase and exact-lease publication safety.
 - Add typed GitLab merge-request create-or-update publication with unambiguous open-MR matching, file-backed descriptions, configurable assignee, and the resolved Multica issue link.
-- Add typed `publish`/`unpublish` operations for project and environment runtimes through Caddy, including stable external addresses, transactional route application, HTTPS, Basic Auth, Odoo proxy semantics, and lifecycle cleanup.
+- Add typed `publish`/`unpublish` operations for project and environment runtimes through one OdCLI-owned Caddy route file, including stable external addresses, validated reload, HTTPS, Basic Auth, Odoo proxy semantics, and lifecycle cleanup.
 - Extend monitor/OpenAPI/TypeScript contracts with publication state and external URLs, make the panel safe behind an explicitly trusted proxy/Host, and restyle the existing UI to a compact Odoo-like operational interface.
 - Keep CLI results machine-readable, public SDK results frozen and typed, process launches on the shared execution boundary, and all secret-bearing values redacted.
 
@@ -20,7 +20,7 @@ Future Multica skills need independently callable, typed OdCLI primitives for pr
 
 - `multica-user-credentials`: Resolve a Multica checkout to the root issue's human creator and map that identity to host-scoped GitLab credentials without fallback to the machine account.
 - `gitlab-merge-request`: Create or update exactly one matching open GitLab merge request through a typed SDK/CLI operation and return its stable publication result.
-- `instance-publication`: Persist and reconcile Caddy routes and stable HTTPS identities for project, environment, and monitor runtimes.
+- `instance-publication`: Reconcile one OdCLI-owned Caddy route file and stable HTTPS identities for project, environment, and monitor runtimes.
 
 ### Modified Capabilities
 
@@ -39,4 +39,4 @@ Future Multica skills need independently callable, typed OdCLI primitives for pr
 
 ## Impact
 
-The change affects CLI registration and output inventory, public models/resources, project and catalog persistence, runtime/database preparation, module and Git resources, process redaction, HTTP transport, the optional dashboard server, OpenAPI generation, the React monitor, and integration/e2e documentation and tests. It introduces a narrow public `multica-py` integration dependency for `odcli-multica` and a Caddy control-plane adapter; it does not embed skill orchestration or LLM analysis in the SDK, replace native Git behavior, modify production Odoo, or make Caddy's administrative API externally reachable.
+The change affects CLI registration, project binding, one environment ownership field, runtime/database preparation, module and Git resources, process redaction, HTTP transport, the optional dashboard server, OpenAPI generation, the React monitor, and focused documentation/tests. It adds the required public `multica-py` dependency and a concrete in-package adapter; it does not add a plugin framework, provider registry, publication database, generic ingress control plane, skill orchestration, or LLM analysis, replace native Git behavior, modify production Odoo, or make Caddy's administrative API externally reachable.

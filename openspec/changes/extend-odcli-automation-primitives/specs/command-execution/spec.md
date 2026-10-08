@@ -12,7 +12,7 @@ Secret-bearing Git and GitLab execution inputs SHALL be captured privately at co
 - **THEN** the public plan, bounded result, logs, exception graph, and fingerprint contain no token bytes
 
 ### Requirement: Publication effects use existing execution boundaries
-Caddy validation/reload and native Git passthrough SHALL use `internal/proc`; GitLab HTTP and Caddy route persistence SHALL use typed action steps on the same immutable plan. Convenience methods SHALL delegate to their `*_command()` siblings, and dry-run SHALL execute neither processes, HTTP requests, filesystem publication, nor catalog mutations.
+Caddy validation/reload and native Git passthrough SHALL use `internal/proc`; GitLab HTTP and replacement of the single owned Caddy route file SHALL use the existing action-step convention. Convenience methods SHALL delegate to their `*_command()` siblings, and dry-run SHALL execute neither processes, HTTP requests, nor filesystem publication.
 
 #### Scenario: Inspect a publication plan
 - **WHEN** a caller constructs publish or MR commands

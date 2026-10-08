@@ -1,77 +1,51 @@
-## 1. Configuration, Models, and Persistence Foundations
+## 1. Main Checkout Binding and Runtime
 
-- [ ] 1.1 Add typed project fields for the paired managed filestore binding, ordered addon repositories, and non-secret Multica-user/GitLab mappings with backward-compatible manifest parsing, atomic serialization, validation, and focused tests.
-- [ ] 1.2 Add owner-only canonical publication settings loading for domain, Caddy, Basic Auth hash, panel, and trusted-proxy values with permission/path/host validation, redacted representations, and tests.
-- [ ] 1.3 Add frozen public/private models for Multica context, Git credentials, adoption ownership, module context availability, MR results, publication state/results, and monitor publication projections; update public exports without exposing secret fields.
-- [ ] 1.4 Add catalog migrations and data access for externally owned adopted checkouts and project/environment publication rows, preserving legacy SDK-owned/unpublished defaults and migration equivalence.
-- [ ] 1.5 Extend central redaction, public projection, fingerprint, and architecture inventories for Git helpers, GitLab authorization, publication settings, and Caddy steps with secret-canary tests.
+- [ ] 1.1 Extend the existing project manifest with backward-compatible managed-filestore and ordered-addon-repository fields; add focused parse/round-trip/path-validation checks.
+- [ ] 1.2 Extend the common preparation pipeline to publish the database/filestore pair with the existing atomic manifest replacement and stale-binding check after successful restore postconditions.
+- [ ] 1.3 Extend project refresh/restore results and CLI projections with the required backup, target, configuration, filestore, publication, and sanitized failure facts.
+- [ ] 1.4 Make project detached run/readiness/status/stop consume the paired binding through the existing runtime identity path and add focused success, timeout, stale-identity, and prior-binding-preservation checks.
 
-## 2. Main Checkout Database and Runtime Binding
+## 2. Multica Adoption and Root-Creator Identity
 
-- [ ] 2.1 Extend common database preparation planning to capture the paired current project database/filestore binding and the restored filestore evidence without creating a second restore pipeline.
-- [ ] 2.2 Publish database and safe contained filestore fields in one stale-checked atomic manifest replacement only after all refresh/restore postconditions; preserve the previous binding and retained-artifact evidence on every failure.
-- [ ] 2.3 Extend refresh/restore typed results and Rich/JSON/TOON projections with nullable backup ID, target database, effective configuration, filestore, project, publication state, and stable sanitized failure reason.
-- [ ] 2.4 Make project runtime planning require and consume the paired binding for generated Odoo configuration while preserving source config immutability and existing environment behavior.
-- [ ] 2.5 Complete project `run --detach --wait-ready`, status, and stop result/identity coverage for readiness success, early exit, timeout, cleanup failure, PID reuse, owner mismatch, and stale bindings.
-- [ ] 2.6 Add focused preparation/runtime/CLI integration tests proving download-only preservation, successful restore-to-run handoff, concurrent stale publication refusal, and no project/environment selector crossover.
+- [ ] 2.1 Add one additive `checkout_owner` environment field defaulting to OdCLI ownership and implement `env adopt` by registering the proven external checkout through the existing environment catalogue/resource path without Git, database, runtime, or filesystem mutation.
+- [ ] 2.2 Guard the existing sync/remove filesystem steps so Multica-owned checkouts can be used, stopped, unpublished, and unregistered but never moved, reset, cleaned, updated by generic sync, or deleted.
+- [ ] 2.3 Add the required public `multica-py` dependency and one concrete in-package adapter that resolves one checkout binding and finite same-workspace lineage to a human root creator.
+- [ ] 2.4 Add one owner-only Multica-user/GitLab-host mapping file and reuse the existing project dotenv loader for reserved token keys, returning one private per-command credential context with safe public identifiers.
+- [ ] 2.5 Add focused checks for adoption conflicts/non-mutation, external-owner removal, invalid lineage, missing/ambiguous host mapping, concurrent user isolation, and secret redaction.
 
-## 3. Multica Checkout Adoption
+## 3. Native Git and GitLab Merge Requests
 
-- [ ] 3.1 Implement typed `EnvironmentResource.adopt_command()`/convenience operation that captures safe Git/project/Multica evidence and registers an externally owned checkout without Git, database, runtime, or filesystem mutation.
-- [ ] 3.2 Add `odcli env adopt` with canonical project/environment provenance, bounded machine output, dry-run plan, stable conflicts, and SDK-first leaf inventory coverage.
-- [ ] 3.3 Extend runtime, database, module, monitor, and publication resolution to consume adopted environments through the existing owner-neutral context.
-- [ ] 3.4 Guard sync/removal/cleanup so an adopted checkout can be stopped, unpublished, and unregistered but never updated, cleaned, moved, reset, or deleted by OdCLI.
-- [ ] 3.5 Add migration, retry, conflict, removal, and secret/path-containment tests that prove byte-for-byte external checkout ownership.
+- [ ] 3.1 Add a packaged child-only `GIT_ASKPASS` path on the existing process boundary for one proven HTTPS GitLab host without changing URLs, argv, or Git configuration.
+- [ ] 3.2 Add `GitResource.passthrough_command()` and `odcli git -- <args>` with exact native cwd/stdout/stderr/signal/exit behavior; skip credential resolution for local-only commands.
+- [ ] 3.3 Extend the existing sync plan to use the same HTTPS credential snapshot while retaining current SSH, rebase, check, branch-protection, and exact-lease behavior.
+- [ ] 3.4 Add the concrete GitLab `httpx` calls and `gitlab mr publish` operation for exact project/source/target lookup, bounded file-backed description, issue link, assignee resolution, and create-or-update.
+- [ ] 3.5 Add focused native-Git and fake-GitLab checks for local/remote passthrough, HTTPS sync, stale lease, two users, MR zero/one/many matching, provider failure, dry-run, and secret canaries.
 
-## 4. Multica Root-Creator and Credential Resolution
+## 4. Repository-Aware Module Context
 
-- [ ] 4.1 Add the optional `odcli-multica` integration package/extra pinned to a compatible public `multica-py` API and keep core/help imports dependency-neutral.
-- [ ] 4.2 Resolve one checkout binding, workspace, issue, finite same-workspace parent chain, root issue, and human creator with typed failures for missing, ambiguous, cyclic, cross-workspace, or non-human lineage.
-- [ ] 4.3 Resolve exact user/host/login/token-key mappings through the existing owner-only project dotenv with process precedence, reserved token-key validation, and no ambient/machine fallback.
-- [ ] 4.4 Produce one private immutable credential context and safe public projection shared by adoption, Git, sync, and MR operations; add concurrent-user and echoed-secret tests.
+- [ ] 4.1 Extend `ModuleResource` to inspect ordered safe addon roots in the selected checkout and declared repositories while preserving first-root precedence, shadow provenance, and containment.
+- [ ] 4.2 Collect repository Git changes through the existing process boundary and installed module/version facts through the selected database path without executing manifests or adding a cache/index.
+- [ ] 4.3 Add one read-only SDK/CLI context result that keeps filesystem, database, and Git availability independent and exposes bounded reasons for unavailable sources.
+- [ ] 4.4 Add focused checks for duplicate names, dependency paths, Git/database unavailability, unsafe roots, change attribution, and no mutation.
 
-## 5. Native Git and GitLab Merge Requests
+## 5. Single-File Caddy Publication
 
-- [ ] 5.1 Implement exact remote-host resolution and a packaged process-local non-interactive Git credential helper that changes neither remote URLs nor repository/global credential configuration.
-- [ ] 5.2 Add `GitResource.passthrough_command()`/convenience operation and `odcli git -- <args>` raw transport with exact argv/cwd/stdout/stderr/signal/exit behavior and local-command credential bypass.
-- [ ] 5.3 Extend existing `git sync` planning/execution to accept proven HTTPS GitLab origins with shared credentials while preserving clean/protected/upstream checks, rebase behavior, pre-push validation, exact force-with-lease, and stale-lease refusal.
-- [ ] 5.4 Add the bounded GitLab transport and file-backed description snapshot/revalidation with typed authentication, authorization, validation, timeout, and protocol errors and no create retry.
-- [ ] 5.5 Implement `publish_merge_request_command()`/convenience operation and `odcli gitlab mr publish` for exact project/source/target lookup, zero-create, one-update, many-error, issue-link idempotency, and exact assignee resolution.
-- [ ] 5.6 Add native Git integration fixtures and GitLab fake-transport matrices covering SSH compatibility, HTTPS success/failure, two concurrent users, raw passthrough, sync conflicts, MR create/update/ambiguity, dry-run, and secret canaries.
+- [ ] 5.1 Add one owner-only publication settings reader and deterministic project/environment/panel host labels using existing stable owner IDs.
+- [ ] 5.2 Implement `publish_command()`/`unpublish_command()` and CLI leaves as a locked read-modify-write of one OdCLI-owned route file with runtime readiness, candidate validation, reload, prior-byte restoration on failure, and idempotent removal.
+- [ ] 5.3 Generate only the required HTTPS, hashed Basic Auth, proxy-header, Odoo HTTP/assets/attachments/bus, and panel routes; keep unknown hosts unmatched and Caddy control local.
+- [ ] 5.4 Integrate route availability with stop/restart and require successful route removal before environment removal, preserving the external checkout on cleanup failure.
+- [ ] 5.5 Add focused checks for stable/distinct URLs, concurrent file updates, validation/reload failure, prior-byte preservation, auth/Host rejection, stopped runtime, unpublish, removal retry, and secret-free output.
 
-## 6. Repository-Aware Module Context
+## 6. Monitor, HTTP Contract, and Existing Panel
 
-- [ ] 6.1 Extend safe addon-root resolution across the selected checkout and ordered registered repositories while preserving containment, symlink rejection, first-root precedence, shadow identities, and deterministic de-duplication.
-- [ ] 6.2 Add read-only repository Git fact capture and relate committed/staged/unstaged/untracked paths to resolved and shadowed modules without mutating Git.
-- [ ] 6.3 Add read-only installed module/version collection for the selected ready database and keep filesystem and database versions as separate typed facts.
-- [ ] 6.4 Implement one inspectable module context SDK/CLI operation with per-source availability and bounded reasons so unavailable data is not reported as empty or uninstalled.
-- [ ] 6.5 Add multi-repository, duplicate-name, dependency-path, database-unavailable, Git-unavailable, unsafe-root, and no-mutation test matrices.
+- [ ] 6.1 Extend the canonical project/environment snapshot with one publication value read from the owned route file and correlated with exact runtime state; preserve the separate local endpoint and isolate publication read failure.
+- [ ] 6.2 Add explicit trusted-proxy mode to the existing FastAPI server with exact peer/Host/forwarded-origin checks, secure external CSRF, local-mode compatibility, and external pgAdmin disablement.
+- [ ] 6.3 Regenerate OpenAPI and the TypeScript SDK once from the canonical snapshot change and keep relative API/assets under the external origin.
+- [ ] 6.4 Restyle the existing Mantine views into compact Odoo-like project/environment navigation and tables; use only the server-supplied available external URL for `Open Odoo`.
+- [ ] 6.5 Add focused monitor/HTTP/UI checks for project/environment publication states, spoofed forwarding, same-origin mutation, disabled actions, relative URLs, generated-type use, accessibility, and responsive layout.
 
-## 7. Caddy Publication and Lifecycle
+## 7. Documentation and One Verification Pass
 
-- [ ] 7.1 Implement deterministic stable project/environment/panel host and route identifiers from persisted owner identities and validated publication settings.
-- [ ] 7.2 Implement the publication lock, catalog snapshot, complete OdCLI-owned Caddy candidate generator, private temporary file, `caddy validate`/`reload` process plan, and last-known-good atomic publication/rollback.
-- [ ] 7.3 Generate exact HTTPS, hashed Basic Auth, Host, proxy-header, Odoo page/assets/redirect/upload/download, and Odoo 19 bus/WebSocket routes plus the protected panel/API route.
-- [ ] 7.4 Add public `publish_command()`/`unpublish_command()` operations and mutually exclusive project/environment CLI selectors with runtime identity/readiness probes, idempotent route reconciliation, dry-run, and typed results.
-- [ ] 7.5 Integrate stop/restart publication availability and pre-removal environment route cleanup with retryable `cleanup_failed` behavior and external-checkout preservation.
-- [ ] 7.6 Add concurrent publication, validation/reload failure, previous-route preservation, unknown Host/Auth, stopped/stale runtime, idempotent unpublish, removal retry, and secret/path safety tests.
-
-## 8. Monitor, HTTP, and Generated Contracts
-
-- [ ] 8.1 Extend canonical project/environment snapshots and collector planning with read-only publication correlation, separate local endpoint/external URL, typed availability, and component failure isolation.
-- [ ] 8.2 Extend `create_app()`/`run_server()` and monitor CLI with explicit proxy mode, exact allowed Hosts/trusted peers, validated forwarded origin, secure CSRF cookie, local-mode compatibility, and external pgAdmin disablement.
-- [ ] 8.3 Update msgspec/OpenAPI response metadata, deterministic `openapi.json`, generated TypeScript SDK, and stale-output tests for the canonical publication model.
-- [ ] 8.4 Add HTTP tests for trusted Caddy forwarding, spoofed/untrusted headers, unknown Hosts, external same-origin CSRF, local mode, publication serialization, and sanitized component failures.
-
-## 9. Odoo-Style Panel
-
-- [ ] 9.1 Restructure the existing Mantine UI into compact Odoo-style project/environment navigation and tabular operational views without introducing a second component framework.
-- [ ] 9.2 Render publication state/reason and separate local endpoint for project and environment runtimes; enable `Open Odoo` only for the generated external HTTPS URL and disable loopback-only pgAdmin externally.
-- [ ] 9.3 Preserve relative API/assets, polling serialization, CSRF interception, accessibility, responsive layout, and generated-type-only data access through focused Vitest/React tests.
-
-## 10. Documentation and Verification
-
-- [ ] 10.1 Document independent project preparation/run/status/stop, adoption ownership, module context, root-creator credential mapping, Git passthrough/sync, MR publication, Caddy setup, external monitor security, and recovery procedures without secret examples.
-- [ ] 10.2 Add requirement-to-test trace coverage and update CLI/public SDK/architecture inventories, README, Python SDK reference, changelog, and deployment prerequisites.
-- [ ] 10.3 Run formatter, Ruff, strict mypy, unit/integration/dashboard tests, OpenAPI/codegen stale gates, packaging tests, architecture/security secret audits, and strict OpenSpec validation; record unavailable opt-in Caddy/Odoo prerequisites truthfully.
-- [ ] 10.4 Run opt-in disposable Odoo 19 acceptance through Caddy for concurrent URLs, TLS/Auth, login, redirects, assets, attachments, bus/WebSocket, panel external origin, failed reload preservation, stop/restart, and environment removal when prerequisites are available.
+- [ ] 7.1 Document the independent project, adoption, module, Git/GitLab, publication, external-panel, ownership, prerequisite, and recovery flows without secret values.
+- [ ] 7.2 Run the existing format, Ruff, strict mypy, unit/integration/dashboard, OpenAPI/codegen, packaging, and architecture/security gates once on the integrated branch; fix only failures caused by this change.
+- [ ] 7.3 When existing disposable Odoo/Caddy prerequisites are available, run one focused smoke for HTTPS/Auth/login/assets/attachments/bus, panel origin, failed reload preservation, stop/restart, and removal; report unavailable prerequisites without adding a new harness.

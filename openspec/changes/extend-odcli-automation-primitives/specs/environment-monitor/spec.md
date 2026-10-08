@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Runtime snapshots expose publication separately from local endpoints
-`ProjectSummary` and `EnvironmentSnapshot` SHALL expose a typed publication projection containing state `unpublished`, `available`, `backend_unavailable`, or `error`, stable external URL when configured, sanitized unavailability reason, and sampled route identity. Existing `RuntimeMetrics.http_url` SHALL remain the local endpoint and SHALL NOT be overwritten by the external URL. Collection SHALL correlate persisted publication owner/route identity with the same captured runtime identity used by status/stop and SHALL remain read-only.
+`ProjectSummary` and `EnvironmentSnapshot` SHALL expose a typed publication projection containing state `unpublished`, `available`, `backend_unavailable`, or `error`, stable external URL when configured, sanitized unavailability reason, and sampled route identity. Existing `RuntimeMetrics.http_url` SHALL remain the local endpoint and SHALL NOT be overwritten by the external URL. Collection SHALL read the OdCLI-owned route file and correlate its owner/route identity with the same captured runtime identity used by status/stop; it SHALL remain read-only and SHALL NOT introduce a publication database.
 
 #### Scenario: Published environment is ready
 - **WHEN** an environment has a matching active route and its exact runtime is ready
