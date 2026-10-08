@@ -192,12 +192,6 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             backup_ownership=ownership,
         )
 
-        if (remote_name is not None or selected_backup is not None) and instance.databases.exists(
-            target_db
-        ):
-            raise DatabaseAlreadyExistsError(
-                f"Target database {target_db!r} already exists on {base_url}"
-            )
         cat.update_environment(str(env_id), {"backup_id": str(backup.id)})
 
         cat.upsert_copy_journal(

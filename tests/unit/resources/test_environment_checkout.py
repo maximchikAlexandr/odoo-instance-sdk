@@ -59,7 +59,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
-from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 
 FIXED_NOW = datetime(2026, 9, 26, 21, 30, tzinfo=UTC)
 
@@ -1453,6 +1453,234 @@ class TestCheckoutCopy:
     def _assert_auxiliary_cleanup(instance: OdooInstance) -> None:
         cast("Any", instance._client.register_process).assert_called_once()
         cast("Any", instance._client.unregister_process).assert_called_once()
+
+    @staticmethod
+    def _configure_real_copy_instance(
+        instance: OdooInstance,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        database_names: tuple[str, ...],
+    ) -> MagicMock:
+        object.__setattr__(
+            instance,
+            "config",
+            InstanceConfig(
+                base_url="http://localhost:8069",
+                master_password="admin",
+                db_host="localhost",
+                db_port=5432,
+                db_user="odoo",
+            ),
+        )
+        monkeypatch.setattr(type(instance.databases), "names", lambda _self: database_names)
+        restore = MagicMock()
+        monkeypatch.setattr(instance.databases, "_restore_after_verified_absence", restore)
+        return restore
+
+    @staticmethod
+    def _real_copy_result_factory(snapshot: Any) -> Any:
+        def result_for(step: PreparedProcess) -> ProcessResult:
+            prepared = cast("PreparedStep", step)
+            stdout = {
+                "checkout.validate.git.toplevel": str(snapshot.private.repo_root),
+                "checkout.validate.git.common-dir": snapshot.private.git_common_dir,
+                "checkout.validate.git.base": snapshot.private.base_revision,
+                "database.restore.exists-after": "1",
+            }.get(prepared.step_id, "")
+            if prepared.step_id == "checkout.worktree":
+                snapshot.private.worktree.mkdir(parents=True)
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+
+        return result_for
+
+    def _real_copy_command(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        *,
+        branch: str,
+        target_database: str,
+        backup_id: uuid.UUID | None = None,
+        remote_name: str | None = None,
+    ) -> tuple[Command[DevelopmentEnvironment], RecordingExecutor]:
+        snapshot = env_client.environments._build_checkout_snapshot(
+            project_manifest,
+            branch,
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                backup_id=backup_id,
+                remote_name=remote_name,
+                target_database=target_database,
+            ),
+        )
+        executor = RecordingExecutor(result_factory=self._real_copy_result_factory(snapshot))
+        return env_client.environments._command_from_snapshot(snapshot, executor=executor), executor
+
+    @staticmethod
+    def _assert_restore_probe_pair(executor: RecordingExecutor) -> None:
+        probe_ids = [
+            step.step_id
+            for step in executor.executed
+            if step.step_id.startswith("database.restore.exists-")
+        ]
+        assert probe_ids == [f"database.restore.exists-{suffix}" for suffix in ("before", "after")]
+
+    def test_selected_backup_real_database_resource_consumes_restore_probes_once(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backup = _valid_retained_backup(tmp_path)
+        _record_backup(env_client, backup)
+        instance = env_client.instance("http://localhost:8069", master_password="admin")
+        restore = self._configure_real_copy_instance(
+            instance, monkeypatch, database_names=("comerta",)
+        )
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=instance))
+        command, executor = self._real_copy_command(
+            env_client,
+            project_manifest,
+            fake_python,
+            branch="feat/real-retained",
+            backup_id=backup.id,
+            target_database="retained_copy",
+        )
+        plan_ids = tuple(step.step_id for step in command.plan.steps)
+        before_index = plan_ids.index("database.restore.exists-before")
+        assert plan_ids.count("database.restore.exists-before") == 1
+        assert plan_ids.count("database.restore.exists-after") == 1
+        assert plan_ids[before_index : before_index + 2] == (
+            "database.restore.exists-before",
+            "database.restore.exists-after",
+        )
+        env = command.run()
+
+        assert env.state is EnvironmentState.READY
+        self._assert_restore_probe_pair(executor)
+        restore.assert_called_once_with(
+            backup,
+            "retained_copy",
+            copy=True,
+            neutralize_database=True,
+        )
+        assert env.backup_id == backup.id
+        assert (journal := env_client.get_catalog().get_copy_journal(str(env.id))) is not None
+        assert journal["backup_ownership"] == "borrowed"
+        assert (backup_row := env_client.get_catalog().get_by_id(str(backup.id))) is not None
+        assert backup_row["state"] == "available"
+
+    def test_selected_backup_existing_target_fails_before_restore_and_preserves_backup(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backup = _valid_retained_backup(tmp_path)
+        _record_backup(env_client, backup)
+        instance = env_client.instance("http://localhost:8069", master_password="admin")
+        restore = self._configure_real_copy_instance(
+            instance, monkeypatch, database_names=("comerta", "retained_copy")
+        )
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=instance))
+        command, executor = self._real_copy_command(
+            env_client,
+            project_manifest,
+            fake_python,
+            branch="feat/real-existing",
+            backup_id=backup.id,
+            target_database="retained_copy",
+        )
+        with pytest.raises(DatabaseAlreadyExistsError, match="already exists"):
+            command.run()
+
+        assert [step.step_id for step in executor.executed] == [
+            "checkout.validate.git.toplevel",
+            "checkout.validate.git.common-dir",
+            "checkout.validate.git.base",
+        ]
+        restore.assert_not_called()
+        assert env_client.environments.list(project=project_manifest) == []
+        backup_row = env_client.get_catalog().get_by_id(str(backup.id))
+        assert backup_row is not None and backup_row["state"] == "available"
+
+    def test_named_remote_real_database_resource_consumes_restore_probes_once(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _add_named_remote_config(project_manifest)
+        backup = _valid_retained_backup(tmp_path, branch="main")
+        backup = Backup(
+            id=backup.id,
+            source_base_url=backup.source_base_url,
+            database_name="staging_db",
+            format=backup.format,
+            filestore_requested=backup.filestore_requested,
+            path=backup.path,
+            filename=backup.filename,
+            size_bytes=backup.size_bytes,
+            sha256=backup.sha256,
+            downloaded_at=backup.downloaded_at,
+            source_git_branch=backup.source_git_branch,
+            source_name="staging",
+        )
+        remote = MagicMock()
+
+        def record_remote_backup(*_args: object, **_kwargs: object) -> Backup:
+            _record_backup(env_client, backup)
+            return backup
+
+        remote.databases.backup.side_effect = record_remote_backup
+        local = env_client.instance("http://localhost:8069", master_password="admin")
+        restore = self._configure_real_copy_instance(
+            local, monkeypatch, database_names=("comerta",)
+        )
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=local))
+        monkeypatch.setattr(InstanceFactory, "__call__", lambda *_args, **_kwargs: remote)
+        monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "staging-secret")
+
+        command, executor = self._real_copy_command(
+            env_client,
+            project_manifest,
+            fake_python,
+            branch="feat/real-named",
+            remote_name="staging",
+            target_database="staging_copy",
+        )
+        env = command.run()
+
+        assert env.state is EnvironmentState.READY
+        self._assert_restore_probe_pair(executor)
+        remote.databases.backup.assert_called_once()
+        restore.assert_called_once_with(
+            backup,
+            "staging_copy",
+            copy=True,
+            neutralize_database=True,
+        )
+        assert env.backup_id == backup.id
+        assert (journal := env_client.get_catalog().get_copy_journal(str(env.id))) is not None
+        assert journal["backup_ownership"] == "borrowed"
+        assert (backup_row := env_client.get_catalog().get_by_id(str(backup.id))) is not None
+        assert backup_row["state"] == "available"
 
     def test_copy_success_records_restored_journal(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
