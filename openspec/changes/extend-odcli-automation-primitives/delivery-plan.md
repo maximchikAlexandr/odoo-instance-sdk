@@ -3,8 +3,8 @@
 - **Task key:** `MYL-409`
 - **Change:** `extend-odcli-automation-primitives`
 - **Approved base:** `origin/main@c1e57b79f39e529a50c25818134c06309384ee23`
-- **Planning branch:** `feat/MYL-409-extend-odcli-automation-primitives-v2`
-- **Graph revision:** `MYL-409-GR2`
+- **Planning branch:** `feat/MYL-409-extend-odcli-automation-primitives-v3`
+- **Graph revision:** `MYL-409-GR3`
 - **Delivery mode:** `dag`
 - **Sizing source:** authoritative `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours` properties on the root planning issue; numerical totals are intentionally not duplicated in artifacts
 - **Topology decision:** the weighted property remains above the multi-WP threshold and stages 1 and 2 each contain genuinely independent write scopes
@@ -38,6 +38,8 @@ Required child stage mapping:
 | `WP-06-monitor-panel-verification` | 3 |
 
 Stages are consecutive topological layers. Stage 1 permits project binding/runtime and Multica adoption/identity concurrently because they edit disjoint project/runtime versus environment/integration paths. Stage 2 permits Git/GitLab, module context, and Caddy publication concurrently after their required contexts exist. WIP is operational and is not encoded as an edge.
+
+The direct edge set is unchanged after ownership correction: `WP-03` and `WP-05` remain genuinely independent feature packages and neither writes the central CLI registry. Each exports its complete Click command/group object. Their existing common successor `WP-06` is the sole owner of `src/odoo_instance_sdk/commands/cli_parts/registration.py` and wires both completed surfaces during convergence. This single-owner contract removes the shared-file conflict without inventing a dependency between unrelated GitLab and publication behavior.
 
 ## Task Coverage
 
@@ -80,10 +82,10 @@ Every OpenSpec task is owned exactly once:
 - **OpenSpec task coverage:** `3.1`–`3.5`
 - **Direct `depends_on`:** `WP-02-multica-adoption-identity`
 - **Independent deliverable:** native Git passthrough, HTTPS sync, and exact-key GitLab MR create/update operate as the resolved root creator without persisting or exposing credentials.
-- **Owned responsibility scope:** `resources/git.py`, `internal/git_sync.py`, `commands/git.py`, the small askpass helper, concrete GitLab `httpx` module/command, and focused native-Git/fake-provider tests. It consumes WP-02 identity values without editing adoption/mapping code.
-- **Contract surface:** literal `--` raw transport; child-only credential environment; existing SSH and exact-lease sync semantics; exact project/source/target MR key; bounded description file; created/updated result.
-- **DoD / evidence:** local Git needs no identity; remote URL/argv/config remain secret-free; native exit/stdio behavior holds; HTTPS sync retains stale-lease refusal; MR zero/one/many and provider-failure cases pass without a live GitLab service.
-- **Parallel-safety rationale:** owns only Git/GitLab paths and tests; it does not edit module, Caddy, monitor, or UI files used by stage-2 siblings.
+- **Owned responsibility scope:** `resources/git.py`, `internal/git_sync.py`, `commands/git.py`, a self-contained GitLab Click group/leaf module, the small askpass helper, concrete GitLab `httpx` module, and focused native-Git/fake-provider tests. It consumes WP-02 identity values without editing adoption/mapping code. It does not edit the central `commands/cli_parts/registration.py` registry.
+- **Contract surface:** literal `--` raw transport; child-only credential environment; existing SSH and exact-lease sync semantics; exact project/source/target MR key; bounded description file; created/updated result; one importable, fully constructed top-level `gitlab` Click group for WP-06 to register without adapting its callbacks.
+- **DoD / evidence:** local Git needs no identity; remote URL/argv/config remain secret-free; native exit/stdio behavior holds; HTTPS sync retains stale-lease refusal; MR zero/one/many and provider-failure cases pass without a live GitLab service; the exported group exposes the specified help and `mr publish` leaf in isolation.
+- **Parallel-safety rationale:** owns only Git/GitLab paths and tests and exports its Click group without touching the central registry; it does not edit module, Caddy, monitor, or UI files used by stage-2 siblings.
 
 ## WP-04-module-context
 
@@ -102,10 +104,10 @@ Every OpenSpec task is owned exactly once:
 - **OpenSpec task coverage:** `5.1`–`5.5`
 - **Direct `depends_on`:** `WP-01-project-binding-runtime`, `WP-02-multica-adoption-identity`
 - **Independent deliverable:** project and environment runtimes gain stable idempotent HTTPS publish/unpublish through one locked, validated OdCLI-owned Caddy route file, with safe stop/restart/removal behavior.
-- **Owned responsibility scope:** publication settings reader, one concrete publication resource/CLI, route-file generator/lock, Caddy validate/reload process steps, environment removal hook, and focused tests. It reuses existing runtime/catalog owner identities and adds no publication table or generic control plane.
-- **Contract surface:** deterministic owner labels/URLs; exact ready backend; one complete owned route file; validate/reload/prior-byte restoration; HTTPS/Basic Auth/Odoo/panel routes; idempotent unpublish; removal cleanup gate.
-- **DoD / evidence:** stable distinct URLs; concurrent updates keep both routes; failed validation/reload preserves prior bytes and live routes; unknown Host/auth fail closed; stopped runtime is non-actionable; removal failure preserves the adopted checkout; outputs contain no secret.
-- **Parallel-safety rationale:** owns publication modules and the narrow removal hook after WP-02. It does not edit Git or module paths; monitor/UI consume its file only in WP-06.
+- **Owned responsibility scope:** publication settings reader, one concrete publication resource, a self-contained publication Click command module, route-file generator/lock, Caddy validate/reload process steps, environment removal hook, and focused tests. It reuses existing runtime/catalog owner identities and adds no publication table or generic control plane. It does not edit the central `commands/cli_parts/registration.py` registry.
+- **Contract surface:** deterministic owner labels/URLs; exact ready backend; one complete owned route file; validate/reload/prior-byte restoration; HTTPS/Basic Auth/Odoo/panel routes; idempotent unpublish; removal cleanup gate; importable, fully constructed top-level `publish` and `unpublish` Click commands for WP-06 to register without adapting their callbacks.
+- **DoD / evidence:** stable distinct URLs; concurrent updates keep both routes; failed validation/reload preserves prior bytes and live routes; unknown Host/auth fail closed; stopped runtime is non-actionable; removal failure preserves the adopted checkout; outputs contain no secret; exported commands expose the specified help and options in isolation.
+- **Parallel-safety rationale:** owns publication modules and the narrow removal hook after WP-02 and exports complete Click commands without touching the central registry. It does not edit Git or module paths; monitor/UI and central registration consume its contracts only in WP-06.
 
 ## WP-06-monitor-panel-verification
 
@@ -113,15 +115,15 @@ Every OpenSpec task is owned exactly once:
 - **OpenSpec task coverage:** `6.1`–`6.5`, `7.1`–`7.3`
 - **Direct `depends_on`:** `WP-03-git-gitlab`, `WP-04-module-context`, `WP-05-caddy-publication`
 - **Independent deliverable:** the existing monitor/OpenAPI/generated client/panel exposes publication safely behind Caddy, documents all new leaves, and passes one integrated verification run.
-- **Owned responsibility scope:** canonical monitor snapshot/collector, FastAPI proxy policy, OpenAPI and generated TypeScript, existing React/Mantine views/tests, focused user/deployment/recovery docs, and final existing repo gates. It consumes completed Git/module/publication contracts and does not introduce new backend subsystems or test harnesses.
-- **Contract surface:** minimal publication state/URL/reason; separate local endpoint; exact trusted proxy/Host/effective origin; secure CSRF; local compatibility; relative generated client; Odoo-like views; server-supplied external URL only.
-- **DoD / evidence:** project/environment publication renders consistently; publication read failure is isolated; spoofed forwarding/unknown hosts fail; external same-origin mutation and local mode pass; UI disables unavailable links and stays accessible/responsive; generated stale gate and existing repo gates pass once; optional smoke uses existing fixtures or reports missing prerequisites.
-- **Parallel-safety rationale:** terminal convergence package. All stage-2 feature writers finish first, so generated contracts, UI, docs, and integrated verification have no active sibling write conflicts.
+- **Owned responsibility scope:** sole ownership of `src/odoo_instance_sdk/commands/cli_parts/registration.py`, canonical monitor snapshot/collector, FastAPI proxy policy, OpenAPI and generated TypeScript, existing React/Mantine views/tests, focused user/deployment/recovery docs, and final existing repo gates. It consumes completed Git/module/publication contracts and does not introduce new backend subsystems or test harnesses.
+- **Contract surface:** one central registry mapping the completed `gitlab`, `publish`, and `unpublish` Click objects without callback adaptation; minimal publication state/URL/reason; separate local endpoint; exact trusted proxy/Host/effective origin; secure CSRF; local compatibility; relative generated client; Odoo-like views; server-supplied external URL only.
+- **DoD / evidence:** root help and lazy routing expose exactly one top-level `gitlab`, `publish`, and `unpublish` surface backed by the predecessor exports; project/environment publication renders consistently; publication read failure is isolated; spoofed forwarding/unknown hosts fail; external same-origin mutation and local mode pass; UI disables unavailable links and stays accessible/responsive; generated stale gate and existing repo gates pass once; optional smoke uses existing fixtures or reports missing prerequisites.
+- **Parallel-safety rationale:** terminal convergence package and sole central-registry writer. All stage-2 feature writers finish first, so registry wiring, generated contracts, UI, docs, and integrated verification have no active sibling write conflicts.
 
 ## Estimation Evidence and Assumptions
 
 - Evidence inspected: current `RuntimeView`, `internal/dbprep`, atomic project manifest writer, project/environment runtime identity, environment catalogue/removal, `ModuleResource`, `GitResource`/exact-lease sync, dotenv/redaction, monitor/msgspec/OpenAPI/generated TypeScript/React flow, FastAPI Host/CSRF boundary, dependency metadata, existing test harnesses, and the planning attachments.
-- The estimate counts each focused check with its owning implementation row and counts shared documentation/generated artifacts/repository gates only in the terminal row. No blanket testing/review percentage, new acceptance harness, trace matrix, publication database, provider framework, or repeated full-gate pass is included.
+- The estimate counts each focused check with its owning implementation row and counts central CLI registration, shared documentation/generated artifacts, and repository gates only in the terminal row. No blanket testing/review percentage, new acceptance harness, trace matrix, publication database, provider framework, or repeated full-gate pass is included.
 - Existing database preparation, detached runtime, process execution/redaction, Git exact-lease, safe module parsing, monitor/OpenAPI generation, React/Mantine, and disposable Odoo fixtures are reused as observed.
 - Public `multica-py` must expose the required typed traversal. If it does not, the missing public API becomes a separate upstream change rather than private HTTP work inside this estimate.
 - Deployment supplies DNS/TLS prerequisites, a dedicated local Caddy instance including the owned route file, and valid mappings. External waiting is excluded from active developer-hours.

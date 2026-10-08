@@ -25,7 +25,7 @@ The missing behavior is integration at those seams: a paired project database/fi
 
 ### 1. Extend concrete resources; do not add an orchestration layer
 
-Project/environment selection remains in `RuntimeView`; preparation remains in `internal/dbprep`; runtime work remains in `OdooInstance`; module and Git work stay in their existing resources; monitor remains the snapshot authority. New commands are thin adapters over those SDK operations.
+Project/environment selection remains in `RuntimeView`; preparation remains in `internal/dbprep`; runtime work remains in `OdooInstance`; module and Git work stay in their existing resources; monitor remains the snapshot authority. New commands are thin adapters over those SDK operations. GitLab and publication packages each export complete Click objects; the existing central registry is changed once during terminal integration, after both objects exist.
 
 Alternative: a new service coordinating prepare, run, publish, and MR. Rejected because the requested steps are independently callable and the service would duplicate plans, errors, and compensation.
 

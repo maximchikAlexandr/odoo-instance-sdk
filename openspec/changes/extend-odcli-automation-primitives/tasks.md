@@ -40,7 +40,7 @@
 
 - [ ] 6.1 Extend the canonical project/environment snapshot with one publication value read from the owned route file and correlated with exact runtime state; preserve the separate local endpoint and isolate publication read failure.
 - [ ] 6.2 Add explicit trusted-proxy mode to the existing FastAPI server with exact peer/Host/forwarded-origin checks, secure external CSRF, local-mode compatibility, and external pgAdmin disablement.
-- [ ] 6.3 Regenerate OpenAPI and the TypeScript SDK once from the canonical snapshot change and keep relative API/assets under the external origin.
+- [ ] 6.3 Register the completed top-level `gitlab`, `publish`, and `unpublish` Click objects in the central CLI registry, regenerate OpenAPI and the TypeScript SDK once from the canonical snapshot change, and keep relative API/assets under the external origin.
 - [ ] 6.4 Restyle the existing Mantine views into compact Odoo-like project/environment navigation and tables; use only the server-supplied available external URL for `Open Odoo`.
 - [ ] 6.5 Add focused monitor/HTTP/UI checks for project/environment publication states, spoofed forwarding, same-origin mutation, disabled actions, relative URLs, generated-type use, accessibility, and responsive layout.
 
