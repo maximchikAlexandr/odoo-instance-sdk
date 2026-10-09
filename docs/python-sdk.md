@@ -358,6 +358,20 @@ The Python monitor returns typed models. The local HTTP interface exposes the
 same snapshot contract at `/api/v1/snapshot`; see the README for its security
 and deployment boundaries.
 
+Each project and environment snapshot also carries a publication projection:
+`unpublished`, `available`, `backend_unavailable`, or `error`, with a sanitized
+reason, route identity, and optional external URL. The projection is read from
+the single OdCLI-owned Caddy route file and correlated with the runtime's local
+HTTP endpoint; the local endpoint remains a separate diagnostic value. A route
+read failure affects publication only and does not hide runtime facts.
+
+The panel uses the external URL only when the state is `available`; otherwise
+its external action is disabled. For an external panel deployment, configure
+exact allowed hosts and trusted proxy peers. Forwarded origin headers from any
+other peer are rejected, CSRF cookies are secure, and pgAdmin remains disabled
+outside local mode. Publication and unpublication are exposed as top-level CLI
+leaves and do not add a second persistence layer.
+
 ## Process and checkout inventory
 
 `EnvironmentMonitor.processes_command()` projects one `ProcessInventory` from
