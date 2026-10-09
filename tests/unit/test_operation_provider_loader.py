@@ -171,7 +171,8 @@ def test_fixture_provider_is_discovered_exported_and_invocable() -> None:
     assert not result.failures
     registry = build_registry(providers=result.providers)
     binding = registry.get("fixture.greeting")
-    request = binding.descriptor.request_type(name="Ada")  # type: ignore[union-attr]
+    assert binding.descriptor.request_type is not None
+    request = binding.descriptor.request_type(name="Ada")
     response = binding.factory(request)  # type: ignore[misc]
     assert response.greeting == "hello Ada"
     assert response.payload is None
