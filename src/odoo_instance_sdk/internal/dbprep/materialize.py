@@ -395,6 +395,17 @@ def _restore_preflight(  # noqa: C901
             base_url=local_url,
             master_password=local_password,
         )
+        managed_filestore = managed_filestore_path(current)
+        from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
+
+        verify_project_owned_data_dir(root, managed_filestore, require_exists=False)
+        managed_filestore.mkdir(parents=True, exist_ok=True)
+        verify_project_owned_data_dir(root, managed_filestore)
+        if local.config.start_config is None:
+            raise InstanceConfigurationError("local source config has no runtime configuration")
+        # Restore into the same validated project-owned directory that the
+        # post-restore manifest publishes; the source config file stays untouched.
+        local.config.start_config.data_dir = str(managed_filestore)
         # ``from_config`` is intentionally transport-only and therefore does
         # not infer the project Compose claim. Restore provenance must carry
         # the exact active cluster and data root into the local instance so a
