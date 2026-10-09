@@ -2,9 +2,7 @@
 
 ## Purpose
 TBD - created by archiving change centralize-execution-dry-run-typed-output. Update Purpose after archive.
-
 ## Requirements
-
 ### Requirement: Public inspectable command contract
 
 Every finite public SDK operation that can launch a child process SHALL expose a sibling `<operation>_command()` returning `Command[T]`. `Command[T]` SHALL expose an immutable secret-free `.plan`, stable `.commands`, and `.run() -> T`; the existing finite convenience operation SHALL delegate to that command object and SHALL NOT reconstruct planning or execution inputs. An explicitly documented unbounded streaming coordinator MAY instead build and run a fresh finite command per iteration when no finite snapshot can describe all future launches; it SHALL NOT launch directly or reuse one stale command across iterations.
@@ -435,3 +433,21 @@ All Git workflow probes and mutations SHALL be captured as immutable process/act
 #### Scenario: Inspect Git plan
 - **WHEN** any mutating `odcli git` command is requested with `--dry-run`
 - **THEN** output contains every sanitized exact command and precondition while repository and remotes remain unchanged
+
+### Requirement: Ephemeral host-scoped child credentials
+Secret-bearing Git and GitLab execution inputs SHALL be captured privately at command construction, associated with one exact normalized HTTPS host, and supplied only to the intended child process or HTTP request. Public projections SHALL show the credential source and host but SHALL redact token values, authorization headers, credential-helper environment, stdin, scripts, observations, errors, and fingerprints. Parallel commands for different users SHALL have independent immutable private snapshots and SHALL NOT mutate global or repository Git credential configuration.
+
+#### Scenario: Two users run Git concurrently
+- **WHEN** two commands for different root creators access the same GitLab host concurrently
+- **THEN** each child receives only its own credential snapshot and neither command changes the other's environment or Git configuration
+
+#### Scenario: Plan and child output contain a token
+- **WHEN** credential material occurs in a private environment value or is echoed by a child
+- **THEN** the public plan, bounded result, logs, exception graph, and fingerprint contain no token bytes
+
+### Requirement: Publication effects use existing execution boundaries
+Caddy validation/reload and native Git passthrough SHALL use `internal/proc`; GitLab HTTP and replacement of the single owned Caddy route file SHALL use the existing action-step convention. Convenience methods SHALL delegate to their `*_command()` siblings, and dry-run SHALL execute neither processes, HTTP requests, nor filesystem publication.
+
+#### Scenario: Inspect a publication plan
+- **WHEN** a caller constructs publish or MR commands
+- **THEN** every possible process and effect appears in execution order with stable step identifiers before mutation
