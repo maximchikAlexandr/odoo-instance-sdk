@@ -422,8 +422,10 @@ def run(  # noqa: C901
     output_format: str | None,
     json_output: bool,
 ) -> None:
-    if wait_ready and (not detach or ctx.env is None):
-        raise click.UsageError("--wait-ready requires root --env together with --detach")
+    if wait_ready and (not detach or (ctx.env is None and ctx.project is None)):
+        raise click.UsageError(
+            "--wait-ready requires root --env or --project together with --detach"
+        )
     if not wait_ready and readiness_timeout is not None:
         raise click.UsageError("--readiness-timeout requires --wait-ready")
     effective_readiness_timeout = 60.0 if readiness_timeout is None else readiness_timeout

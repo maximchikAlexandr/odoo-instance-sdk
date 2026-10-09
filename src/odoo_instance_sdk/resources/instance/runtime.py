@@ -318,6 +318,19 @@ class InstanceFactory:
         )
         if project.default_source_database is not None:
             start_cfg.db_name = project.default_source_database
+        if project.managed_filestore is not None:
+            from odoo_instance_sdk.project import managed_filestore_path
+
+            if project.default_source_database is None:
+                raise InstanceConfigurationError("project binding has no target database")
+            managed_filestore = _project_path(
+                root,
+                managed_filestore_path(project),
+                field="managed_filestore",
+                directory=True,
+            )
+            start_cfg.data_dir = str(managed_filestore)
+            start_cfg.dbfilter = project.default_source_database
         normalized = normalize_base_url(f"http://{start_cfg.http_interface}:{start_cfg.http_port}")
         try:
             assert_local(normalized)
