@@ -1,0 +1,455 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from multica_py import Issue
+from odcli_multica.client import MulticaOdooClient
+from odcli_multica.gitlab import (
+    GitLabPublicationError,
+    publish_merge_request,
+    read_description_file,
+    repository_project_path,
+)
+from odcli_multica.models import (
+    GitLabCredentialContext,
+    GitLabCredentialIdentity,
+    MulticaCompatibility,
+    VerifiedTaskContext,
+)
+
+
+def _credential() -> GitLabCredentialContext:
+    return GitLabCredentialContext(
+        identity=GitLabCredentialIdentity(
+            user_id="user",
+            host="gitlab.example",
+            login="alice",
+            token_key="ODCLI_GITLAB_TOKEN_ALICE",
+            workspace_id="workspace",
+            issue_id="issue",
+            root_issue_id="root",
+        ),
+        _token="secret-token",
+    )
+
+
+def test_description_and_repository_validation(tmp_path: Path) -> None:
+    description = tmp_path / "description.md"
+    description.write_text("body\n", encoding="utf-8")
+
+    assert read_description_file(description) == "body\n"
+    assert repository_project_path("https://GitLab.Example/team/repo.git") == (
+        "gitlab.example",
+        "team/repo",
+    )
+    with pytest.raises(GitLabPublicationError, match="HTTPS"):
+        repository_project_path("http://gitlab.example/team/repo")
+
+
+def test_publish_creates_one_exact_merge_request_without_exposing_token() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if str(request.url).endswith("/api/v4/projects/team%2Frepo"):
+            return httpx.Response(200, json={"id": 42})
+        if request.url.path == "/api/v4/projects/42/merge_requests":
+            if request.method == "GET":
+                return httpx.Response(200, json=[])
+            return httpx.Response(
+                201,
+                json={"iid": 7, "web_url": "https://gitlab.example/team/repo/-/merge_requests/7"},
+            )
+        raise AssertionError(request.url)
+
+    def factory(**kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    result = publish_merge_request(
+        credential=_credential(),
+        project_path="team/repo",
+        source_branch="feature",
+        target_branch="main",
+        title="Add feature",
+        description="body",
+        issue_url="https://multica.example/issues/1",
+        client_factory=factory,
+    )
+
+    assert result.outcome == "created"
+    assert result.merge_request_id == 7
+    assert len(requests) == 3
+    assert all(b"secret-token" not in request.content for request in requests)
+    assert requests[-1].headers["PRIVATE-TOKEN"] == "secret-token"
+
+
+def test_publish_rejects_ambiguous_open_merge_requests() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/api/v4/projects/team%2Frepo"):
+            return httpx.Response(200, json={"id": 42})
+        return httpx.Response(200, json=[{"iid": 1}, {"iid": 2}])
+
+    def factory(**kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    with pytest.raises(GitLabPublicationError, match="multiple"):
+        publish_merge_request(
+            credential=_credential(),
+            project_path="team/repo",
+            source_branch="feature",
+            target_branch="main",
+            title="Add feature",
+            description="body",
+            issue_url="https://multica.example/issues/1",
+            client_factory=factory,
+        )
+
+
+def test_publish_updates_the_unique_open_merge_request() -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        if str(request.url).endswith("/api/v4/projects/team%2Frepo"):
+            return httpx.Response(200, json={"id": 42})
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"iid": 7}])
+        return httpx.Response(
+            200,
+            json={"iid": 7, "web_url": "https://gitlab.example/team/repo/-/merge_requests/7"},
+        )
+
+    def factory(**kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    result = publish_merge_request(
+        credential=_credential(),
+        project_path="team/repo",
+        source_branch="feature",
+        target_branch="main",
+        title="Update feature",
+        description="body",
+        issue_url="https://multica.example/issues/1",
+        client_factory=factory,
+    )
+
+    assert result.outcome == "updated"
+    assert methods[-1] == "PUT"
+
+
+def test_publish_provider_failure_is_bounded_and_redacted() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert b"secret-token" not in request.content
+        return httpx.Response(503, text="secret-token upstream details")
+
+    def factory(**kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    with pytest.raises(GitLabPublicationError, match="failed") as error:
+        publish_merge_request(
+            credential=_credential(),
+            project_path="team/repo",
+            source_branch="feature",
+            target_branch="main",
+            title="Update feature",
+            description="body",
+            issue_url="https://multica.example/issues/1",
+            client_factory=factory,
+        )
+    assert "secret-token" not in str(error.value)
+
+
+def _missing_description(path: Path) -> None:
+    return None
+
+
+def _symlink_description(path: Path) -> None:
+    target = path.with_name("target.md")
+    target.write_text("body", encoding="utf-8")
+    path.symlink_to(target)
+
+
+def _directory_description(path: Path) -> None:
+    path.mkdir()
+
+
+def _invalid_utf8_description(path: Path) -> None:
+    path.write_bytes(b"\xff")
+
+
+def _oversized_description(path: Path) -> None:
+    path.write_bytes(b"x" * (1_048_576 + 1))
+
+
+@pytest.mark.parametrize(
+    "arrange",
+    [
+        pytest.param(_missing_description, id="missing"),
+        pytest.param(_symlink_description, id="symlink"),
+        pytest.param(_directory_description, id="directory"),
+        pytest.param(_invalid_utf8_description, id="utf8"),
+        pytest.param(_oversized_description, id="large"),
+    ],
+)
+def test_description_file_rejects_bounded_negative_cases(
+    tmp_path: Path, arrange: Callable[[Path], None]
+) -> None:
+    path = tmp_path / "description.md"
+    arrange(path)
+
+    with pytest.raises(GitLabPublicationError):
+        read_description_file(path)
+
+
+class _IssueStore:
+    def __init__(self, issue: Issue) -> None:
+        self.issue = issue
+
+    def get(self, _issue_id: str) -> Issue:
+        return self.issue
+
+
+class _BranchResource:
+    def __init__(self, branch: str) -> None:
+        self.branch = branch
+
+    def passthrough(self, args: tuple[str, ...]) -> object:
+        assert args == ("symbolic-ref", "--quiet", "--short", "HEAD")
+        return SimpleNamespace(run=lambda: SimpleNamespace(returncode=0, stdout=f"{self.branch}\n"))
+
+
+def _mr_client(root: Issue) -> MulticaOdooClient:
+    client = object.__new__(MulticaOdooClient)
+    client.multica = SimpleNamespace(
+        issues=_IssueStore(root),
+        config=SimpleNamespace(server_url="https://multica.example"),
+    )
+    client._compatibility = MulticaCompatibility(
+        package_version="0.1.0",
+        package_revision="c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed",
+        native_cli_version="0.5.3",
+        typed_checkout=True,
+        typed_daemon_status=True,
+        observed=True,
+    )
+    return client
+
+
+def _mr_context() -> VerifiedTaskContext:
+    return VerifiedTaskContext(
+        checkout_path="/task/checkout",
+        task_root="/task",
+        repository_url="https://gitlab.example/team/repo.git",
+        workspace_id="workspace",
+        multica_project_id="project",
+        issue_id="root",
+        run_id="run",
+        runtime_id="runtime",
+        daemon_id="daemon",
+        observed_at=datetime.now(UTC),
+        root_issue_id="root",
+        root_creator_id="human-root",
+    )
+
+
+class _CapturedGit:
+    def __init__(self) -> None:
+        self.passthrough_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+        self.sync_calls: list[dict[str, object]] = []
+
+    def passthrough_command(self, args: tuple[str, ...], **kwargs: object) -> object:
+        self.passthrough_calls.append((args, kwargs))
+        return SimpleNamespace(run=lambda: SimpleNamespace(returncode=0, stdout=""))
+
+    def sync_command(self, **kwargs: object) -> object:
+        self.sync_calls.append(kwargs)
+        return SimpleNamespace(run=SimpleNamespace)
+
+
+def _credential_project(tmp_path: Path) -> tuple[Path, Path]:
+    project = tmp_path / "project"
+    environment = project / ".odcli" / ".env"
+    environment.parent.mkdir(parents=True)
+    environment.write_text("ODCLI_GITLAB_TOKEN_ROOT=secret-token\n", encoding="utf-8")
+    environment.chmod(0o600)
+    mapping = project / ".odcli" / "gitlab-credentials.toml"
+    mapping.write_text(
+        '[[mappings]]\nuser_id = "human-root"\nhost = "gitlab.example"\n'
+        'login = "root-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    return project, mapping
+
+
+def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Path) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    project, mapping = _credential_project(tmp_path)
+    client = _mr_client(root)
+
+    local_git = _CapturedGit()
+    client.git_command(
+        _mr_context(),
+        ("status", "--short"),
+        git_resource=local_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    assert local_git.passthrough_calls[0][1] == {"environment": {}, "secret_values": ()}
+
+    remote_git = _CapturedGit()
+    client.git_command(
+        _mr_context(),
+        ("fetch", "origin"),
+        git_resource=remote_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    environment = remote_git.passthrough_calls[0][1]["environment"]
+    assert environment == {
+        "GITLAB_LOGIN": "root-login",
+        "GITLAB_TOKEN": "secret-token",
+        "GIT_ASKPASS": environment["GIT_ASKPASS"],
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert remote_git.passthrough_calls[0][1]["secret_values"] == ("secret-token",)
+
+    sync_git = _CapturedGit()
+    client.sync_command(
+        _mr_context(),
+        git_resource=sync_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    assert sync_git.sync_calls[0]["environment"] == environment
+    assert sync_git.sync_calls[0]["secret_values"] == ("secret-token",)
+
+
+def test_git_https_ambiguous_host_fails_before_child_process(tmp_path: Path) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    project, mapping = _credential_project(tmp_path)
+    git = _CapturedGit()
+
+    with pytest.raises(Exception, match="ambiguous"):
+        _mr_client(root).git_command(
+            _mr_context(),
+            ("fetch", "https://other.example/team/repo.git"),
+            git_resource=git,
+            project_root=project,
+            mapping_path=mapping,
+        )
+    assert git.passthrough_calls == []
+
+
+def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+    client = _mr_client(root)
+    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "odcli_multica.gitlab.publish_merge_request",
+        lambda **_: pytest.fail("dry-run invoked provider"),
+    )
+
+    command = client.publish_merge_request_command(
+        _mr_context(),
+        project_root=tmp_path,
+        git_resource=_BranchResource("feature"),
+        source_branch="feature",
+        target_branch="main",
+        title="Add feature",
+        description_file=description,
+    )
+
+    plan_text = repr(command.plan)
+    assert "secret-token" not in plan_text
+    assert "gitlab.mr.revalidate-context" in plan_text
+    assert "gitlab.mr.revalidate-branch" in plan_text
+    assert "gitlab.mr.publish" in plan_text
+
+
+def test_mr_execution_revalidates_stale_context_and_current_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    replacement = Issue(
+        "root",
+        "Replacement",
+        "todo",
+        project_id="project",
+        creator_id="other-human",
+        creator_type="member",
+    )
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+    client = _mr_client(root)
+    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    provider_calls: list[bool] = []
+    monkeypatch.setattr(
+        "odcli_multica.gitlab.publish_merge_request",
+        lambda **_: provider_calls.append(True),
+    )
+    command = client.publish_merge_request_command(
+        _mr_context(),
+        project_root=tmp_path,
+        git_resource=_BranchResource("feature"),
+        source_branch="feature",
+        target_branch="main",
+        title="Add feature",
+        description_file=description,
+    )
+    client.multica.issues.issue = replacement
+
+    with pytest.raises(Exception, match="task root creator"):
+        command.run()
+    assert provider_calls == []
+
+    client.multica.issues.issue = root
+    bad_branch = client.publish_merge_request_command(
+        _mr_context(),
+        project_root=tmp_path,
+        git_resource=_BranchResource("other"),
+        source_branch="feature",
+        target_branch="main",
+        title="Add feature",
+        description_file=description,
+    )
+    with pytest.raises(Exception, match="branch"):
+        bad_branch.run()
+    assert provider_calls == []
