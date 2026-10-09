@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
-import keyword
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -24,108 +22,27 @@ from odoo_instance_sdk.internal.test_selection import (
 from odoo_instance_sdk.models import (
     CommandResult,
     Module,
+    ModuleContext,
     ModuleDependencies,
     ModuleDependency,
     ModuleInstallOrder,
-    ModuleJsonValue,
     ModuleUpdatePlan,
     ModuleUpdateResult,
+)
+from odoo_instance_sdk.resources.module_context import (
+    _depends,
+    _instance_worktree,
+    _manifest,
+    _safe_root,
+    _valid_name,
+    context_command as _context_command,
 )
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.commands.context import RuntimeView
     from odoo_instance_sdk.execution import Command, SemanticPlanObservation
-    from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
+    from odoo_instance_sdk.internal.proc import PreparedStep, ProcessExecutor, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
-
-
-type _LiteralValue = (
-    bool
-    | int
-    | float
-    | str
-    | list["_LiteralValue"]
-    | tuple["_LiteralValue", ...]
-    | dict[str, "_LiteralValue"]
-    | None
-)
-
-
-def _json_value(value: _LiteralValue) -> ModuleJsonValue:
-    """Normalize literal manifest values without evaluating any code."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_json_value(item) for item in value]
-    if isinstance(value, dict):
-        if any(not isinstance(key, str) for key in value):
-            return str(value)
-        return {key: _json_value(item) for key, item in value.items()}
-    # Odoo manifests occasionally contain an otherwise harmless literal type
-    # that is not part of the public JSON model. Keeping its text is safer
-    # than executing or dropping the complete manifest.
-    return str(value)
-
-
-def _valid_name(name: str) -> bool:
-    return bool(name) and name.isidentifier() and not keyword.iskeyword(name)
-
-
-def _safe_root(raw: str, *, worktree: Path) -> Path | None:
-    configured = Path(raw)
-    path = configured if configured.is_absolute() else worktree / configured
-    if path.is_symlink() or _has_symlink_component(path):
-        return None
-    try:
-        resolved = path.resolve(strict=True)
-    except OSError:
-        return None
-    if not resolved.is_dir() or not _contained(resolved, worktree):
-        return None
-    return resolved
-
-
-def _manifest(path: Path) -> dict[str, ModuleJsonValue]:
-    manifest_path = path / "__manifest__.py"
-    try:
-        raw = ast.literal_eval(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError, MemoryError) as exc:
-        raise ConfigError(f"cannot safely parse manifest {manifest_path}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise ConfigError(f"manifest {manifest_path} must contain a dictionary literal")
-    result = _json_value(raw)
-    if not isinstance(result, dict):  # pragma: no cover - guarded by raw's type
-        raise ConfigError(f"manifest {manifest_path} must contain a dictionary literal")
-    return result
-
-
-def _depends(manifest: Mapping[str, ModuleJsonValue], path: Path) -> tuple[str, ...]:
-    raw = manifest.get("depends", ())
-    if raw is None:
-        return ()
-    if not isinstance(raw, (list, tuple)) or any(not isinstance(item, str) for item in raw):
-        raise ConfigError(f"manifest {path / '__manifest__.py'} has invalid depends")
-    names = tuple(cast("str", item) for item in raw)
-    if any(not _valid_name(item) for item in names):
-        raise ConfigError(f"manifest {path / '__manifest__.py'} has invalid dependency name")
-    return names
-
-
-def _instance_worktree(instance: OdooInstance) -> Path:
-    cwd = instance.config.default_cwd
-    if cwd is None and instance.config.start_config is not None:
-        config_path = instance.config.start_config.config_path
-        if config_path is not None:
-            cwd = Path(config_path).parent
-    if cwd is None:
-        cwd = Path.cwd()
-    try:
-        root = Path(cwd).resolve(strict=True)
-    except OSError as exc:
-        raise ConfigError(f"runtime worktree is unavailable: {cwd}") from exc
-    if not root.is_dir() or root.is_symlink():
-        raise ConfigError(f"runtime worktree is not a safe directory: {root}")
-    return root
 
 
 class ModuleResource:
@@ -138,6 +55,20 @@ class ModuleResource:
 
     def __init__(self, instance: OdooInstance) -> None:
         self._instance = instance
+
+    def context_command(
+        self,
+        *,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[ModuleContext]:
+        """Capture one read-only module context collection."""
+        return _context_command(self._instance, executor=executor)
+
+    def context(self) -> ModuleContext:
+        return self.context_command().run()
+
+    inspect_context = context
+    module_context = context
 
     def _roots(self) -> tuple[Path, ...]:
         config = self._instance.config.start_config
