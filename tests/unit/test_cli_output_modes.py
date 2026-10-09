@@ -214,6 +214,24 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="owned target process stop and repeat",
     ),
     PublicLeafCase(
+        ("publish",),
+        ("publish", "--project", "/tmp/project", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="publish_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Caddy-backed publication is covered by focused publication resource tests",
+    ),
+    PublicLeafCase(
+        ("unpublish",),
+        ("unpublish", "--project", "/tmp/project", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="unpublish_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Caddy-backed unpublication is covered by focused publication resource tests",
+    ),
+    PublicLeafCase(
         ("resource", "ls"),
         ("resource", "ls"),
         "bounded-read-only",
@@ -559,6 +577,15 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         sdk_primitive="ModuleResource.info",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream module inspection is covered by focused command tests",
+    ),
+    PublicLeafCase(
+        ("module", "context"),
+        ("module", "context"),
+        "bounded-read-only",
+        False,
+        sdk_primitive="ModuleResource.context",
+        e2e_disposition="not-applicable",
+        e2e_rationale="repository-aware read-only module facts are covered offline",
     ),
     PublicLeafCase(
         ("module", "where"),
@@ -1403,6 +1430,29 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
+    if path in {("publish",), ("unpublish",)}:
+
+        class FakePublication:
+            def publish_command(self, target: object, *, settings: object) -> Command[Any]:
+                if failing:
+                    raise RuntimeError("isolated external operation failed")
+                return _matrix_command({"status": "published", "target": str(target)})
+
+            def unpublish_command(self, target: object, *, settings: object) -> Command[Any]:
+                if failing:
+                    raise RuntimeError("isolated external operation failed")
+                return _matrix_command({"status": "unpublished", "target": str(target)})
+
+        fake_client = SimpleNamespace(publication=FakePublication())
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.publication._client", lambda _ctx: fake_client
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.publication.PublicationSettings.load",
+            classmethod(lambda cls, path=None: object()),
+        )
+        return
+
     if path[:1] == ("resource",):
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.resource._resource_command",
@@ -1742,6 +1792,7 @@ def _patch_leaf_external(  # noqa: C901
 
     if path[0:2] in {
         ("module", "info"),
+        ("module", "context"),
         ("module", "where"),
         ("module", "deps"),
         ("module", "install-order"),
@@ -1755,11 +1806,20 @@ def _patch_leaf_external(  # noqa: C901
         )
         if failing:
             instance.modules.info.side_effect = fail_operation
+            instance.modules.context.side_effect = fail_operation
             instance.modules.where.side_effect = fail_operation
             instance.modules.deps.side_effect = fail_operation
             instance.modules.dependencies.side_effect = fail_operation
             instance.modules.install_order.side_effect = fail_operation
         instance.modules.info.return_value = module
+        instance.modules.context.return_value = __import__(
+            "odoo_instance_sdk.models", fromlist=["ModuleContext"]
+        ).ModuleContext(
+            modules=(module,),
+            database=__import__(
+                "odoo_instance_sdk.models", fromlist=["ModuleAvailability"]
+            ).ModuleAvailability(state="unavailable", reason="database is not selected"),
+        )
         instance.modules.where.return_value = tmp_path / "sale"
         deps_result = __import__(
             "odoo_instance_sdk.models", fromlist=["ModuleDependencies"]

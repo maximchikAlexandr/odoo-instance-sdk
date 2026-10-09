@@ -20,6 +20,8 @@ def test_monitor_headless_passes_flags_and_exits_clean(
         port: int | None = None,
         headless: bool = False,
         no_open: bool = False,
+        external_proxy: Any = None,
+        publication_settings: Any = None,
     ) -> None:
         captured.update({"host": host, "port": port, "headless": headless, "no_open": no_open})
 
@@ -46,6 +48,8 @@ def test_monitor_port_and_host_pass_through(
         port: int | None = None,
         headless: bool = False,
         no_open: bool = False,
+        external_proxy: Any = None,
+        publication_settings: Any = None,
     ) -> None:
         captured.update({"host": host, "port": port, "headless": headless, "no_open": no_open})
 
@@ -68,6 +72,8 @@ def test_monitor_missing_dashboard_extra_exits_one_with_hint(
         port: int | None = None,
         headless: bool = False,
         no_open: bool = False,
+        external_proxy: Any = None,
+        publication_settings: Any = None,
     ) -> None:
         raise SystemExit(
             "monitor command requires the dashboard extra: "
@@ -93,6 +99,8 @@ def test_monitor_missing_extra_hint_in_exception_output(
         port: int | None = None,
         headless: bool = False,
         no_open: bool = False,
+        external_proxy: Any = None,
+        publication_settings: Any = None,
     ) -> None:
         raise SystemExit("pip install odoo-instance-sdk[dashboard] (missing uvicorn)")
 
@@ -100,3 +108,51 @@ def test_monitor_missing_extra_hint_in_exception_output(
     result = CliRunner().invoke(cli, ["monitor"])
     assert result.exit_code == 1
     assert "[dashboard]" in result.output
+
+
+@pytest.mark.unit
+def test_monitor_external_loads_publication_and_passes_trusted_proxy_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    publication = type(
+        "PublicationSettingsStub",
+        (),
+        {
+            "panel_host_label": "panel",
+            "domain_suffix": "example.test",
+            "trusted_proxy_addresses": ("127.0.0.1",),
+        },
+    )()
+
+    def fake_run_server(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.serve.run_server", fake_run_server)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.publication.PublicationSettings.load",
+        classmethod(lambda cls, path=None: publication),
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "monitor",
+            "--external",
+            "--settings",
+            "/tmp/publication.toml",
+            "--headless",
+            "--no-open",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["publication_settings"] is publication
+    assert captured["external_proxy"].allowed_hosts == ("panel.example.test",)
+    assert captured["external_proxy"].trusted_proxy_addresses == ("127.0.0.1",)
+
+
+@pytest.mark.unit
+def test_monitor_settings_require_explicit_external_mode() -> None:
+    result = CliRunner().invoke(cli, ["monitor", "--settings", "/tmp/publication.toml"])
+    assert result.exit_code == 2
+    assert "requires --external" in result.output

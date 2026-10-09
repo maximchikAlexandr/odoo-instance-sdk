@@ -17,6 +17,7 @@ from click.shell_completion import CompletionItem
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.init_registration import _OptionState
+from odoo_instance_sdk.commands.cli_parts.monitor import register_monitor_command
 from odoo_instance_sdk.commands.cli_parts.registration import (
     _run_shell_command,
     _RunCommand,
@@ -422,8 +423,10 @@ def run(  # noqa: C901
     output_format: str | None,
     json_output: bool,
 ) -> None:
-    if wait_ready and (not detach or ctx.env is None):
-        raise click.UsageError("--wait-ready requires root --env together with --detach")
+    if wait_ready and (not detach or (ctx.env is None and ctx.project is None)):
+        raise click.UsageError(
+            "--wait-ready requires root --env or --project together with --detach"
+        )
     if not wait_ready and readiness_timeout is not None:
         raise click.UsageError("--readiness-timeout requires --wait-ready")
     effective_readiness_timeout = 60.0 if readiness_timeout is None else readiness_timeout
@@ -939,6 +942,7 @@ def _register_short_alias(group_name: str, canonical: str, alternate: str) -> No
 # this registry's individual leaf callbacks.
 register_module_commands(cli)
 register_translation_commands(cli)
+register_monitor_command(cli)
 for _group, _canonical, _alternate in (
     ("env", "create", "checkout"),
     ("env", "ls", "list"),
@@ -953,27 +957,6 @@ for _group, _canonical, _alternate in (
     ("module", "ls", "list"),
 ):
     _register_short_alias(_group, _canonical, _alternate)
-
-
-@cli.command("monitor")
-@click.option("--headless", is_flag=True, default=False, help="Serve API only, no UI/browser.")
-@click.option(
-    "--host", default="127.0.0.1", help="Loopback bind address (127.0.0.1, localhost, or ::1)."
-)
-@click.option(
-    "--port", type=int, default=None, help="Exact port (else auto-select 8069 or 8100-8120)."
-)
-@click.option("--no-open", is_flag=True, default=False, help="Do not open a browser.")
-@click.pass_context
-def monitor_cmd(
-    ctx: click.Context, headless: bool, host: str, port: int | None, no_open: bool
-) -> None:
-    """Start the observability monitor (FastAPI + React UI)."""
-    from odoo_instance_sdk.internal.serve import run_server
-
-    # run_server raises SystemExit with an actionable hint if the dashboard
-    # extra (fastapi/uvicorn) is missing; that propagates as exit 1.
-    run_server(host=host, port=port, headless=headless, no_open=no_open)
 
 
 def _resolve_odoo_bin(

@@ -183,6 +183,8 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "doctor",
         "remote",
         "stop",
+        "publish",
+        "unpublish",
         "update",
         "eval",
         "exec",

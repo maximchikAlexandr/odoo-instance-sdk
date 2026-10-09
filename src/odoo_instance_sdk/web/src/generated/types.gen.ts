@@ -89,6 +89,7 @@ export type EnvironmentSnapshot = {
     observed_port: PortObservation | null;
     pgadmin: PgAdminEligibility;
     project_id: string;
+    publication?: PublicationSnapshot;
     runtime: RuntimeMetrics;
     short_sha: string | null;
     storage: StorageFootprint;
@@ -275,8 +276,21 @@ export type ProjectSummary = {
     environment_count: number;
     id: string;
     name: string;
+    publication?: PublicationSnapshot;
     repository_root: string;
     runtime: null | RuntimeMetrics;
+};
+
+/**
+ * PublicationSnapshot
+ *
+ * The route-backed external view of one local runtime.
+ */
+export type PublicationSnapshot = {
+    external_url?: string | null;
+    reason?: string | null;
+    route_identity?: string | null;
+    state: 'available' | 'backend_unavailable' | 'error' | 'unpublished';
 };
 
 /**
