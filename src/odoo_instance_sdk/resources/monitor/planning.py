@@ -21,6 +21,7 @@ from odoo_instance_sdk.models import (
     RuntimeMetrics,
     RuntimeState,
     Snapshot,
+    SnapshotSection,
     StorageFootprint,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -161,6 +162,7 @@ class _SnapshotPlan:
     worktrees: frozenset[Path]
     statuses: frozenset[str]
     cpu_points: frozenset[tuple[int, float]]
+    sections: frozenset[SnapshotSection]
 
 
 def _orphan_git(default_branch: str = "main") -> GitActivity:

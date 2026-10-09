@@ -31,6 +31,7 @@ from odoo_instance_sdk.internal.storage_footprint import (
     collect_storage_footprint,
 )
 from odoo_instance_sdk.models import (
+    SNAPSHOT_SECTIONS,
     ClusterEndpoint,
     ClusterResourceSnapshot,
     ClusterSnapshot,
@@ -47,6 +48,7 @@ from odoo_instance_sdk.models import (
     RuntimeMetrics,
     RuntimeState,
     Snapshot,
+    SnapshotSection,
     StorageFootprint,
 )
 from odoo_instance_sdk.resources.environment import EnvironmentState
@@ -94,12 +96,14 @@ class _SnapshotMixin:
         resources: dict[str, ClusterResourceSnapshot],
         *,
         probe_results: dict[str, ProcessResult] | None = None,
+        sections: frozenset[SnapshotSection] | None = None,
     ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]:
+        selected = sections if sections is not None else frozenset(SNAPSHOT_SECTIONS)
         projects: list[ProjectSummary] = []
         environments: list[EnvironmentSnapshot] = []
         for plan in plans:
             project_runtime = None
-            if plan.project_runtime is not None:
+            if "runtime" in selected and plan.project_runtime is not None:
                 try:
                     project_runtime = self._collect_runtime(plan.project_runtime)
                 except Exception:
@@ -112,12 +116,22 @@ class _SnapshotMixin:
                     display_hint=display_hint,
                     repository_root=display_hint,
                     environment_count=len(plan.environments),
-                    cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
-                    runtime=project_runtime,
+                    cluster=(
+                        self._cluster_snapshot(plan, resources.get(plan.project_id))
+                        if selected & {"postgresql", "docker"}
+                        else None
+                    ),
+                    runtime=project_runtime if "runtime" in selected else None,
                 )
             )
             environments.extend(
-                self._collect_environment(item.row, plan, item.runtime, probe_results=probe_results)
+                self._collect_environment(
+                    item.row,
+                    plan,
+                    item.runtime,
+                    probe_results=probe_results,
+                    sections=selected,
+                )
                 for item in sorted(plan.environments, key=lambda item: str(item.row["id"]))
             )
         return tuple(projects), tuple(sorted(environments, key=lambda item: item.id))
@@ -336,7 +350,9 @@ class _SnapshotMixin:
         runtime_record: sqlite3.Row | None,
         *,
         probe_results: dict[str, ProcessResult] | None = None,
+        sections: frozenset[SnapshotSection] | None = None,
     ) -> EnvironmentSnapshot:
+        selected = sections if sections is not None else frozenset(SNAPSHOT_SECTIONS)
         env_id = str(row["id"])
         db_mode = cast("Literal['shared', 'copy']", str(row["db_mode"]))
         database = row["target_db_name"] if db_mode == "copy" else row["source_db_name"]
@@ -348,7 +364,7 @@ class _SnapshotMixin:
         # Removed rows retain catalog identity but never perform live probes.
         # Process collection is an environment boundary for active rows: one
         # unavailable PID or psutil failure must not erase healthy siblings.
-        if lifecycle_state is EnvironmentState.REMOVED:
+        if "runtime" not in selected or lifecycle_state is EnvironmentState.REMOVED:
             runtime = _stopped_runtime()
         else:
             try:
@@ -359,38 +375,67 @@ class _SnapshotMixin:
         worktree = Path(str(row["worktree_path"]))
         base_ref = _validated_base_ref(row["base_ref"])
         git_probes = None
-        if probe_results is not None:
+        if probe_results is not None and "git" in selected:
             git_probes = {
                 key.rsplit(".git.", 1)[1]: value
                 for key, value in probe_results.items()
                 if key.startswith(f"monitor.{env_id}.git.")
             }
-        git = self._collect_git(worktree, base_ref=base_ref, recorded=git_probes or None)
+        git = (
+            self._collect_git(worktree, base_ref=base_ref, recorded=git_probes or None)
+            if "git" in selected
+            else _orphan_git(base_ref or "unknown")
+        )
         short_sha = git.head_sha[:7] if git.head_sha else None
 
         storage_probes = (
             None
-            if probe_results is None
+            if probe_results is None or not (selected & {"storage", "postgresql"})
             else {
                 key.rsplit(f"monitor.{env_id}.storage.", 1)[1]: value
                 for key, value in probe_results.items()
                 if key.startswith(f"monitor.{env_id}.storage.")
             }
         )
-        storage = self._collect_storage(
-            row,
-            env_id,
-            db_mode,
-            recorded=storage_probes,
+        storage = (
+            self._collect_storage(
+                row,
+                env_id,
+                db_mode,
+                recorded=storage_probes,
+                collect_postgres="postgresql" in selected,
+            )
+            if selected & {"storage", "postgresql"}
+            else _empty_storage()
         )
         worktree_probe = (
             None
             if probe_results is None
             else probe_results.get(f"monitor.{plan.project_id}.git.worktrees")
         )
-        artifacts = self._collect_artifacts(row, recorded=worktree_probe)
-        observed_port = self._observe_port(row, lifecycle_state, runtime, allocated_port)
-        pgadmin = self._pgadmin_eligibility(lifecycle_state, database_str, plan.cluster, plan.state)
+        artifacts = (
+            self._collect_artifacts(row, recorded=worktree_probe)
+            if "artifact" in selected
+            else EnvironmentArtifacts(
+                worktree_exists=False,
+                worktree_registered=False,
+                config_exists=False,
+                python_exists=False,
+                python_contained=False,
+                dependency_lock_exists=False,
+                backup_exists=None,
+            )
+        )
+        observed_port = (
+            self._observe_port(row, lifecycle_state, runtime, allocated_port)
+            if "runtime" in selected
+            else None
+        )
+        pgadmin = (
+            self._pgadmin_eligibility(lifecycle_state, database_str, plan.cluster, plan.state)
+            if "postgresql" in selected
+            else PgAdminEligibility(state=PgAdminEligibilityState.DATABASE_UNRESOLVED)
+        )
 
         return EnvironmentSnapshot(
             id=env_id,
@@ -578,6 +623,9 @@ class _SnapshotMixin:
             database_name=str(rt["database_name"]),
             commit_sha=str(rt["commit_sha"]),
             branch=str(rt["checkout_branch"]),
+            create_time=result.create_time or create_time,
+            cpu_seconds=result.cpu_seconds,
+            sampled_at=result.sampled_at,
         )
 
     def _probe_readiness(self, http_url: str) -> RuntimeState:
@@ -662,6 +710,7 @@ class _SnapshotMixin:
         db_mode: str,
         *,
         recorded: Mapping[str, ProcessResult] | None = None,
+        collect_postgres: bool = True,
     ) -> StorageFootprint:
         now = time.monotonic()
         if recorded is not None:
@@ -681,8 +730,12 @@ class _SnapshotMixin:
             worktree_bytes = measured("worktree")
             python_owned = bool(int(row["python_environment_owned"]))
             python_bytes = measured("python") if python_owned else None
-            postgres_bytes = measured("postgres") if db_mode == "copy" else None
-            filestore_bytes = measured("filestore") if db_mode == "copy" else None
+            postgres_bytes = (
+                measured("postgres") if db_mode == "copy" and collect_postgres else None
+            )
+            filestore_bytes = (
+                measured("filestore") if db_mode == "copy" and collect_postgres else None
+            )
             generated_config = Path(str(row["generated_config_path"]))
             dependency_lock = Path(str(row["dependency_lock_path"]))
 
@@ -723,7 +776,7 @@ class _SnapshotMixin:
                 complete = worktree_bytes is not None and other_bytes is not None
                 if python_owned:
                     complete = complete and python_bytes is not None
-                if db_mode == "copy":
+                if db_mode == "copy" and collect_postgres:
                     complete = (
                         complete and postgres_bytes is not None and filestore_bytes is not None
                     )
@@ -753,7 +806,7 @@ class _SnapshotMixin:
         python_owned = bool(int(row["python_environment_owned"]))
         generated_config = Path(str(row["generated_config_path"]))
         dependency_lock = Path(str(row["dependency_lock_path"]))
-        target_db = row["target_db_name"]
+        target_db = row["target_db_name"] if collect_postgres else None
         target_db_str = str(target_db) if target_db is not None else None
 
         db_host: str | None
@@ -786,7 +839,7 @@ class _SnapshotMixin:
                 dependency_lock_path=dependency_lock,
                 environment_root=generated_config.parent,
                 database=DatabaseStorageInput(
-                    mode=db_mode,
+                    mode=db_mode if collect_postgres else "shared",
                     target_name=target_db_str,
                     host=db_host,
                     port=db_port,
