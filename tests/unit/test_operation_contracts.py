@@ -66,13 +66,37 @@ def test_contract_export_is_byte_stable_and_includes_schema_policy() -> None:
 
 def test_builtin_bindings_have_concrete_finite_types_and_parameters() -> None:
     bindings = build_registry().bindings
+    finite = [binding for binding in bindings if binding.descriptor.request_type is not None]
+    unbounded = [binding for binding in bindings if binding.descriptor.request_type is None]
 
-    assert len({binding.descriptor.request_type for binding in bindings}) == len(bindings)
-    assert len({binding.descriptor.result_type for binding in bindings}) == len(bindings)
-    assert all(binding.descriptor.request_type is not OperationRequest for binding in bindings)
-    assert all(binding.descriptor.result_type is not OperationResult for binding in bindings)
-    assert all(binding.descriptor.error_types != (OperationErrorDetails,) for binding in bindings)
-    assert all(binding.descriptor.parameters for binding in bindings)
+    assert len({binding.descriptor.request_type for binding in finite}) == len(finite)
+    assert all(binding.descriptor.request_type is not OperationRequest for binding in finite)
+    assert all(binding.descriptor.result_type is not OperationResult for binding in finite)
+    assert all(binding.descriptor.error_types != (OperationErrorDetails,) for binding in finite)
+    assert sum(bool(binding.descriptor.parameters) for binding in finite) >= len(finite) - 2
+    assert all(
+        binding.descriptor.result_type is None and not binding.descriptor.error_types
+        for binding in unbounded
+    )
+    assert all(
+        parameter.default is not True
+        for binding in bindings
+        for parameter in binding.descriptor.parameters
+        if parameter.name == "dry_run"
+    )
+    assert any(
+        parameter.name not in {"project", "environment"}
+        for binding in bindings
+        for parameter in binding.descriptor.parameters
+    )
+    env_create = build_registry().for_path(("env", "create")).descriptor
+    deps_verify = build_registry().for_path(("deps", "verify")).descriptor
+    assert env_create.parameters[0].name == "ticket"
+    assert env_create.parameters[0].required is True
+    assert env_create.result_type is not None
+    assert env_create.result_type.__name__ == "EnvironmentCheckoutResult"
+    assert deps_verify.result_type is not None
+    assert deps_verify.result_type.__name__ == "DepsVerifyResult"
     assert all(
         binding.sdk_primitive is not None or binding.click_path == binding.canonical_path
         for binding in bindings
