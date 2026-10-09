@@ -7,7 +7,7 @@ the authoritative operation bundle. Regeneration is pinned to
 
 ```sh
 ./generate.sh
-go test ./...
+./test.sh
 ```
 
 The generated fixture is intentionally small enough to compile in isolation;

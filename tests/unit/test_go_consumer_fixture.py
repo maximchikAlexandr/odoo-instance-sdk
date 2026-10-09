@@ -39,3 +39,5 @@ def test_provider_fixture_uses_one_entry_point_and_python_runtime_has_no_go_depe
     }
     assert "go-jsonschema" not in " ".join(root["project"]["dependencies"])
     assert "go" not in root["project"]["scripts"]
+    gate = Path("tools/go-consumer/test.sh").read_text(encoding="utf-8")
+    assert "go test ./..." in gate

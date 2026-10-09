@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from importlib.metadata import EntryPoint, entry_points
-from typing import Any
+from typing import TypeVar
 
 from .contracts import CONTRACT_VERSION, ENTRY_POINT_GROUP, OperationBinding, provider_bindings
 
@@ -68,6 +68,7 @@ class ProviderDiscoveryError(ValueError):
 
 _cache_lock = threading.Lock()
 _cache: dict[str, ProviderDiscovery | None] = {"discovery": None}
+_T = TypeVar("_T")
 
 
 def clear_provider_cache() -> None:
@@ -105,11 +106,11 @@ def _safe_message(code: str, error: BaseException | None = None) -> str:
 
 
 def _run_bounded(
-    callback: Callable[[], Any], timeout: float
-) -> tuple[Any, BaseException | None, bool]:
+    callback: Callable[[], _T], timeout: float
+) -> tuple[_T | None, BaseException | None, bool]:
     """Run one provider callback with a daemon worker and a hard caller bound."""
 
-    result: list[Any] = []
+    result: list[_T] = []
     error: list[BaseException] = []
 
     def worker() -> None:
@@ -154,11 +155,12 @@ def _load_entry_point(
     if error is not None:
         code = _safe_exception_code(error)
         return None, ProviderFailure(name, code, _safe_message(code, error))
+    assert rows is not None
     version = getattr(loaded, "contract_version", CONTRACT_VERSION)
     return LoadedOperationProvider(name, version, rows), None
 
 
-def _discover(discovered: Any, deadline: float) -> ProviderDiscovery:
+def _discover(discovered: Iterable[EntryPoint], deadline: float) -> ProviderDiscovery:
     started = time.monotonic()
     entries = tuple(sorted(discovered, key=_entry_point_sort_key))
     providers: list[LoadedOperationProvider] = []
@@ -186,7 +188,7 @@ def discover_operation_providers(
     *,
     timeout_seconds: float = DEFAULT_STARTUP_DEADLINE_SECONDS,
     use_cache: bool = True,
-    entry_point_factory: Callable[[], Any] | None = None,
+    entry_point_factory: Callable[[], Iterable[EntryPoint]] | None = None,
 ) -> ProviderDiscovery:
     """Discover only the selected interpreter's installed operation providers.
 
@@ -202,7 +204,7 @@ def discover_operation_providers(
             if cached is not None:
                 return cached
 
-    def get_entry_points() -> Any:
+    def get_entry_points() -> Iterable[EntryPoint]:
         if entry_point_factory is not None:
             return entry_point_factory()
         return entry_points(group=ENTRY_POINT_GROUP)
@@ -225,6 +227,7 @@ def discover_operation_providers(
             failures=(ProviderFailure("<entry-point-group>", code, _safe_message(code, error)),)
         )
     else:
+        assert discovered is not None
         result = _discover(discovered, timeout_seconds - (time.monotonic() - started))
     if use_cache and entry_point_factory is None:
         with _cache_lock:
@@ -246,10 +249,19 @@ def discovered_bindings(
     return discovery.bindings
 
 
-def discover_providers(**kwargs: Any) -> ProviderDiscovery:
+def discover_providers(
+    *,
+    timeout_seconds: float = DEFAULT_STARTUP_DEADLINE_SECONDS,
+    use_cache: bool = True,
+    entry_point_factory: Callable[[], Iterable[EntryPoint]] | None = None,
+) -> ProviderDiscovery:
     """Compatibility spelling for callers using the short provider API name."""
 
-    return discover_operation_providers(**kwargs)
+    return discover_operation_providers(
+        timeout_seconds=timeout_seconds,
+        use_cache=use_cache,
+        entry_point_factory=entry_point_factory,
+    )
 
 
 __all__ = [
