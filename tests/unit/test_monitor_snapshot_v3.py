@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from odoo_instance_sdk.internal.process_metrics import (
     ProcessTreeResult,
     collect_process_tree,
 )
-from odoo_instance_sdk.models import SnapshotRequest
+from odoo_instance_sdk.models import Snapshot, SnapshotRequest
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from tests.unit.monitor_support import (
     FakeDockerProvider,
@@ -56,6 +57,93 @@ def test_unselected_sections_do_not_probe_or_cache(tmp_path: Path, monkeypatch: 
     assert snapshot.requested_sections == ("catalogue", "runtime")
     assert snapshot.unknown_sections == ()
     assert snapshot.observed_at is not None
+
+
+def test_snapshot_observation_marks_unavailable_runtime(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    catalog = make_catalog(tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    env_id = str(uuid.uuid4())
+    seed_env(catalog, make_env(env_id, worktree_path=str(worktree)))
+    seed_runtime(catalog, env_id)
+    catalog.close()
+
+    patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))  # type: ignore[arg-type]
+    snapshot = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        process_provider=FakeProcessProvider(),
+    ).snapshot(request=SnapshotRequest(sections=("catalogue", "runtime")))
+
+    assert snapshot.environments[0].runtime.state.value == "stopped"
+    assert snapshot.unknown_sections == ("runtime",)
+    assert snapshot.observation is not None
+    runtime_observation = next(
+        item for item in snapshot.observation.sections if item.section == "runtime"
+    )
+    assert runtime_observation.complete is False
+    assert runtime_observation.reason == "runtime observation unavailable"
+
+
+def test_snapshot_batch_sections_share_one_observation_boundary(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    catalog = make_catalog(tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    seed_env(catalog, make_env(str(uuid.uuid4()), worktree_path=str(worktree)))
+    seed_env(
+        catalog,
+        make_env(str(uuid.uuid4()), branch="feature/batch", worktree_path=str(worktree / "batch")),
+    )
+    catalog.close()
+
+    patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))  # type: ignore[arg-type]
+    snapshot = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        git_provider=FakeGitProvider(),
+        process_provider=FakeProcessProvider(
+            result=ProcessTreeResult(
+                child_pids=(), process_count=1, cpu_percent=None, memory_bytes=1
+            )
+        ),
+    ).snapshot(request=SnapshotRequest(sections=("catalogue", "runtime", "git")))
+
+    assert snapshot.observation is not None
+    assert snapshot.observation.unknown_sections == ()
+    assert {section.observed_at for section in snapshot.observation.sections} == {
+        snapshot.observation.observed_at
+    }
+
+
+def test_watch_preserves_each_snapshot_observation_boundary(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    catalog = make_catalog(tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    seed_env(catalog, make_env(str(uuid.uuid4()), worktree_path=str(worktree)))
+    catalog.close()
+
+    patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))  # type: ignore[arg-type]
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+
+    async def take_two() -> list[Snapshot]:
+        snapshots: list[Snapshot] = []
+        async for snapshot in monitor.watch(interval=0.1):
+            snapshots.append(snapshot)
+            if len(snapshots) == 2:
+                break
+        return snapshots
+
+    snapshots = asyncio.run(take_two())
+    assert len(snapshots) == 2
+    for snapshot in snapshots:
+        assert snapshot.observation is not None
+        assert {section.observed_at for section in snapshot.observation.sections} == {
+            snapshot.observation.observed_at
+        }
 
 
 def test_snapshot_observation_marks_unavailable_docker(tmp_path: Path, monkeypatch: object) -> None:

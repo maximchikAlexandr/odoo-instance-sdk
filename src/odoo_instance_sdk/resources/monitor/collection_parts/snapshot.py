@@ -97,17 +97,27 @@ class _SnapshotMixin:
         *,
         probe_results: dict[str, ProcessResult] | None = None,
         sections: frozenset[SnapshotSection] | None = None,
-    ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]:
+    ) -> tuple[
+        tuple[ProjectSummary, ...],
+        tuple[EnvironmentSnapshot, ...],
+        dict[SnapshotSection, str],
+    ]:
         selected = sections if sections is not None else frozenset(SNAPSHOT_SECTIONS)
         projects: list[ProjectSummary] = []
         environments: list[EnvironmentSnapshot] = []
+        section_outcomes: dict[SnapshotSection, str] = {}
         for plan in plans:
             project_runtime = None
             if "runtime" in selected and plan.project_runtime is not None:
                 try:
-                    project_runtime = self._collect_runtime(plan.project_runtime)
+                    project_runtime, runtime_unavailable = self._collect_runtime_with_outcome(
+                        plan.project_runtime
+                    )
                 except Exception:
                     project_runtime = _stopped_runtime()
+                    runtime_unavailable = True
+                if runtime_unavailable:
+                    section_outcomes["runtime"] = "runtime observation unavailable"
             display_hint = plan.project_id.removeprefix("project_")
             projects.append(
                 ProjectSummary(
@@ -131,10 +141,15 @@ class _SnapshotMixin:
                     item.runtime,
                     probe_results=probe_results,
                     sections=selected,
+                    section_outcomes=section_outcomes,
                 )
                 for item in sorted(plan.environments, key=lambda item: str(item.row["id"]))
             )
-        return tuple(projects), tuple(sorted(environments, key=lambda item: item.id))
+        return (
+            tuple(projects),
+            tuple(sorted(environments, key=lambda item: item.id)),
+            section_outcomes,
+        )
 
     def _prune_caches(
         self,
@@ -351,6 +366,7 @@ class _SnapshotMixin:
         *,
         probe_results: dict[str, ProcessResult] | None = None,
         sections: frozenset[SnapshotSection] | None = None,
+        section_outcomes: dict[SnapshotSection, str] | None = None,
     ) -> EnvironmentSnapshot:
         selected = sections if sections is not None else frozenset(SNAPSHOT_SECTIONS)
         env_id = str(row["id"])
@@ -368,9 +384,12 @@ class _SnapshotMixin:
             runtime = _stopped_runtime()
         else:
             try:
-                runtime = self._collect_runtime(runtime_record)
+                runtime, runtime_unavailable = self._collect_runtime_with_outcome(runtime_record)
             except Exception:
                 runtime = _stopped_runtime()
+                runtime_unavailable = True
+            if runtime_unavailable and section_outcomes is not None:
+                section_outcomes["runtime"] = "runtime observation unavailable"
 
         worktree = Path(str(row["worktree_path"]))
         base_ref = _validated_base_ref(row["base_ref"])
@@ -581,8 +600,12 @@ class _SnapshotMixin:
         return cfg.http_port
 
     def _collect_runtime(self, rt: sqlite3.Row | None) -> RuntimeMetrics:
+        runtime, _unavailable = self._collect_runtime_with_outcome(rt)
+        return runtime
+
+    def _collect_runtime_with_outcome(self, rt: sqlite3.Row | None) -> tuple[RuntimeMetrics, bool]:
         if rt is None:
-            return _stopped_runtime()
+            return _stopped_runtime(), False
 
         root_pid = int(rt["root_pid"])
         create_time = float(rt["create_time"])
@@ -596,7 +619,7 @@ class _SnapshotMixin:
             result_pair = collect_process_tree(root_pid, create_time, prev_cpu_point=prev)
 
         if result_pair is None:
-            return _stopped_runtime()
+            return _stopped_runtime(), True
 
         result, new_point = result_pair
         self._cpu_points[(root_pid, create_time)] = new_point
@@ -610,22 +633,25 @@ class _SnapshotMixin:
         except (ValueError, TypeError):
             started_at = None
 
-        return RuntimeMetrics(
-            state=state,
-            root_pid=root_pid,
-            child_pids=result.child_pids,
-            process_count=result.process_count,
-            cpu_percent=result.cpu_percent,
-            memory_bytes=result.memory_bytes,
-            started_at=started_at,
-            http_url=http_url,
-            http_port=int(rt["http_port"]),
-            database_name=str(rt["database_name"]),
-            commit_sha=str(rt["commit_sha"]),
-            branch=str(rt["checkout_branch"]),
-            create_time=result.create_time or create_time,
-            cpu_seconds=result.cpu_seconds,
-            sampled_at=result.sampled_at,
+        return (
+            RuntimeMetrics(
+                state=state,
+                root_pid=root_pid,
+                child_pids=result.child_pids,
+                process_count=result.process_count,
+                cpu_percent=result.cpu_percent,
+                memory_bytes=result.memory_bytes,
+                started_at=started_at,
+                http_url=http_url,
+                http_port=int(rt["http_port"]),
+                database_name=str(rt["database_name"]),
+                commit_sha=str(rt["commit_sha"]),
+                branch=str(rt["checkout_branch"]),
+                create_time=result.create_time or create_time,
+                cpu_seconds=result.cpu_seconds,
+                sampled_at=result.sampled_at,
+            ),
+            False,
         )
 
     def _probe_readiness(self, http_url: str) -> RuntimeState:

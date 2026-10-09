@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -89,7 +89,11 @@ class _CollectMixin:
             *,
             probe_results: dict[str, ProcessResult] | None = None,
             sections: frozenset[SnapshotSection] | None = None,
-        ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]: ...
+        ) -> tuple[
+            tuple[ProjectSummary, ...],
+            tuple[EnvironmentSnapshot, ...],
+            dict[SnapshotSection, str],
+        ]: ...
 
         def _prune_caches(
             self,
@@ -881,7 +885,7 @@ class _CollectMixin:
             if "docker" in plan.sections
             else ({}, set())
         )
-        projects, environments = self._collect_snapshot_rows(
+        projects, environments, section_outcomes = self._collect_snapshot_rows(
             plan.projects, resources, probe_results=probe_results, sections=plan.sections
         )
         self._prune_caches(
@@ -893,7 +897,12 @@ class _CollectMixin:
         )
         observed_at = datetime.now(UTC)
         observation = self._snapshot_observation(
-            observed_at, plan.sections, projects, environments, resources
+            observed_at,
+            plan.sections,
+            projects,
+            environments,
+            resources,
+            section_outcomes,
         )
         return Snapshot(
             schema_version=_SCHEMA_VERSION,
@@ -1034,10 +1043,15 @@ class _CollectMixin:
         projects: tuple[ProjectSummary, ...],
         environments: tuple[EnvironmentSnapshot, ...],
         resources: dict[str, ClusterResourceSnapshot],
+        section_outcomes: Mapping[SnapshotSection, str] | None = None,
     ) -> SnapshotObservation:
         """Summarize selected collectors without manufacturing unavailable values."""
         completed: set[SnapshotSection] = set(sections)
         reasons: dict[SnapshotSection, str] = {}
+        for section, reason in (section_outcomes or {}).items():
+            if section in sections:
+                completed.discard(section)
+                reasons[section] = reason[:160]
         if "docker" in sections:
             failures = {
                 str(resource.unavailability_reason)
