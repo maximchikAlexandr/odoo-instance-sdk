@@ -234,6 +234,109 @@ def _mr_context() -> VerifiedTaskContext:
     )
 
 
+class _CapturedGit:
+    def __init__(self) -> None:
+        self.passthrough_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+        self.sync_calls: list[dict[str, object]] = []
+
+    def passthrough_command(self, args: tuple[str, ...], **kwargs: object) -> object:
+        self.passthrough_calls.append((args, kwargs))
+        return SimpleNamespace(run=lambda: SimpleNamespace(returncode=0, stdout=""))
+
+    def sync_command(self, **kwargs: object) -> object:
+        self.sync_calls.append(kwargs)
+        return SimpleNamespace(run=SimpleNamespace)
+
+
+def _credential_project(tmp_path: Path) -> tuple[Path, Path]:
+    project = tmp_path / "project"
+    environment = project / ".odcli" / ".env"
+    environment.parent.mkdir(parents=True)
+    environment.write_text("ODCLI_GITLAB_TOKEN_ROOT=secret-token\n", encoding="utf-8")
+    environment.chmod(0o600)
+    mapping = project / ".odcli" / "gitlab-credentials.toml"
+    mapping.write_text(
+        '[[mappings]]\nuser_id = "human-root"\nhost = "gitlab.example"\n'
+        'login = "root-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    return project, mapping
+
+
+def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Path) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    project, mapping = _credential_project(tmp_path)
+    client = _mr_client(root)
+
+    local_git = _CapturedGit()
+    client.git_command(
+        _mr_context(),
+        ("status", "--short"),
+        git_resource=local_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    assert local_git.passthrough_calls[0][1] == {"environment": {}, "secret_values": ()}
+
+    remote_git = _CapturedGit()
+    client.git_command(
+        _mr_context(),
+        ("fetch", "origin"),
+        git_resource=remote_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    environment = remote_git.passthrough_calls[0][1]["environment"]
+    assert environment == {
+        "GITLAB_LOGIN": "root-login",
+        "GITLAB_TOKEN": "secret-token",
+        "GIT_ASKPASS": environment["GIT_ASKPASS"],
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert remote_git.passthrough_calls[0][1]["secret_values"] == ("secret-token",)
+
+    sync_git = _CapturedGit()
+    client.sync_command(
+        _mr_context(),
+        git_resource=sync_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    assert sync_git.sync_calls[0]["environment"] == environment
+    assert sync_git.sync_calls[0]["secret_values"] == ("secret-token",)
+
+
+def test_git_https_ambiguous_host_fails_before_child_process(tmp_path: Path) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    project, mapping = _credential_project(tmp_path)
+    git = _CapturedGit()
+
+    with pytest.raises(Exception, match="ambiguous"):
+        _mr_client(root).git_command(
+            _mr_context(),
+            ("fetch", "https://other.example/team/repo.git"),
+            git_resource=git,
+            project_root=project,
+            mapping_path=mapping,
+        )
+    assert git.passthrough_calls == []
+
+
 def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
