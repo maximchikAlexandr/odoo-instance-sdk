@@ -291,6 +291,31 @@ def module_info(
     raise click.exceptions.Exit(0)
 
 
+@_module_group.command(
+    "context", help="Inspect read-only filesystem, Git, and database module facts."
+)
+@output_options
+@pass_cli_context
+def module_context(
+    ctx: CliContext,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    try:
+        instance = cli_context.ready_instance(ctx).instance
+        value = instance.modules.context()
+        emit(
+            success_document(command="module.context", result=model_to_dict(value)),
+            output_mode,
+        )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(output_mode, "module.context", exc, dry_run=False)
+    raise click.exceptions.Exit(0)
+
+
 @_module_group.command("where", help="Show the resolved filesystem path for an Odoo module.")
 @click.argument("module", required=False)
 @output_options

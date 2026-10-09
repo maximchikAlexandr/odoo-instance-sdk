@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -145,3 +146,49 @@ def test_catalogue_rejects_unsafe_roots_and_symlinked_modules(tmp_path: Path) ->
     resource = _resource(tmp_path, ["addons", "../outside-modules", "addons/linked"])
 
     assert resource.catalogue() == ()
+
+
+def test_context_combines_provenance_changes_and_partial_database_availability(
+    tmp_path: Path,
+) -> None:
+    addons = tmp_path / "addons"
+    extra = tmp_path / "extra"
+    _manifest(addons, "base", "{'version': '1.0'}")
+    sale = _manifest(addons, "sale", "{'version': 'first', 'depends': ['base']}")
+    _manifest(extra, "sale", "{'version': 'shadow'}")
+    (sale / "models.py").write_text("# tracked\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "modules"], check=True)
+    untracked = sale / "untracked.py"
+    untracked.write_text("# not committed\n", encoding="utf-8")
+    before = (sale / "__manifest__.py").read_bytes()
+
+    value = _resource(tmp_path, ["addons", "extra"]).context()
+
+    sale_module = next(module for module in value.modules if module.name == "sale")
+    assert sale_module.version == "first"
+    assert sale_module.shadowed_paths == (str(extra / "sale"),)
+    assert sale_module.shadowed[0].path == str(extra / "sale")
+    assert sale_module.repository == str(tmp_path)
+    assert {change.kind for change in sale_module.changes} >= {"committed", "untracked"}
+    assert sale_module.dependency_details[0].path == str(addons / "base")
+    assert value.database.state == "unavailable"
+    assert value.database.reason == "database is not selected"
+    assert (sale / "__manifest__.py").read_bytes() == before
+
+
+def test_context_rejects_roots_outside_checkout_without_inspection(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "module-context-outside"
+    outside.mkdir()
+    _manifest(outside, "secret", "{'version': 'outside'}")
+
+    value = _resource(tmp_path, ["../module-context-outside"]).context()
+
+    assert value.modules == ()
+    assert value.filesystem.state == "unavailable"
+    assert any("outside allowed repositories" in warning for warning in value.warnings)
