@@ -91,6 +91,10 @@ class DatabasePreparationFailureContext(
     restore_stage_elapsed: float | None = None
     source_kind: Literal["catalogue", "local_archive"] | None = None
     source_sha256: str | None = None
+    project_id: str | None = None
+    effective_config: str | None = None
+    managed_filestore: str | None = None
+    binding_published: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

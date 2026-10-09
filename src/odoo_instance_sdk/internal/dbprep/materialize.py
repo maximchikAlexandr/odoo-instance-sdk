@@ -94,7 +94,7 @@ from odoo_instance_sdk.models import (
     RestoreState,
     StartConfig,
 )
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -335,11 +335,20 @@ def _restore_preflight(  # noqa: C901
                     DatabasePreparationResult(
                         mode=DatabasePreparationAction.RESTORE,
                         backup=mapped,
+                        source_kind="catalogue",
+                        backup_id=mapped.id,
                         source_git_branch=mapped.source_git_branch,
                         branch_origin=source.origin,
                         restored_database=current.default_source_database,
                         previous_default=current.default_source_database,
                         effective_default=current.default_source_database,
+                        managed_filestore=(
+                            str(managed_filestore_path(current))
+                            if current.managed_filestore is not None
+                            else None
+                        ),
+                        project_id=project_id,
+                        binding_published=False,
                         warnings=("reused fresh project database",),
                     )
                 )
@@ -689,8 +698,13 @@ def prepare_restore(  # noqa: C901
                     reset_completed = True
 
                 final_config = _manifest_after_preparation(root, current)
+                managed_filestore = managed_filestore_path(final_config)
                 switched = msgspec.structs.replace(
-                    final_config, default_source_database=preflight.target_database
+                    final_config,
+                    default_source_database=preflight.target_database,
+                    managed_filestore=(
+                        final_config.managed_filestore or managed_filestore.relative_to(root)
+                    ),
                 )
                 _consume_action_if_planned("database.prepare.default-switch")
                 from odoo_instance_sdk.internal.restore_stages import (
@@ -703,11 +717,22 @@ def prepare_restore(  # noqa: C901
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
                     backup=backup,
+                    source_kind=(
+                        "local_archive"
+                        if isinstance(preflight.restore_source, _LocalArchiveRestoreSource)
+                        else "catalogue"
+                    ),
+                    backup_id=backup.id if backup is not None else None,
                     source_git_branch=backup.source_git_branch if backup is not None else None,
                     branch_origin=source.origin
                     if source is not None
                     else BackupBranchOrigin.UNKNOWN,
                     restored_database=preflight.target_database,
+                    target_database=preflight.target_database,
+                    effective_config=str(preflight.source_config),
+                    managed_filestore=str(managed_filestore),
+                    project_id=preflight.project_id,
+                    binding_published=True,
                     admin_password_reset=reset_completed,
                     default_switched=True,
                     previous_default=current.default_source_database,
@@ -748,6 +773,14 @@ def prepare_restore(  # noqa: C901
                     if local_restore is not None
                     and isinstance(preflight.restore_source, _LocalArchiveRestoreSource)
                     else None,
+                    project_id=preflight.project_id,
+                    effective_config=str(preflight.source_config),
+                    managed_filestore=(
+                        str(managed_filestore_path(preflight.project))
+                        if preflight.project.managed_filestore is not None
+                        else None
+                    ),
+                    binding_published=False,
                 )
                 raise
             finally:
@@ -853,10 +886,18 @@ def prepare_download(
         return DatabasePreparationResult(
             mode=DatabasePreparationAction.DOWNLOAD,
             backup=backup,
+            source_kind="catalogue",
+            backup_id=backup.id,
             source_git_branch=source.branch,
             branch_origin=source.origin,
             previous_default=current.default_source_database,
             effective_default=current.default_source_database,
+            managed_filestore=(
+                str(managed_filestore_path(current))
+                if current.managed_filestore is not None
+                else None
+            ),
+            project_id=f"project_{project_key}",
         )
 
 

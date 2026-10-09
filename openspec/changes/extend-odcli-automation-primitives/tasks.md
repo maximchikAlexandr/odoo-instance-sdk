@@ -1,9 +1,9 @@
 ## 1. Main Checkout Binding and Runtime
 
-- [ ] 1.1 Extend the existing project manifest with backward-compatible managed-filestore and ordered-addon-repository fields; add focused parse/round-trip/path-validation checks.
-- [ ] 1.2 Extend the common preparation pipeline to publish the database/filestore pair with the existing atomic manifest replacement and stale-binding check after successful restore postconditions.
-- [ ] 1.3 Extend project refresh/restore results and CLI projections with the required backup, target, configuration, filestore, publication, and sanitized failure facts.
-- [ ] 1.4 Make project detached run/readiness/status/stop consume the paired binding through the existing runtime identity path and add focused success, timeout, stale-identity, and prior-binding-preservation checks.
+- [x] 1.1 Extend the existing project manifest with backward-compatible managed-filestore and ordered-addon-repository fields; add focused parse/round-trip/path-validation checks.
+- [x] 1.2 Extend the common preparation pipeline to publish the database/filestore pair with the existing atomic manifest replacement and stale-binding check after successful restore postconditions.
+- [x] 1.3 Extend project refresh/restore results and CLI projections with the required backup, target, configuration, filestore, publication, and sanitized failure facts.
+- [x] 1.4 Make project detached run/readiness/status/stop consume the paired binding through the existing runtime identity path and add focused success, timeout, stale-identity, and prior-binding-preservation checks.
 
 ## 2. Root-Creator Credential Context
 

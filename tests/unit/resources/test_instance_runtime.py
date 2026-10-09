@@ -258,6 +258,38 @@ class TestInstancePrefix:
         )
         assert foreground.argv[-2:] == ("--dev=xml", "--stop-after-init")
 
+    def test_from_project_consumes_published_database_filestore_binding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "python").chmod(0o755)
+        config = root / "odoo.conf"
+        config.write_text("[options]\nhttp_interface = 127.0.0.1\n")
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=Path("odoo.conf"),
+            default_source_database="restored",
+            managed_filestore=Path(".odcli/filestore"),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock(owned=False)),
+        )
+
+        instance = _make_client().instance.from_project(project)
+
+        assert instance.config.configured_database_names == ("restored",)
+        assert instance.config.start_config is not None
+        assert instance.config.start_config.data_dir == str(filestore)
+        assert instance.config.start_config.dbfilter == "restored"
+
     def test_from_project_uses_owned_compose_runtime_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
