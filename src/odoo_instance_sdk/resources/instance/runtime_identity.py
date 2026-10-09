@@ -172,14 +172,13 @@ def _runtime_owner_matches(
         )
     if owner_kind == "project":
         return str(runtime["owner_id"]) == binding.owner_id
-    return (
-        owner_kind == "environment"
-        and environment is not None
-        and _canonical_runtime_path(str(environment["repository_root"]))
-        == _canonical_runtime_path(str(binding.repository_root))
-        and _canonical_runtime_path(str(environment["git_common_dir"]))
-        == _canonical_runtime_path(str(binding.git_common_dir))
-    )
+    if owner_kind == "environment" and environment is not None:
+        return _canonical_runtime_path(
+            str(environment["repository_root"])
+        ) == _canonical_runtime_path(str(binding.repository_root)) and _canonical_runtime_path(
+            str(environment["git_common_dir"])
+        ) == _canonical_runtime_path(str(binding.git_common_dir))
+    return False
 
 
 def _runtime_row_matches(
@@ -229,7 +228,7 @@ def _recorded_runtime_pid(
 ) -> int | None:
     """Return a matching persisted runtime PID, failing closed on drift."""
     binding = instance._runtime_binding
-    if binding is None:
+    if binding is None or binding.owner_kind not in {"project", "environment"}:
         return None
     catalog = cast("_RuntimeCatalog", instance._client.get_catalog())
     snapshot_reader = getattr(catalog, "_monitor_snapshot_rows", None)

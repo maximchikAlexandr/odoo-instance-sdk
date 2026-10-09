@@ -97,3 +97,31 @@ def test_postgres_manifest_rejects_unknown_keys_and_coercions(tmp_path: Path) ->
     )
     with pytest.raises(ConfigError, match=r"invalid \[postgres\]"):
         ProjectConfig.load(tmp_path)
+
+
+@pytest.mark.parametrize("database", ["", "   ", "bad/name"])
+def test_project_config_constructor_rejects_invalid_default_database(
+    tmp_path: Path, database: str
+) -> None:
+    with pytest.raises(ConfigError, match="Invalid database name"):
+        ProjectConfig(
+            repository_root=tmp_path,
+            default_source_database=database,
+            managed_filestore=tmp_path / ".odcli" / "filestore",
+        )
+
+
+def test_project_manifest_rejects_invalid_default_database_before_runtime_load(
+    tmp_path: Path,
+) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    manifest = manifest_dir / "project.toml"
+    manifest.write_text(
+        '[project]\ndefault_source_database = ""\nmanaged_filestore = ".odcli/filestore"\n',
+    )
+    with pytest.raises(ConfigError, match="Invalid database name"):
+        ProjectConfig.load(tmp_path)
+    assert manifest.read_text() == (
+        '[project]\ndefault_source_database = ""\nmanaged_filestore = ".odcli/filestore"\n'
+    )

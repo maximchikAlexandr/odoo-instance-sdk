@@ -245,6 +245,11 @@ def _execute_init(
         python=option_state.python,
         source_config=effective_source_config,
         default_source_database=option_state.default_source_database,
+        managed_filestore=(
+            Path(".odcli") / "filestore"
+            if option_state.default_source_database is not None
+            else None
+        ),
         preferred_http_port=option_state.preferred_http_port,
         requirements=option_state.requirements,
         default_run_args=option_state.default_run_args,

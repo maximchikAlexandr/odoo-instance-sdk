@@ -23,6 +23,7 @@ from odoo_instance_sdk.internal.project_init import (
     register_initialized_project,
     remote_database_names_action,
     validate_generated_config_target,
+    verify_project_owned_data_dir,
     write_project_env,
     write_project_generated_config,
 )
@@ -404,6 +405,17 @@ def _planned_command_prefix(root: Path, config: ProjectConfig) -> tuple[str, ...
     return (python, str(odoo_bin))
 
 
+def _ensure_project_owned_data_directory(project_path: Path, config: ProjectConfig) -> None:
+    if config.managed_filestore is None:
+        return
+    from odoo_instance_sdk.project import managed_filestore_path
+
+    data_directory = managed_filestore_path(config)
+    verify_project_owned_data_dir(project_path, data_directory, require_exists=False)
+    data_directory.mkdir(parents=True, exist_ok=True)
+    verify_project_owned_data_dir(project_path, data_directory)
+
+
 def init_project(
     project_path: Path,
     config: ProjectConfig,
@@ -459,6 +471,7 @@ def init_project(
         return result
 
     write_manifest(project_path, effective_config)
+    _ensure_project_owned_data_directory(project_path, effective_config)
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
         write_project_generated_config(project_path, effective_config)
         if effective_config.test_instance is not None:

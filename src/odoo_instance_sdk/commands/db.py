@@ -819,6 +819,11 @@ def _rich_refresh(document: OutputDocument) -> str:
         "default_switched",
         "previous_default",
         "effective_default",
+        "target_database",
+        "effective_config",
+        "managed_filestore",
+        "project_id",
+        "binding_published",
     ):
         value = payload.get(field)
         if value is not None:
@@ -858,6 +863,18 @@ def _restore_rich(document: OutputDocument) -> str:
     backup_id = backup.get("id") if isinstance(backup, dict) else backup
     table = bordered_table("Field", "Value", title="Database restore")
     table.add_row("Database", rich_cell(database))
+    for field in (
+        "target_database",
+        "source_kind",
+        "backup_id",
+        "effective_config",
+        "managed_filestore",
+        "project_id",
+        "binding_published",
+    ):
+        value = payload.get(field)
+        if value is not None:
+            table.add_row(field.replace("_", " ").title(), rich_cell(value))
     if backup_id:
         table.add_row("Backup", rich_cell(backup_id))
     return render_rich_text(table, width=Console().width)

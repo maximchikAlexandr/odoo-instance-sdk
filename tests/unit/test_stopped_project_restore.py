@@ -295,6 +295,55 @@ def test_recorded_runtime_requires_unambiguous_exact_socket_owner(
     assert _recorded_runtime_pid(instance, config) is expected
 
 
+def test_recorded_environment_runtime_uses_exact_owner_and_parent_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.resources.instance import runtime_identity
+    from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
+
+    instance = _instance(tmp_path)
+    instance._runtime_binding = _RuntimeBinding(
+        owner_kind="environment",
+        owner_id="environment-1",
+        project_id="project_demo",
+        repository_root=tmp_path,
+        git_common_dir=tmp_path / ".git",
+    )
+    environment = {
+        "project_id": "project_demo",
+        "repository_root": str(tmp_path),
+        "git_common_dir": str(tmp_path / "different-checkout" / ".git"),
+    }
+    runtime = {
+        "owner_kind": "environment",
+        "owner_id": "environment-1",
+        "http_port": 0,
+        "http_url": "http://127.0.0.1:0",
+        "root_pid": 42,
+        "create_time": 123.5,
+    }
+    process = MagicMock()
+    process.is_running.return_value = True
+    process.status.return_value = "running"
+    process.create_time.return_value = 123.5
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.runtime_identity.psutil.Process",
+        lambda _pid: process,
+    )
+    monkeypatch.setattr(runtime_identity, "_runtime_process_matches", lambda *_args, **_kw: True)
+    monkeypatch.setattr(runtime_identity, "_socket_owned_by", lambda *_args: True)
+    snapshot = MagicMock()
+    snapshot.project_runtimes = ()
+    snapshot.environments = ((environment, runtime),)
+    cast("Any", instance._client.get_catalog())._monitor_snapshot_rows.return_value = snapshot
+
+    config = instance.config.start_config
+    assert config is not None
+    assert runtime_identity._recorded_runtime_pid(instance, config) == 42
+    runtime["owner_id"] = "environment-2"
+    assert runtime_identity._recorded_runtime_pid(instance, config) is None
+
+
 def test_uninspectable_socket_rejects_recorded_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -438,6 +438,7 @@ def test_failed_production_adoption_cleans_sdk_artifacts_and_preserves_caller_ch
     client.core = env_client
     resource = env_client.environments
     monkeypatch.setattr(type(resource), "_preflight_copy_checkout", lambda *_args: None)
+    monkeypatch.setattr(type(resource), "_copy_auxiliary_session", lambda *_args: None)
 
     def fail_restore(*_args: object, **_kwargs: object) -> uuid.UUID:
         raise RuntimeError("disposable restore failed after SDK artifact creation")

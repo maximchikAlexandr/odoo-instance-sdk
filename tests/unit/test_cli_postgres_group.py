@@ -74,6 +74,7 @@ def _write_project(
 ) -> Path:
     manifest_dir = tmp_path / ".odcli"
     manifest_dir.mkdir()
+    (manifest_dir / "filestore").mkdir()
     postgres: PostgresProjectConfig | None = None
     if mode == "compose":
         postgres = PostgresProjectConfig(mode="compose", image="pg", port=5468, user="odoo")
@@ -303,10 +304,13 @@ def test_database_instance_uses_owned_compose_project_when_environment_is_absent
         odoo_bin=odoo_bin,
         python=Path(sys.executable),
         preferred_http_port=8077,
+        default_source_database="tenant",
+        managed_filestore=Path(".odcli/filestore"),
         postgres=PostgresProjectConfig(mode="compose", image="pg", port=5468, user="odoo"),
     )
     manifest_dir = tmp_path / ".odcli"
     manifest_dir.mkdir()
+    (manifest_dir / "filestore").mkdir()
     (manifest_dir / "project.toml").write_text(project.to_manifest())
     (manifest_dir / "odoo.conf").write_text(
         "[options]\nhttp_port = 8069\ndb_host = 127.0.0.1\ndb_port = 5468\ndb_name = tenant\n"

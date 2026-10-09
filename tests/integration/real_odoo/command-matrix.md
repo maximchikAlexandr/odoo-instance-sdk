@@ -1,12 +1,14 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 62-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 65-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
 | `init` | mutating-or-spawning | yes | smoke | E2E-SM-01 / E2E-CP-01: manifest/target project, resumable Compose postconditions, and truthful no-op metadata |
 | `doctor` | bounded-read-only | no | critical | E2E-CP-14: final project diagnosis |
 | `stop` | mutating-or-spawning | yes | critical | E2E-CP-13: owned target process stop and repeat |
+| `publish` | mutating-or-spawning | yes | not-applicable | Caddy-backed publication is covered by focused publication resource tests |
+| `unpublish` | mutating-or-spawning | yes | not-applicable | Caddy-backed unpublication is covered by focused publication resource tests |
 | `resource ls` | bounded-read-only | no | critical | E2E-CP-12: run-owned inventory |
 | `resource doctor` | bounded-read-only | no | smoke | E2E-SM-05 / E2E-CP-12: ownership and health |
 | `env create` | mutating-or-spawning | yes | critical | E2E-CP-02: pinned source, explicit owned venv, and audited hash-lock first install |
@@ -39,6 +41,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `module update` | mutating-or-spawning | yes | critical | E2E-CP-06: deterministic update and repeat |
 | `module test` | mutating-or-spawning | yes | focused | E2E-FC-08: compatibility alias equals top-level test |
 | `module info` | bounded-read-only | no | not-applicable | upstream module inspection is covered by focused command tests |
+| `module context` | bounded-read-only | no | not-applicable | repository-aware read-only module facts are covered offline |
 | `module where` | bounded-read-only | no | not-applicable | upstream filesystem inspection is outside the lifecycle fixture |
 | `module deps` | bounded-read-only | no | not-applicable | upstream dependency inspection is covered offline |
 | `module install-order` | process-previewable-read-only | yes | not-applicable | upstream planning leaf is outside the lifecycle fixture |
