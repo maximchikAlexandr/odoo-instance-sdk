@@ -18,20 +18,20 @@
 
 ## 3. Capture one context and invoke finite operations locally
 
-- [x] 3.1 Add frozen invocation-scoped `OperationContext` over existing CLI/runtime resolution with explicit selectors, cwd/provenance, selected interpreter set, private resolved objects and one catalogue owner.
-- [x] 3.2 Refactor representative bounded read and mutation factories to accept typed request plus `OperationContext`, eliminating repeated cwd/project/environment/config/catalogue discovery inside one call.
-- [x] 3.3 Implement validated operation registry lookup and `odcli operation invoke <operation-id>` as an explicitly local entrypoint with no daemon/RPC/dispatch construction.
-- [x] 3.4 Implement finite document invocation through existing envelope-v1, sanitization and exit mapping with bounded output and no prompt/ANSI/stdout diagnostics.
-- [x] 3.5 Reject native TTY, interactive, Rich-live and unbounded JSONL operations from finite invoke with typed supported-transport guidance while preserving their friendly CLI paths.
-- [x] 3.6 Migrate the remaining eligible finite built-ins to typed requests/context and prove each friendly CLI adapter and stable operation ID delegate to the same SDK primitive.
+- [ ] 3.1 Add frozen invocation-scoped `OperationContext` over existing CLI/runtime resolution with explicit selectors, cwd/provenance, selected interpreter set, private resolved objects and one catalogue owner.
+- [ ] 3.2 Refactor representative bounded read and mutation factories to accept typed request plus `OperationContext`, eliminating repeated cwd/project/environment/config/catalogue discovery inside one call.
+- [ ] 3.3 Implement validated operation registry lookup and `odcli operation invoke <operation-id>` as an explicitly local entrypoint with no daemon/RPC/dispatch construction.
+- [ ] 3.4 Implement finite document invocation through existing envelope-v1, sanitization and exit mapping with bounded output and no prompt/ANSI/stdout diagnostics.
+- [ ] 3.5 Reject native TTY, interactive, Rich-live and unbounded JSONL operations from finite invoke with typed supported-transport guidance while preserving their friendly CLI paths.
+- [ ] 3.6 Migrate the remaining eligible finite built-ins to typed requests/context and prove each friendly CLI adapter and stable operation ID delegate to the same SDK primitive.
 
 ## 4. Preserve one private snapshot through approval
 
-- [x] 4.1 Define bounded JSONL session request/event DTOs and ordering for accepted, preview, approval-required, step, result, error and cancelled records.
-- [x] 4.2 Retain exactly one private `Command` after preview and require one approve decision carrying the emitted fingerprint before executing that same object.
-- [x] 4.3 Implement bounded decision timeout, input/record/byte limits, EOF, invalid-sequence, mismatched-fingerprint, cancel and interrupt semantics without reconstructing executable inputs.
-- [x] 4.4 Preserve existing StepObserver events, process/Expression gates, execution-time revalidation, locks, rollback, postconditions and exact-child cleanup through the session adapter.
-- [x] 4.5 Add tests for approval parity, stale decision, cancel, timeout, cleanup, output privacy and transport-success/domain-negative result separation.
+- [ ] 4.1 Define bounded JSONL session request/event DTOs and ordering for accepted, preview, approval-required, step, result, error and cancelled records.
+- [ ] 4.2 Retain exactly one private `Command` after preview and require one approve decision carrying the emitted fingerprint before executing that same object.
+- [ ] 4.3 Implement bounded decision timeout, input/record/byte limits, EOF, invalid-sequence, mismatched-fingerprint, cancel and interrupt semantics without reconstructing executable inputs.
+- [ ] 4.4 Preserve existing StepObserver events, process/Expression gates, execution-time revalidation, locks, rollback, postconditions and exact-child cleanup through the session adapter.
+- [ ] 4.5 Add tests for approval parity, stale decision, cancel, timeout, cleanup, output privacy and transport-success/domain-negative result separation.
 
 ## 5. Add the narrow installed-operation provider boundary
 
