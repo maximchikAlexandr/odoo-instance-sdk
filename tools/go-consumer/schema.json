@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/odcli/contract-fixture.json",
+  "title": "OperationContractFixture",
+  "type": "object",
+  "properties": {
+    "request": {"$ref": "#/$defs/OperationRequest"},
+    "result": {"$ref": "#/$defs/OperationResult"},
+    "error": {"$ref": "#/$defs/FixtureError"},
+    "alias": {"$ref": "#/$defs/DepsMissingImport"},
+    "wire": {"$ref": "#/$defs/WireOperationDocument"},
+    "plugin": {"$ref": "#/$defs/FixturePluginPayload"}
+  },
+  "required": ["request", "result", "error", "alias", "wire", "plugin"],
+  "additionalProperties": false,
+  "$defs": {
+    "OperationRequest": {
+      "type": "object",
+      "properties": {
+        "project": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+        "environment": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null}
+      },
+      "additionalProperties": false
+    },
+    "OperationResult": {
+      "type": "object",
+      "properties": {"status": {"type": "string", "default": "ok"}},
+      "additionalProperties": false
+    },
+    "OperationErrorDetails": {
+      "type": "object",
+      "properties": {"code": {"type": "string"}, "message": {"type": "string"}},
+      "required": ["code", "message"],
+      "additionalProperties": false
+    },
+    "FixtureError": {
+      "type": "object",
+      "properties": {"code": {"type": "string"}, "message": {"type": "string"}},
+      "required": ["code", "message"],
+      "additionalProperties": false
+    },
+    "DepsMissingImport": {
+      "type": "object",
+      "properties": {"module": {"type": "string"}, "import": {"type": "string"}},
+      "required": ["module", "import"],
+      "additionalProperties": false
+    },
+    "WireNestedValue": {
+      "type": "object",
+      "properties": {
+        "label": {"type": "string"},
+        "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": null}
+      },
+      "required": ["label"],
+      "additionalProperties": false
+    },
+    "WireCreateValue": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "create"},
+        "name": {"type": "string"},
+        "count": {"type": "integer", "default": 0}
+      },
+      "required": ["type", "name"],
+      "additionalProperties": false
+    },
+    "WireDeleteValue": {
+      "type": "object",
+      "properties": {"type": {"const": "delete"}, "name": {"type": "string"}},
+      "required": ["type", "name"],
+      "additionalProperties": false
+    },
+    "WireOperationDocument": {
+      "type": "object",
+      "properties": {
+        "nested": {"$ref": "#/$defs/WireNestedValue"},
+        "action": {"anyOf": [{"$ref": "#/$defs/WireCreateValue"}, {"$ref": "#/$defs/WireDeleteValue"}]},
+        "alias": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null}
+      },
+      "required": ["nested", "action"],
+      "additionalProperties": false
+    },
+    "FixturePluginPayload": {
+      "type": "object",
+      "properties": {"value": {"type": "string"}},
+      "required": ["value"],
+      "additionalProperties": false
+    }
+  }
+}

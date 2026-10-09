@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import rich_click as click
 
-from odoo_instance_sdk.operations import contract_bytes
+from odoo_instance_sdk.operations import builtin_bindings, contract_bytes, discovered_bindings
 
 
 @click.group("contract", help="Inspect local machine-operation contracts.")
@@ -17,7 +17,10 @@ def contract_group() -> None:
 def export_contract(output_format: str) -> None:
     """Export the deterministic versioned operation contract bundle."""
     del output_format
-    click.echo(contract_bytes().decode("utf-8"))
+    # Provider DTOs are loaded only for this explicit metadata export.  The
+    # selected interpreter remains the sole source of installed operations.
+    bindings = (*builtin_bindings(), *discovered_bindings())
+    click.echo(contract_bytes(bindings).decode("utf-8"))
 
 
 __all__ = ["contract_group", "export_contract"]
