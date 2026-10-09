@@ -227,9 +227,17 @@ class DatabasePreparationResult(
 ):
     mode: DatabasePreparationAction
     backup: Backup | None = None
+    source_kind: str | None = None
+    backup_id: uuid.UUID | None = None
     source_git_branch: str | None = None
     branch_origin: BackupBranchOrigin = BackupBranchOrigin.UNKNOWN
     restored_database: str | None = None
+    target_database: str | None = None
+    effective_config: str | None = None
+    managed_filestore: str | None = None
+    project_id: str | None = None
+    binding_published: bool = False
+    failure_reason: str | None = None
     admin_password_reset: bool = False
     default_switched: bool = False
     previous_default: str | None = None

@@ -44,6 +44,7 @@ from odoo_instance_sdk.models import (
     DatabaseRefreshOptions,
     LocalArchiveRestoreSource,
     RestoreState,
+    StartConfig,
 )
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
@@ -2265,17 +2266,22 @@ def test_target_instance_is_target_only_secure_and_ephemeral(
 def test_restore_coordinator_switches_default_only_after_restore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
     from odoo_instance_sdk.internal.dbprep import materialize as preparation
     from odoo_instance_sdk.internal.project_manifest import write_manifest
 
     source = tmp_path / "odoo.conf"
+    source_data = tmp_path / "source-data"
+    source_data.mkdir()
     source.write_text(
         "[options]\n"
         "http_interface = 127.0.0.1\n"
         "http_port = 8069\n"
         "db_name = source\n"
         "admin_passwd = local-secret\n"
+        f"data_dir = {source_data}\n"
     )
+    source_config_bytes = source.read_bytes()
     python = tmp_path / "python"
     python.write_text("#!/bin/sh\n")
     python.chmod(0o755)
@@ -2292,8 +2298,17 @@ def test_restore_coordinator_switches_default_only_after_restore(
     )
     backup = _backup(tmp_path, downloaded_at=FIXED_NOW)
     local = MagicMock()
+    local.config.start_config = StartConfig.from_odoo_config(source)
     local.databases.names.return_value = ("source",)
     local.databases.exists.return_value = False
+
+    def restore_to_managed_filestore(*_args: object, **_kwargs: object) -> None:
+        data_dir = local.config.start_config.data_dir
+        assert data_dir == str(tmp_path / ".odcli" / "filestore")
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        (Path(data_dir) / "restored.marker").write_text("restored")
+
+    local.databases.restore.side_effect = restore_to_managed_filestore
     remote = MagicMock()
     remote.databases.backup.return_value = backup
     cluster = MagicMock()
@@ -2301,6 +2316,7 @@ def test_restore_coordinator_switches_default_only_after_restore(
     client.instance.from_config.return_value = local
     client.instance.return_value = remote
     loader = MagicMock(return_value=project)
+    actual_load = ProjectConfig.load
     monkeypatch.setattr(ProjectConfig, "load", loader)
     monkeypatch.setattr(
         preparation, "canonical_project_identity", lambda _: (tmp_path, tmp_path, "repo")
@@ -2314,6 +2330,14 @@ def test_restore_coordinator_switches_default_only_after_restore(
     )
     monkeypatch.setattr(preparation, "write_manifest", write_manifest, raising=False)
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.runtime.git_common_dir",
+        lambda _root: tmp_path,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.runtime.repo_key",
+        lambda *_args: "repo",
+    )
 
     result = preparation.prepare_restore(client, project)
 
@@ -2331,6 +2355,15 @@ def test_restore_coordinator_switches_default_only_after_restore(
     )
     assert loader.return_value.default_source_database == "old"
     assert loader.call_count >= 1
+
+    bound = actual_load(tmp_path)
+    runtime = OdooClient(config=OdooClientConfig(executable="python3")).instance.from_project(bound)
+    assert runtime.config.start_config is not None
+    assert runtime.config.start_config.db_name == result.restored_database
+    assert runtime.config.start_config.data_dir == str(tmp_path / ".odcli" / "filestore")
+    assert (tmp_path / ".odcli" / "filestore" / "restored.marker").read_text() == "restored"
+    assert not (source_data / "restored.marker").exists()
+    assert source.read_bytes() == source_config_bytes
 
 
 def test_restore_failure_retains_backup_and_does_not_write_manifest(
@@ -2535,6 +2568,8 @@ def _incomplete_restore_retry_case(
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
+    filestore = project_manifest / ".odcli" / "filestore"
+    filestore.mkdir(exist_ok=True)
     (project_manifest / ".odcli" / "project.toml").write_text(
         (project_manifest / ".odcli" / "project.toml").read_text()
         + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n'
@@ -3248,7 +3283,12 @@ def test_local_archive_restore_vertical_flow_uses_real_preflight_transport_and_c
         ("restored_target",),
     ).fetchone()
     assert row is not None
-    assert tuple(row) == (None, "local_archive", expected_sha256, str(data_dir))
+    assert tuple(row) == (
+        None,
+        "local_archive",
+        expected_sha256,
+        str(git_repo / ".odcli" / "filestore"),
+    )
     assert archive_path.exists()
     assert not list(git_repo.joinpath(".odcli", "restore").glob(".*"))
     catalog.close()
