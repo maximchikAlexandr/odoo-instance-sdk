@@ -21,10 +21,10 @@
 
 ## 4. Repository-Aware Module Context
 
-- [ ] 4.1 Extend `ModuleResource` to inspect ordered safe addon roots in the selected checkout and declared repositories while preserving first-root precedence, shadow provenance, and containment.
-- [ ] 4.2 Collect repository Git changes through the existing process boundary and installed module/version facts through the selected database path without executing manifests or adding a cache/index.
-- [ ] 4.3 Add one read-only SDK/CLI context result that keeps filesystem, database, and Git availability independent and exposes bounded reasons for unavailable sources.
-- [ ] 4.4 Add focused checks for duplicate names, dependency paths, Git/database unavailability, unsafe roots, change attribution, and no mutation.
+- [x] 4.1 Extend `ModuleResource` to inspect ordered safe addon roots in the selected checkout and declared repositories while preserving first-root precedence, shadow provenance, and containment.
+- [x] 4.2 Collect repository Git changes through the existing process boundary and installed module/version facts through the selected database path without executing manifests or adding a cache/index.
+- [x] 4.3 Add one read-only SDK/CLI context result that keeps filesystem, database, and Git availability independent and exposes bounded reasons for unavailable sources.
+- [x] 4.4 Add focused checks for duplicate names, dependency paths, Git/database unavailability, unsafe roots, change attribution, and no mutation.
 
 ## 5. Single-File Caddy Publication
 
