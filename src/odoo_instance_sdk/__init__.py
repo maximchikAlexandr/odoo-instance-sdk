@@ -84,6 +84,7 @@ if TYPE_CHECKING:
         fingerprint_plan,
     )
     from odoo_instance_sdk.models import (
+        SNAPSHOT_SECTIONS,
         AdminPasswordResetResult,
         Backup,
         BackupBranchOrigin,
@@ -169,6 +170,10 @@ if TYPE_CHECKING:
         RuntimeState,
         ServerUnavailabilityReason,
         Snapshot,
+        SnapshotObservation,
+        SnapshotRequest,
+        SnapshotSection,
+        SnapshotSectionObservation,
         SqlExecutionResult,
         StartConfig,
         StatsCapabilities,
@@ -499,12 +504,20 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "RestoreResult": ("odoo_instance_sdk.models", "RestoreResult"),
     "RuntimeMetrics": ("odoo_instance_sdk.models", "RuntimeMetrics"),
     "RuntimeState": ("odoo_instance_sdk.models", "RuntimeState"),
+    "SNAPSHOT_SECTIONS": ("odoo_instance_sdk.models", "SNAPSHOT_SECTIONS"),
     "ServerUnavailabilityReason": (
         "odoo_instance_sdk.models",
         "ServerUnavailabilityReason",
     ),
     "SqlExecutionResult": ("odoo_instance_sdk.models", "SqlExecutionResult"),
     "Snapshot": ("odoo_instance_sdk.models", "Snapshot"),
+    "SnapshotObservation": ("odoo_instance_sdk.models", "SnapshotObservation"),
+    "SnapshotRequest": ("odoo_instance_sdk.models", "SnapshotRequest"),
+    "SnapshotSection": ("odoo_instance_sdk.models", "SnapshotSection"),
+    "SnapshotSectionObservation": (
+        "odoo_instance_sdk.models",
+        "SnapshotSectionObservation",
+    ),
     "StartConfig": ("odoo_instance_sdk.models", "StartConfig"),
     "StopEnvironmentResult": ("odoo_instance_sdk.models", "StopEnvironmentResult"),
     "TestCommandSnapshot": ("odoo_instance_sdk.models", "TestCommandSnapshot"),
@@ -550,6 +563,7 @@ def __getattr__(name: str) -> LazyExport:
 # models are added while preserving the historical order in that map.
 if TYPE_CHECKING:
     __all__ = [
+        "SNAPSHOT_SECTIONS",
         "ActionStep",
         "AdminPasswordResetResult",
         "Backup",
@@ -741,6 +755,10 @@ if TYPE_CHECKING:
         "RuntimeState",
         "ServerUnavailabilityReason",
         "Snapshot",
+        "SnapshotObservation",
+        "SnapshotRequest",
+        "SnapshotSection",
+        "SnapshotSectionObservation",
         "SqlExecutionResult",
         "StartConfig",
         "StatsCapabilities",

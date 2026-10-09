@@ -176,3 +176,83 @@ class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=
     generated_at: Annotated[datetime, "odcli-structural"]
     projects: tuple[ProjectSummary, ...]
     environments: tuple[EnvironmentSnapshot, ...]
+    observation: SnapshotObservation | None = None
+
+    @property
+    def observed_at(self) -> datetime | None:
+        return self.observation.observed_at if self.observation is not None else None
+
+    @property
+    def requested_sections(self) -> tuple[str, ...]:
+        return self.observation.requested_sections if self.observation is not None else ()
+
+    @property
+    def completed_sections(self) -> tuple[str, ...]:
+        return self.observation.completed_sections if self.observation is not None else ()
+
+    @property
+    def unknown_sections(self) -> tuple[str, ...]:
+        return self.observation.unknown_sections if self.observation is not None else ()
+
+
+type SnapshotSection = Literal[
+    "catalogue",
+    "runtime",
+    "git",
+    "storage",
+    "artifact",
+    "postgresql",
+    "docker",
+]
+
+
+SNAPSHOT_SECTIONS: tuple[SnapshotSection, ...] = (
+    "catalogue",
+    "runtime",
+    "git",
+    "storage",
+    "artifact",
+    "postgresql",
+    "docker",
+)
+
+
+class SnapshotRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Finite monitor selection captured before any expensive probe starts."""
+
+    sections: tuple[SnapshotSection, ...] = SNAPSHOT_SECTIONS
+    project_ids: tuple[str, ...] = ()
+    environment_ids: tuple[str, ...] = ()
+    include_removed: bool = False
+
+    def __post_init__(self) -> None:
+        if len(set(self.sections)) != len(self.sections):
+            raise ValueError("snapshot sections must be unique")
+        unknown = set(self.sections) - set(SNAPSHOT_SECTIONS)
+        if unknown:
+            raise ValueError(f"unknown snapshot sections: {sorted(unknown)!r}")
+        if len(set(self.project_ids)) != len(self.project_ids):
+            raise ValueError("snapshot project_ids must be unique")
+        if len(set(self.environment_ids)) != len(self.environment_ids):
+            raise ValueError("snapshot environment_ids must be unique")
+
+
+class SnapshotSectionObservation(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    section: SnapshotSection
+    observed_at: datetime
+    source_age_seconds: float | None = None
+    complete: bool = True
+    reason: str | None = None
+
+
+class SnapshotObservation(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Truth metadata for one finite snapshot collection pass."""
+
+    schema_version: int
+    observed_at: datetime
+    requested_sections: tuple[SnapshotSection, ...]
+    completed_sections: tuple[SnapshotSection, ...]
+    unknown_sections: tuple[SnapshotSection, ...]
+    sections: tuple[SnapshotSectionObservation, ...]
