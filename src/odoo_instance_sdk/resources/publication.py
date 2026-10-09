@@ -37,6 +37,7 @@ from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessExecutor,
     ProcessResult,
+    ProcessResultLike,
     RunContext,
     SubprocessExecutor,
 )
@@ -65,7 +66,7 @@ def _config_file_is_private(path: Path) -> None:
         raise ConfigError("publication settings must be a private regular file")
 
 
-def _host_suffix(value: object) -> str:
+def _host_suffix(value: str | None) -> str:
     if not isinstance(value, str):
         raise ConfigError("publication domain_suffix must be a string")
     value = value.strip().lower().rstrip(".")
@@ -77,7 +78,7 @@ def _host_suffix(value: object) -> str:
     return value
 
 
-def _local_endpoint(value: object) -> str:
+def _local_endpoint(value: str | None) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError("publication caddy_control_endpoint is required")
     parsed = urlsplit(value.strip())
@@ -98,7 +99,7 @@ def _local_endpoint(value: object) -> str:
     return f"{parsed.scheme}://{parsed.hostname}:{port}"
 
 
-def _owned_path(value: object, *, root: Path) -> Path:
+def _owned_path(value: str | Path | None, *, root: Path) -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise ConfigError("publication owned_route_file is required")
     path = Path(value).expanduser()
@@ -114,13 +115,13 @@ def _owned_path(value: object, *, root: Path) -> Path:
     return path
 
 
-def _host_label(value: object, field: str) -> str:
+def _host_label(value: str | None, field: str) -> str:
     if not isinstance(value, str) or not _DNS_LABEL.fullmatch(value.strip().lower()):
         raise ConfigError(f"publication {field} must be one DNS label")
     return value.strip().lower()
 
 
-def _proxy_addresses(value: object) -> tuple[str, ...]:
+def _proxy_addresses(value: Sequence[str] | None) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or not value:
         raise ConfigError("publication trusted_proxy_addresses must not be empty")
     result: list[str] = []
@@ -333,6 +334,18 @@ def _decode_routes(raw: bytes) -> list[_Route]:
         raise PublicationError("owned Caddy route file is not an OdCLI route file") from exc
 
 
+def _read_owned_routes() -> tuple[_Route, ...]:
+    """Read the one owned route file without probing runtimes or Caddy."""
+    settings_path = get_publication_config_path()
+    if not settings_path.is_file():
+        return ()
+    settings = PublicationSettings.load(settings_path)
+    route_path = settings.owned_route_file
+    if not route_path.is_file():
+        return ()
+    return tuple(_decode_routes(route_path.read_bytes()))
+
+
 def _route_block(route: _Route, settings: PublicationSettings) -> str:
     host = urlsplit(route.external_url).netloc
     endpoint = route.local_endpoint.rstrip("/")
@@ -426,7 +439,7 @@ def _result(
     )
 
 
-def _as_result(value: object) -> ProcessResult:
+def _as_result(value: ProcessResultLike) -> ProcessResult:
     if not isinstance(value, ProcessResult):
         raise PublicationError("Caddy process returned no result")
     return value

@@ -126,7 +126,11 @@ def build_monitor_router(monitor: SnapshotProvider) -> APIRouter:
     return router
 
 
-def build_pgadmin_router(opener: PgAdminOpener) -> APIRouter:  # noqa: C901
+def build_pgadmin_router(  # noqa: C901
+    opener: PgAdminOpener,
+    *,
+    external_origin: tuple[str, tuple[str, ...]] | None = None,
+) -> APIRouter:
     """Build the UI-only state-changing route around one typed opener."""
     from fastapi import APIRouter, Request
     from fastapi.responses import Response
@@ -156,7 +160,7 @@ def build_pgadmin_router(opener: PgAdminOpener) -> APIRouter:  # noqa: C901
         content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             return False
-        if not _same_origin(request):
+        if not _same_origin(request, external_origin=external_origin):
             return False
         fetch_site = request.headers.get("sec-fetch-site")
         if fetch_site is not None and fetch_site.lower() != "same-origin":
@@ -196,7 +200,11 @@ def build_pgadmin_router(opener: PgAdminOpener) -> APIRouter:  # noqa: C901
     return router
 
 
-def _same_origin(request: Request) -> bool:
+def _same_origin(
+    request: Request,
+    *,
+    external_origin: tuple[str, tuple[str, ...]] | None = None,
+) -> bool:
     """Require an explicit Origin that exactly matches the request origin."""
     from urllib.parse import urlsplit
 
@@ -218,6 +226,11 @@ def _same_origin(request: Request) -> bool:
         or parsed.fragment
     ):
         return False
+    if external_origin is not None:
+        expected_scheme, expected_hosts = external_origin
+        return (
+            parsed.scheme.lower() == expected_scheme and parsed.hostname.lower() in expected_hosts
+        )
     request_scheme = request.url.scheme.lower()
     request_host = request.url.hostname
     request_port = request.url.port

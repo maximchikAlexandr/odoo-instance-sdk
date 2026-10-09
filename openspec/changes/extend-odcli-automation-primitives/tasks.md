@@ -36,14 +36,14 @@
 
 ## 6. Monitor, HTTP Contract, and Existing Panel
 
-- [ ] 6.1 Extend the canonical project/environment snapshot with one publication value read from the owned route file and correlated with exact runtime state; preserve the separate local endpoint and isolate publication read failure.
-- [ ] 6.2 Add explicit trusted-proxy mode to the existing FastAPI server with exact peer/Host/forwarded-origin checks, secure external CSRF, local-mode compatibility, and external pgAdmin disablement.
-- [ ] 6.3 Register the completed top-level `publish` and `unpublish` Click objects in the central core CLI registry, regenerate OpenAPI and the TypeScript SDK once from the canonical snapshot change, and keep relative API/assets under the external origin.
-- [ ] 6.4 Restyle the existing Mantine views into compact Odoo-like project/environment navigation and tables; use only the server-supplied available external URL for `Open Odoo`.
-- [ ] 6.5 Add focused monitor/HTTP/UI checks for project/environment publication states, spoofed forwarding, same-origin mutation, disabled actions, relative URLs, generated-type use, accessibility, and responsive layout.
+- [x] 6.1 Extend the canonical project/environment snapshot with one publication value read from the owned route file and correlated with exact runtime state; preserve the separate local endpoint and isolate publication read failure.
+- [x] 6.2 Add explicit trusted-proxy mode to the existing FastAPI server with exact peer/Host/forwarded-origin checks, secure external CSRF, local-mode compatibility, and external pgAdmin disablement.
+- [x] 6.3 Register the completed top-level `publish` and `unpublish` Click objects in the central core CLI registry, regenerate OpenAPI and the TypeScript SDK once from the canonical snapshot change, and keep relative API/assets under the external origin.
+- [x] 6.4 Restyle the existing Mantine views into compact Odoo-like project/environment navigation and tables; use only the server-supplied available external URL for `Open Odoo`.
+- [x] 6.5 Add focused monitor/HTTP/UI checks for project/environment publication states, spoofed forwarding, same-origin mutation, disabled actions, relative URLs, generated-type use, accessibility, and responsive layout.
 
 ## 7. Documentation and One Verification Pass
 
-- [ ] 7.1 Document the independent project, root-creator credential, module, Multica Git/GitLab, publication, external-panel, ownership, prerequisite, and recovery flows without secret values.
-- [ ] 7.2 Run the existing format, Ruff, strict mypy, unit/integration/dashboard, OpenAPI/codegen, packaging, and architecture/security gates once on the integrated branch; fix only failures caused by this change.
-- [ ] 7.3 When existing disposable Odoo/Caddy prerequisites are available, run one focused smoke for HTTPS/Auth/login/assets/attachments/bus, panel origin, failed reload preservation, stop/restart, and removal; report unavailable prerequisites without adding a new harness.
+- [x] 7.1 Document the independent project, root-creator credential, module, Multica Git/GitLab, publication, external-panel, ownership, prerequisite, and recovery flows without secret values.
+- [x] 7.2 Run the existing format, Ruff, strict mypy, unit/integration/dashboard, OpenAPI/codegen, packaging, and architecture/security gates once on the integrated branch; fix only failures caused by this change.
+- [x] 7.3 When existing disposable Odoo/Caddy prerequisites are available, run one focused smoke for HTTPS/Auth/login/assets/attachments/bus, panel origin, failed reload preservation, stop/restart, and removal; report unavailable prerequisites without adding a new harness.

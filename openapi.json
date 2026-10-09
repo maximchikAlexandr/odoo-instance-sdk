@@ -410,6 +410,15 @@
           "project_id": {
             "type": "string"
           },
+          "publication": {
+            "$ref": "#/components/schemas/PublicationSnapshot",
+            "default": {
+              "external_url": null,
+              "reason": null,
+              "route_identity": null,
+              "state": "unpublished"
+            }
+          },
           "runtime": {
             "$ref": "#/components/schemas/RuntimeMetrics"
           },
@@ -758,6 +767,15 @@
           "name": {
             "type": "string"
           },
+          "publication": {
+            "$ref": "#/components/schemas/PublicationSnapshot",
+            "default": {
+              "external_url": null,
+              "reason": null,
+              "route_identity": null,
+              "state": "unpublished"
+            }
+          },
           "repository_root": {
             "type": "string"
           },
@@ -782,6 +800,58 @@
           "runtime"
         ],
         "title": "ProjectSummary",
+        "type": "object"
+      },
+      "PublicationSnapshot": {
+        "additionalProperties": false,
+        "description": "The route-backed external view of one local runtime.",
+        "properties": {
+          "external_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "route_identity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "state": {
+            "enum": [
+              "available",
+              "backend_unavailable",
+              "error",
+              "unpublished"
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "PublicationSnapshot",
         "type": "object"
       },
       "PythonEnvFootprint": {

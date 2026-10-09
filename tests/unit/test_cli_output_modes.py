@@ -214,6 +214,24 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="owned target process stop and repeat",
     ),
     PublicLeafCase(
+        ("publish",),
+        ("publish", "--project", "/tmp/project", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="publish_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Caddy-backed publication is covered by focused publication resource tests",
+    ),
+    PublicLeafCase(
+        ("unpublish",),
+        ("unpublish", "--project", "/tmp/project", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="unpublish_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Caddy-backed unpublication is covered by focused publication resource tests",
+    ),
+    PublicLeafCase(
         ("resource", "ls"),
         ("resource", "ls"),
         "bounded-read-only",
@@ -1409,6 +1427,29 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), env, instance),
+        )
+        return
+
+    if path in {("publish",), ("unpublish",)}:
+
+        class FakePublication:
+            def publish_command(self, target: object, *, settings: object) -> Command[Any]:
+                if failing:
+                    raise RuntimeError("isolated external operation failed")
+                return _matrix_command({"status": "published", "target": str(target)})
+
+            def unpublish_command(self, target: object, *, settings: object) -> Command[Any]:
+                if failing:
+                    raise RuntimeError("isolated external operation failed")
+                return _matrix_command({"status": "unpublished", "target": str(target)})
+
+        fake_client = SimpleNamespace(publication=FakePublication())
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.publication._client", lambda _ctx: fake_client
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.publication.PublicationSettings.load",
+            classmethod(lambda cls, path=None: object()),
         )
         return
 

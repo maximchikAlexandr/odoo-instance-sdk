@@ -274,10 +274,10 @@ def _context_step(root: Path, step_id: str, args: Sequence[str]) -> PreparedStep
     )
 
 
-def _result_text(value: object) -> str:
+def _result_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
-    return value if isinstance(value, str) else ""
+    return value or ""
 
 
 def _status_changes(value: str, *, repository: str) -> tuple[ModuleGitChange, ...]:
