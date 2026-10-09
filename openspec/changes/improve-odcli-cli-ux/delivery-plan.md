@@ -17,10 +17,10 @@
 | `WP-01` | 1 | none |
 | `WP-02` | 1 | none |
 | `WP-03` | 2 | `WP-01` |
-| `WP-04` | 3 | `WP-01`, `WP-02`, `WP-03` |
-| `WP-05` | 4 | `WP-02`, `WP-03`, `WP-04` |
+| `WP-04` | 3 | `WP-02`, `WP-03` |
+| `WP-05` | 4 | `WP-04` |
 
-Stage 1 is the verified parallel frontier: `WP-01` owns shared output/import infrastructure while `WP-02` owns focused environment selection and collection. Later work converges on shared Click registration and completion surfaces and is therefore ordered to avoid conflicting writes.
+Stage 1 is the verified parallel frontier: `WP-01` owns shared output/import infrastructure while `WP-02` owns focused environment selection and collection. Later work converges on shared Click registration and completion surfaces and is therefore ordered to avoid conflicting writes. `WP-04` receives `WP-01` transitively through `WP-03`; `WP-05` receives every earlier prerequisite transitively through `WP-04`, so neither repeats those edges.
 
 ## WP-01 — Machine usage boundary and metadata startup
 
@@ -56,24 +56,24 @@ Stage 1 is the verified parallel frontier: `WP-01` owns shared output/import inf
 ## WP-04 — Local selector completion and schema-derived fields
 
 - Stage: `3`
-- Direct dependencies: `WP-01`, `WP-02`, `WP-03`
+- Direct dependencies: `WP-02`, `WP-03`
 - Covers tasks: `4.1`, `4.2`, `4.3`
 - Deliverable: environment/remote selectors and typed fields complete locally and safely; invalid fields offer bounded leaf-specific suggestions from the same schema source.
 - Owned responsibility scope: direct Click `shell_complete` callbacks on existing root/arguments/options, exposure and reuse of schema paths, close-match diagnostics, comma/dotted completion, and all completion/field regression tests. Critical shared files include the finalized common registration from `WP-03`, environment registration from `WP-02`, `commands/remote.py`, `internal/output_fields.py`, and CLI characterization/field tests.
 - Contract surface: prefix filtering, spaces, project scope, expected unreadable-source degradation, no network/snapshot/runtime/migration/chmod/mutation, leaf-specific schema paths, bounded value-free suggestions, exit `2`, JSON/TOON usage envelope inherited from `WP-01`, and standard command/option/path completion preservation.
 - Definition of done/evidence: shell completion matrices cover environment and remote values, dotted/comma fields, unreadable sources, and spaces; fail-fast mocks prove forbidden seams are untouched; valid projections are byte/semantic compatible; existing nested command, option, and path completion tests remain green.
-- Parallel-safety rationale: intentionally follows all owners of registration, environment selection, and machine field errors because it edits those converged seams; no active sibling shares its write-zone.
+- Parallel-safety rationale: directly follows the environment owner `WP-02` and the registration owner `WP-03`; the machine-output foundation `WP-01` is already inherited through `WP-03`. No active sibling shares its write-zone.
 
 ## WP-05 — Compatibility, documentation, and final verification
 
 - Stage: `4`
-- Direct dependencies: `WP-02`, `WP-03`, `WP-04`
+- Direct dependency: `WP-04`
 - Covers tasks: `5.1`, `5.2`
 - Deliverable: the intentional contract change is documented and the integrated implementation is verified at repository and installed-artifact boundaries with limitations recorded honestly.
 - Owned responsibility scope: `CHANGELOG.md`, maintained CLI documentation, integration/compatibility adjustments, full repository gates, wheel/executable verification, and evidence records. Directly related tests, fixtures, snapshots, and service files are included when required to close an integration failure and are not owned by an active sibling.
 - Contract surface: all AC-1 through AC-9, canonical `PUBLIC_LEAF_CASES`, successful envelope compatibility, repository architecture/security rules, installed executable outside checkout, and no new dependency/infrastructure.
 - Definition of done/evidence: focused suites, formatting, lint, type checking, full repository tests, wheel build/install, metadata measurement, machine stdout/stderr/exit, non-TTY/NO_COLOR/TERM=dumb, narrow PTY, completion side-effect, and relevant dry-run gates pass on the final SHA; real Odoo/PostgreSQL/Windows or other unavailable checks are explicitly separated from passed evidence.
-- Parallel-safety rationale: final convergence and repair package; it starts only after production work is integrated and has no sibling.
+- Parallel-safety rationale: final convergence and repair package; its sole direct predecessor `WP-04` already joins `WP-02`, `WP-03`, and transitively `WP-01`, so it starts only after production work is integrated and has no sibling.
 
 ## Task coverage audit
 
