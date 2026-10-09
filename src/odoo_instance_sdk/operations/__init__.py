@@ -10,6 +10,7 @@ from odoo_instance_sdk.operations.invoke import (  # noqa: F401
     invoke_local,
     invoke_with_context,
 )
+from odoo_instance_sdk.operations.provider_loader import *  # noqa: F403
 from odoo_instance_sdk.operations.session import (  # noqa: F401
     SessionDecision,
     SessionEvent,

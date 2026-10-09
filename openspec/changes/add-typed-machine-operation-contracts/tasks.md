@@ -13,7 +13,7 @@
 - [x] 2.2 Implement deterministic JSON Schema generation through the existing msgspec/runtime projection so wire aliases, tagged unions, defaults and nullability match encoded values.
 - [x] 2.3 Include envelope-v1, operation metadata, parameter required/default values, transport/preview/cancellation/exit policy and domain-status fields in contract bundle version 1.
 - [x] 2.4 Implement metadata-only `odcli contract export --format json` with deterministic ordering and no project/catalogue/Git/Docker/PostgreSQL/domain I/O.
-- [ ] 2.5 Add pinned Go JSON-Schema consumer tooling outside runtime dependencies and committed generation/compile fixtures covering requests, results, errors, aliases and extensible plugin payloads.
+- [x] 2.5 Add pinned Go JSON-Schema consumer tooling outside runtime dependencies and committed generation/compile fixtures covering requests, results, errors, aliases and extensible plugin payloads.
 - [x] 2.6 Add compatibility fixtures that reject accidental breaking bundle changes unless the operation-contract version changes explicitly.
 
 ## 3. Capture one context and invoke finite operations locally
@@ -36,10 +36,10 @@
 ## 5. Add the narrow installed-operation provider boundary
 
 - [x] 5.1 Define the `odoo_instance_sdk.operations` entry-point provider protocol returning finite complete bindings and factories for one supported contract version.
-- [ ] 5.2 Discover selected-interpreter providers once in deterministic order under a startup deadline and return bounded sanitized missing/load/version errors.
+- [x] 5.2 Discover selected-interpreter providers once in deterministic order under a startup deadline and return bounded sanitized missing/load/version errors.
 - [x] 5.3 Reject duplicate IDs/paths and incomplete provider DTO/factory bindings before any provider operation executes; keep core free of provider-domain imports.
-- [ ] 5.4 Add an isolated fixture plugin proving discovery, schema export and local invocation without core or generated-Go inventory changes.
-- [ ] 5.5 Add negative tests for absent, incompatible, slow, failing and conflicting providers plus packaging tests proving no Go/plugin lifecycle/runtime dependency was introduced.
+- [x] 5.4 Add an isolated fixture plugin proving discovery, schema export and local invocation without core or generated-Go inventory changes.
+- [x] 5.5 Add negative tests for absent, incompatible, slow, failing and conflicting providers plus packaging tests proving no Go/plugin lifecycle/runtime dependency was introduced.
 
 ## 6. Make finite monitor snapshots selective and honest
 
