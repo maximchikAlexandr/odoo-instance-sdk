@@ -28,11 +28,11 @@
 
 ## 5. Single-File Caddy Publication
 
-- [ ] 5.1 Add one owner-only publication settings reader and deterministic project/environment/panel host labels using existing stable owner IDs.
-- [ ] 5.2 Implement `publish_command()`/`unpublish_command()` and CLI leaves as a locked read-modify-write of one OdCLI-owned route file with runtime readiness, candidate validation, reload, prior-byte restoration on failure, and idempotent removal.
-- [ ] 5.3 Generate only the required HTTPS, hashed Basic Auth, proxy-header, Odoo HTTP/assets/attachments/bus, and panel routes; keep unknown hosts unmatched and Caddy control local.
-- [ ] 5.4 Integrate route availability with stop/restart and require successful route removal before environment removal, preserving every caller-owned checkout on cleanup failure.
-- [ ] 5.5 Add focused checks for stable/distinct URLs, concurrent file updates, validation/reload failure, prior-byte preservation, auth/Host rejection, stopped runtime, unpublish, removal retry, and secret-free output.
+- [x] 5.1 Add one owner-only publication settings reader and deterministic project/environment/panel host labels using existing stable owner IDs.
+- [x] 5.2 Implement `publish_command()`/`unpublish_command()` and CLI leaves as a locked read-modify-write of one OdCLI-owned route file with runtime readiness, candidate validation, reload, prior-byte restoration on failure, and idempotent removal.
+- [x] 5.3 Generate only the required HTTPS, hashed Basic Auth, proxy-header, Odoo HTTP/assets/attachments/bus, and panel routes; keep unknown hosts unmatched and Caddy control local.
+- [x] 5.4 Integrate route availability with stop/restart and require successful route removal before environment removal, preserving every caller-owned checkout on cleanup failure.
+- [x] 5.5 Add focused checks for stable/distinct URLs, concurrent file updates, validation/reload failure, prior-byte preservation, auth/Host rejection, stopped runtime, unpublish, removal retry, and secret-free output.
 
 ## 6. Monitor, HTTP Contract, and Existing Panel
 
