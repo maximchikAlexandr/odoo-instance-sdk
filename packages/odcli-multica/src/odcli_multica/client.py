@@ -5,9 +5,11 @@ from __future__ import annotations
 import configparser
 import json
 import re
+import shlex
 import stat
+import sys
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata
@@ -25,6 +27,7 @@ from odcli_multica.models import (
     GitLabCredentialContext,
     GitLabCredentialIdentity,
     GitLabCredentialMapping,
+    MergeRequestPublicationResult,
     MulticaCompatibility,
     PreparationRequest,
     RootCreatorContext,
@@ -40,6 +43,7 @@ from odoo_instance_sdk import (
 )
 from odoo_instance_sdk.commands.output import action_command
 from odoo_instance_sdk.execution import ExecutionPlan
+from odoo_instance_sdk.models import CommandResult, GitSyncResult
 
 if TYPE_CHECKING:
     from multica_py import Issue, MulticaClient, OperationOptions, Page, Project, TaskRun
@@ -247,6 +251,206 @@ class MulticaOdooClient:
         """Expose the typed daemon status without decoding output locally."""
         self._require_contract()
         return self.multica.daemon.status(options=options)
+
+    def git_command(
+        self,
+        context: VerifiedTaskContext,
+        args: Sequence[str],
+        *,
+        git_resource: object,
+        project_root: Path | str,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> Command[CommandResult]:
+        """Delegate raw Git transport, resolving credentials only for remotes."""
+        native_args = tuple(str(value) for value in args)
+        environment: Mapping[str, str] = {}
+        secret_values: tuple[str, ...] = ()
+        remote_host = _remote_host_for_operation(native_args, context.repository_url)
+        if remote_host is not None:
+            credential = self.credential_context(
+                context,
+                host=remote_host,
+                project_root=project_root,
+                mapping_path=mapping_path,
+                process_environment=process_environment,
+            )
+            environment = credential.askpass_environment(_askpass_command())
+            secret_values = (dict(credential.child_environment())["GITLAB_TOKEN"],)
+        passthrough = getattr(git_resource, "passthrough_command", None)
+        if not callable(passthrough):
+            raise ContextVerificationError("core Git passthrough capability is unavailable")
+        return cast(
+            "Command[CommandResult]",
+            passthrough(native_args, environment=environment, secret_values=secret_values),
+        )
+
+    def git(
+        self,
+        context: VerifiedTaskContext,
+        args: Sequence[str],
+        *,
+        git_resource: object,
+        project_root: Path | str,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        return self.git_command(
+            context,
+            args,
+            git_resource=git_resource,
+            project_root=project_root,
+            mapping_path=mapping_path,
+            process_environment=process_environment,
+        ).run()
+
+    def sync_command(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        git_resource: object,
+        project_root: Path | str,
+        base: str | None = None,
+        push: bool = False,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> Command[GitSyncResult]:
+        """Compose core Git sync with one root-creator credential snapshot."""
+        remote_host = _remote_host_for_operation(("fetch",), context.repository_url)
+        environment: Mapping[str, str] = {}
+        secret_values: tuple[str, ...] = ()
+        if remote_host is not None:
+            credential = self.credential_context(
+                context,
+                host=remote_host,
+                project_root=project_root,
+                mapping_path=mapping_path,
+                process_environment=process_environment,
+            )
+            environment = credential.askpass_environment(_askpass_command())
+            secret_values = (dict(credential.child_environment())["GITLAB_TOKEN"],)
+
+        sync = getattr(git_resource, "sync_command", None)
+        if not callable(sync):
+            raise ContextVerificationError("core Git sync capability is unavailable")
+
+        def remote_allowed(url: str) -> bool:
+            if url.startswith(("git@", "ssh://")):
+                return True
+            return remote_host is not None and _https_host(url) == remote_host
+
+        return cast(
+            "Command[GitSyncResult]",
+            sync(
+                base=base,
+                push=push,
+                environment=environment,
+                secret_values=secret_values,
+                remote_allowed=remote_allowed,
+            ),
+        )
+
+    def sync(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        git_resource: object,
+        project_root: Path | str,
+        base: str | None = None,
+        push: bool = False,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> GitSyncResult:
+        return self.sync_command(
+            context,
+            git_resource=git_resource,
+            project_root=project_root,
+            base=base,
+            push=push,
+            mapping_path=mapping_path,
+            process_environment=process_environment,
+        ).run()
+
+    def publish_merge_request_command(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        project_root: Path | str,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description_file: Path | str,
+        assignee: str | None = None,
+        project_path: str | None = None,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> Command[MergeRequestPublicationResult]:
+        """Capture a dry-runnable GitLab create-or-update MR operation."""
+        from odcli_multica.gitlab import (
+            publish_merge_request,
+            read_description_file,
+            repository_project_path,
+        )
+
+        host, inferred_project = repository_project_path(context.repository_url)
+        selected_project = project_path or inferred_project
+        description = read_description_file(description_file)
+        credential = self.credential_context(
+            context,
+            host=host,
+            project_root=project_root,
+            mapping_path=mapping_path,
+            process_environment=process_environment,
+        )
+        server_url = getattr(self.multica.config, "server_url", None)
+        if not isinstance(server_url, str) or not server_url.strip():
+            raise ContextVerificationError("Multica issue URL is unavailable")
+        issue_url = server_url.rstrip("/") + f"/issues/{context.issue_id}"
+        return cast(
+            "Command[MergeRequestPublicationResult]",
+            action_command(
+                "gitlab.mr.publish",
+                lambda: publish_merge_request(
+                    credential=credential,
+                    project_path=selected_project,
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                    title=title,
+                    description=description,
+                    issue_url=issue_url,
+                    assignee=assignee,
+                ),
+                description="Resolve and create or update one exact GitLab merge request",
+                mutating=True,
+            ),
+        )
+
+    def publish_merge_request(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        project_root: Path | str,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description_file: Path | str,
+        assignee: str | None = None,
+        project_path: str | None = None,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> MergeRequestPublicationResult:
+        return self.publish_merge_request_command(
+            context,
+            project_root=project_root,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            title=title,
+            description_file=description_file,
+            assignee=assignee,
+            project_path=project_path,
+            mapping_path=mapping_path,
+            process_environment=process_environment,
+        ).run()
 
     def _read_context(self, request: ContextRequest) -> VerifiedTaskContext:
         checkout = _canonical_checkout(request.checkout_path)
@@ -591,6 +795,36 @@ def _gitlab_host(value: str) -> str:
     if port is not None:
         authority = f"{authority}:{port}"
     return authority
+
+
+def _https_host(value: str) -> str | None:
+    try:
+        return _gitlab_host(value)
+    except ValueError:
+        return None
+
+
+def _remote_host_for_operation(args: Sequence[str], repository_url: str) -> str | None:
+    """Resolve one proven HTTPS host for a remote Git operation."""
+    remote_commands = frozenset(
+        {"clone", "fetch", "pull", "push", "ls-remote", "submodule", "archive", "bundle"}
+    )
+    if not any(argument in remote_commands for argument in args):
+        return None
+    host = _https_host(repository_url)
+    if host is None:
+        return None
+    for argument in args:
+        if "://" not in argument:
+            continue
+        candidate = _https_host(argument)
+        if candidate is not None and candidate != host:
+            raise ContextVerificationError("Git remote host is ambiguous")
+    return host
+
+
+def _askpass_command() -> str:
+    return shlex.join((sys.executable, "-m", "odcli_multica.askpass"))
 
 
 def _observe_compatibility(multica: MulticaClient) -> MulticaCompatibility:

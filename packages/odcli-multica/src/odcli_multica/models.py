@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 
 import msgspec
 
@@ -129,9 +130,30 @@ class GitLabCredentialContext:
         """Return an immutable private child snapshot; never include it in output."""
         return MappingProxyType({"GITLAB_LOGIN": self.login, "GITLAB_TOKEN": self._token})
 
+    def askpass_environment(self, askpass: str) -> Mapping[str, str]:
+        """Return the private environment used by one Git child."""
+        return MappingProxyType(
+            {
+                "GITLAB_LOGIN": self.login,
+                "GITLAB_TOKEN": self._token,
+                "GIT_ASKPASS": askpass,
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
+
 
 class ContextVerificationError(ValueError):
     """Raised when typed task evidence is absent, conflicting, or unsafe."""
+
+
+class MergeRequestPublicationResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """The stable public result of one GitLab merge-request publication."""
+
+    merge_request_id: int
+    web_url: str
+    source_branch: str
+    target_branch: str
+    outcome: Literal["created", "updated"]
 
 
 TaskContext = VerifiedTaskContext
