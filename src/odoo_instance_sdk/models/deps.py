@@ -13,7 +13,7 @@ class DepsMissingImport(msgspec.Struct, frozen=True, forbid_unknown_fields=True,
     """One missing addon import discovered during dependency verification."""
 
     module: str
-    import_name: str
+    import_name: str = msgspec.field(name="import")
 
 
 class DepsVerifyResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -35,9 +35,7 @@ class DepsVerifyResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, 
         """Project the public result into CLI-safe JSON fields."""
         return {
             "distributions": [{"detail": item.detail} for item in self.distributions],
-            "missing_imports": [
-                {"module": item.module, "import": item.import_name} for item in self.missing_imports
-            ],
+            "missing_imports": [msgspec.to_builtins(item) for item in self.missing_imports],
             "pip_check_ok": self.pip_check_ok,
             "pip_check_output": self.pip_check_output,
         }

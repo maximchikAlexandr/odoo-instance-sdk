@@ -844,6 +844,16 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "`update --check` is the process-previewable-read-only variant"
         ),
     ),
+    PublicLeafCase(
+        ("contract", "export"),
+        ("contract", "export", "--format", "json"),
+        "native-passthrough",
+        False,
+        cli_only_reason="metadata-only contract export does not use a project SDK primitive",
+        exception_reason="metadata-only contract export has its own JSON output boundary",
+        e2e_disposition="not-applicable",
+        e2e_rationale="contract metadata is covered by focused operation contract tests",
+    ),
 )
 
 PUBLIC_LEAF_CASES = tuple(_PUBLIC_LEAF_DATA)

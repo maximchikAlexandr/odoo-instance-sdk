@@ -17,6 +17,7 @@ from odoo_instance_sdk.commands.backup import (  # noqa: I001 -- keep command re
     configure_catalog_path_provider,
 )
 from odoo_instance_sdk.commands.bug_report import bug_report_group
+from odoo_instance_sdk.commands.contract import contract_group
 from odoo_instance_sdk.commands.context import CliContext
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.output import (
@@ -631,6 +632,7 @@ cli.add_command(
     name="git",
 )
 cli.add_command(bug_report_group, name="bug-report")
+cli.add_command(contract_group, name="contract")
 
 register_init_command(cli)
 
