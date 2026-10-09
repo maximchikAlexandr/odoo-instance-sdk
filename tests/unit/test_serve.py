@@ -191,7 +191,7 @@ def test_run_server_external_mode_registers_panel_and_disables_uvicorn_proxy_tru
         trusted_proxy_addresses=("10.0.0.2",),
     )
     serve.run_server(
-        host="10.0.0.10",
+        host="127.0.0.1",
         port=8123,
         headless=False,
         no_open=False,
@@ -199,11 +199,22 @@ def test_run_server_external_mode_registers_panel_and_disables_uvicorn_proxy_tru
         publication_settings=settings,  # type: ignore[arg-type]
     )
 
-    assert captured["route"] == ("http://10.0.0.10:8123", settings)
+    assert captured["route"] == ("http://127.0.0.1:8123", settings)
     assert captured["app"]["external_proxy"] is proxy
     assert captured["browser_url"] == "https://panel.example.test/"
     assert captured["proxy_headers"] is False
     assert captured["forwarded_allow_ips"] == ""
+
+
+def test_run_server_rejects_non_loopback_external_bind() -> None:
+    from odoo_instance_sdk.http.app import ExternalProxyConfig
+
+    proxy = ExternalProxyConfig(
+        allowed_hosts=("panel.example.test",),
+        trusted_proxy_addresses=("10.0.0.2",),
+    )
+    with pytest.raises(SystemExit, match="loopback"):
+        serve.run_server(host="0.0.0.0", external_proxy=proxy, headless=True)
 
 
 # --------------------------------------------------------------------- FastAPI routes

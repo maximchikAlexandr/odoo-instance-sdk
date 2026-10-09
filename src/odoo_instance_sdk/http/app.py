@@ -213,10 +213,8 @@ def run_server(
     publication_settings: PublicationSettings | None = None,
 ) -> None:
     """Start the monitor server; dashboard dependencies are imported lazily."""
-    if external_proxy is None and not _is_loopback_host(host):
-        raise SystemExit(
-            "monitor command only supports loopback hosts; refusing unauthenticated network bind"
-        )
+    if not _is_loopback_host(host):
+        raise SystemExit("monitor command only supports loopback hosts; refusing network bind")
     if publication_settings is not None and external_proxy is None:
         raise SystemExit("publication settings require an external proxy configuration")
     try:
