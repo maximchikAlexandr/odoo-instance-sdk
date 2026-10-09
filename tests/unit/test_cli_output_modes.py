@@ -697,6 +697,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
 )
 
 PUBLIC_LEAF_TEST_CASES = tuple(_PUBLIC_LEAF_DATA)
+# Compatibility name consumed by the real-Odoo evidence scripts; the rows
+# remain invocation/evidence fixtures derived from the production inventory.
+PUBLIC_LEAF_CASES = PUBLIC_LEAF_TEST_CASES
 
 
 def test_cli_fixture_covers_production_inventory_exactly() -> None:
