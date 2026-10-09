@@ -966,16 +966,55 @@ for _group, _canonical, _alternate in (
     "--port", type=int, default=None, help="Exact port (else auto-select 8069 or 8100-8120)."
 )
 @click.option("--no-open", is_flag=True, default=False, help="Do not open a browser.")
+@click.option(
+    "--external",
+    "external_mode",
+    is_flag=True,
+    default=False,
+    help="Publish the monitor through the configured Caddy panel route.",
+)
+@click.option(
+    "--settings",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Publication settings file (requires --external).",
+)
 @click.pass_context
 def monitor_cmd(
-    ctx: click.Context, headless: bool, host: str, port: int | None, no_open: bool
+    ctx: click.Context,
+    headless: bool,
+    host: str,
+    port: int | None,
+    no_open: bool,
+    external_mode: bool,
+    settings: Path | None,
 ) -> None:
     """Start the observability monitor (FastAPI + React UI)."""
+    from odoo_instance_sdk.http.app import ExternalProxyConfig
     from odoo_instance_sdk.internal.serve import run_server
+    from odoo_instance_sdk.resources.publication import PublicationSettings
+
+    if settings is not None and not external_mode:
+        raise click.UsageError("--settings requires --external")
+    loaded_settings = PublicationSettings.load(settings) if external_mode else None
+    external_proxy = None
+    if loaded_settings is not None:
+        panel_host = f"{loaded_settings.panel_host_label}.{loaded_settings.domain_suffix}"
+        external_proxy = ExternalProxyConfig(
+            allowed_hosts=(panel_host,),
+            trusted_proxy_addresses=loaded_settings.trusted_proxy_addresses,
+        )
 
     # run_server raises SystemExit with an actionable hint if the dashboard
     # extra (fastapi/uvicorn) is missing; that propagates as exit 1.
-    run_server(host=host, port=port, headless=headless, no_open=no_open)
+    run_server(
+        host=host,
+        port=port,
+        headless=headless,
+        no_open=no_open,
+        external_proxy=external_proxy,
+        publication_settings=loaded_settings,
+    )
 
 
 def _resolve_odoo_bin(

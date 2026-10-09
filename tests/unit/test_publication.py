@@ -110,6 +110,40 @@ def test_publish_is_stable_and_unpublish_is_idempotent(
     assert absent.status == "already_absent"
 
 
+def test_monitor_route_is_reconciled_and_preserved_by_runtime_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
+    settings = _settings()
+    client = _client()
+    executor = RecordingExecutor()
+
+    panel_url = client.publication.monitor_route_command(
+        "http://127.0.0.1:8123", settings=settings, executor=executor
+    ).run()
+    assert panel_url == "https://panel.example.test"
+    route_bytes = settings.owned_route_file.read_bytes()
+    routes = publication_resource._decode_routes(route_bytes)
+    assert [(route.owner_kind, route.local_endpoint) for route in routes] == [
+        ("panel", "http://127.0.0.1:8123")
+    ]
+    assert "panel.example.test" in route_bytes.decode()
+
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_abc",
+        project_id="project_abc",
+        local_endpoint="http://127.0.0.1:8069",
+    )
+    client.publication.publish_command(target, settings=settings, executor=executor).run()
+    routes = publication_resource._decode_routes(settings.owned_route_file.read_bytes())
+    assert {(route.owner_kind, route.owner_id) for route in routes} == {
+        ("panel", "monitor"),
+        ("project", "project_abc"),
+    }
+
+
 def test_reload_failure_restores_prior_route_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

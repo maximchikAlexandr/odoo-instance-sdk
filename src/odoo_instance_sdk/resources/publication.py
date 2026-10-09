@@ -263,7 +263,7 @@ class PublicationResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True,
 
 @dataclass(frozen=True, slots=True)
 class _Route:
-    owner_kind: Literal["project", "environment"]
+    owner_kind: Literal["project", "environment", "panel"]
     owner_id: str
     project_id: str | None
     environment_id: str | None
@@ -347,6 +347,8 @@ def _read_owned_routes() -> tuple[_Route, ...]:
 
 
 def _route_block(route: _Route, settings: PublicationSettings) -> str:
+    if route.owner_kind == "panel":
+        return render_panel_route(route.local_endpoint, settings)
     host = urlsplit(route.external_url).netloc
     endpoint = route.local_endpoint.rstrip("/")
     return (
@@ -401,6 +403,33 @@ def _render_routes(routes: Sequence[_Route], settings: PublicationSettings) -> b
     text = f"{_ROUTE_MARKER}\n{_ROUTE_DATA_PREFIX}{encoded}\n\n"
     text += "\n".join(_route_block(route, settings).rstrip("\n") for route in ordered)
     return (text.rstrip() + "\n").encode("utf-8")
+
+
+def _panel_route(local_endpoint: str, settings: PublicationSettings) -> _Route:
+    endpoint = local_endpoint.strip().rstrip("/")
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme != "http"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.port is None
+    ):
+        raise PublicationError("monitor local endpoint is invalid")
+    external = f"https://{settings.panel_host_label}.{settings.domain_suffix}"
+    identity = hashlib.sha256(f"panel:monitor:{external}".encode()).hexdigest()[:16]
+    return _Route(
+        owner_kind="panel",
+        owner_id="monitor",
+        project_id=None,
+        environment_id=None,
+        local_endpoint=endpoint,
+        external_url=external,
+        route_identity=identity,
+    )
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
@@ -647,6 +676,142 @@ class PublicationResource:
             return None
         return self.unpublish_command(target, executor=executor).run()
 
+    def monitor_route_command(
+        self,
+        local_endpoint: str,
+        *,
+        settings: PublicationSettings | None = None,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[str]:
+        """Register the monitor endpoint in the owned Caddy route file."""
+        loaded = settings or PublicationSettings.load()
+        route = _panel_route(local_endpoint, loaded)
+        action_id = "publication.monitor"
+        validation_id = f"{action_id}.caddy.validate"
+        replacement_id = f"{action_id}.route.replace"
+        reload_id = f"{action_id}.caddy.reload"
+        restore_id = f"{action_id}.route.restore"
+        restore_reload_id = f"{action_id}.caddy.reload.restore"
+        candidate_path = loaded.owned_route_file.with_name(
+            f".{loaded.owned_route_file.name}.candidate"
+        )
+        steps: tuple[PreparedStep | PreparedAction, ...] = (
+            PreparedAction(
+                step_id=action_id,
+                action=action_id,
+                description="Reconcile the OdCLI monitor Caddy route",
+                mutating=True,
+            ),
+            PreparedStep(
+                step_id=validation_id,
+                argv=(
+                    loaded.caddy_executable,
+                    "validate",
+                    "--config",
+                    str(candidate_path),
+                    "--adapter",
+                    "caddyfile",
+                ),
+                timeout=30.0,
+                read_only=True,
+            ),
+            PreparedAction(
+                step_id=replacement_id,
+                action="replace-owned-route-file",
+                description="Atomically replace the OdCLI-owned route file",
+                mutating=True,
+            ),
+            PreparedStep(
+                step_id=reload_id,
+                argv=(
+                    loaded.caddy_executable,
+                    "reload",
+                    "--config",
+                    str(loaded.owned_route_file),
+                    "--adapter",
+                    "caddyfile",
+                    "--address",
+                    loaded.caddy_control_endpoint,
+                ),
+                timeout=30.0,
+                mutating=True,
+            ),
+            PreparedAction(
+                step_id=restore_id,
+                action="restore-owned-route-file",
+                description="Restore the prior route bytes after reload failure",
+                mutating=True,
+            ),
+            PreparedStep(
+                step_id=restore_reload_id,
+                argv=(
+                    loaded.caddy_executable,
+                    "reload",
+                    "--config",
+                    str(loaded.owned_route_file),
+                    "--adapter",
+                    "caddyfile",
+                    "--address",
+                    loaded.caddy_control_endpoint,
+                ),
+                timeout=30.0,
+                mutating=True,
+            ),
+        )
+
+        def run(context: RunContext[str]) -> str:
+            context.action(action_id)
+            path = loaded.owned_route_file
+            with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+                prior = path.read_bytes() if path.exists() else b""
+                current = _decode_routes(prior)
+                updated = [item for item in current if item.owner_kind != "panel"]
+                updated.append(route)
+                candidate = _render_routes(updated, loaded)
+                _atomic_write(candidate_path, candidate)
+                try:
+                    validation = _as_result(context.process(validation_id))
+                    _require_success(validation, "Caddy monitor route validation failed")
+                    context.action(replacement_id)
+                    _atomic_write(path, candidate)
+                    context.complete_action(replacement_id)
+                    reloaded = _as_result(context.process(reload_id))
+                    _require_success(reloaded, "Caddy monitor route reload failed")
+                except BaseException as exc:
+                    changed = path.exists() and path.read_bytes() != prior
+                    if changed:
+                        context.action(restore_id)
+                        _atomic_write(path, prior)
+                        context.complete_action(restore_id)
+                        if context.planned(restore_reload_id) and not context.consumed(
+                            restore_reload_id
+                        ):
+                            context.process(restore_reload_id)
+                    else:
+                        if not context.consumed(restore_id):
+                            context.skip(restore_id)
+                        if not context.consumed(restore_reload_id):
+                            context.skip(restore_reload_id)
+                    if isinstance(exc, PublicationError):
+                        raise
+                    raise PublicationError(
+                        sanitize_last_error(str(exc)) or "monitor publication failed"
+                    ) from exc
+                finally:
+                    candidate_path.unlink(missing_ok=True)
+                context.skip(restore_id)
+                context.skip(restore_reload_id)
+                context.complete_action(action_id)
+                return route.external_url
+
+        plan_steps = tuple(step.public_projection() for step in steps)
+        return Command.create(
+            ExecutionPlan(steps=plan_steps),
+            run,
+            steps,
+            executor=executor or SubprocessExecutor(),
+        )
+
     def _mutation_command(  # noqa: C901
         self,
         target: PublicationTarget,
@@ -851,12 +1016,29 @@ def unpublish_command(
     return client.publication.unpublish_command(target, settings=settings, executor=executor)
 
 
+def monitor_route_command(
+    local_endpoint: str,
+    *,
+    settings: PublicationSettings | None = None,
+    executor: ProcessExecutor | None = None,
+) -> Command[str]:
+    """Build the inspectable monitor route reconciliation operation."""
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.config import OdooClientConfig
+
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    return client.publication.monitor_route_command(
+        local_endpoint, settings=settings, executor=executor
+    )
+
+
 __all__ = [
     "PublicationResource",
     "PublicationResult",
     "PublicationSettings",
     "PublicationTarget",
     "external_url",
+    "monitor_route_command",
     "publication_settings",
     "publish_command",
     "render_panel_route",

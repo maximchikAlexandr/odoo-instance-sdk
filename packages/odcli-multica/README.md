@@ -48,11 +48,12 @@ the local publication settings are required. Validation or reload failure
 restores the prior route bytes; unpublish is idempotent. Never edit the owned
 route file by hand while a command is running.
 
-The monitor panel is local by default. External deployment requires exact
-allowed hosts and exact trusted proxy peers. The panel accepts forwarded origin
-headers only from those peers, uses secure CSRF cookies, and does not expose
-pgAdmin externally. If a route is missing, stale, stopped, or unavailable, the
-panel shows the local endpoint and disables `Open Odoo`.
+The monitor panel is local by default. Use `odcli monitor --external --settings PATH`
+for explicit publication mode; startup registers the monitor endpoint in the
+owned Caddy route and supplies exact allowed hosts and trusted proxy peers. The
+panel accepts forwarded origin headers only from those peers, uses secure CSRF
+cookies, and does not expose pgAdmin externally. If a route is missing, stale,
+stopped, or unavailable, the panel shows the local endpoint and disables `Open Odoo`.
 
 ## Recovery
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import socket
+import sys
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -159,6 +161,49 @@ def test_run_server_missing_each_dashboard_dependency(
 def test_run_server_rejects_unauthenticated_network_bind(host: str) -> None:
     with pytest.raises(SystemExit, match="loopback"):
         serve.run_server(host=host, headless=True)
+
+
+def test_run_server_external_mode_registers_panel_and_disables_uvicorn_proxy_trust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.http.app import ExternalProxyConfig
+
+    captured: dict[str, Any] = {}
+    settings = types.SimpleNamespace(panel_host_label="panel", domain_suffix="example.test")
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda app, **kwargs: captured.update(kwargs)
+    monkeypatch.setitem(sys.modules, "fastapi", types.ModuleType("fastapi"))
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setattr(serve, "_select_port", lambda _host, _port: 8123)
+    monkeypatch.setattr(
+        serve, "create_app", lambda **kwargs: captured.update(app=kwargs) or object()
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.publication.monitor_route_command",
+        lambda endpoint, *, settings: types.SimpleNamespace(
+            run=lambda: captured.update(route=(endpoint, settings))
+        ),
+    )
+    monkeypatch.setattr(serve.webbrowser, "open", lambda url: captured.update(browser_url=url))
+
+    proxy = ExternalProxyConfig(
+        allowed_hosts=("panel.example.test",),
+        trusted_proxy_addresses=("10.0.0.2",),
+    )
+    serve.run_server(
+        host="10.0.0.10",
+        port=8123,
+        headless=False,
+        no_open=False,
+        external_proxy=proxy,
+        publication_settings=settings,  # type: ignore[arg-type]
+    )
+
+    assert captured["route"] == ("http://10.0.0.10:8123", settings)
+    assert captured["app"]["external_proxy"] is proxy
+    assert captured["browser_url"] == "https://panel.example.test/"
+    assert captured["proxy_headers"] is False
+    assert captured["forwarded_allow_ips"] == ""
 
 
 # --------------------------------------------------------------------- FastAPI routes
@@ -398,6 +443,12 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                     "server": None,
                     "server_unavailability_reason": None,
                 },
+                "publication": {
+                    "state": "unpublished",
+                    "external_url": None,
+                    "reason": None,
+                    "route_identity": None,
+                },
             }
         ],
         "environments": [
@@ -434,6 +485,12 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                     "database_name": "db_x",
                     "commit_sha": "abc",
                     "branch": "main",
+                },
+                "publication": {
+                    "state": "unpublished",
+                    "external_url": None,
+                    "reason": None,
+                    "route_identity": None,
                 },
                 "git": {
                     "default_branch": "main",

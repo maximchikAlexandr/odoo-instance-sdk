@@ -825,6 +825,7 @@ XML-RPC stays in test support only; `src/` contains zero `ServerProxy` call site
 ```bash
 odcli monitor --headless
 odcli monitor --watch --interval 2
+odcli monitor --external --settings ~/.config/odcli/publication.toml
 ```
 
 The monitor binds to loopback only by default. The dashboard is an optional
@@ -852,8 +853,10 @@ for the `available` state; stopped, not-ready, missing, or unreadable routes
 remain disabled. The route identity is correlated with the runtime's local
 endpoint, so stale routes are never presented as usable.
 
-For a deployment behind a trusted reverse proxy, construct the dashboard with
-an explicit allowlist of exact external hosts and trusted proxy peers. Forwarded
+For a deployment behind a trusted reverse proxy, use `monitor --external`
+with the owner-only publication settings. Startup registers the selected
+monitor endpoint in the OdCLI-owned Caddy route and passes an explicit
+allowlist of exact external hosts and trusted proxy peers. Forwarded
 host/protocol headers are accepted only from those peers, external CSRF cookies
 are secure, and pgAdmin is local-only. Keep `/api` and dashboard assets
 relative so the panel works under the configured external origin.

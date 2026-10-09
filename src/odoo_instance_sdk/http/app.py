@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from fastapi import FastAPI, Request
     from fastapi.responses import Response
 
+    from odoo_instance_sdk.resources.publication import PublicationSettings
+
 __all__ = ["ExternalProxyConfig", "create_app", "run_server"]
 
 _WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -208,12 +210,15 @@ def run_server(
     headless: bool = False,
     no_open: bool = False,
     external_proxy: ExternalProxyConfig | None = None,
+    publication_settings: PublicationSettings | None = None,
 ) -> None:
     """Start the monitor server; dashboard dependencies are imported lazily."""
     if external_proxy is None and not _is_loopback_host(host):
         raise SystemExit(
             "monitor command only supports loopback hosts; refusing unauthenticated network bind"
         )
+    if publication_settings is not None and external_proxy is None:
+        raise SystemExit("publication settings require an external proxy configuration")
     try:
         import fastapi  # noqa: F401
         import uvicorn
@@ -226,8 +231,26 @@ def run_server(
     chosen = _select_port(host, port)
     app = create_app(headless=headless, external_proxy=external_proxy)
 
-    if not headless and not no_open:
-        url_host = f"[{host}]" if ":" in host else host
-        webbrowser.open(f"http://{url_host}:{chosen}/")
+    if publication_settings is not None:
+        from odoo_instance_sdk.resources.publication import monitor_route_command
 
-    uvicorn.run(app, host=host, port=chosen)
+        monitor_route_command(f"http://{host}:{chosen}", settings=publication_settings).run()
+
+    if not headless and not no_open:
+        if publication_settings is not None:
+            browser_url = (
+                f"https://{publication_settings.panel_host_label}."
+                f"{publication_settings.domain_suffix}/"
+            )
+        else:
+            url_host = f"[{host}]" if ":" in host else host
+            browser_url = f"http://{url_host}:{chosen}/"
+        webbrowser.open(browser_url)
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=chosen,
+        proxy_headers=False,
+        forwarded_allow_ips="",
+    )
