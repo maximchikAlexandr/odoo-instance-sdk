@@ -5,6 +5,9 @@ from __future__ import annotations
 import configparser
 import json
 import re
+import stat
+import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata
@@ -19,8 +22,12 @@ from odcli_multica.models import (
     MULTICA_PY_VERSION,
     ContextRequest,
     ContextVerificationError,
+    GitLabCredentialContext,
+    GitLabCredentialIdentity,
+    GitLabCredentialMapping,
     MulticaCompatibility,
     PreparationRequest,
+    RootCreatorContext,
     VerifiedTaskContext,
 )
 from odoo_instance_sdk import (
@@ -131,6 +138,70 @@ class MulticaOdooClient:
         """Run the finite context observation."""
         return self.context_command(request).run()
 
+    def root_creator_command(self, context: VerifiedTaskContext) -> Command[RootCreatorContext]:
+        """Capture the verified issue's finite root-creator traversal."""
+        self._require_contract()
+        return cast(
+            "Command[RootCreatorContext]",
+            action_command(
+                "multica.root-creator",
+                lambda: self._resolve_root_creator(context),
+                description="Resolve the human creator of the verified task root issue",
+            ),
+        )
+
+    def root_creator(self, context: VerifiedTaskContext) -> RootCreatorContext:
+        """Resolve one human root creator from an already verified context."""
+        return self.root_creator_command(context).run()
+
+    def credential_context_command(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        host: str,
+        project_root: Path | str,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> Command[GitLabCredentialContext]:
+        """Capture one private, host-scoped credential for a child command."""
+        self._require_contract()
+        return cast(
+            "Command[GitLabCredentialContext]",
+            action_command(
+                "multica.credentials",
+                lambda: self._resolve_credentials(
+                    context,
+                    host=host,
+                    project_root=project_root,
+                    mapping_path=mapping_path,
+                    process_environment=process_environment,
+                ),
+                description="Resolve root-creator credentials for one GitLab host",
+            ),
+        )
+
+    def credential_context(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        host: str,
+        project_root: Path | str,
+        mapping_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+    ) -> GitLabCredentialContext:
+        """Resolve one private credential snapshot without persisting its token."""
+        return self.credential_context_command(
+            context,
+            host=host,
+            project_root=project_root,
+            mapping_path=mapping_path,
+            process_environment=process_environment,
+        ).run()
+
+    # Explicit aliases keep the identity contract discoverable to extension callers.
+    resolve_root_creator = root_creator
+    resolve_gitlab_credentials = credential_context
+
     def prepare_command(self, request: PreparationRequest) -> PrepareCommand:
         """Preflight context, then capture one exact core adoption command."""
         context = self.context(request.context)
@@ -222,6 +293,13 @@ class MulticaOdooClient:
             checkout,
             expected_server_url=self.multica.config.server_url,
         )
+        root_creator = _optional_root_creator(
+            issue,
+            request.issue,
+            workspace_id,
+            project.id,
+            self.multica.issues,
+        )
         return VerifiedTaskContext(
             checkout_path=str(checkout),
             task_root=str(task_root),
@@ -233,7 +311,70 @@ class MulticaOdooClient:
             runtime_id=runtime_id,
             daemon_id=daemon_id,
             observed_at=datetime.now(UTC),
+            root_issue_id=root_creator.root_issue_id if root_creator else None,
+            root_creator_id=root_creator.root_creator_id if root_creator else None,
         )
+
+    def _resolve_root_creator(self, context: VerifiedTaskContext) -> RootCreatorContext:
+        return _resolve_root_creator(
+            context,
+            self.multica.issues,
+        )
+
+    def _resolve_credentials(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        host: str,
+        project_root: Path | str,
+        mapping_path: Path | str | None,
+        process_environment: Mapping[str, str] | None,
+    ) -> GitLabCredentialContext:
+        root = self._resolve_root_creator(context)
+        try:
+            normalized_host = _gitlab_host(host)
+        except ValueError as exc:
+            raise ContextVerificationError("GitLab host is invalid") from exc
+        mappings = read_gitlab_credential_mappings(
+            Path(mapping_path)
+            if mapping_path is not None
+            else _default_mapping_path(Path(project_root))
+        )
+        matches = tuple(
+            item
+            for item in mappings
+            if item.user_id == root.root_creator_id and item.host == normalized_host
+        )
+        if not matches:
+            raise ContextVerificationError("GitLab credential mapping is unavailable")
+        if len(matches) != 1:
+            raise ContextVerificationError("GitLab credential mapping is ambiguous")
+        mapping = matches[0]
+        try:
+            from odoo_instance_sdk.internal.project_env import (
+                effective_project_environment,
+                load_project_environment,
+            )
+
+            file_values = load_project_environment(project_root)
+            effective = effective_project_environment(file_values, process_environment)
+        except Exception as exc:
+            raise ContextVerificationError("project credential environment is unavailable") from exc
+        token = effective.get(mapping.token_key, "")
+        if not token:
+            raise ContextVerificationError(
+                f"GitLab credential token key {mapping.token_key} is unavailable"
+            )
+        identity = GitLabCredentialIdentity(
+            user_id=mapping.user_id,
+            host=mapping.host,
+            login=mapping.login,
+            token_key=mapping.token_key,
+            workspace_id=root.workspace_id,
+            issue_id=root.issue_id,
+            root_issue_id=root.root_issue_id,
+        )
+        return GitLabCredentialContext(identity=identity, _token=token)
 
 
 def _canonical_checkout(value: Path) -> Path:
@@ -244,6 +385,212 @@ def _canonical_checkout(value: Path) -> Path:
     if not checkout.is_dir():
         raise ContextVerificationError("checkout path is not a directory")
     return checkout
+
+
+def _optional_root_creator(
+    issue: Issue,
+    issue_id: str,
+    workspace_id: str,
+    project_id: str,
+    issues: object,
+) -> RootCreatorContext | None:
+    """Preserve the baseline context contract when old issue projections omit creators."""
+    if issue.creator_type is None and issue.creator_id is None:
+        return None
+    return _resolve_root_creator_from_issue(
+        issue,
+        issue_id=issue_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        issues=issues,
+    )
+
+
+def _resolve_root_creator(
+    context: VerifiedTaskContext,
+    issues: object,
+) -> RootCreatorContext:
+    try:
+        issue = issues.get(context.issue_id)  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise ContextVerificationError("issue lineage evidence is unavailable") from exc
+    return _resolve_root_creator_from_issue(
+        issue,
+        issue_id=context.issue_id,
+        workspace_id=context.workspace_id,
+        project_id=context.multica_project_id,
+        issues=issues,
+    )
+
+
+def _resolve_root_creator_from_issue(
+    first_issue: Issue,
+    *,
+    issue_id: str,
+    workspace_id: str,
+    project_id: str,
+    issues: object,
+) -> RootCreatorContext:
+    visited: set[str] = set()
+    current_id = issue_id
+    issue = first_issue
+    while True:
+        if current_id in visited:
+            raise ContextVerificationError("issue lineage is cyclic")
+        visited.add(current_id)
+        _verify_lineage_issue(issue, workspace_id=workspace_id, project_id=project_id)
+        parent_id = issue.parent_id
+        if parent_id is None or not parent_id.strip():
+            creator_type = (issue.creator_type or "").strip().casefold()
+            creator_id = (issue.creator_id or "").strip()
+            if creator_type != "member" or not creator_id:
+                raise ContextVerificationError("root issue human creator evidence is unavailable")
+            return RootCreatorContext(
+                issue_id=issue_id,
+                root_issue_id=current_id,
+                root_creator_id=creator_id,
+                workspace_id=workspace_id,
+            )
+        parent_id = parent_id.strip()
+        if parent_id in visited:
+            raise ContextVerificationError("issue lineage is cyclic")
+        try:
+            issue = issues.get(parent_id)  # type: ignore[attr-defined]
+        except Exception as exc:
+            raise ContextVerificationError("parent issue evidence is unavailable") from exc
+        current_id = parent_id
+
+
+def _verify_lineage_issue(issue: Issue, *, workspace_id: str, project_id: str) -> None:
+    issue_project = issue.project_id
+    if issue_project != project_id:
+        raise ContextVerificationError("issue lineage crosses the verified workspace")
+    issue_workspace = getattr(issue, "workspace_id", None)
+    if issue_workspace is not None and issue_workspace != workspace_id:
+        raise ContextVerificationError("issue lineage crosses the verified workspace")
+
+
+def _default_mapping_path(project_root: Path) -> Path:
+    return project_root.expanduser().resolve() / ".odcli" / "gitlab-credentials.toml"
+
+
+def read_gitlab_credential_mappings(path: Path | str) -> tuple[GitLabCredentialMapping, ...]:
+    """Read and validate one owner-only, non-secret GitLab mapping file."""
+    path = Path(path)
+    try:
+        metadata = path.stat()
+    except OSError as exc:
+        raise ContextVerificationError("GitLab credential mapping is unavailable") from exc
+    if path.is_symlink() or not path.is_file() or (stat.S_IMODE(metadata.st_mode) & 0o077):
+        raise ContextVerificationError("GitLab credential mapping requires owner-only access")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ContextVerificationError("GitLab credential mapping is unavailable") from exc
+    try:
+        raw = json.loads(text) if path.suffix.casefold() == ".json" else tomllib.loads(text)
+    except (ValueError, tomllib.TOMLDecodeError) as exc:
+        raise ContextVerificationError("GitLab credential mapping is malformed") from exc
+    entries = _mapping_entries(raw)
+    mappings: list[GitLabCredentialMapping] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise ContextVerificationError("GitLab credential mapping is malformed")
+        try:
+            user_id = _mapping_text(entry, "user_id")
+            host = _gitlab_host(_mapping_text(entry, "host"))
+            login = _mapping_text(entry, "login")
+            token_key = _mapping_text(entry, "token_key")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ContextVerificationError("GitLab credential mapping is malformed") from exc
+        if not re.fullmatch(r"ODCLI_GITLAB_TOKEN_[A-Za-z0-9_]+", token_key):
+            raise ContextVerificationError("GitLab credential token key is malformed")
+        key = (user_id, host)
+        if key in seen:
+            raise ContextVerificationError("GitLab credential mapping is ambiguous")
+        seen.add(key)
+        mappings.append(
+            GitLabCredentialMapping(
+                user_id=user_id,
+                host=host,
+                login=login,
+                token_key=token_key,
+            )
+        )
+    return tuple(mappings)
+
+
+def _mapping_entries(raw: object) -> tuple[object, ...]:
+    if isinstance(raw, list):
+        return tuple(raw)
+    if not isinstance(raw, Mapping):
+        raise ContextVerificationError("GitLab credential mapping is malformed")
+    entries = _named_mapping_entries(raw)
+    if entries is not None:
+        return entries
+    users = raw.get("users")
+    if isinstance(users, Mapping):
+        return _user_mapping_entries(users)
+    if {"user_id", "host", "login", "token_key"}.issubset(raw):
+        return (raw,)
+    raise ContextVerificationError("GitLab credential mapping is malformed")
+
+
+def _named_mapping_entries(raw: Mapping[object, object]) -> tuple[object, ...] | None:
+    for key in ("mappings", "credentials", "credential", "gitlab"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            return tuple(value)
+        if isinstance(value, Mapping):
+            return (value,)
+    return None
+
+
+def _user_mapping_entries(users: Mapping[object, object]) -> tuple[object, ...]:
+    values: list[dict[str, object]] = []
+    for user_id, hosts in users.items():
+        if not isinstance(user_id, str) or not isinstance(hosts, Mapping):
+            raise ContextVerificationError("GitLab credential mapping is malformed")
+        for host, details in hosts.items():
+            if not isinstance(host, str) or not isinstance(details, Mapping):
+                raise ContextVerificationError("GitLab credential mapping is malformed")
+            values.append({"user_id": user_id, "host": host, **details})
+    return tuple(values)
+
+
+def _mapping_text(entry: Mapping[object, object], key: str) -> str:
+    value = entry[key]
+    if not isinstance(value, str) or not value.strip() or any(char in value for char in "\r\n"):
+        raise ValueError(key)
+    return value.strip()
+
+
+def _gitlab_host(value: str) -> str:
+    raw = value.strip()
+    candidate = raw if "://" in raw else f"https://{raw}"
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.netloc
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("GitLab host is not an exact HTTPS authority")
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("GitLab host is not an exact HTTPS authority") from exc
+    if hostname is None or "*" in hostname or not hostname.strip():
+        raise ValueError("GitLab host is not an exact HTTPS authority")
+    authority = hostname.casefold()
+    if port is not None:
+        authority = f"{authority}:{port}"
+    return authority
 
 
 def _observe_compatibility(multica: MulticaClient) -> MulticaCompatibility:
@@ -511,4 +858,4 @@ def _verify_daemon_filesystem(
         raise ContextVerificationError("checkout is outside the verified task directory")
 
 
-__all__ = ["MulticaOdooClient", "PrepareCommand"]
+__all__ = ["MulticaOdooClient", "PrepareCommand", "read_gitlab_credential_mappings"]

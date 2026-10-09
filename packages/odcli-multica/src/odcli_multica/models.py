@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 
 import msgspec
 
@@ -63,6 +65,69 @@ class VerifiedTaskContext(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     runtime_id: str
     daemon_id: str
     observed_at: datetime
+    root_issue_id: str | None = None
+    root_creator_id: str | None = None
+
+
+class RootCreatorContext(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The human authority proven by a finite issue-parent traversal."""
+
+    issue_id: str
+    root_issue_id: str
+    root_creator_id: str
+    workspace_id: str
+
+
+class GitLabCredentialMapping(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Non-secret mapping from one Multica user and host to a token key."""
+
+    user_id: str
+    host: str
+    login: str
+    token_key: str
+
+
+class GitLabCredentialIdentity(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Safe public identity for one resolved host-scoped credential."""
+
+    user_id: str
+    host: str
+    login: str
+    token_key: str
+    workspace_id: str
+    issue_id: str
+    root_issue_id: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class GitLabCredentialContext:
+    """Private per-command credential handle with a secret-free representation."""
+
+    identity: GitLabCredentialIdentity
+    _token: str = field(repr=False, compare=False)
+
+    def __repr__(self) -> str:
+        return f"GitLabCredentialContext(identity={self.identity!r})"
+
+    @property
+    def user_id(self) -> str:
+        return self.identity.user_id
+
+    @property
+    def host(self) -> str:
+        return self.identity.host
+
+    @property
+    def login(self) -> str:
+        return self.identity.login
+
+    def child_environment(self) -> Mapping[str, str]:
+        """Return an immutable private child snapshot; never include it in output."""
+        return MappingProxyType({"GITLAB_LOGIN": self.login, "GITLAB_TOKEN": self._token})
 
 
 class ContextVerificationError(ValueError):

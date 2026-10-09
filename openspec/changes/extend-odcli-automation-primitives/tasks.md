@@ -7,9 +7,9 @@
 
 ## 2. Root-Creator Credential Context
 
-- [ ] 2.1 Extend the existing `odcli-multica` verified task context through public typed issue reads with finite same-workspace parent traversal to one human root creator; reject missing, cyclic, cross-workspace, or non-human lineage.
-- [ ] 2.2 Add one owner-only Multica-user/GitLab-host mapping reader and reuse the existing project dotenv loader for reserved token keys, returning one private per-command credential context with safe public identifiers.
-- [ ] 2.3 Add focused extension-package checks for parent traversal, missing/ambiguous host mapping, concurrent user isolation, compatibility with the existing context/preparation contract, and secret redaction.
+- [x] 2.1 Extend the existing `odcli-multica` verified task context through public typed issue reads with finite same-workspace parent traversal to one human root creator; reject missing, cyclic, cross-workspace, or non-human lineage.
+- [x] 2.2 Add one owner-only Multica-user/GitLab-host mapping reader and reuse the existing project dotenv loader for reserved token keys, returning one private per-command credential context with safe public identifiers.
+- [x] 2.3 Add focused extension-package checks for parent traversal, missing/ambiguous host mapping, concurrent user isolation, compatibility with the existing context/preparation contract, and secret redaction.
 
 ## 3. Native Git and GitLab Merge Requests
 
