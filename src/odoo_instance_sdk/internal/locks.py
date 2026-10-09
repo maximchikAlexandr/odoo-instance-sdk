@@ -131,6 +131,13 @@ def pgadmin_lock_path() -> Path:
     return get_locks_dir() / "pgadmin.lock"
 
 
+def publication_lock_path() -> Path:
+    """Return the one user-global lock for the owned Caddy route file."""
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    return get_locks_dir() / "publication.lock"
+
+
 def backup_lock_path(backup_id: str) -> Path:
     """Return the exact UUID-scoped lock shared by backup point operations."""
     from odoo_instance_sdk.internal.paths import get_locks_dir
