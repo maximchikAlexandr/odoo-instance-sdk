@@ -16,13 +16,14 @@ class FixtureRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     name: str
 
 
+class FixturePluginPayload(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    value: str
+
+
 class FixtureResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     status: str
     greeting: str
-
-
-class FixturePluginPayload(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    value: str
+    payload: FixturePluginPayload | None = None
 
 
 class FixtureError(msgspec.Struct, frozen=True, forbid_unknown_fields=True):

@@ -174,5 +174,6 @@ def test_fixture_provider_is_discovered_exported_and_invocable() -> None:
     request = binding.descriptor.request_type(name="Ada")  # type: ignore[union-attr]
     response = binding.factory(request)  # type: ignore[misc]
     assert response.greeting == "hello Ada"
+    assert response.payload is None
     assert "FixtureResult" in registry.bundle()["schemas"]
     assert "FixtureError" in registry.bundle()["schemas"]

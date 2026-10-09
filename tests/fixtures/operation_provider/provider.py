@@ -16,15 +16,16 @@ class FixtureRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     name: str
 
 
-class FixtureResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    status: str
-    greeting: str
-
-
 class FixturePluginPayload(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """Concrete extensible payload, rather than an untyped JSON map."""
 
     value: str
+
+
+class FixtureResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    status: str
+    greeting: str
+    payload: FixturePluginPayload | None = None
 
 
 class FixtureError(msgspec.Struct, frozen=True, forbid_unknown_fields=True):

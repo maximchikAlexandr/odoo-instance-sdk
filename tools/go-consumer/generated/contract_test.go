@@ -7,7 +7,7 @@ import (
 
 func TestExportedContractFixturesCompileAndDecode(t *testing.T) {
 	request := OperationRequest{}
-	result := OperationResult{Status: "ok"}
+	result := FixtureResult{Status: "ok", Greeting: "hello"}
 	err := FixtureError{Code: "invalid", Message: "safe"}
 	alias := DepsMissingImport{Module: "base", Import: "odoo"}
 	document := WireOperationDocument{

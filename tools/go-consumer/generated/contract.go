@@ -6,7 +6,7 @@ import "encoding/json"
 
 type OperationContractFixture struct {
 	Request OperationRequest       `json:"request"`
-	Result  OperationResult        `json:"result"`
+	Result  FixtureResult          `json:"result"`
 	Error   FixtureError           `json:"error"`
 	Alias   DepsMissingImport      `json:"alias"`
 	Wire    WireOperationDocument  `json:"wire"`
@@ -20,6 +20,12 @@ type OperationRequest struct {
 
 type OperationResult struct {
 	Status string `json:"status,omitempty"`
+}
+
+type FixtureResult struct {
+	Status   string                `json:"status"`
+	Greeting string                `json:"greeting"`
+	Payload  *FixturePluginPayload `json:"payload,omitempty"`
 }
 
 type OperationErrorDetails struct {

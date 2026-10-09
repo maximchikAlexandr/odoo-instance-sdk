@@ -4,27 +4,28 @@ import json
 import tomllib
 from pathlib import Path
 
-from odoo_instance_sdk.operations import contract_bundle
+from odoo_instance_sdk.operations import builtin_bindings, contract_bundle, provider_bindings
+from tests.fixtures.operation_provider import provider
 
 
 def test_go_fixture_keeps_authoritative_alias_and_plugin_shapes() -> None:
     path = Path("tools/go-consumer/schema.json")
     schema = json.loads(path.read_text(encoding="utf-8"))
-    bundle = contract_bundle()
+    bundle = contract_bundle((*builtin_bindings(), *provider_bindings(provider)))
 
     assert (
-        schema["$defs"]["DepsMissingImport"]["properties"]["import"]
-        == bundle["schemas"]["DepsMissingImport"]["$defs"]["DepsMissingImport"]["properties"][
-            "import"
-        ]
+        schema["$defs"]["DepsMissingImport"]
+        == bundle["schemas"]["DepsMissingImport"]["$defs"]["DepsMissingImport"]
     )
     assert "import_name" not in schema["$defs"]["DepsMissingImport"]["properties"]
-    assert schema["$defs"]["FixturePluginPayload"] == {
-        "type": "object",
-        "properties": {"value": {"type": "string"}},
-        "required": ["value"],
-        "additionalProperties": False,
-    }
+    assert (
+        schema["$defs"]["FixtureResult"]
+        == bundle["schemas"]["FixtureResult"]["$defs"]["FixtureResult"]
+    )
+    assert (
+        schema["$defs"]["FixturePluginPayload"]
+        == bundle["schemas"]["FixtureResult"]["$defs"]["FixturePluginPayload"]
+    )
 
 
 def test_provider_fixture_uses_one_entry_point_and_python_runtime_has_no_go_dependency() -> None:
