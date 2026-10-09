@@ -17,7 +17,7 @@ import stat
 import tempfile
 import tomllib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn, cast
 from urllib.parse import urlsplit
@@ -229,7 +229,8 @@ class PublicationTarget:
     local_endpoint: str
     project_id: str | None = None
     environment_id: str | None = None
-    ready: bool = True
+    ready: bool = False
+    runtime: OdooInstance | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.owner_kind not in {"project", "environment"} or not self.owner_id.strip():
@@ -433,6 +434,64 @@ def _require_success(result: ProcessResult, message: str) -> None:
         raise PublicationError(message)
 
 
+def _runtime_endpoint(runtime: OdooInstance) -> str:
+    identity = runtime._read_runtime_identity()
+    if identity is None or identity.vanished:
+        raise PublicationError("runtime is stopped")
+    runtime._validate_runtime_identity(identity)
+    config = runtime.config.start_config
+    if config is None:
+        raise PublicationError("runtime readiness configuration is unavailable")
+    from odoo_instance_sdk.resources.instance.runtime_identity import _socket_owned_by
+
+    if not _socket_owned_by(config, identity.root_pid):
+        raise PublicationError("runtime listener ownership is not proven")
+    return runtime.config.base_url
+
+
+def _probe_runtime_health(endpoint: str) -> None:
+    from odoo_instance_sdk.internal.transport import TransportError
+    from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
+
+    try:
+        with open_odoo_http_client(endpoint, timeout=2.0) as http:
+            response = http.get(f"{endpoint}/web/health?db_server_status=true")
+        _require_healthy_response(response.status_code)
+        payload = response.json()
+    except PublicationError:
+        raise
+    except (TransportError, TypeError, ValueError, OSError) as exc:
+        raise PublicationError("runtime health probe failed") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "pass":
+        raise PublicationError("runtime health probe failed")
+
+
+def _require_healthy_response(status_code: int) -> None:
+    if status_code != 200:
+        raise PublicationError("runtime health probe failed")
+
+
+def _assert_runtime_ready(target: PublicationTarget) -> None:
+    """Prove the route backend still belongs to the captured runtime."""
+    runtime = target.runtime
+    if runtime is None:
+        if not target.ready:
+            raise PublicationError("runtime readiness must be proven before publication")
+        return
+    try:
+        endpoint = _runtime_endpoint(runtime)
+        _probe_runtime_health(endpoint)
+    except PublicationError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise PublicationError("runtime identity is not valid") from exc
+
+
+def _assert_mutation_target(target: PublicationTarget, *, remove: bool) -> None:
+    if not remove:
+        _assert_runtime_ready(target)
+
+
 class PublicationResource:
     """One publication resource attached to :class:`OdooClient`."""
 
@@ -464,6 +523,7 @@ class PublicationResource:
                 project_id=binding.project_id,
                 environment_id=value._environment_id,
                 local_endpoint=value.config.base_url,
+                runtime=value,
             )
         if isinstance(value, ProjectConfig):
             return self._target(self._client.instance.from_project(value))
@@ -487,8 +547,8 @@ class PublicationResource:
     ) -> Command[PublicationResult]:
         selected = self._target(target)
         loaded = settings or PublicationSettings.load()
-        if not selected.ready or not selected.local_endpoint.strip():
-            raise PublicationError("runtime is not ready")
+        if not selected.local_endpoint.strip():
+            raise PublicationError("runtime endpoint is missing")
         url = external_url(selected, loaded)
         route = _Route(
             owner_kind=selected.owner_kind,
@@ -656,6 +716,7 @@ class PublicationResource:
         )
 
         def run(context: RunContext[PublicationResult]) -> PublicationResult:
+            _assert_mutation_target(target, remove=remove)
             context.action(action_id)
             path = settings.owned_route_file
             with exclusive_lock(publication_lock_path()):

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 
+import odoo_instance_sdk.commands.publication as publication_commands
+import odoo_instance_sdk.resources.instance.runtime_identity as runtime_identity
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import ConfigError, PublicationError
@@ -80,6 +84,7 @@ def test_publish_is_stable_and_unpublish_is_idempotent(
         owner_id="project_abc_123",
         project_id="project_abc_123",
         local_endpoint="http://127.0.0.1:8069",
+        ready=True,
     )
     executor = RecordingExecutor()
     client = _client()
@@ -115,6 +120,7 @@ def test_reload_failure_restores_prior_route_bytes(
         owner_id="project_a",
         project_id="project_a",
         local_endpoint="http://127.0.0.1:8069",
+        ready=True,
     )
     second = PublicationTarget(
         owner_kind="environment",
@@ -122,6 +128,7 @@ def test_reload_failure_restores_prior_route_bytes(
         project_id="project_a",
         environment_id="env-b",
         local_endpoint="http://127.0.0.1:8070",
+        ready=True,
     )
     client.publication.publish_command(first, settings=settings, executor=RecordingExecutor()).run()
     previous = settings.owned_route_file.read_bytes()
@@ -140,3 +147,175 @@ def test_reload_failure_restores_prior_route_bytes(
         ).run()
 
     assert settings.owned_route_file.read_bytes() == previous
+
+
+def test_unproven_target_is_rejected_before_route_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = _settings()
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_unproven",
+        project_id="project_unproven",
+        local_endpoint="http://127.0.0.1:8069",
+    )
+
+    with pytest.raises(PublicationError, match="runtime readiness must be proven"):
+        _client().publication.publish_command(target, settings=settings).run()
+
+    assert not settings.owned_route_file.exists()
+
+
+def test_publish_cli_resolves_environment_selector_before_building_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = object()
+    selected = object()
+    captured: list[object] = []
+
+    class FakePublication:
+        def publish_command(self, target: object, *, settings: object) -> SimpleNamespace:
+            captured.append(target)
+            return SimpleNamespace(plan={}, run=dict)
+
+    class FakeEnvironments:
+        def get(self, selector: str) -> object:
+            assert selector == "env-name"
+            return selected
+
+    fake_client = SimpleNamespace(publication=FakePublication(), environments=FakeEnvironments())
+    monkeypatch.setattr(
+        publication_commands.PublicationSettings,
+        "load",
+        classmethod(lambda cls, path=None: settings),
+    )
+
+    result = CliRunner().invoke(
+        publication_commands.publish_cli,
+        ["--env", "env-name", "--dry-run"],
+        obj=fake_client,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == [selected]
+
+
+def test_runtime_target_rejects_stopped_before_route_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = _settings()
+    runtime = SimpleNamespace(_read_runtime_identity=lambda: None)
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_stopped",
+        project_id="project_stopped",
+        local_endpoint="http://127.0.0.1:8069",
+        runtime=runtime,
+    )
+
+    with pytest.raises(PublicationError, match="runtime is stopped"):
+        _client().publication.publish_command(target, settings=settings).run()
+
+    assert not settings.owned_route_file.exists()
+
+
+def test_runtime_target_rejects_stale_identity_before_route_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = _settings()
+    identity = SimpleNamespace(vanished=False, root_pid=123)
+
+    def reject_identity(_identity: object) -> None:
+        raise RuntimeError("foreign process")
+
+    runtime = SimpleNamespace(
+        _read_runtime_identity=lambda: identity,
+        _validate_runtime_identity=reject_identity,
+    )
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_stale",
+        project_id="project_stale",
+        local_endpoint="http://127.0.0.1:8069",
+        runtime=runtime,
+    )
+
+    with pytest.raises(PublicationError, match="runtime identity is not valid"):
+        _client().publication.publish_command(target, settings=settings).run()
+
+    assert not settings.owned_route_file.exists()
+
+
+def test_runtime_target_rejects_unhealthy_backend_before_route_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = _settings()
+    identity = SimpleNamespace(vanished=False, root_pid=123)
+    runtime = SimpleNamespace(
+        _read_runtime_identity=lambda: identity,
+        _validate_runtime_identity=lambda _identity: None,
+        config=SimpleNamespace(start_config=object(), base_url="http://127.0.0.1:8069"),
+    )
+    monkeypatch.setattr(runtime_identity, "_socket_owned_by", lambda _config, _pid: True)
+
+    class UnhealthyResponse:
+        status_code = 503
+
+        def json(self) -> dict[str, str]:
+            return {"status": "fail"}
+
+    class UnhealthyHttp:
+        def __enter__(self) -> UnhealthyHttp:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> UnhealthyResponse:
+            return UnhealthyResponse()
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.transport.factory.open_odoo_http_client",
+        lambda _endpoint, timeout: UnhealthyHttp(),
+    )
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_unhealthy",
+        project_id="project_unhealthy",
+        local_endpoint="http://127.0.0.1:8069",
+        runtime=runtime,
+    )
+
+    with pytest.raises(PublicationError, match="runtime health probe failed"):
+        _client().publication.publish_command(target, settings=settings).run()
+
+    assert not settings.owned_route_file.exists()
+
+
+def test_two_publications_retain_both_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = _settings()
+    client = _client()
+    executor = RecordingExecutor()
+    for owner_id in ("project_one", "project_two"):
+        client.publication.publish_command(
+            PublicationTarget(
+                owner_kind="project",
+                owner_id=owner_id,
+                project_id=owner_id,
+                local_endpoint="http://127.0.0.1:8069",
+                ready=True,
+            ),
+            settings=settings,
+            executor=executor,
+        ).run()
+
+    route_text = settings.owned_route_file.read_text()
+    assert "project-one.example.test" in route_text
+    assert "project-two.example.test" in route_text

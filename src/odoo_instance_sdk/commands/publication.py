@@ -47,9 +47,13 @@ def publish_cli(
     settings: Path | None,
 ) -> None:
     """Publish exactly one project or environment runtime through Caddy."""
-    selected = _selector(str(project) if project is not None else None, environment)
     loaded = PublicationSettings.load(settings)
-    command = _client(ctx).publication.publish_command(selected, settings=loaded)
+    if environment is not None:
+        selected_environment = _client(ctx).environments.get(environment)
+        command = _client(ctx).publication.publish_command(selected_environment, settings=loaded)
+    else:
+        selected = _selector(str(project) if project is not None else None, None)
+        command = _client(ctx).publication.publish_command(selected, settings=loaded)
     if dry_run:
         click.echo(json.dumps(to_builtins(command.plan), sort_keys=True))
         return
