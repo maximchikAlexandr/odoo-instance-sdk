@@ -45,7 +45,8 @@ def validate_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
     return _PlanningOutcome(state=state)
 
 
-def normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
+def normalize_checkout_projections(state: _CheckoutPlanningState) -> _PlanningOutcome:
+    """Normalize captured provenance before building either checkout projection."""
     provenance = msgspec.structs.replace(
         state.provenance,
         source_name=state.private.source_name,
@@ -62,6 +63,10 @@ def normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
     return _PlanningOutcome(
         state=replace(state, provenance=provenance, public=public, execution_plan=execution_plan)
     )
+
+
+def normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
+    return normalize_checkout_projections(state)
 
 
 def capture_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:

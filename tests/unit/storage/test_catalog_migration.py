@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from odoo_instance_sdk.storage.catalog_migrate import (
     CATALOG_REVISION,
     _alembic_config,
+    _ddl_fingerprint,
+    _historical_ddl_fingerprint,
     assert_schema_metadata_matches_revision,
     catalog_revision,
     ensure_catalog_migrated,
@@ -29,6 +32,9 @@ from tests.unit.storage.catalog_alpha_fixture import write_alpha_catalog
 
 V16_CATALOG_FIXTURE = Path(__file__).parents[2] / "fixtures" / "catalog_v16.sql"
 V15_CATALOG_FIXTURE = Path(__file__).parents[2] / "fixtures" / "catalog_v15.sql"
+PRE_SOURCE_NEUTRAL_CATALOG_FIXTURE = (
+    Path(__file__).parents[2] / "fixtures" / "catalog_pre_source_neutral.sql"
+)
 
 
 def _assert_current_revision(conn: sqlite3.Connection) -> None:
@@ -196,6 +202,23 @@ def test_current_catalog_has_one_head_and_metadata_equivalence(tmp_path: Path) -
     assert_schema_metadata_matches_revision()
 
 
+def test_historical_fingerprints_share_common_omissions_but_keep_version_differences() -> None:
+    v16_tables, v16_indexes, _, _, _ = _historical_ddl_fingerprint("v16")
+    legacy_tables, legacy_indexes, _, _, _ = _historical_ddl_fingerprint("pre_source_neutral")
+    v16_by_name = {table: columns for table, columns, *_rest in v16_tables}
+    legacy_by_name = {table: columns for table, columns, *_rest in legacy_tables}
+
+    for table in ("restores", "database_events"):
+        assert "source_kind" not in {column[0] for column in v16_by_name[table]}
+        assert "source_kind" not in {column[0] for column in legacy_by_name[table]}
+    assert "launch_identity_json" not in {column[0] for column in v16_by_name["runtime"]}
+    assert "launch_identity_json" not in {column[0] for column in legacy_by_name["runtime"]}
+    assert "state" not in {column[0] for column in v16_by_name["restores"]}
+    assert "state" in {column[0] for column in legacy_by_name["restores"]}
+    assert "environments_one_active_branch" not in {index[0] for index in v16_indexes}
+    assert "environments_one_active_branch" in {index[0] for index in legacy_indexes}
+
+
 def test_alpha_catalogue_is_backed_up_stamped_and_preserves_rows(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     backup_id, environment_id, project_id = write_alpha_catalog(db)
@@ -348,6 +371,47 @@ def test_v15_repair_rolls_back_when_foreign_keys_are_invalid(tmp_path: Path) -> 
     conn.close()
 
 
+def test_real_pre_source_neutral_catalogue_is_stamped_upgraded_and_preserves_rows(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(PRE_SOURCE_NEUTRAL_CATALOG_FIXTURE.read_text())
+    before = {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in CATALOG_TABLES
+    }
+    assert _ddl_fingerprint(conn) == _historical_ddl_fingerprint("pre_source_neutral")
+    conn.close()
+
+    backup_copy = db.with_suffix(f"{db.suffix}.pre-alembic.backup")
+    catalog = BackupCatalog(db_path=db)
+
+    _assert_current_revision(catalog._conn)
+    assert backup_copy.exists()
+    after = {
+        table: catalog._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in CATALOG_TABLES
+    }
+    assert after == before
+    assert catalog.get_by_id("backup-legacy") is not None
+    assert catalog.get_environment("environment-legacy") is not None
+    assert (
+        catalog._conn.execute(
+            "SELECT state FROM restores WHERE database_name = 'alpha_copy'"
+        ).fetchone()[0]
+        == "complete"
+    )
+    assert "source_name" in {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
+    assert "launch_identity_json" in {
+        row[1] for row in catalog._conn.execute("PRAGMA table_info(runtime)")
+    }
+    assert "artifact_root" in {
+        row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")
+    }
+    catalog.close()
+
+
 def test_real_v16_catalogue_rejects_duplicate_active_branch(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
@@ -411,6 +475,155 @@ def test_schema_verification_failure_does_not_stamp(tmp_path: Path) -> None:
         BackupCatalog(db_path=db)
 
     conn = sqlite3.connect(str(db))
+    assert catalog_revision(conn) is None
+    conn.close()
+
+
+def _rewrite_catalog_object_sql(
+    db: Path, *, object_type: str, name: str, old: str, new: str
+) -> None:
+    conn = sqlite3.connect(str(db))
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+        (object_type, name),
+    ).fetchone()
+    assert row is not None and old in str(row[0])
+    conn.execute("PRAGMA writable_schema = ON")
+    conn.execute(
+        "UPDATE sqlite_master SET sql = ? WHERE type = ? AND name = ?",
+        (str(row[0]).replace(old, new, 1), object_type, name),
+    )
+    schema_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    conn.execute(f"PRAGMA schema_version = {schema_version + 1}")
+    conn.commit()
+    conn.execute("PRAGMA writable_schema = OFF")
+    conn.close()
+
+
+def _mutate_check(db: Path) -> None:
+    _rewrite_catalog_object_sql(
+        db,
+        object_type="table",
+        name="backups",
+        old="format IN ('zip', 'dump')",
+        new="format IN ('zip', 'tar')",
+    )
+
+
+def _mutate_default(db: Path) -> None:
+    _rewrite_catalog_object_sql(
+        db,
+        object_type="table",
+        name="backups",
+        old="pinned INTEGER DEFAULT '0' NOT NULL",
+        new="pinned INTEGER DEFAULT '1' NOT NULL",
+    )
+
+
+def _mutate_foreign_key(db: Path) -> None:
+    _rewrite_catalog_object_sql(
+        db,
+        object_type="table",
+        name="environments",
+        old="REFERENCES projects (project_id)",
+        new="REFERENCES backups (id)",
+    )
+
+
+def _mutate_view_sql(db: Path) -> None:
+    conn = sqlite3.connect(str(db))
+    view_sql = str(
+        conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?",
+            ("environment_runtime",),
+        ).fetchone()[0]
+    )
+    conn.execute("DROP VIEW environment_runtime")
+    conn.execute(view_sql.replace("owner_kind = 'environment'", "owner_kind = 'project'", 1))
+    conn.commit()
+    conn.close()
+
+
+def _mutate_non_unique_index(db: Path) -> None:
+    conn = sqlite3.connect(str(db))
+    conn.execute("DROP INDEX backups_state_idx")
+    conn.execute("CREATE INDEX backups_state_idx ON backups (database_name)")
+    conn.commit()
+    conn.close()
+
+
+def _mutate_trigger(db: Path) -> None:
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        """CREATE TRIGGER injected_catalogue_trigger
+           AFTER INSERT ON backups
+           BEGIN DELETE FROM backups WHERE id = NEW.id; END"""
+    )
+    conn.commit()
+    conn.close()
+
+
+def _mutate_primary_key_conflict_policy(db: Path) -> None:
+    _rewrite_catalog_object_sql(
+        db,
+        object_type="table",
+        name="backups",
+        old="PRIMARY KEY (id)",
+        new="PRIMARY KEY (id) ON CONFLICT REPLACE",
+    )
+
+
+def _mutate_primary_key_order(db: Path) -> None:
+    _rewrite_catalog_object_sql(
+        db,
+        object_type="table",
+        name="backups",
+        old="PRIMARY KEY (id)",
+        new="PRIMARY KEY (id DESC)",
+    )
+
+
+def _catalogue_state(conn: sqlite3.Connection) -> tuple[object, ...]:
+    data = tuple(
+        (
+            table,
+            int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]),
+            tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table}")),
+        )
+        for table in CATALOG_TABLES
+    )
+    return _ddl_fingerprint(conn), data
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param(_mutate_check, id="check"),
+        pytest.param(_mutate_default, id="default"),
+        pytest.param(_mutate_foreign_key, id="foreign-key"),
+        pytest.param(_mutate_view_sql, id="view-sql"),
+        pytest.param(_mutate_non_unique_index, id="non-unique-index"),
+        pytest.param(_mutate_trigger, id="trigger"),
+        pytest.param(_mutate_primary_key_conflict_policy, id="primary-key-conflict-policy"),
+        pytest.param(_mutate_primary_key_order, id="primary-key-order"),
+    ],
+)
+def test_known_catalogue_ddl_mutations_fail_before_stamp(
+    tmp_path: Path, mutation: Callable[[Path], None]
+) -> None:
+    db = tmp_path / f"catalog-{mutation.__name__}.sqlite3"
+    write_alpha_catalog(db)
+    mutation(db)
+
+    conn = sqlite3.connect(str(db))
+    before = _catalogue_state(conn)
+    conn.close()
+
+    with pytest.raises(BackupCatalogError, match="schema is not equivalent"):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert _catalogue_state(conn) == before
     assert catalog_revision(conn) is None
     conn.close()
 
