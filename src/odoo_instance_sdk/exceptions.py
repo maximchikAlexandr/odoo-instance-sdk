@@ -129,6 +129,12 @@ class PlanValidationError(PlanError):
     code = "plan_validation"
 
 
+class PublicationError(PlanError):
+    """A publication setting, runtime, or owned-route operation failed."""
+
+    code = "publication_failed"
+
+
 class ModuleOperationInProgressError(PlanError):
     """Odoo rejected an update because another module operation is active."""
 
