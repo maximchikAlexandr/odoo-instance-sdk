@@ -1,20 +1,20 @@
 ## 1. Characterize and establish the canonical operation inventory
 
-- [ ] 1.1 Add characterization fixtures for the complete Click leaf/alias tree, current `PUBLIC_LEAF_CASES`, SDK primitive ownership, transport classes, envelope-v1 bytes, exit codes and native/interactive behavior.
-- [ ] 1.2 Add wire-projection fixtures for nested DTOs, tagged unions, defaults/nulls and aliases including `DepsMissingImport.import_name -> import`.
-- [ ] 1.3 Add frozen operation descriptor/binding/transport/error models and move the canonical `PUBLIC_LEAF_CASES` authority from tests into production without changing existing command behavior.
-- [ ] 1.4 Bind real Click leaves and aliases to stable namespaced operation IDs and validate one ID/path/implementation mapping against the composed tree.
-- [ ] 1.5 Update existing characterization/E2E matrices to import production inventory and keep invocation arguments/evidence as test-only data.
-- [ ] 1.6 Prove registry construction rejects missing/stale leaves, duplicate IDs/paths, incomplete metadata and SDK primitive drift.
+- [x] 1.1 Add characterization fixtures for the complete Click leaf/alias tree, current `PUBLIC_LEAF_CASES`, SDK primitive ownership, transport classes, envelope-v1 bytes, exit codes and native/interactive behavior.
+- [x] 1.2 Add wire-projection fixtures for nested DTOs, tagged unions, defaults/nulls and aliases including `DepsMissingImport.import_name -> import`.
+- [x] 1.3 Add frozen operation descriptor/binding/transport/error models and move the canonical `PUBLIC_LEAF_CASES` authority from tests into production without changing existing command behavior.
+- [x] 1.4 Bind real Click leaves and aliases to stable namespaced operation IDs and validate one ID/path/implementation mapping against the composed tree.
+- [x] 1.5 Update existing characterization/E2E matrices to import production inventory and keep invocation arguments/evidence as test-only data.
+- [x] 1.6 Prove registry construction rejects missing/stale leaves, duplicate IDs/paths, incomplete metadata and SDK primitive drift.
 
 ## 2. Export actual wire contracts and consumer types
 
-- [ ] 2.1 Define frozen unknown-field-forbidden request DTOs for finite operations and connect existing concrete result/error DTOs without replacing them with arbitrary JSON.
-- [ ] 2.2 Implement deterministic JSON Schema generation through the existing msgspec/runtime projection so wire aliases, tagged unions, defaults and nullability match encoded values.
-- [ ] 2.3 Include envelope-v1, operation metadata, parameter required/default values, transport/preview/cancellation/exit policy and domain-status fields in contract bundle version 1.
-- [ ] 2.4 Implement metadata-only `odcli contract export --format json` with deterministic ordering and no project/catalogue/Git/Docker/PostgreSQL/domain I/O.
+- [x] 2.1 Define frozen unknown-field-forbidden request DTOs for finite operations and connect existing concrete result/error DTOs without replacing them with arbitrary JSON.
+- [x] 2.2 Implement deterministic JSON Schema generation through the existing msgspec/runtime projection so wire aliases, tagged unions, defaults and nullability match encoded values.
+- [x] 2.3 Include envelope-v1, operation metadata, parameter required/default values, transport/preview/cancellation/exit policy and domain-status fields in contract bundle version 1.
+- [x] 2.4 Implement metadata-only `odcli contract export --format json` with deterministic ordering and no project/catalogue/Git/Docker/PostgreSQL/domain I/O.
 - [ ] 2.5 Add pinned Go JSON-Schema consumer tooling outside runtime dependencies and committed generation/compile fixtures covering requests, results, errors, aliases and extensible plugin payloads.
-- [ ] 2.6 Add compatibility fixtures that reject accidental breaking bundle changes unless the operation-contract version changes explicitly.
+- [x] 2.6 Add compatibility fixtures that reject accidental breaking bundle changes unless the operation-contract version changes explicitly.
 
 ## 3. Capture one context and invoke finite operations locally
 
@@ -35,9 +35,9 @@
 
 ## 5. Add the narrow installed-operation provider boundary
 
-- [ ] 5.1 Define the `odoo_instance_sdk.operations` entry-point provider protocol returning finite complete bindings and factories for one supported contract version.
+- [x] 5.1 Define the `odoo_instance_sdk.operations` entry-point provider protocol returning finite complete bindings and factories for one supported contract version.
 - [ ] 5.2 Discover selected-interpreter providers once in deterministic order under a startup deadline and return bounded sanitized missing/load/version errors.
-- [ ] 5.3 Reject duplicate IDs/paths and incomplete provider DTO/factory bindings before any provider operation executes; keep core free of provider-domain imports.
+- [x] 5.3 Reject duplicate IDs/paths and incomplete provider DTO/factory bindings before any provider operation executes; keep core free of provider-domain imports.
 - [ ] 5.4 Add an isolated fixture plugin proving discovery, schema export and local invocation without core or generated-Go inventory changes.
 - [ ] 5.5 Add negative tests for absent, incompatible, slow, failing and conflicting providers plus packaging tests proving no Go/plugin lifecycle/runtime dependency was introduced.
 
