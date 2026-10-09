@@ -219,6 +219,38 @@ def test_init_allow_partial_proceeds_with_warning(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["result"]["partial"] is True
     assert "test_url" in payload["result"]["missing"]
+    manifest = (tmp_path / ".odcli" / "project.toml").read_text(encoding="utf-8")
+    assert "default_source_database" not in manifest
+    assert "managed_filestore" not in manifest
+
+
+@pytest.mark.parametrize("database", ["", "   ", "bad/name"])
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_rejects_invalid_database_before_manifest_or_cluster_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, database: str
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    spawn = MagicMock(side_effect=AssertionError("cluster spawn must not be reached"))
+    monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", spawn)
+    result = CliRunner().invoke(
+        cli,
+        [
+            *_base_args(tmp_path, json_output=True, allow_partial=True),
+            "--postgres",
+            "compose",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+            "--database",
+            database,
+        ],
+    )
+    assert result.exit_code != 0
+    assert result.exception is not None
+    assert "Invalid database name" in str(result.exception)
+    assert not (tmp_path / ".odcli" / "project.toml").exists()
+    spawn.assert_not_called()
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")
@@ -1174,6 +1206,7 @@ def _prepare_self_contained_restore_setup(
         odoo_bin=odoo_bin,
         source_config=source,
         default_source_database="old",
+        managed_filestore=Path(".odcli/filestore"),
         postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5468, user="odoo"),
         test_instance=RemoteTestInstanceConfig(
             base_url="https://example.test",
@@ -1373,6 +1406,8 @@ def test_init_master_env_db_refresh_dry_run_flow(tmp_path: Path) -> None:
             "pgvector/pgvector:pg16",
             "--postgres-port",
             "5468",
+            "--database",
+            "source",
             "--test-url",
             "http://127.0.0.1:18069",
             "--test-database",

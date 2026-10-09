@@ -1324,9 +1324,14 @@ class TestCheckoutShared:
         _add_compose_config(project_manifest)
         outside = tmp_path / "outside-filestore"
         outside.mkdir()
-        (project_manifest / ".odcli" / "filestore").symlink_to(outside, target_is_directory=True)
+        filestore = project_manifest / ".odcli" / "filestore"
+        filestore.rmdir()
+        filestore.symlink_to(outside, target_is_directory=True)
 
-        with pytest.raises(InstanceConfigurationError, match="regular directory"):
+        with pytest.raises(
+            (InstanceConfigurationError, ConfigError),
+            match=r"(regular directory|must not traverse a symlink)",
+        ):
             env_client.environments.checkout(
                 project_manifest,
                 "feat/unsafe-filestore",
@@ -1348,9 +1353,14 @@ class TestCheckoutShared:
         _add_compose_config(project_manifest)
         target = project_manifest / "sensitive-filestore"
         target.mkdir()
-        (project_manifest / ".odcli" / "filestore").symlink_to(target, target_is_directory=True)
+        filestore = project_manifest / ".odcli" / "filestore"
+        filestore.rmdir()
+        filestore.symlink_to(target, target_is_directory=True)
 
-        with pytest.raises(InstanceConfigurationError, match="regular directory"):
+        with pytest.raises(
+            (InstanceConfigurationError, ConfigError),
+            match=r"(regular directory|must not traverse a symlink)",
+        ):
             env_client.environments.checkout(
                 project_manifest,
                 "feat/in-repo-unsafe-filestore",
@@ -1383,6 +1393,7 @@ class TestCheckoutShared:
         outside = tmp_path / "swapped-filestore"
         outside.mkdir()
         filestore = project_manifest / ".odcli" / "filestore"
+        filestore.rmdir()
         filestore.symlink_to(outside, target_is_directory=True)
 
         with pytest.raises(InstanceConfigurationError, match="regular directory"):

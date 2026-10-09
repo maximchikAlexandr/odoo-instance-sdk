@@ -14,6 +14,8 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,7 @@ from odoo_instance_sdk.exceptions import PostgresClusterStartError
 from odoo_instance_sdk.internal.pg.stats import build_stats_sql
 from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.models import StartConfig
+from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.integration.postgres_cleanup import (
@@ -130,14 +133,46 @@ def _psql_process(
     )
 
 
-@pytest.mark.serial
-@pytest.mark.timeout(180)
-def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # noqa: C901
+@dataclass(frozen=True)
+class _DiagnosticsContext:
+    project: Path
+    cluster: PostgresCluster
+    psql: str
+    password: str
+    database: DatabaseResource
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout: float, description: str) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(description)
+        time.sleep(min(0.05, remaining))
+
+
+def _create_diagnostic_fixture(database: DatabaseResource) -> None:
+    setup = database.execute_sql(
+        "CREATE TABLE IF NOT EXISTS odcli_diag_fixture "
+        "(id integer PRIMARY KEY, payload text); "
+        "CREATE INDEX IF NOT EXISTS odcli_diag_fixture_payload_idx "
+        "ON odcli_diag_fixture (payload); "
+        "CREATE INDEX IF NOT EXISTS odcli_diag_fixture_payload_gin "
+        "ON odcli_diag_fixture USING gin (to_tsvector('simple', payload)); "
+        "INSERT INTO odcli_diag_fixture (id, payload) "
+        "SELECT id, repeat('fixture token ', 32) FROM generate_series(1, 256) AS ids(id) "
+        "ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload;",
+        timeout=30.0,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+
+@pytest.fixture
+def diagnostics_context(
     tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
     docker_visible_postgres_root: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> Iterator[_DiagnosticsContext]:
     _require_docker()
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
@@ -176,6 +211,8 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
             sys.executable,
             "--config",
             str(source_config),
+            "--database",
+            "postgres",
             "--project",
             str(tmp_path),
             "--postgres",
@@ -192,8 +229,6 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
 
     cluster = PostgresCluster.from_project(tmp_path)
     psql = _install_container_psql(tmp_path=tmp_path, cluster=cluster, monkeypatch=monkeypatch)
-    blocker: subprocess.Popen[str] | None = None
-    waiter: subprocess.Popen[str] | None = None
     compose_file = cluster.compose_file
     volume_name = f"pgdata_{cluster.to_diagnostic_dict()['project_id']}"
     primary_failure: BaseException | None = None
@@ -236,216 +271,11 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
             _client=client,
             _postgres_cluster=cluster,
         )
-        database = instance.databases
-        setup = database.execute_sql(
-            "CREATE TABLE IF NOT EXISTS odcli_diag_fixture "
-            "(id integer PRIMARY KEY, payload text); "
-            "CREATE INDEX IF NOT EXISTS odcli_diag_fixture_payload_idx "
-            "ON odcli_diag_fixture (payload); "
-            "CREATE INDEX IF NOT EXISTS odcli_diag_fixture_payload_gin "
-            "ON odcli_diag_fixture USING gin (to_tsvector('simple', payload)); "
-            "INSERT INTO odcli_diag_fixture (id, payload) "
-            "SELECT id, repeat('fixture token ', 32) FROM generate_series(1, 256) AS ids(id) "
-            "ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload;",
-            timeout=30.0,
-        )
-        assert setup.returncode == 0, setup.stderr
-
-        blocker = _psql_process(
-            psql,
-            cluster,
-            password,
-            "postgres",
-            "-c",
-            "BEGIN; LOCK TABLE odcli_diag_fixture IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(30);",
-        )
-        deadline = time.monotonic() + 10.0
-        holder = "0"
-        while blocker.poll() is None and time.monotonic() < deadline:
-            probe = database.execute_sql(
-                "SELECT count(*) FROM pg_locks l "
-                "JOIN pg_class c ON c.oid = l.relation "
-                "WHERE c.relname = 'odcli_diag_fixture' AND l.granted;",
-                timeout=5.0,
-            )
-            holder = probe.stdout.strip()
-            if holder == "1":
-                break
-            time.sleep(0.05)
-        assert blocker.poll() is None, (
-            "blocking PostgreSQL session exited before acquiring its lock"
-        )
-        assert holder == "1", (
-            f"blocking PostgreSQL session did not hold the fixture lock: {holder!r}"
-        )
-
-        waiter = _psql_process(
-            psql,
-            cluster,
-            password,
-            "postgres",
-            "-c",
-            "BEGIN; LOCK TABLE odcli_diag_fixture IN ACCESS SHARE MODE; SELECT pg_sleep(30);",
-            stdout=subprocess.PIPE,
-        )
-        time.sleep(0.2)
-        assert waiter.poll() is None, (
-            f"waiting PostgreSQL session exited before the blocker was observed: "
-            f"{waiter.stderr.read() if waiter.stderr is not None else ''}"
-        )
-        locks = database.locks("postgres", top=20, timeout=10.0)
-        deadline = time.monotonic() + 5.0
-        while not locks.rows and waiter.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.2)
-            locks = database.locks("postgres", top=20, timeout=10.0)
-        assert locks.rows, "expected a real blocked session in pg_locks"
-        assert any(row.blocking_pids for row in locks.rows)
-        assert all(len(row.query_preview) <= 240 for row in locks.rows)
-
-        for active_child in (waiter, blocker):
-            if active_child.poll() is None:
-                active_child.terminate()
-                active_child.wait(timeout=5.0)
-        terminated = database.execute_sql(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE pid <> pg_backend_pid() AND query LIKE '%pg_sleep(30)%';",
-            timeout=5.0,
-        )
-        assert terminated.returncode == 0, terminated.stderr
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            released = database.execute_sql(
-                "SELECT count(*) FROM pg_locks l "
-                "JOIN pg_class c ON c.oid = l.relation "
-                "WHERE c.relname = 'odcli_diag_fixture' AND l.granted;",
-                timeout=5.0,
-            )
-            if released.stdout.strip() == "0":
-                break
-            time.sleep(0.2)
-
-        try:
-            stats = database.stats("postgres", top=20, timeout=10.0)
-        except Exception as exc:
-            diagnostic = database.execute_sql(build_stats_sql(top=20, timeout=10.0), timeout=10.0)
-            pytest.fail(f"real stats diagnostic failed: {exc}; stderr={diagnostic.stderr!r}")
-        assert any(row.table == "odcli_diag_fixture" for row in stats.tables)
-        assert any(index.index == "odcli_diag_fixture_pkey" for index in stats.indexes)
-        assert all(
-            isinstance(row.total_bytes, int) and row.total_bytes >= 0 for row in stats.tables
-        )
-        assert "cumulative_statistics" in {warning.code for warning in stats.warnings}
-
-        available_extensions = {
-            line.strip()
-            for line in database.execute_sql(
-                "SELECT name FROM pg_available_extensions "
-                "WHERE name IN ('pg_buffercache', 'pgstattuple') ORDER BY name;",
-                timeout=5.0,
-            ).stdout.splitlines()
-            if line.strip()
-        }
-        installed_before = {
-            line.strip()
-            for line in database.execute_sql(
-                "SELECT extname FROM pg_extension "
-                "WHERE extname IN ('pg_buffercache', 'pgstattuple') ORDER BY extname;",
-                timeout=5.0,
-            ).stdout.splitlines()
-            if line.strip()
-        }
-        assert available_extensions == {"pg_buffercache", "pgstattuple"}
-
-        first_init = database.init_monitoring("postgres", timeout=20.0)
-        installed_after_first = {
-            line.strip()
-            for line in database.execute_sql(
-                "SELECT extname FROM pg_extension "
-                "WHERE extname IN ('pg_buffercache', 'pgstattuple') ORDER BY extname;",
-                timeout=5.0,
-            ).stdout.splitlines()
-            if line.strip()
-        }
-        second_init = database.init_monitoring("postgres", timeout=20.0)
-        installed_after_second = {
-            line.strip()
-            for line in database.execute_sql(
-                "SELECT extname FROM pg_extension "
-                "WHERE extname IN ('pg_buffercache', 'pgstattuple') ORDER BY extname;",
-                timeout=5.0,
-            ).stdout.splitlines()
-            if line.strip()
-        }
-        assert installed_after_first == available_extensions
-        assert installed_after_second == installed_after_first
-        assert set(first_init.installed) == available_extensions - installed_before
-        assert set(first_init.already_present) == installed_before
-        assert first_init.skipped == ()
-        assert second_init.installed == ()
-        assert set(second_init.already_present) == installed_after_first
-        assert second_init.skipped == ()
-
-        bloat = database.bloat("postgres", top=20, exact_max_scan_mb=64, timeout=10.0)
-        assert any(row.table == "odcli_diag_fixture" for row in bloat.tables)
-        assert any(index.index == "odcli_diag_fixture_pkey" for index in bloat.indexes)
-        assert bloat.capabilities.pgstattuple is True
-        assert any(
-            row.table == "odcli_diag_fixture" and row.method == "exact" for row in bloat.tables
-        )
-        assert any(
-            index.index == "odcli_diag_fixture_pkey" and index.method == "exact"
-            for index in bloat.indexes
-        )
-
-        mixed_top_one = database.bloat("postgres", top=1, exact_max_scan_mb=64, timeout=10.0)
-        assert len(mixed_top_one.indexes) == 1
-        assert mixed_top_one.indexes[0].index == "odcli_diag_fixture_payload_gin"
-        assert mixed_top_one.indexes[0].method == "estimate"
-
-        estimate_only = database.bloat("postgres", top=20, exact_max_scan_mb=0, timeout=10.0)
-        assert all(row.method in {"estimate", "unavailable"} for row in estimate_only.tables)
-        assert all(index.method in {"estimate", "unavailable"} for index in estimate_only.indexes)
-        assert not any(row.method == "exact" for row in estimate_only.tables)
-        assert not any(index.method == "exact" for index in estimate_only.indexes)
-
-        from click.testing import CliRunner
-
-        native = CliRunner().invoke(
-            cli,
-            ["--project", str(tmp_path), "psql", "-c", "SELECT current_database();"],
-        )
-        assert native.exit_code == 0, native.output
-        native_stdout = capfd.readouterr().out
-        assert "current_database" in native_stdout
-        assert "postgres" in native_stdout
-
-        enriched = CliRunner().invoke(
-            cli,
-            ["--project", str(tmp_path), "postgres", "status", "--format", "json"],
-        )
-        assert enriched.exit_code == 0, enriched.output
-        status_payload = json.loads(enriched.output)
-        assert status_payload["result"]["server"] is not None
-        assert status_payload["result"]["server_unavailability_reason"] is None
-        assert cluster.status().value == "healthy"
+        yield _DiagnosticsContext(tmp_path, cluster, psql, password, instance.databases)
     except BaseException as exc:
         primary_failure = exc
         raise
     finally:
-        cleanup_failures: list[BaseException] = []
-        for cleanup_child in (waiter, blocker):
-            if cleanup_child is not None and cleanup_child.poll() is None:
-                try:
-                    cleanup_child.terminate()
-                    cleanup_child.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
-                    try:
-                        cleanup_child.kill()
-                        cleanup_child.wait(timeout=5.0)
-                    except BaseException as exc:
-                        cleanup_failures.append(exc)
-                except BaseException as exc:
-                    cleanup_failures.append(exc)
         try:
             cleanup_postgres_project(
                 compose_file=compose_file,
@@ -454,13 +284,197 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
                 primary_failure=None,
             )
         except BaseException as exc:
-            cleanup_failures.append(exc)
-        if primary_failure is not None and cleanup_failures:
-            raise BaseExceptionGroup(
-                "primary test failure and PostgreSQL cleanup failures",
-                [primary_failure, *cleanup_failures],
+            if primary_failure is not None:
+                raise BaseExceptionGroup(
+                    "primary test failure and PostgreSQL cleanup failure", [primary_failure, exc]
+                ) from None
+            raise
+
+
+@pytest.mark.serial
+@pytest.mark.timeout(180)
+def test_real_diagnostics_blocking_sessions_report_blockers(
+    diagnostics_context: _DiagnosticsContext,
+) -> None:
+    context = diagnostics_context
+    _create_diagnostic_fixture(context.database)
+    blocker = _psql_process(
+        context.psql,
+        context.cluster,
+        context.password,
+        "postgres",
+        "-c",
+        "BEGIN; LOCK TABLE odcli_diag_fixture IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(30);",
+    )
+    waiter: subprocess.Popen[str] | None = None
+    try:
+        holder = "0"
+
+        def lock_is_held() -> bool:
+            nonlocal holder
+            probe = context.database.execute_sql(
+                "SELECT count(*) FROM pg_locks l "
+                "JOIN pg_class c ON c.oid = l.relation "
+                "WHERE c.relname = 'odcli_diag_fixture' AND l.granted;",
+                timeout=5.0,
             )
-        if primary_failure is not None:
-            raise primary_failure
-        if cleanup_failures:
-            raise BaseExceptionGroup("PostgreSQL cleanup failures", cleanup_failures)
+            holder = probe.stdout.strip()
+            return holder == "1"
+
+        _wait_until(
+            lock_is_held,
+            timeout=10.0,
+            description=f"blocking PostgreSQL session did not hold the fixture lock: {holder!r}",
+        )
+        assert blocker.poll() is None
+        waiter = _psql_process(
+            context.psql,
+            context.cluster,
+            context.password,
+            "postgres",
+            "-c",
+            "BEGIN; LOCK TABLE odcli_diag_fixture IN ACCESS SHARE MODE; SELECT pg_sleep(30);",
+        )
+
+        def has_blocked_rows() -> bool:
+            return bool(context.database.locks("postgres", top=20, timeout=10.0).rows)
+
+        _wait_until(
+            has_blocked_rows,
+            timeout=10.0,
+            description="expected a real blocked session in pg_locks",
+        )
+        locks = context.database.locks("postgres", top=20, timeout=10.0)
+        assert any(row.blocking_pids for row in locks.rows)
+        assert all(len(row.query_preview) <= 240 for row in locks.rows)
+    finally:
+        for active_child in (waiter, blocker):
+            if active_child is None:
+                continue
+            if active_child.poll() is None:
+                active_child.terminate()
+                active_child.wait(timeout=5.0)
+        terminated = context.database.execute_sql(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE pid <> pg_backend_pid() AND query LIKE '%pg_sleep(30)%';",
+            timeout=5.0,
+        )
+        assert terminated.returncode == 0, terminated.stderr
+
+
+@pytest.mark.serial
+@pytest.mark.timeout(180)
+def test_real_diagnostics_stats_report_fixture(
+    diagnostics_context: _DiagnosticsContext,
+) -> None:
+    context = diagnostics_context
+    _create_diagnostic_fixture(context.database)
+    try:
+        stats = context.database.stats("postgres", top=20, timeout=10.0)
+    except Exception as exc:
+        diagnostic = context.database.execute_sql(
+            build_stats_sql(top=20, timeout=10.0), timeout=10.0
+        )
+        pytest.fail(f"real stats diagnostic failed: {exc}; stderr={diagnostic.stderr!r}")
+    assert any(row.table == "odcli_diag_fixture" for row in stats.tables)
+    assert any(index.index == "odcli_diag_fixture_pkey" for index in stats.indexes)
+    assert all(isinstance(row.total_bytes, int) and row.total_bytes >= 0 for row in stats.tables)
+    assert "cumulative_statistics" in {warning.code for warning in stats.warnings}
+
+
+@pytest.mark.serial
+@pytest.mark.timeout(180)
+def test_real_diagnostics_monitoring_init_is_idempotent(
+    diagnostics_context: _DiagnosticsContext,
+) -> None:
+    database = diagnostics_context.database
+
+    def extension_names(query: str) -> set[str]:
+        return {
+            line.strip()
+            for line in database.execute_sql(query, timeout=5.0).stdout.splitlines()
+            if line.strip()
+        }
+
+    available = extension_names(
+        "SELECT name FROM pg_available_extensions "
+        "WHERE name IN ('pg_buffercache', 'pgstattuple') ORDER BY name;"
+    )
+    installed_before = extension_names(
+        "SELECT extname FROM pg_extension "
+        "WHERE extname IN ('pg_buffercache', 'pgstattuple') ORDER BY extname;"
+    )
+    assert available == {"pg_buffercache", "pgstattuple"}
+    first_init = database.init_monitoring("postgres", timeout=20.0)
+    installed_after_first = extension_names(
+        "SELECT extname FROM pg_extension "
+        "WHERE extname IN ('pg_buffercache', 'pgstattuple') ORDER BY extname;"
+    )
+    second_init = database.init_monitoring("postgres", timeout=20.0)
+    installed_after_second = extension_names(
+        "SELECT extname FROM pg_extension "
+        "WHERE extname IN ('pg_buffercache', 'pgstattuple') ORDER BY extname;"
+    )
+    assert installed_after_first == available
+    assert installed_after_second == installed_after_first
+    assert set(first_init.installed) == available - installed_before
+    assert set(first_init.already_present) == installed_before
+    assert first_init.skipped == ()
+    assert second_init.installed == ()
+    assert set(second_init.already_present) == installed_after_first
+    assert second_init.skipped == ()
+
+
+@pytest.mark.serial
+@pytest.mark.timeout(180)
+def test_real_diagnostics_bloat_supports_exact_mixed_and_estimate_modes(
+    diagnostics_context: _DiagnosticsContext,
+) -> None:
+    database = diagnostics_context.database
+    _create_diagnostic_fixture(database)
+    database.init_monitoring("postgres", timeout=20.0)
+    bloat = database.bloat("postgres", top=20, exact_max_scan_mb=64, timeout=10.0)
+    assert any(row.table == "odcli_diag_fixture" for row in bloat.tables)
+    assert any(index.index == "odcli_diag_fixture_pkey" for index in bloat.indexes)
+    assert bloat.capabilities.pgstattuple is True
+    assert any(row.table == "odcli_diag_fixture" and row.method == "exact" for row in bloat.tables)
+    assert any(
+        index.index == "odcli_diag_fixture_pkey" and index.method == "exact"
+        for index in bloat.indexes
+    )
+    mixed_top_one = database.bloat("postgres", top=1, exact_max_scan_mb=64, timeout=10.0)
+    assert len(mixed_top_one.indexes) == 1
+    assert mixed_top_one.indexes[0].index == "odcli_diag_fixture_payload_gin"
+    assert mixed_top_one.indexes[0].method == "estimate"
+    estimate_only = database.bloat("postgres", top=20, exact_max_scan_mb=0, timeout=10.0)
+    assert all(row.method in {"estimate", "unavailable"} for row in estimate_only.tables)
+    assert all(index.method in {"estimate", "unavailable"} for index in estimate_only.indexes)
+    assert not any(row.method == "exact" for row in estimate_only.tables)
+    assert not any(index.method == "exact" for index in estimate_only.indexes)
+
+
+@pytest.mark.serial
+@pytest.mark.timeout(180)
+def test_real_diagnostics_native_psql_and_status_are_healthy(
+    diagnostics_context: _DiagnosticsContext,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    from click.testing import CliRunner
+
+    native = CliRunner().invoke(
+        cli,
+        ["--project", str(diagnostics_context.project), "psql", "-c", "SELECT current_database();"],
+    )
+    assert native.exit_code == 0, native.output
+    native_stdout = capfd.readouterr().out
+    assert "current_database" in native_stdout
+    assert "postgres" in native_stdout
+    enriched = CliRunner().invoke(
+        cli,
+        ["--project", str(diagnostics_context.project), "postgres", "status", "--format", "json"],
+    )
+    assert enriched.exit_code == 0, enriched.output
+    status_payload = json.loads(enriched.output)
+    assert status_payload["result"]["server"] is not None
+    assert status_payload["result"]["server_unavailability_reason"] is None
+    assert diagnostics_context.cluster.status().value == "healthy"

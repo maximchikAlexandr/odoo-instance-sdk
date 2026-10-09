@@ -63,6 +63,11 @@ from odoo_instance_sdk.internal.dbprep.materialize_steps import (
     _captured_restore_exists as _captured_restore_exists,
     _restore_failure_probe_evidence as _restore_failure_probe_evidence,
 )
+from odoo_instance_sdk.internal.dbprep.result_projection import (
+    coalesced_restore_result,
+    completed_restore_result,
+    download_result,
+)
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
     database_preparation_lock_path,
@@ -86,15 +91,13 @@ from odoo_instance_sdk.internal.project_runtime import (
 from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
-    BackupBranchOrigin,
     BackupFreshness,
-    DatabasePreparationAction,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
     RestoreState,
     StartConfig,
 )
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -332,16 +335,7 @@ def _restore_preflight(  # noqa: C901
                 and mapped.source_git_branch == source.branch
             ):
                 raise _CoalescedRestore(
-                    DatabasePreparationResult(
-                        mode=DatabasePreparationAction.RESTORE,
-                        backup=mapped,
-                        source_git_branch=mapped.source_git_branch,
-                        branch_origin=source.origin,
-                        restored_database=current.default_source_database,
-                        previous_default=current.default_source_database,
-                        effective_default=current.default_source_database,
-                        warnings=("reused fresh project database",),
-                    )
+                    coalesced_restore_result(mapped, source, current, project_id=project_id)
                 )
         source_config = _resolve_source_config(current, root)
         local_cfg = parse_odoo_config(source_config)
@@ -386,6 +380,17 @@ def _restore_preflight(  # noqa: C901
             base_url=local_url,
             master_password=local_password,
         )
+        managed_filestore = managed_filestore_path(current)
+        from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
+
+        verify_project_owned_data_dir(root, managed_filestore, require_exists=False)
+        managed_filestore.mkdir(parents=True, exist_ok=True)
+        verify_project_owned_data_dir(root, managed_filestore)
+        if local.config.start_config is None:
+            raise InstanceConfigurationError("local source config has no runtime configuration")
+        # Restore into the same validated project-owned directory that the
+        # post-restore manifest publishes; the source config file stays untouched.
+        local.config.start_config.data_dir = str(managed_filestore)
         # ``from_config`` is intentionally transport-only and therefore does
         # not infer the project Compose claim. Restore provenance must carry
         # the exact active cluster and data root into the local instance so a
@@ -689,8 +694,13 @@ def prepare_restore(  # noqa: C901
                     reset_completed = True
 
                 final_config = _manifest_after_preparation(root, current)
+                managed_filestore = managed_filestore_path(final_config)
                 switched = msgspec.structs.replace(
-                    final_config, default_source_database=preflight.target_database
+                    final_config,
+                    default_source_database=preflight.target_database,
+                    managed_filestore=(
+                        final_config.managed_filestore or managed_filestore.relative_to(root)
+                    ),
                 )
                 _consume_action_if_planned("database.prepare.default-switch")
                 from odoo_instance_sdk.internal.restore_stages import (
@@ -700,18 +710,16 @@ def prepare_restore(  # noqa: C901
                 with _restore_stage("default_switch"):
                     switch_project_default(root, switched, write_manifest_fn=write_manifest)
                 default_switch_confirmed = True
-                return DatabasePreparationResult(
-                    mode=DatabasePreparationAction.RESTORE,
-                    backup=backup,
-                    source_git_branch=backup.source_git_branch if backup is not None else None,
-                    branch_origin=source.origin
-                    if source is not None
-                    else BackupBranchOrigin.UNKNOWN,
-                    restored_database=preflight.target_database,
+                return completed_restore_result(
+                    backup,
+                    preflight.restore_source,
+                    source,
+                    target_database=preflight.target_database,
+                    source_config=preflight.source_config,
+                    managed_filestore=managed_filestore,
+                    project_id=preflight.project_id,
                     admin_password_reset=reset_completed,
-                    default_switched=True,
                     previous_default=current.default_source_database,
-                    effective_default=preflight.target_database,
                 )
             except BaseException as exc:
                 _consume_action_if_planned("database.prepare.rollback")
@@ -748,6 +756,14 @@ def prepare_restore(  # noqa: C901
                     if local_restore is not None
                     and isinstance(preflight.restore_source, _LocalArchiveRestoreSource)
                     else None,
+                    project_id=preflight.project_id,
+                    effective_config=str(preflight.source_config),
+                    managed_filestore=(
+                        str(managed_filestore_path(preflight.project))
+                        if preflight.project.managed_filestore is not None
+                        else None
+                    ),
+                    binding_published=False,
                 )
                 raise
             finally:
@@ -850,14 +866,7 @@ def prepare_download(
                 project_id=catalog_project_id,
                 source_name=source.source_name,
             )
-        return DatabasePreparationResult(
-            mode=DatabasePreparationAction.DOWNLOAD,
-            backup=backup,
-            source_git_branch=source.branch,
-            branch_origin=source.origin,
-            previous_default=current.default_source_database,
-            effective_default=current.default_source_database,
-        )
+        return download_result(backup, source, current, project_id=f"project_{project_key}")
 
 
 def preflight_restore(

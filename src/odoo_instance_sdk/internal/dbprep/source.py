@@ -135,6 +135,8 @@ _PREPARATION_FIELDS = (
     "source_config",
     "postgres",
     "default_source_database",
+    "managed_filestore",
+    "addon_repositories",
 )
 
 
