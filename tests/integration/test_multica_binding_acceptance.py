@@ -256,6 +256,7 @@ class _CoreEnvironments:
 def _fake_client(
     monkeypatch: pytest.MonkeyPatch, root: Path, *, checkout_path: Path | None = None
 ) -> tuple[MulticaOdooClient, _Repositories, _CoreEnvironments, Path]:
+    monkeypatch.setenv("MULTICA_TASK_WORKSPACES_ROOT", str(root))
     task_root = root / "task"
     checkout = checkout_path or task_root / "checkout"
     checkout.mkdir(parents=True, exist_ok=True)
@@ -313,7 +314,7 @@ def _fake_client(
             daemon_id="daemon",
             server_url="http://127.0.0.1:8765",
             cli_version="0.5.3",
-            workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",), path=str(root)),),
+            workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",)),),
         )
     )
     multica = SimpleNamespace(

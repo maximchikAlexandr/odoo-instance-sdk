@@ -37,6 +37,34 @@ class _CliClient:
         )
 
 
+class _GitCliClient:
+    def __init__(self) -> None:
+        self.raw_args: tuple[str, ...] | None = None
+        self.sync_options: dict[str, object] | None = None
+        self.run_count = 0
+
+    def context(self, request: ContextRequest) -> SimpleNamespace:
+        return SimpleNamespace(checkout_path=request.checkout_path)
+
+    def git_command(self, _context: object, args: tuple[str, ...], **_kwargs: object) -> object:
+        self.raw_args = args
+
+        def run() -> SimpleNamespace:
+            self.run_count += 1
+            return SimpleNamespace(returncode=0)
+
+        return action_command("test.git", run, description="test Git passthrough")
+
+    def sync_command(self, _context: object, **kwargs: object) -> object:
+        self.sync_options = kwargs
+
+        def run() -> SimpleNamespace:
+            self.run_count += 1
+            return SimpleNamespace()
+
+        return action_command("test.git.sync", run, description="test Git sync")
+
+
 def _invoke_context(
     monkeypatch: pytest.MonkeyPatch, client: _CliClient, tmp_path: Path, *extra: str
 ) -> Result:
@@ -132,3 +160,143 @@ def test_cli_initialization_preserves_interruption(
 
     assert result.exit_code == 1
     assert json.loads(result.output)["error"]["code"] == "interrupted"
+
+
+def _git_context_options(project: Path) -> list[str]:
+    return [
+        "--project",
+        str(project),
+        "--multica-project",
+        "project",
+        "--issue",
+        "issue",
+        "--run",
+        "run",
+        "--repository-url",
+        "https://example.test/repo",
+        "--format",
+        "json",
+        "--dry-run",
+    ]
+
+
+def test_git_raw_passthrough_routes_after_literal_delimiter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = importlib.import_module("odcli_multica.cli")
+    client = _GitCliClient()
+    monkeypatch.setattr(module, "_client", lambda *_args: client)
+    monkeypatch.setattr(module, "_git_resource", lambda *_args: object())
+    project = tmp_path / "project"
+    checkout = tmp_path / "checkout"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "git",
+            *_git_context_options(project),
+            str(checkout),
+            "--",
+            "status",
+            "--short",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["command"] == "git"
+    assert client.raw_args == ("status", "--short")
+    assert client.run_count == 0
+
+
+def test_git_raw_passthrough_accepts_sync_checkout_before_literal_delimiter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = importlib.import_module("odcli_multica.cli")
+    client = _GitCliClient()
+    monkeypatch.setattr(module, "_client", lambda *_args: client)
+    monkeypatch.setattr(module, "_git_resource", lambda *_args: object())
+    project = tmp_path / "project"
+
+    result = CliRunner().invoke(
+        cli,
+        ["git", "sync", *_git_context_options(project), "--", "status"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["command"] == "git"
+    assert client.raw_args == ("status",)
+    assert client.run_count == 0
+
+
+def test_git_sync_routes_named_leaf_and_preserves_dry_run_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    help_result = CliRunner().invoke(cli, ["git", "sync", "--help"])
+    assert help_result.exit_code == 0
+    assert "sync [OPTIONS]" in help_result.output
+    assert "CHECKOUT_PATH" in help_result.output
+
+    module = importlib.import_module("odcli_multica.cli")
+    client = _GitCliClient()
+    monkeypatch.setattr(module, "_client", lambda *_args: client)
+    monkeypatch.setattr(module, "_git_resource", lambda *_args: object())
+    project = tmp_path / "project"
+    checkout = tmp_path / "checkout"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "git",
+            "sync",
+            str(checkout),
+            "--project",
+            str(project),
+            "--multica-project",
+            "project",
+            "--issue",
+            "issue",
+            "--run",
+            "run",
+            "--repository-url",
+            "https://example.test/repo",
+            "--base",
+            "origin/main",
+            "--push",
+            "--format",
+            "json",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["command"] == "git.sync"
+    assert client.sync_options is not None
+    assert client.sync_options["base"] == "origin/main"
+    assert client.sync_options["push"] is True
+    assert client.run_count == 0
+
+
+def test_git_raw_passthrough_rejects_extra_positional_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = importlib.import_module("odcli_multica.cli")
+    client = _GitCliClient()
+    monkeypatch.setattr(module, "_client", lambda *_args: client)
+    project = tmp_path / "project"
+    checkout = tmp_path / "checkout"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "git",
+            *_git_context_options(project),
+            str(checkout),
+            "unexpected-extra",
+            "--",
+            "status",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "exactly one CHECKOUT_PATH" in result.output
+    assert client.raw_args is None

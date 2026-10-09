@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import click
 from multica_py import ClientConfig, MulticaClient
 
-from odcli_multica.client import MulticaOdooClient, PrepareCommand
+from odcli_multica.client import GitResourceLike, MulticaOdooClient, PrepareCommand
 from odcli_multica.models import (
     ContextRequest,
     PreparationRequest,
@@ -197,6 +198,286 @@ def context_command(
 @cli.group("env")
 def env() -> None:
     """Odoo environment preparation operations."""
+
+
+def _git_resource(client: MulticaOdooClient, project: Path) -> GitResourceLike:
+    """Resolve the core Git resource without adding a second core adapter."""
+    candidates = (project / "odoo.conf", project / ".odoo.conf", project / ".odcli" / "odoo.conf")
+    for candidate in candidates:
+        if candidate.is_file():
+            instance = client.core.instance.from_config(candidate)
+            instance.config = replace(instance.config, default_cwd=project.resolve())
+            return instance.git
+    raise click.UsageError("project has no readable odoo.conf for the core Git resource")
+
+
+class _GitGroup(click.Group):
+    """Keep the raw checkout positional distinct from named Git leaves."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if args and args[0] == "sync" and "--" in args:
+            checkout_path = args.pop(0)
+            args.insert(args.index("--"), checkout_path)
+        if args and args[0] == "sync" and "--" not in args:
+            argument_index = next(
+                index
+                for index, parameter in enumerate(self.params)
+                if isinstance(parameter, click.Argument)
+            )
+            argument = self.params.pop(argument_index)
+            try:
+                return super().parse_args(ctx, args)
+            finally:
+                self.params.insert(argument_index, argument)
+        return super().parse_args(ctx, args)
+
+    def invoke(self, ctx: click.Context) -> None:
+        if ctx._protected_args and self.get_command(ctx, ctx._protected_args[0]) is None:
+            args = [*ctx._protected_args, *ctx.args]
+            ctx.args = args
+            ctx._protected_args = []
+            ctx.invoked_subcommand = None
+            click.Command.invoke(self, ctx)
+            return
+        super().invoke(ctx)
+
+
+@cli.group(
+    "git",
+    cls=_GitGroup,
+    invoke_without_command=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+@click.argument("checkout_path", type=click.Path(path_type=Path), required=False)
+@click.option("--project", "project", required=False, type=click.Path(path_type=Path))
+@click.option("--multica-project", required=False)
+@click.option("--issue", required=False)
+@click.option("--run", "run_id", required=False)
+@click.option("--repository-url", required=False)
+@click.option("--profile", default=None)
+@click.option("--workspace-id", default=None)
+@click.option("--odoo-bin", default=lambda: os.environ.get("ODCLI_ODOO_BIN", "odoo"))
+@click.option(
+    "--format", "output_format", type=click.Choice(["rich", "json", "toon"]), default="rich"
+)
+@click.option("--dry-run", is_flag=True)
+@click.pass_context
+def git(
+    ctx: click.Context,
+    project: Path | None,
+    multica_project: str | None,
+    issue: str | None,
+    run_id: str | None,
+    repository_url: str | None,
+    profile: str | None,
+    workspace_id: str | None,
+    odoo_bin: str,
+    output_format: str,
+    dry_run: bool,
+    checkout_path: Path | None = None,
+) -> None:
+    """Run ``sync`` or pass native Git as ``CHECKOUT_PATH -- GIT_ARGS``."""
+    if ctx.invoked_subcommand is not None:
+        return
+    args = tuple(ctx.args)
+    if "--" not in args:
+        raise click.UsageError("raw Git arguments require a literal `--` delimiter")
+    delimiter = args.index("--")
+    if delimiter != 0:
+        raise click.UsageError(
+            "raw Git accepts exactly one CHECKOUT_PATH before the literal `--` delimiter"
+        )
+    if (
+        checkout_path is None
+        or project is None
+        or not all(value is not None for value in (multica_project, issue, run_id, repository_url))
+    ):
+        raise click.UsageError(
+            "raw Git requires CHECKOUT_PATH and complete Multica context options"
+        )
+    native_args = args[delimiter + 1 :]
+    client = _client_or_failure(profile, workspace_id, odoo_bin, _mode(output_format), "git")
+    if client is None:
+        return
+    try:
+        context = client.context(
+            _request(
+                checkout_path,
+                project,
+                multica_project or "",
+                issue or "",
+                run_id or "",
+                repository_url or "",
+            )
+        )
+        resource = _git_resource(client, project)
+        command = client.git_command(
+            context,
+            native_args,
+            git_resource=resource,
+            project_root=project,
+        )
+        if dry_run:
+            _finish(
+                _mode(output_format),
+                success_document(command="git", result=model_to_dict(command.plan), dry_run=True),
+            )
+            return
+        result = command.run()
+        raise click.exceptions.Exit(result.returncode)  # noqa: TRY301
+    except click.exceptions.Exit:
+        raise
+    except BaseException as error:
+        _failure(_mode(output_format), "git", error)
+
+
+@git.command("sync")
+@click.option("--base", default=None)
+@click.option("--push", is_flag=True)
+@click.option("--project", "project", required=True, type=click.Path(path_type=Path))
+@click.option("--multica-project", required=True)
+@click.option("--issue", required=True)
+@click.option("--run", "run_id", required=True)
+@click.option("--repository-url", required=True)
+@click.argument("checkout_path", type=click.Path(path_type=Path))
+@click.option("--profile", default=None)
+@click.option("--workspace-id", default=None)
+@click.option("--odoo-bin", default=lambda: os.environ.get("ODCLI_ODOO_BIN", "odoo"))
+@click.option(
+    "--format", "output_format", type=click.Choice(["rich", "json", "toon"]), default="rich"
+)
+@click.option("--dry-run", is_flag=True)
+def git_sync(
+    base: str | None,
+    push: bool,
+    project: Path,
+    multica_project: str,
+    issue: str,
+    run_id: str,
+    repository_url: str,
+    checkout_path: Path,
+    profile: str | None,
+    workspace_id: str | None,
+    odoo_bin: str,
+    output_format: str,
+    dry_run: bool,
+) -> None:
+    mode = _mode(output_format)
+    client = _client_or_failure(profile, workspace_id, odoo_bin, mode, "git.sync")
+    if client is None:
+        return
+    try:
+        context = client.context(
+            _request(checkout_path, project, multica_project, issue, run_id, repository_url)
+        )
+        command = client.sync_command(
+            context,
+            git_resource=_git_resource(client, project),
+            project_root=project,
+            base=base,
+            push=push,
+        )
+        if dry_run:
+            _finish(
+                mode,
+                success_document(
+                    command="git.sync", result=model_to_dict(command.plan), dry_run=True
+                ),
+            )
+            return
+        value = command.run()
+        _finish(mode, success_document(command="git.sync", result=model_to_dict(value)))
+    except click.exceptions.Exit:
+        raise
+    except BaseException as error:
+        _failure(mode, "git.sync", error)
+
+
+@cli.group("gitlab")
+def gitlab() -> None:
+    """GitLab-specific extension operations."""
+
+
+@gitlab.group("mr")
+def merge_request() -> None:
+    """Merge-request operations."""
+
+
+@merge_request.command("publish")
+@click.argument("checkout_path", type=click.Path(path_type=Path))
+@click.option("--project", "project", required=True, type=click.Path(path_type=Path))
+@click.option("--multica-project", required=True)
+@click.option("--issue", required=True)
+@click.option("--run", "run_id", required=True)
+@click.option("--repository-url", required=True)
+@click.option("--source", "source_branch", required=True)
+@click.option("--target", "target_branch", required=True)
+@click.option("--title", required=True)
+@click.option("--description-file", required=True, type=click.Path(path_type=Path))
+@click.option("--issue-url", default=None)
+@click.option("--assignee", default=None)
+@click.option("--project-path", default=None)
+@click.option("--profile", default=None)
+@click.option("--workspace-id", default=None)
+@click.option("--odoo-bin", default=lambda: os.environ.get("ODCLI_ODOO_BIN", "odoo"))
+@click.option(
+    "--format", "output_format", type=click.Choice(["rich", "json", "toon"]), default="rich"
+)
+@click.option("--dry-run", is_flag=True)
+def merge_request_publish(
+    checkout_path: Path,
+    project: Path,
+    multica_project: str,
+    issue: str,
+    run_id: str,
+    repository_url: str,
+    source_branch: str,
+    target_branch: str,
+    title: str,
+    description_file: Path,
+    issue_url: str | None,
+    assignee: str | None,
+    project_path: str | None,
+    profile: str | None,
+    workspace_id: str | None,
+    odoo_bin: str,
+    output_format: str,
+    dry_run: bool,
+) -> None:
+    mode = _mode(output_format)
+    client = _client_or_failure(profile, workspace_id, odoo_bin, mode, "gitlab.mr.publish")
+    if client is None:
+        return
+    try:
+        context = client.context(
+            _request(checkout_path, project, multica_project, issue, run_id, repository_url)
+        )
+        command = client.publish_merge_request_command(
+            context,
+            project_root=project,
+            git_resource=_git_resource(client, project),
+            source_branch=source_branch,
+            target_branch=target_branch,
+            title=title,
+            description_file=description_file,
+            issue_url=issue_url,
+            assignee=assignee,
+            project_path=project_path,
+        )
+        if dry_run:
+            _finish(
+                mode,
+                success_document(
+                    command="gitlab.mr.publish", result=model_to_dict(command.plan), dry_run=True
+                ),
+            )
+            return
+        value = command.run()
+        _finish(mode, success_document(command="gitlab.mr.publish", result=model_to_dict(value)))
+    except click.exceptions.Exit:
+        raise
+    except BaseException as error:
+        _failure(mode, "gitlab.mr.publish", error)
 
 
 @env.command("prepare")
