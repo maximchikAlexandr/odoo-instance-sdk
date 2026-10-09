@@ -43,12 +43,12 @@
 
 ## 6. Make finite monitor snapshots selective and honest
 
-- [ ] 6.1 Add frozen snapshot section request and snapshot-v3 observation/completeness/freshness DTOs while preserving every version-2 field.
-- [ ] 6.2 Refactor monitor planning so project/environment/section selection precedes Git, storage, artifact, Docker and PostgreSQL probes and unselected sections do not populate caches.
-- [ ] 6.3 Implement batch observation with one catalogue selection pass, one shared UTC observation boundary and typed requested/completed/unknown section results.
-- [ ] 6.4 Extend process metrics with confirmed PID/create-time, raw cumulative CPU seconds and sample time; calculate percentage only from a compatible prior point.
-- [ ] 6.5 Preserve Darwin physical footprint, non-Darwin RSS, recursive ownership, shared-PID dedup and the real production Docker collector path.
-- [ ] 6.6 Add first-sample, caller-supplied previous sample, PID reuse, partial probe, section-no-call, cache and multi-project batch tests across SDK/CLI/API fixtures.
+- [x] 6.1 Add frozen snapshot section request and snapshot-v3 observation/completeness/freshness DTOs while preserving every version-2 field.
+- [x] 6.2 Refactor monitor planning so project/environment/section selection precedes Git, storage, artifact, Docker and PostgreSQL probes and unselected sections do not populate caches.
+- [x] 6.3 Implement batch observation with one catalogue selection pass, one shared UTC observation boundary and typed requested/completed/unknown section results.
+- [x] 6.4 Extend process metrics with confirmed PID/create-time, raw cumulative CPU seconds and sample time; calculate percentage only from a compatible prior point.
+- [x] 6.5 Preserve Darwin physical footprint, non-Darwin RSS, recursive ownership, shared-PID dedup and the real production Docker collector path.
+- [x] 6.6 Add first-sample, caller-supplied previous sample, PID reuse, partial probe, section-no-call, cache and multi-project batch tests across SDK/CLI/API fixtures.
 
 ## 7. Separate database observation from reconciliation
 
