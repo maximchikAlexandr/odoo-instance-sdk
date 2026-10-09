@@ -196,6 +196,12 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.resources.publication import (
+        PublicationResource,
+        PublicationResult,
+        PublicationSettings,
+        PublicationTarget,
+    )
 
     class _CanonicalBytes(Protocol):
         def __call__(self, plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> bytes: ...
@@ -223,6 +229,10 @@ if TYPE_CHECKING:
             | ModuleResource
             | GitResource
             | PostgresCluster
+            | PublicationResource
+            | PublicationResult
+            | PublicationSettings
+            | PublicationTarget
         ]
         | _CanonicalBytes
         | _CanonicalProjection
@@ -480,6 +490,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "odoo_instance_sdk.exceptions",
         "PostgresPortCollisionError",
     ),
+    "PublicationError": ("odoo_instance_sdk.exceptions", "PublicationError"),
+    "PublicationResource": ("odoo_instance_sdk.resources.publication", "PublicationResource"),
+    "PublicationResult": ("odoo_instance_sdk.resources.publication", "PublicationResult"),
+    "PublicationSettings": ("odoo_instance_sdk.resources.publication", "PublicationSettings"),
+    "PublicationTarget": ("odoo_instance_sdk.resources.publication", "PublicationTarget"),
+    "render_panel_route": ("odoo_instance_sdk.resources.publication", "render_panel_route"),
     "PostgresProjectConfig": ("odoo_instance_sdk.project", "PostgresProjectConfig"),
     "ProcessExitedBeforeReady": ("odoo_instance_sdk.exceptions", "ProcessExitedBeforeReady"),
     "ProcessNotFoundError": ("odoo_instance_sdk.exceptions", "ProcessNotFoundError"),

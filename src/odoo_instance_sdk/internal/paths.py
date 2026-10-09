@@ -80,6 +80,15 @@ def get_config_root(*, ensure_exists: bool = True) -> Path:
     return root
 
 
+def get_publication_config_path(*, ensure_exists: bool = False) -> Path:
+    """Return the owner-only publication settings file.
+
+    The file is deliberately not created by this accessor: publication must
+    fail closed when an operator has not configured the proxy.
+    """
+    return get_config_root(ensure_exists=ensure_exists) / "publication.toml"
+
+
 def get_cache_root(*, ensure_exists: bool = True) -> Path:
     """Compatibility name for the canonical global root.
 

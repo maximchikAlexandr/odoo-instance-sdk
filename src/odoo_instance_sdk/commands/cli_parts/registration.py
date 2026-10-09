@@ -31,6 +31,8 @@ from odoo_instance_sdk.commands.pg import (
     psql as _psql,
     register_database_commands,
 )
+from odoo_instance_sdk.commands.publication import publish as _publish
+from odoo_instance_sdk.commands.publication import unpublish as _unpublish
 from odoo_instance_sdk.commands.resource import (
     configure_catalog_path_provider as configure_resource_catalog_path_provider,
     resource_group,
@@ -631,6 +633,8 @@ cli.add_command(
     name="git",
 )
 cli.add_command(bug_report_group, name="bug-report")
+cli.add_command(_publish, name="publish")
+cli.add_command(_unpublish, name="unpublish")
 
 register_init_command(cli)
 

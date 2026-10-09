@@ -23,6 +23,7 @@ from odoo_instance_sdk.internal.odoo_config import (
     get_admin_passwd,
     parse_odoo_config,
 )
+from odoo_instance_sdk.internal.proc import PreparedAction
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
@@ -53,7 +54,6 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.proc import (
-        PreparedAction,
         PreparedCommand,
         PreparedStep,
         ProcessExecutor,
@@ -211,6 +211,17 @@ class _CleanupMixin:
             else selector
         )
         steps: tuple[PreparedStep | PreparedAction, ...] = ()
+        from odoo_instance_sdk.internal.paths import get_publication_config_path
+
+        if get_publication_config_path().is_file():
+            steps = (
+                PreparedAction(
+                    step_id="environment.remove.publication",
+                    action="remove-publication-route",
+                    description="Remove the environment route before deleting its artifacts",
+                    mutating=True,
+                ),
+            )
         worktree = Path(env.worktree_path)
         if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED and worktree.is_dir():
             steps = (
@@ -361,10 +372,28 @@ class _CleanupMixin:
 
         catalog = self._client.get_catalog()
         with exclusive_lock(environment_lock_path(str(env.id))):
+            context = cast("RunContext[None] | None", active_context())
+            publication_step = "environment.remove.publication"
+            if context is not None and context.planned(publication_step):
+                context.action(publication_step)
+                try:
+                    self._client.publication.unpublish_if_configured(
+                        ("environment", str(env.id)),
+                        executor=context.executor,
+                    )
+                except Exception as exc:
+                    reason = sanitize_last_error(str(exc)) or type(exc).__name__
+                    message = f"publication cleanup failed: {reason}"
+                    catalog.update_environment_state(
+                        str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=message
+                    )
+                    catalog.add_environment_event(str(env.id), "remove", "failed", message=message)
+                    raise EnvironmentConflictError("cleanup_failed", message) from exc
+                context.complete_action(publication_step)
             self._do_remove(
                 catalog,
                 env,
-                context=cast("RunContext[None] | None", active_context()),
+                context=context,
                 copy_drop=copy_drop,
             )
 
