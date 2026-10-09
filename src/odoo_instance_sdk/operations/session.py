@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import IO, cast
+from typing import IO, Literal, cast
 
 import msgspec
 
@@ -50,7 +50,7 @@ class SessionRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
 class SessionDecision(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     """The one decision accepted after preview."""
 
-    decision: str
+    decision: Literal["approve", "cancel"]
     fingerprint: str | None = None
 
 
@@ -103,14 +103,21 @@ def _write_record(
     record: dict[str, JsonValue],
     records: list[dict[str, JsonValue]],
     limits: SessionLimits,
+    *,
+    terminal: bool = False,
+    terminal_reserve: int = 0,
 ) -> bool:
-    if len(records) >= limits.max_records:
+    available_records = limits.max_records if terminal else limits.max_records - 1
+    if len(records) >= available_records:
         return False
     line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
     existing = sum(
         len(json.dumps(item, ensure_ascii=False, separators=(",", ":"))) + 1 for item in records
     )
-    if existing + len(line.encode("utf-8")) > limits.max_output_bytes:
+    if (
+        not terminal
+        and existing + len(line.encode("utf-8")) + terminal_reserve > limits.max_output_bytes
+    ):
         return False
     stream.write(line)
     stream.flush()
@@ -118,9 +125,41 @@ def _write_record(
     return True
 
 
+def _terminal_error(
+    operation_id: str,
+    code: str,
+    message: str,
+    *,
+    fingerprint: str | None = None,
+) -> dict[str, JsonValue]:
+    return _event(
+        "error",
+        operation_id,
+        fingerprint=fingerprint,
+        data={"code": code, "message": sanitize_diagnostic(message)},
+    )
+
+
+def _write_terminal_error(
+    output_stream: IO[str],
+    records: list[dict[str, JsonValue]],
+    limits: SessionLimits,
+    record: dict[str, JsonValue],
+) -> None:
+    # A control error is the only permitted exception to a byte budget: an
+    # impossible budget must still produce a typed, non-zero terminal result.
+    _write_record(output_stream, record, records, limits, terminal=True)
+
+
+def session_error_record(operation_id: str, code: str, message: str) -> dict[str, JsonValue]:
+    """Build the JSONL error record used before a session can be opened."""
+
+    return _terminal_error(operation_id, code, message)
+
+
 def _read_decision(
     stream: IO[str], timeout: float, max_bytes: int
-) -> tuple[dict[str, JsonValue] | None, str | None]:
+) -> tuple[SessionDecision | None, str | None]:
     if timeout <= 0:
         return None, "timeout"
     try:
@@ -140,12 +179,9 @@ def _read_decision(
     if len(line.encode("utf-8")) > max_bytes:
         return None, "input_limit"
     try:
-        raw = json.loads(line)
-    except json.JSONDecodeError:
+        return msgspec.json.decode(line.encode("utf-8"), type=SessionDecision), None
+    except (msgspec.DecodeError, msgspec.ValidationError):
         return None, "invalid_sequence"
-    if not isinstance(raw, dict):
-        return None, "invalid_sequence"
-    return cast("dict[str, JsonValue]", raw), None
 
 
 def run_approval_session(  # noqa: C901
@@ -163,6 +199,17 @@ def run_approval_session(  # noqa: C901
     try:
         command = build_command()
         digest = command.plan.fingerprint or fingerprint_plan(command.plan)
+        bounded_error = _terminal_error(
+            operation_id,
+            "bounded_output",
+            "bounded JSONL session output limit exceeded",
+            fingerprint=digest,
+        )
+        terminal_reserve = len(
+            (json.dumps(bounded_error, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            )
+        )
         for record in (
             _event("accepted", operation_id),
             _event(
@@ -173,74 +220,101 @@ def run_approval_session(  # noqa: C901
             ),
             _event("approval_required", operation_id, fingerprint=digest),
         ):
-            if not _write_record(output_stream, record, records, limits):
+            if not _write_record(
+                output_stream,
+                record,
+                records,
+                limits,
+                terminal_reserve=terminal_reserve,
+            ):
+                _write_terminal_error(output_stream, records, limits, bounded_error)
                 return SessionOutcome(tuple(records), 1)
 
         decision, error_code = _read_decision(
             input_stream, limits.decision_timeout, limits.max_input_bytes
         )
         if error_code is not None:
-            terminal = _event(error_code, operation_id, fingerprint=digest)
-            _write_record(output_stream, terminal, records, limits)
+            _write_terminal_error(
+                output_stream,
+                records,
+                limits,
+                _terminal_error(
+                    operation_id,
+                    error_code,
+                    f"session ended: {error_code}",
+                    fingerprint=digest,
+                ),
+            )
             return SessionOutcome(tuple(records), 1)
         assert decision is not None
-        kind = decision.get("decision", decision.get("event"))
-        if kind == "cancel":
+        if decision.decision == "cancel":
             _write_record(
                 output_stream,
                 _event("cancelled", operation_id, fingerprint=digest),
                 records,
                 limits,
+                terminal=True,
             )
             return SessionOutcome(tuple(records), 0)
-        if kind != "approve":
-            _write_record(
-                output_stream,
-                _event("invalid_sequence", operation_id, fingerprint=digest),
-                records,
-                limits,
-            )
-            return SessionOutcome(tuple(records), 1)
-        supplied = decision.get("fingerprint")
+        supplied = decision.fingerprint
         if not isinstance(supplied, str) or supplied != digest:
-            _write_record(
+            _write_terminal_error(
                 output_stream,
-                _event("stale_approval", operation_id, fingerprint=digest),
                 records,
                 limits,
+                _terminal_error(
+                    operation_id,
+                    "stale_approval",
+                    "approval fingerprint does not match the captured command",
+                    fingerprint=digest,
+                ),
             )
             return SessionOutcome(tuple(records), 1)
 
+        output_exhausted = False
+
         def observe(step: StepEvent) -> None:
-            _write_record(
+            nonlocal output_exhausted
+            output_exhausted = not _write_record(
                 output_stream,
                 _event("step", operation_id, fingerprint=digest, data=_step_data(step)),
                 records,
                 limits,
+                terminal_reserve=terminal_reserve,
             )
 
         try:
             value = command.run(observer=observe)
         except KeyboardInterrupt:
+            if output_exhausted:
+                _write_terminal_error(output_stream, records, limits, bounded_error)
+                return SessionOutcome(tuple(records), 1)
             _write_record(
                 output_stream,
                 _event("cancelled", operation_id, fingerprint=digest),
                 records,
                 limits,
+                terminal=True,
             )
             return SessionOutcome(tuple(records), 130)
         except Exception as error:
-            _write_record(
+            if output_exhausted:
+                _write_terminal_error(output_stream, records, limits, bounded_error)
+                return SessionOutcome(tuple(records), 1)
+            _write_terminal_error(
                 output_stream,
-                _event(
-                    "error",
-                    operation_id,
-                    fingerprint=digest,
-                    data={"code": "operation_failed", "message": sanitize_diagnostic(str(error))},
-                ),
                 records,
                 limits,
+                _terminal_error(
+                    operation_id,
+                    "operation_failed",
+                    str(error),
+                    fingerprint=digest,
+                ),
             )
+            return SessionOutcome(tuple(records), 1)
+        if output_exhausted:
+            _write_terminal_error(output_stream, records, limits, bounded_error)
             return SessionOutcome(tuple(records), 1)
         payload = msgspec.to_builtins(value) if isinstance(value, msgspec.Struct) else value
         if (
@@ -248,12 +322,15 @@ def run_approval_session(  # noqa: C901
             and payload is not None
         ):
             payload = repr(value)
-        _write_record(
+        if not _write_record(
             output_stream,
             _event("result", operation_id, fingerprint=digest, data=cast("JsonValue", payload)),
             records,
             limits,
-        )
+            terminal=True,
+        ):
+            _write_terminal_error(output_stream, records, limits, bounded_error)
+            return SessionOutcome(tuple(records), 1)
         return SessionOutcome(tuple(records), 0)
     finally:
         # Dropping the reference releases the private snapshot; no plan fields
@@ -268,4 +345,5 @@ __all__ = [
     "SessionOutcome",
     "SessionRequest",
     "run_approval_session",
+    "session_error_record",
 ]

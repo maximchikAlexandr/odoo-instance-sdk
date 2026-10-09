@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import gc
 import io
 import json
 import time
 from pathlib import Path
 
 import msgspec
+from click.testing import CliRunner
 
+from odoo_instance_sdk import execution as execution_module
+from odoo_instance_sdk.commands.cli_parts.registration import cli
 from odoo_instance_sdk.commands.context import OperationContext
 from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
 from odoo_instance_sdk.internal.proc import (
@@ -20,6 +24,7 @@ from odoo_instance_sdk.operations import (
     OperationDescriptor,
     OperationResult,
     OperationTransport,
+    SessionDecision,
     SessionLimits,
     build_registry,
     invoke_local,
@@ -146,7 +151,8 @@ def test_approval_session_rejects_stale_decision_without_execution() -> None:
     )
 
     assert outcome.exit_code == 1
-    assert outcome.records[-1]["event"] == "stale_approval"
+    assert outcome.records[-1]["event"] == "error"
+    assert outcome.records[-1]["data"]["code"] == "stale_approval"
     assert executions == []
 
 
@@ -189,7 +195,8 @@ def test_cancel_and_timeout_are_non_execution_terminal_outcomes() -> None:
         limits=SessionLimits(decision_timeout=0.001),
     )
     assert timed_out.exit_code == 1
-    assert timed_out.records[-1]["event"] == "timeout"
+    assert timed_out.records[-1]["event"] == "error"
+    assert timed_out.records[-1]["data"]["code"] == "timeout"
     assert executions == []
 
 
@@ -210,3 +217,149 @@ def test_preview_contains_only_the_redacted_public_plan() -> None:
 
     assert private_value not in output.getvalue()
     assert "<redacted>" in output.getvalue()
+
+
+def test_session_limits_always_emit_typed_terminal_bounded_output_error() -> None:
+    executions: list[str] = []
+
+    def build() -> Command[str]:
+        private = PreparedAction(
+            step_id="write", action="write", description="write", mutating=True
+        )
+        return Command.create(
+            ExecutionPlan(
+                steps=(
+                    ActionStep(step_id="write", action="write", description="write", mutating=True),
+                )
+            ),
+            lambda context: (executions.append("ran"), context.action("write"), "done")[2],
+            (private,),
+        )
+
+    for limits in (SessionLimits(max_records=3), SessionLimits(max_output_bytes=1)):
+        output = io.StringIO()
+        outcome = run_approval_session("fixture.write", build, io.StringIO(), output, limits=limits)
+
+        assert outcome.exit_code != 0
+        assert outcome.records[-1]["event"] == "error"
+        assert outcome.records[-1]["data"]["code"] == "bounded_output"
+        assert json.loads(output.getvalue().splitlines()[-1])["data"]["code"] == "bounded_output"
+    assert executions == []
+
+
+def test_session_decision_is_strict_and_forbids_unknown_fields() -> None:
+    assert SessionDecision(decision="approve", fingerprint="fp")
+
+    def build() -> Command[str]:
+        private = PreparedAction(
+            step_id="write", action="write", description="write", mutating=True
+        )
+        return Command.create(
+            ExecutionPlan(
+                steps=(
+                    ActionStep(step_id="write", action="write", description="write", mutating=True),
+                )
+            ),
+            lambda context: context.action("write") or "done",
+            (private,),
+        )
+
+    for raw in (
+        '{"event":"approve","fingerprint":"fp"}\n',
+        '{"decision":"cancel","unknown":true}\n',
+        '{"decision":"maybe"}\n',
+    ):
+        outcome = run_approval_session("fixture.write", build, io.StringIO(raw), io.StringIO())
+        assert outcome.exit_code != 0
+        assert outcome.records[-1]["event"] == "error"
+        assert outcome.records[-1]["data"]["code"] == "invalid_sequence"
+
+
+def test_session_cli_rejects_ineligible_operation_with_jsonl_error_without_prompt() -> None:
+    result = CliRunner().invoke(cli, ["operation", "session", "odcli.git.check"])
+
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(records) == 1
+    assert records[0]["event"] == "error"
+    assert records[0]["data"]["code"] == "session_transport_required"
+    assert "schema_version" not in records[0]
+
+
+def test_session_eof_and_input_limits_are_typed_terminal_errors() -> None:
+    def build() -> Command[str]:
+        return Command.create(
+            ExecutionPlan(
+                steps=(
+                    ActionStep(step_id="write", action="write", description="write", mutating=True),
+                )
+            ),
+            lambda context: "done",
+            (PreparedAction(step_id="write", action="write", description="write", mutating=True),),
+        )
+
+    cases = (
+        (io.StringIO(), SessionLimits()),
+        (io.StringIO('{"decision":"approve"}\n'), SessionLimits(max_input_bytes=4)),
+    )
+    for input_stream, limits in cases:
+        output = io.StringIO()
+        outcome = run_approval_session("fixture.write", build, input_stream, output, limits=limits)
+        assert outcome.exit_code == 1
+        assert outcome.records[-1]["event"] == "error"
+        assert outcome.records[-1]["data"]["code"] in {"eof", "input_limit"}
+        assert json.loads(output.getvalue().splitlines()[-1]) == outcome.records[-1]
+
+
+def test_session_interrupt_cancels_and_drops_private_command_snapshot() -> None:
+    command_id: int | None = None
+
+    def build() -> Command[str]:
+        nonlocal command_id
+
+        def interrupt(context: object) -> str:
+            raise KeyboardInterrupt
+
+        command = Command.create(
+            ExecutionPlan(
+                steps=(
+                    ActionStep(step_id="write", action="write", description="write", mutating=True),
+                )
+            ),
+            interrupt,
+            (PreparedAction(step_id="write", action="write", description="write", mutating=True),),
+        )
+        command_id = id(command)
+        return command
+
+    first = run_approval_session("fixture.write", build, io.StringIO(), io.StringIO())
+    assert first.exit_code == 1
+    assert first.records[-1]["data"]["code"] == "eof"
+
+    output = io.StringIO()
+    fingerprint = first.records[1]["fingerprint"]
+    second = run_approval_session(
+        "fixture.write",
+        build,
+        io.StringIO(json.dumps({"decision": "approve", "fingerprint": fingerprint}) + "\n"),
+        output,
+    )
+    assert second.exit_code == 130
+    assert second.records[-1]["event"] == "cancelled"
+    assert command_id is not None
+    gc.collect()
+    assert command_id not in execution_module._COMMANDS
+
+
+def test_builtin_read_and_mutation_bindings_keep_sdk_primitive_delegation() -> None:
+    registry = build_registry()
+    read = registry.get("odcli.git.check")
+    mutation = registry.get("odcli.stop")
+
+    assert read.descriptor.canonical_path == ("git", "check")
+    assert read.factory is not None
+    assert read.sdk_primitive == "GitResource.check_command"
+    assert mutation.descriptor.approval_required is True
+    assert mutation.factory is not None
+    assert mutation.sdk_primitive == "OdooInstance.stop_runtime_command"
