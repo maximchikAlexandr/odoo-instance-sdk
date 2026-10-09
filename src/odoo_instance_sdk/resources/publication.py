@@ -19,6 +19,7 @@ import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, NoReturn, cast
 from urllib.parse import urlsplit
 
@@ -26,7 +27,10 @@ import msgspec
 
 from odoo_instance_sdk.exceptions import ConfigError, PublicationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
-from odoo_instance_sdk.internal.locks import exclusive_lock, publication_lock_path
+from odoo_instance_sdk.internal.locks import (
+    exclusive_lock_until,
+    publication_lock_path,
+)
 from odoo_instance_sdk.internal.paths import get_config_root, get_publication_config_path
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
@@ -229,7 +233,6 @@ class PublicationTarget:
     local_endpoint: str
     project_id: str | None = None
     environment_id: str | None = None
-    ready: bool = False
     runtime: OdooInstance | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -475,9 +478,7 @@ def _assert_runtime_ready(target: PublicationTarget) -> None:
     """Prove the route backend still belongs to the captured runtime."""
     runtime = target.runtime
     if runtime is None:
-        if not target.ready:
-            raise PublicationError("runtime readiness must be proven before publication")
-        return
+        raise PublicationError("runtime readiness must be proven before publication")
     try:
         endpoint = _runtime_endpoint(runtime)
         _probe_runtime_health(endpoint)
@@ -719,7 +720,7 @@ class PublicationResource:
             _assert_mutation_target(target, remove=remove)
             context.action(action_id)
             path = settings.owned_route_file
-            with exclusive_lock(publication_lock_path()):
+            with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
                 prior = path.read_bytes() if path.exists() else b""
                 current = _decode_routes(prior)
                 matching = next(
