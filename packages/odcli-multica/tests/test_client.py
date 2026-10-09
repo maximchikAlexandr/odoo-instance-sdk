@@ -22,6 +22,7 @@ from multica_py.models.issue_activity import TaskProjectResourceData
 from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
 from multica_py.models.system import DaemonStatus, DaemonWorkspace, RepositoryCheckoutResult
 from odcli_multica import ContextRequest, MulticaOdooClient
+from odcli_multica.client import _remote_host_for_operation
 from odcli_multica.models import (
     ContextVerificationError,
     PreparationRequest,
@@ -555,4 +556,41 @@ def test_prepare_delegates_one_selector_and_captures_recovery_command(tmp_path: 
             PreparationRequest(
                 context=request, base_ref="main", remote_name="origin", backup_id="b"
             )
+        )
+
+
+def test_raw_git_credentials_require_the_actual_remote_command() -> None:
+    with pytest.raises(ContextVerificationError, match="command overrides"):
+        _remote_host_for_operation(
+            ("-c", "alias.leak=!f(){ env; };f", "leak", "fetch"),
+            "https://gitlab.example/team/repo",
+        )
+
+    assert (
+        _remote_host_for_operation(("status", "--short"), "https://gitlab.example/team/repo")
+        is None
+    )
+
+
+@pytest.mark.parametrize("args", [("-C", "fetch", "leak"), ("-Cfetch", "fetch")])
+def test_raw_git_credentials_reject_git_c_directory_variants(args: tuple[str, ...]) -> None:
+    with pytest.raises(ContextVerificationError, match="command overrides"):
+        _remote_host_for_operation(args, "https://gitlab.example/team/repo")
+
+
+def test_merge_request_project_override_cannot_escape_verified_repository(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    context = client.context(request)
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+
+    with pytest.raises(ContextVerificationError, match="verified repository"):
+        client.publish_merge_request_command(
+            context,
+            project_root=tmp_path,
+            source_branch="feature",
+            target_branch="main",
+            title="title",
+            description_file=description,
+            project_path="other/repository",
         )
