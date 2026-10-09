@@ -606,6 +606,8 @@ After the controlled transition, the old `PRAGMA user_version` ledger, `_run_mig
 
 Complex data migrations and data-preservation checks SHALL remain explicit. Alembic autogenerate SHALL NOT be considered proof of migration correctness. ORM models SHALL NOT be added and repository queries SHALL NOT be translated away from `sqlite3` by this change.
 
+Known unstamped catalogue recognition SHALL derive exact, version-explicit historical fingerprints from one canonical internal definition. The v16 repair path and pre-source-neutral provenance path SHALL reuse the same shared table/column differences while keeping their genuine version-specific required-bit and index differences explicit. Neither path SHALL stamp, repair, or upgrade a catalogue with an unrecognized extra/missing column, index, foreign key, or view.
+
 #### Scenario: Clean install skips the historical chain
 
 - **WHEN** a fresh catalogue is created
@@ -625,6 +627,16 @@ Complex data migrations and data-preservation checks SHALL remain explicit. Alem
 
 - **WHEN** CI runs the Alembic gate
 - **THEN** multiple Alembic heads and unverified schema-metadata divergence are rejected
+
+#### Scenario: Shared historical omission applies to both known paths
+
+- **WHEN** a field known to be absent from both supported historical shapes is added to the canonical current schema
+- **THEN** the single historical fingerprint definition excludes it for both v16 repair and legacy-provenance recognition while preserving each variant's explicit index and nullability differences
+
+#### Scenario: Unknown historical shape fails closed
+
+- **WHEN** an unstamped catalogue differs from every exact supported historical fingerprint
+- **THEN** it is neither stamped nor partially repaired and opening fails before Alembic upgrade mutates it
 
 ### Requirement: Project-owned remote download records project_id
 
