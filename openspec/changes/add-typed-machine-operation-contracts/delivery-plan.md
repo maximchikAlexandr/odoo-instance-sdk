@@ -7,7 +7,8 @@
 - `estimate_basis=remaining active developer effort for one experienced developer familiar with Python, Click, msgspec, SQLite/Alembic and the repository; tests were not run to estimate`
 - `estimate_confidence=medium; source and tests are inspectable, but complete request DTO migration, provider compatibility and cross-process contract fixtures carry bounded integration uncertainty`
 - `calibration=uncalibrated; no comparable completed-run timing history was supplied`
-- `human_review=pending; implementation parent SHALL remain backlog after READY and SHALL NOT auto-start regardless of estimate`
+- `launch_policy=normal squad flow; WHEN the authoritative Estimate, hours property is at or below 32 THEN human_review SHALL be approved and the implementation parent MAY start automatically in todo; WHEN it is above 32 THEN human_review SHALL remain pending and the implementation parent SHALL remain backlog`
+- `current_launch_outcome=the authoritative Estimate, hours property is above 32; human_review=pending; implementation parent remains backlog`
 
 The authoritative `Estimate, hours` property is above the multi-WP topology threshold. The graph has a real parallel frontier at stage 2: local invocation/session, installed-provider delivery tooling and monitor snapshot work share only the completed stage-1 contracts and own non-conflicting write zones.
 
