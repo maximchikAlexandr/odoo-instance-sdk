@@ -83,6 +83,14 @@ class EnvironmentPythonMode(enum.StrEnum):
     REUSE = "reuse"
 
 
+class EnvironmentCodeOwnership(enum.StrEnum):
+    """Who owns the repository checkout recorded for an environment."""
+
+    SDK_OWNED = "sdk_owned"
+    CALLER_OWNED = "caller_owned"
+    UNKNOWN = "unknown"
+
+
 class BackupBranchOrigin(enum.StrEnum):
     EXPLICIT = "explicit"
     CONFIGURED = "configured"
@@ -186,6 +194,12 @@ class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=
     removed_at: datetime | None = None
     last_error: str | None = None
     warnings: tuple[str, ...] = ()
+    project_id: str | None = None
+    checkout_repository_root: str | None = None
+    checkout_git_common_dir: str | None = None
+    checkout_commit_sha: str | None = None
+    code_ownership: EnvironmentCodeOwnership = EnvironmentCodeOwnership.UNKNOWN
+    artifact_root: str | None = None
 
 
 class BackupProvenanceComparison(

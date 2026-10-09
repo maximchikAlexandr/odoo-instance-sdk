@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import socket
 import subprocess
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from odoo_instance_sdk.internal.proc import terminate_pid
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
+
+from .compose import _docker_environment
 
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_FAILURE_BUNDLE_BYTES = 50 * 1024 * 1024
@@ -224,31 +227,47 @@ def compose_down(
     if not compose_file.is_file():
         return
     deadline = time.monotonic() + max(0.0, timeout)
-    result = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "--project-name",
-            project_name,
-            "--file",
-            str(compose_file),
-            "down",
-            "--volumes",
-            "--remove-orphans",
-        ],
-        cwd=compose_file.parent,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=max(0.0, deadline - time.monotonic()),
-    )
-    if result.returncode:
-        raise RuntimeError(f"Compose cleanup failed for owned project {project_name}")
+    stop_budget = max(0.0, deadline - time.monotonic())
+    wait_reserve = min(5.0, stop_budget / 3.0)
+    process_budget = max(0.0, stop_budget - wait_reserve)
+    compose_grace = max(0, math.floor(process_budget) - 1)
+    process_reserve = max(0.001, min(1.0, process_budget - compose_grace))
+    process_timeout = min(process_budget, compose_grace + process_reserve)
+    compose_error: RuntimeError | None = None
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                project_name,
+                "--file",
+                str(compose_file),
+                "down",
+                "--timeout",
+                str(compose_grace),
+                "--volumes",
+                "--remove-orphans",
+            ],
+            cwd=compose_file.parent,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=process_timeout,
+            env=_docker_environment(),
+        )
+        if result.returncode:
+            compose_error = RuntimeError(f"Compose cleanup failed for owned project {project_name}")
+    except subprocess.TimeoutExpired as error:
+        compose_error = RuntimeError(f"Compose cleanup timed out for owned project {project_name}")
+        compose_error.__cause__ = error
     remaining = wait_for_ports_free(ports, timeout=max(0.0, deadline - time.monotonic()))
     if remaining:
         raise RuntimeError(
             f"Compose cleanup left owned ports bound for project {project_name}: {remaining}"
         )
+    if compose_error is not None:
+        raise compose_error
 
 
 def audit_no_leaks(

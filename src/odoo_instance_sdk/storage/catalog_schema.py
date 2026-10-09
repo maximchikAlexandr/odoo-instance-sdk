@@ -228,6 +228,19 @@ environments = Table(
     Column("last_used_at", Text),
     Column("removed_at", Text),
     Column("last_error", Text),
+    Column("project_id", Text, ForeignKey("projects.project_id")),
+    Column("checkout_repository_root", Text),
+    Column("checkout_git_common_dir", Text),
+    Column("checkout_commit_sha", Text),
+    Column(
+        "code_ownership",
+        Text,
+        CheckConstraint("code_ownership IN ('sdk_owned', 'caller_owned', 'unknown')"),
+        nullable=False,
+        server_default="unknown",
+    ),
+    Column("artifact_root", Text),
+    Column("adoption_input_fingerprint", Text),
     Column(
         "applied_settings_json",
         Text,
@@ -235,6 +248,12 @@ environments = Table(
         server_default=LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     ),
     Index("environments_active_idx", "git_common_dir", "branch", "state"),
+    Index(
+        "environments_project_checkout_idx",
+        "project_id",
+        "checkout_git_common_dir",
+        "worktree_path",
+    ),
     Index(
         "environments_one_active_branch",
         "git_common_dir",
@@ -368,6 +387,7 @@ CATALOG_INDEXES = (
     "database_events_cluster_identity_idx",
     "environments_active_idx",
     "environments_one_active_branch",
+    "environments_project_checkout_idx",
     "environment_events_env_idx",
     "postgres_clusters_project_idx",
 )

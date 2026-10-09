@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from odoo_instance_sdk.internal import storage_migration
 from odoo_instance_sdk.internal.repo_key import repo_key
 
 _USER_ROOT_NAME = ".odcli"
@@ -19,6 +20,13 @@ class EnvironmentArtifactPaths:
     generated_config_path: Path
     dependency_lock_path: Path
     python_environment_path: Path
+
+
+def is_legacy_environment_path(value: str | None) -> bool:
+    if value is None:
+        return False
+    legacy_root = storage_migration.legacy_storage_roots(Path.home())["data"] / "environments"
+    return Path(value).expanduser().resolve().is_relative_to(legacy_root)
 
 
 def resolve_environment_artifact_paths(

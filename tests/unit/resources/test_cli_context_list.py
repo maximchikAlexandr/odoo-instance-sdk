@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.models import Snapshot
+from odoo_instance_sdk.models import DevelopmentEnvironment, Snapshot
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
 from tests.unit.monitor_support import FakeProcessProvider
 
@@ -39,6 +39,32 @@ def _inject_monitor_process_provider(
         original_init(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
+
+
+def test_cli_context_resolver_is_live_after_command_import(
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_client.environments.checkout(
+        project_manifest,
+        "feat/live-context-resolver",
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+    )
+    from odoo_instance_sdk.commands import context as cli_context
+    from odoo_instance_sdk.commands.env import list as env_list
+
+    assert callable(env_list.resolve_environment)
+
+    def stale_resolution(*_args: object, **_kwargs: object) -> DevelopmentEnvironment:
+        raise RuntimeError("live resolver")
+
+    monkeypatch.setattr(cli_context, "resolve_environment", stale_resolution)
+    result = _invoke(CliRunner(), env_client, ["env", "remove", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 1
+    assert "live resolver" in result.output
 
 
 def test_nested_worktree_infers_remove_selector(

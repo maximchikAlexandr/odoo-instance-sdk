@@ -30,10 +30,7 @@ from odoo_instance_sdk.internal.locks import (
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_env import load_project_environment
-from odoo_instance_sdk.internal.project_init import (
-    project_owned_data_dir,
-    verify_project_owned_data_dir,
-)
+from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import (
     Backup,
@@ -43,13 +40,13 @@ from odoo_instance_sdk.models import (
     CopyReplacementResult,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
-    EnvironmentCheckoutPlan,
-    EnvironmentCheckoutResult,
+    EnvironmentCodeOwnership,
+    EnvironmentState,
 )
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment.checkout_api import _CheckoutApiMixin
 from odoo_instance_sdk.resources.environment.checkout_artifacts import (
     _capture_checkout_stage,
-    _checkout_execution_plan_with_private_steps,
     _checkout_steps,
     _normalize_checkout_stage,
     _planning_error_outcome,
@@ -62,7 +59,6 @@ from odoo_instance_sdk.resources.environment.checkout_execution import do_checko
 from odoo_instance_sdk.resources.environment.checkout_planning import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
-    _checkout_public_plan,
     _CheckoutPlan,
     _CheckoutPlanningState,
     _CheckoutSnapshot,
@@ -70,6 +66,7 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _ExpressionResult,
     _PlanningOutcome,
     _PythonMode,
+    _resolve_checkout_data_dir,
     _resolve_checkout_dependency_inputs,
     _resolve_checkout_hash_lock,
 )
@@ -88,15 +85,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
-def _resolve_checkout_data_dir(project: ProjectConfig, repo_root: Path) -> Path | None:
-    if project.postgres is None or project.postgres.mode != "compose":
-        return None
-    data_dir = project_owned_data_dir(repo_root)
-    verify_project_owned_data_dir(repo_root, data_dir, require_exists=False)
-    return data_dir
-
-
-class _CheckoutMixin:
+class _CheckoutMixin(_CheckoutApiMixin):
     if TYPE_CHECKING:
         _client: OdooClient
 
@@ -177,58 +166,14 @@ class _CheckoutMixin:
             context: RunContext[DevelopmentEnvironment],
         ) -> None: ...
 
-    def _copy_source_metadata(
-        self, project: ProjectConfig, options: EnvironmentCheckoutOptions
-    ) -> tuple[str | None, str | None, str | None, str, Backup | None]:
-        """Resolve one explicit COPY source without contacting a remote."""
-        if options.remote_name is not None and options.backup_id is not None:
-            raise ConfigError("COPY accepts exactly one of remote_name or backup_id")
-        if options.remote_name is not None and options.source_database is not None:
-            raise ConfigError("--remote cannot be combined with --source-db")
-        if options.backup_id is not None and options.source_database is not None:
-            raise ConfigError("--backup cannot be combined with --source-db")
-
-        if options.remote_name is not None:
-            from odoo_instance_sdk.internal.dbprep.source import resolve_test_source
-
-            source = resolve_test_source(
-                project, DatabaseRefreshOptions(remote_name=options.remote_name)
-            )
-            assert source.config.database is not None
-            return (
-                source.source_name,
-                source.config.base_url,
-                source.branch,
-                source.config.database,
-                None,
-            )
-
-        if options.backup_id is not None:
-            try:
-                backup_id = uuid.UUID(str(options.backup_id))
-            except (ValueError, TypeError, AttributeError) as exc:
-                raise ConfigError("catalogue backup identifier must be a complete UUID") from exc
-            projection = self._client.get_catalog()._resolve_backup_projection(str(backup_id))
-            if projection.state.value != "available":
-                raise ConfigError("catalogue backup is not available")
-            backup = projection.backup
-            return (
-                backup.source_name,
-                backup.source_base_url,
-                backup.source_git_branch,
-                backup.database_name,
-                backup,
-            )
-
-        return None, None, None, "", None
-
-    def _prepare_checkout(
+    def _prepare_checkout(  # noqa: C901 -- adoption and SDK-owned plans share validation inputs
         self,
         project: ProjectConfig | Path,
         branch: str,
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
         dry_run_paths: bool,
+        checkout_path: Path | None = None,
     ) -> _CheckoutPlan:
         if isinstance(project, ProjectConfig):
             project_cfg = project
@@ -255,7 +200,8 @@ class _CheckoutMixin:
             rev_parse_toplevel,
         )
 
-        repo_root = rev_parse_toplevel(project_path)
+        configured_root = project_cfg.repository_root.resolve()
+        repo_root = rev_parse_toplevel(checkout_path or project_path)
         git_common = rev_parse_git_common_dir(repo_root)
         git_common_str = str(git_common)
         data_dir = _resolve_checkout_data_dir(project_cfg, repo_root)
@@ -286,7 +232,9 @@ class _CheckoutMixin:
         else:
             worktree_mode = "new"
 
-        source_config = self._resolve_source_config(options, project_cfg, repo_root)
+        source_config = self._resolve_source_config(
+            options, project_cfg, configured_root if checkout_path is not None else repo_root
+        )
         if source_config is not None and not source_config.is_file():
             raise ConfigError(f"Source config not found: {source_config}")
 
@@ -305,14 +253,23 @@ class _CheckoutMixin:
         )
 
         env_id = uuid.uuid4()
-        key = repo_key(repo_root, git_common)
-        env_root = _paths.get_environments_root(ensure_exists=not dry_run_paths) / key / str(env_id)
-        worktree = env_root / "worktree"
+        artifact_key = repo_key(
+            configured_root if checkout_path is not None else repo_root, git_common
+        )
+        env_root = (
+            _paths.get_environments_root(ensure_exists=not dry_run_paths)
+            / artifact_key
+            / str(env_id)
+        )
+        worktree = (checkout_path or (env_root / "worktree")).resolve()
         venv = env_root / "venv"
         generated_cfg = env_root / "odoo.conf"
         lock_file = env_root / "requirements.lock"
-        if worktree_mode == "local":
-            worktree_argv: tuple[str, ...] = (
+        worktree_argv: tuple[str, ...]
+        if checkout_path is not None:
+            worktree_argv = ()
+        elif worktree_mode == "local":
+            worktree_argv = (
                 "git",
                 "-C",
                 str(repo_root),
@@ -399,6 +356,20 @@ class _CheckoutMixin:
             source_git_branch=source_git_branch,
             selected_backup=selected_backup,
             data_dir=data_dir,
+            project_root=configured_root,
+            project_id=(
+                f"project_{repo_key(configured_root, git_common_dir(configured_root))}"
+                if checkout_path is not None
+                else None
+            ),
+            checkout_commit_sha=rev_parse_verify(repo_root, "HEAD"),
+            code_ownership=(
+                EnvironmentCodeOwnership.CALLER_OWNED
+                if checkout_path is not None
+                else EnvironmentCodeOwnership.SDK_OWNED
+            ),
+            artifact_root=env_root,
+            adopted=checkout_path is not None,
         )
 
     def _plan_checkout(
@@ -748,14 +719,52 @@ class _CheckoutMixin:
         instance._runtime_binding = _RuntimeBinding("project", project_id, project_id, plan.repo_root, git_common_dir(plan.repo_root))  # fmt: skip
         return auxiliary_restore_session(instance)
 
-    def _run_checkout_snapshot(
+    def _run_checkout_snapshot(  # noqa: C901 -- locked adoption retry and checkout lifecycle share one boundary
         self, context: RunContext[DevelopmentEnvironment], snapshot: _CheckoutSnapshot
     ) -> DevelopmentEnvironment:
         plan = snapshot.private
         if plan.data_dir is not None:
             verify_project_owned_data_dir(plan.repo_root, plan.data_dir, require_exists=False)
         with exclusive_lock(provisioning_lock_path()):
-            self._validate_checkout_snapshot(snapshot, context=context)
+            catalog = None
+            if plan.adopted:
+                catalog = self._client.get_catalog()
+                if plan.project_id is None or plan.adoption_input_fingerprint is None:
+                    raise PlanValidationError("adoption plan is missing project identity evidence")
+                self._validate_adoption_retry_identity(plan)
+                existing = catalog.adopted_environment_for(
+                    project_id=plan.project_id,
+                    checkout_path=str(plan.worktree),
+                    checkout_git_common_dir=plan.git_common_dir,
+                )
+                if existing is not None:
+                    stored_fingerprint = existing["adoption_input_fingerprint"]
+                    if stored_fingerprint != plan.adoption_input_fingerprint:
+                        raise EnvironmentConflictError(
+                            "adoption_conflict",
+                            "checkout already has an adoption with different inputs",
+                            details={"existing_id": str(existing["id"])},
+                        )
+                    state = str(existing["state"])
+                    if state == EnvironmentState.READY.value:
+                        from odoo_instance_sdk.resources.environment.checkout_artifacts import (
+                            _checkout_steps,
+                        )
+
+                        for step in _checkout_steps(plan):
+                            if context.planned(step.step_id) and not context.consumed(step.step_id):
+                                context.skip(step.step_id)
+                        return _row_to_env(existing)
+                    raise EnvironmentConflictError(
+                        "adoption_recovery_required",
+                        f"existing adoption is {state}; recover or remove it before retrying",
+                        details={"existing_id": str(existing["id"]), "state": state},
+                    )
+            # A new adoption must prove the requested checkout/base identity.
+            # A matching ready row has already proved that identity; ordinary
+            # caller edits and commits are explicitly allowed on that retry.
+            if not plan.adopted or existing is None:
+                self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:
                 plan.branch_revalidator(context)
             from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
@@ -765,12 +774,40 @@ class _CheckoutMixin:
                 auxiliary_session.ensure_started(context)
             if plan.db_mode is EnvironmentDatabaseMode.COPY:
                 self._preflight_copy_checkout(plan)
+            if plan.adopted:
+                assert catalog is not None
+                assert plan.project_id is not None
+                project_root = plan.project_root or plan.project.repository_root
+                catalog._register_project(
+                    plan.project_id,
+                    project_root,
+                    git_common_dir(project_root),
+                )
             context.action("checkout.catalog")
-            catalog = self._client.get_catalog()
+            if catalog is None:
+                catalog = self._client.get_catalog()
             self._revalidate_checkout_locked(catalog, plan)
             result = self._do_checkout(catalog, plan, context=context)
             context.complete_action("checkout.catalog")
             return result
+
+    def _validate_adoption_retry_identity(self, plan: _CheckoutPlan) -> None:
+        """Re-capture adoption evidence before reusing a ready catalog row."""
+        current_project = ProjectConfig.load(plan.project.repository_root)
+        current_source = self._copy_source_metadata(current_project, plan.options)
+        current_fingerprint = self._adoption_fingerprint(
+            plan.project_id or "",
+            plan.worktree,
+            Path(plan.git_common_dir),
+            plan.options,
+            source_name=current_source[0],
+            source_base_url=current_source[1],
+            source_git_branch=current_source[2],
+            source_database=current_source[3],
+            selected_backup_id=(current_source[4].id if current_source[4] is not None else None),
+        )
+        if current_fingerprint != plan.adoption_input_fingerprint:
+            raise StalePlanError("adoption resolved base or source identity changed after planning")
 
     def _validate_checkout_snapshot(  # noqa: C901 -- snapshot validation keeps all drift guards together
         self,
@@ -800,6 +837,7 @@ class _CheckoutMixin:
                 str(rev_parse_git_common_dir(plan.repo_root)),
                 rev_parse_verify(plan.repo_root, plan.base_ref),
             )
+            actual_base = actual_identity[2]
         else:
 
             def output(step_id: str) -> str:
@@ -814,10 +852,11 @@ class _CheckoutMixin:
                 # while capturing the plan. Git reports this path relative
                 # to the directory supplied through ``git -C``.
                 common_dir = plan.repo_root / common_dir
+            actual_base = output("checkout.validate.git.base").strip()
             actual_identity = (
                 str(top_dir),
                 str(common_dir.resolve()),
-                output("checkout.validate.git.base").strip(),
+                actual_base,
             )
         expected_identity = (str(plan.repo_root), plan.git_common_dir, plan.base_revision)
         if actual_identity != expected_identity:
@@ -826,6 +865,39 @@ class _CheckoutMixin:
                 expected=list(expected_identity),
                 actual=list(actual_identity),
             )
+
+        if plan.adopted:
+            if context is None:
+                current_head = rev_parse_verify(plan.worktree, "HEAD")
+                current_base = rev_parse_verify(plan.worktree, plan.base_ref)
+                from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
+
+                dirty = worktree_is_dirty(plan.worktree)
+            else:
+
+                def output(step_id: str) -> str:
+                    result = cast("ProcessResult", context.process(step_id))
+                    value = result.stdout
+                    return (
+                        value.decode(errors="replace")
+                        if isinstance(value, bytes)
+                        else (value or "")
+                    )
+
+                current_head = output("checkout.validate.git.head").strip()
+                current_base = actual_base
+                dirty = bool(output("checkout.validate.git.status").strip())
+            if dirty:
+                raise EnvironmentConflictError(
+                    "dirty_checkout", "caller-owned checkout has uncommitted changes"
+                )
+            if current_base != plan.base_revision or current_head != plan.base_revision:
+                raise EnvironmentConflictError(
+                    "checkout_base_mismatch",
+                    "caller-owned checkout HEAD does not match the explicit base",
+                    details={"expected_base": plan.base_revision, "actual_head": current_head},
+                )
+            return
 
         current_project = ProjectConfig.load(plan.repo_root)
         current_source_config = self._resolve_source_config(
@@ -889,71 +961,12 @@ class _CheckoutMixin:
             plan.generated_config,
             plan.dependency_lock,
         ):
-            if path.exists():
+            if not plan.adopted and path.exists():
                 raise StalePlanError(
                     "checkout deterministic future path is no longer available",
                     expected=str(path),
                     actual="exists",
                 )
-
-    def plan_checkout(
-        self,
-        project: ProjectConfig | Path,
-        branch: str,
-        *,
-        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-    ) -> EnvironmentCheckoutPlan:
-        """Return a secret-free checkout plan without performing mutations."""
-        command = self.checkout_command(project, branch, options=options)
-        return _checkout_public_plan(command)
-
-    def checkout_command(
-        self,
-        project: ProjectConfig | Path,
-        branch: str,
-        *,
-        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-    ) -> Command[DevelopmentEnvironment]:
-        """Capture checkout inputs once and return the inspectable command."""
-        snapshot = self._build_checkout_snapshot(project, branch, options=options)
-        return self._command_from_snapshot(snapshot)
-
-    def _checkout_command_with_branch_revalidation(
-        self,
-        project: ProjectConfig | Path,
-        branch: str,
-        *,
-        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-        branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None],
-    ) -> Command[DevelopmentEnvironment]:
-        snapshot = self._build_checkout_snapshot(project, branch, options=options)
-        private = replace(snapshot.private, branch_revalidator=branch_revalidator)
-        execution_plan = _checkout_execution_plan_with_private_steps(snapshot.execution_plan, private)  # fmt: skip
-        return self._command_from_snapshot(replace(snapshot, private=private, execution_plan=execution_plan))  # fmt: skip
-
-    def checkout_with_plan(
-        self,
-        project: ProjectConfig | Path,
-        branch: str,
-        *,
-        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-    ) -> EnvironmentCheckoutResult:
-        """Execute checkout and return its final secret-free typed plan."""
-        command = self.checkout_command(project, branch, options=options)
-        environment = command.run()
-        return EnvironmentCheckoutResult(
-            environment=environment,
-            plan=_checkout_public_plan(command),
-        )
-
-    def checkout(
-        self,
-        project: ProjectConfig | Path,
-        branch: str,
-        *,
-        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-    ) -> DevelopmentEnvironment:
-        return self.checkout_command(project, branch, options=options).run()
 
     def _revalidate_checkout_locked(self, catalog: BackupCatalog, plan: _CheckoutPlan) -> None:
         cat = catalog
@@ -985,11 +998,3 @@ class _CheckoutMixin:
         context: RunContext[DevelopmentEnvironment],
     ) -> DevelopmentEnvironment:
         return do_checkout(self, catalog, plan, context=context)
-
-    def _get_env_row(self, cat: BackupCatalog, env_id: uuid.UUID) -> DevelopmentEnvironment:
-
-        catalog = cat
-        row = catalog.get_environment(str(env_id))
-        if row is None:
-            raise RuntimeError("environment row disappeared after checkout")
-        return _row_to_env(row)

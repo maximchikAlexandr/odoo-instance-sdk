@@ -28,6 +28,7 @@ from odoo_instance_sdk.resources.instance import OdooInstance
 def _environment(worktree: Path) -> SimpleNamespace:
     return SimpleNamespace(
         id="env-1",
+        project_id="project_env",
         name="demo",
         worktree_path=str(worktree),
         base_ref="main",

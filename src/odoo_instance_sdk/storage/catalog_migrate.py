@@ -19,7 +19,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0006"
+CATALOG_REVISION = "0007"
 
 
 def _migrations_dir() -> Path:
@@ -174,7 +174,7 @@ def verify_schema_equivalence(conn: sqlite3.Connection) -> None:
         raise BackupCatalogError("catalog schema is not equivalent to the canonical revision")
 
 
-def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
+def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:  # noqa: C901
     """Restore the index lost by the historical v16 table rebuild."""
     user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if user_version != 16:
@@ -186,6 +186,21 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
     expected_by_name = {}
     for table, columns, keys in expected_tables:
         legacy_columns = columns
+        if table == "environments":
+            legacy_columns = tuple(
+                item
+                for item in columns
+                if item[0]
+                not in {
+                    "project_id",
+                    "checkout_repository_root",
+                    "checkout_git_common_dir",
+                    "checkout_commit_sha",
+                    "code_ownership",
+                    "artifact_root",
+                    "adoption_input_fingerprint",
+                }
+            )
         if table == "backups":
             legacy_columns = tuple(
                 item for item in columns if item[0] not in {"source_name", "pinned"}
@@ -213,8 +228,10 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
         not compatible_tables
         or actual_foreign_keys != expected_foreign_keys
         or actual_view != expected_view
-        or actual_indexes - (expected_indexes - {"backups_source_group_idx"})
-        or (expected_indexes - {"backups_source_group_idx"}) - actual_indexes
+        or actual_indexes
+        - (expected_indexes - {"backups_source_group_idx", "environments_project_checkout_idx"})
+        or (expected_indexes - {"backups_source_group_idx", "environments_project_checkout_idx"})
+        - actual_indexes
         != {"environments_one_active_branch"}
     ):
         return
@@ -234,13 +251,16 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
         ) from exc
 
 
-def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:
+def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:  # noqa: C901
     """Recognize the pre-source-neutral schema before stamping it as 0001."""
     actual_tables, actual_indexes, actual_foreign_keys, actual_view = _schema_fingerprint(conn)
     expected_tables, expected_indexes, expected_foreign_keys, expected_view = (
         _reference_fingerprint()
     )
-    legacy_indexes = expected_indexes - {"backups_source_group_idx"}
+    legacy_indexes = expected_indexes - {
+        "backups_source_group_idx",
+        "environments_project_checkout_idx",
+    }
     if actual_indexes != legacy_indexes or actual_foreign_keys != expected_foreign_keys:
         return False
     if actual_view != expected_view:
@@ -248,6 +268,21 @@ def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:
     expected_by_name = {table: (columns, keys) for table, columns, keys in expected_tables}
     for table, columns, keys in actual_tables:
         expected_columns, expected_keys = expected_by_name.get(table, ((), frozenset()))
+        if table == "environments":
+            expected_columns = tuple(
+                item
+                for item in expected_columns
+                if item[0]
+                not in {
+                    "project_id",
+                    "checkout_repository_root",
+                    "checkout_git_common_dir",
+                    "checkout_commit_sha",
+                    "code_ownership",
+                    "artifact_root",
+                    "adoption_input_fingerprint",
+                }
+            )
         if table == "runtime":
             expected_columns = _without_runtime_launch_identity(expected_columns)
         if table == "backups":
