@@ -717,6 +717,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli module install-order` — Plan a stable dependency installation order.
 - `odcli module test` — Run tests for explicitly named modules.
 - `odcli module update` — Upgrade explicitly named modules in the selected database.
+- `odcli module context` — Show repository, Git, dependency, and installed-module context.
 - `odcli git commit` — Create one staged Odoo commit with a checked message.
 - `odcli git check` — Validate Odoo commit history and branch safety.
 - `odcli git absorb` — Absorb staged hunks with optional `git-absorb`.
@@ -738,6 +739,8 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db restore` — Restore one exact retained backup or local Odoo ZIP into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
 - `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
+- `odcli publish` — Publish a ready project or environment through the owned Caddy route.
+- `odcli unpublish` — Remove an owned Caddy publication idempotently.
 - `odcli ps` — Show process and resource inventory from one monitor snapshot.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
 - `odcli update` — Self-upgrade an OdCLI uv-tool install.
@@ -822,10 +825,12 @@ XML-RPC stays in test support only; `src/` contains zero `ServerProxy` call site
 ```bash
 odcli monitor --headless
 odcli monitor --watch --interval 2
+odcli monitor --external --settings ~/.config/odcli/publication.toml
 ```
 
-The monitor binds to loopback only. The dashboard is an optional extra; the
-headless server does not require its static assets. Stable routes are:
+The monitor binds to loopback only by default. The dashboard is an optional
+extra; the headless server does not require its static assets. Stable routes
+are:
 
 - `GET /healthz` — process health.
 - `GET /api/v1/snapshot` — the current typed environment snapshot, including
@@ -839,7 +844,22 @@ directly on that project rather than through a synthetic environment.  A
 missing runtime is `null`, while a recorded stopped runtime retains its typed
 metrics with null/empty live values. Use explicit include-removed options where
 supported. Monitor snapshots isolate component failures and never publish
-stored secrets or absolute catalog paths.
+ stored secrets or absolute catalog paths.
+
+When a project or environment has an owned, ready Caddy route, its snapshot
+contains a publication state and server-supplied HTTPS URL. The panel keeps
+the local runtime endpoint visible for diagnosis and enables `Open Odoo` only
+for the `available` state; stopped, not-ready, missing, or unreadable routes
+remain disabled. The route identity is correlated with the runtime's local
+endpoint, so stale routes are never presented as usable.
+
+For a deployment behind a trusted reverse proxy, use `monitor --external`
+with the owner-only publication settings. Startup registers the selected
+monitor endpoint in the OdCLI-owned Caddy route and passes an explicit
+allowlist of exact external hosts and trusted proxy peers. Forwarded
+host/protocol headers are accepted only from those peers, external CSRF cookies
+are secure, and pgAdmin is local-only. Keep `/api` and dashboard assets
+relative so the panel works under the configured external origin.
 
 ## Security and data location
 

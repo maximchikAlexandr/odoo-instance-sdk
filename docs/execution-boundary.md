@@ -78,6 +78,8 @@ classification is bounded and whose contract requires `--dry-run`:
 | `git sync` | mutating-or-spawning |
 | `bug-report init` | mutating-or-spawning |
 | `bug-report submit` | mutating-or-spawning |
+| `publish` | mutating-or-spawning |
+| `unpublish` | mutating-or-spawning; explicit `--yes` confirmation |
 | `update` | mutating-or-spawning (`update --check` is process-previewable-read-only) |
 | `psql` | native-passthrough |
 | `run` | native-passthrough |
@@ -230,10 +232,10 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:555-556` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:558-559` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:474` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:476` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
