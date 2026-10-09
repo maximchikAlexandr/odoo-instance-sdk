@@ -414,6 +414,7 @@ def merge_request_publish(
         command = client.publish_merge_request_command(
             context,
             project_root=project,
+            git_resource=_git_resource(client, project),
             source_branch=source_branch,
             target_branch=target_branch,
             title=title,

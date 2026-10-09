@@ -25,11 +25,13 @@ class _Issues:
             raise RuntimeError("missing issue") from exc
 
 
-def _context(issue_id: str = "child") -> VerifiedTaskContext:
+def _context(
+    issue_id: str = "child", repository_url: str = "https://gitlab.example/team/repo"
+) -> VerifiedTaskContext:
     return VerifiedTaskContext(
         checkout_path="/task/checkout",
         task_root="/task",
-        repository_url="https://gitlab.example/team/repo",
+        repository_url=repository_url,
         workspace_id="workspace",
         multica_project_id="project",
         issue_id=issue_id,
@@ -204,6 +206,132 @@ def test_credentials_fail_closed_for_an_unmapped_host(tmp_path: Path) -> None:
             mapping_path=mapping,
             process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "secret"},
         )
+
+
+class _CapturedGit:
+    def __init__(self) -> None:
+        self.passthrough_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+        self.sync_calls: list[dict[str, object]] = []
+
+    def passthrough_command(self, args: tuple[str, ...], **kwargs: object) -> object:
+        self.passthrough_calls.append((args, kwargs))
+        return SimpleNamespace(run=lambda: SimpleNamespace(returncode=0, stdout=""))
+
+    def sync_command(self, **kwargs: object) -> object:
+        self.sync_calls.append(kwargs)
+        return SimpleNamespace(run=SimpleNamespace)
+
+
+def _credential_project(tmp_path: Path) -> tuple[Path, Path]:
+    project = tmp_path / "project"
+    environment = project / ".odcli" / ".env"
+    environment.parent.mkdir(parents=True)
+    environment.write_text("ODCLI_GITLAB_TOKEN_ROOT=secret-token\n", encoding="utf-8")
+    environment.chmod(0o600)
+    mapping = project / ".odcli" / "gitlab-credentials.toml"
+    mapping.write_text(
+        '[[mappings]]\nuser_id = "human-root"\nhost = "gitlab.example"\n'
+        'login = "root-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    return project, mapping
+
+
+def test_git_passthrough_local_skips_credentials_and_https_injects_child_askpass(
+    tmp_path: Path,
+) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    project, mapping = _credential_project(tmp_path)
+    client = _client(root)
+
+    local_git = _CapturedGit()
+    client.git_command(
+        _context("root"),
+        ("status", "--short"),
+        git_resource=local_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    assert local_git.passthrough_calls[0][1] == {
+        "environment": {},
+        "secret_values": (),
+    }
+
+    remote_git = _CapturedGit()
+    client.git_command(
+        _context("root", "https://gitlab.example/team/repo.git"),
+        ("fetch", "origin"),
+        git_resource=remote_git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+    environment = remote_git.passthrough_calls[0][1]["environment"]
+    assert environment == {
+        "GITLAB_LOGIN": "root-login",
+        "GITLAB_TOKEN": "secret-token",
+        "GIT_ASKPASS": environment["GIT_ASKPASS"],
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert remote_git.passthrough_calls[0][1]["secret_values"] == ("secret-token",)
+
+
+def test_git_https_ambiguous_host_fails_before_child_process(tmp_path: Path) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    project, mapping = _credential_project(tmp_path)
+    git = _CapturedGit()
+
+    with pytest.raises(ContextVerificationError, match="ambiguous"):
+        _client(root).git_command(
+            _context("root", "https://gitlab.example/team/repo.git"),
+            ("fetch", "https://other.example/team/repo.git"),
+            git_resource=git,
+            project_root=project,
+            mapping_path=mapping,
+        )
+    assert git.passthrough_calls == []
+
+
+def test_sync_https_injects_only_child_askpass_environment(tmp_path: Path) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    project, mapping = _credential_project(tmp_path)
+    git = _CapturedGit()
+
+    _client(root).sync_command(
+        _context("root", "https://gitlab.example/team/repo.git"),
+        git_resource=git,
+        project_root=project,
+        mapping_path=mapping,
+    )
+
+    assert git.sync_calls[0]["environment"] == {
+        "GITLAB_LOGIN": "root-login",
+        "GITLAB_TOKEN": "secret-token",
+        "GIT_ASKPASS": git.sync_calls[0]["environment"]["GIT_ASKPASS"],
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert git.sync_calls[0]["secret_values"] == ("secret-token",)
 
 
 def test_two_root_creators_keep_private_tokens_isolated(tmp_path: Path) -> None:

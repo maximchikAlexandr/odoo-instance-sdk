@@ -376,6 +376,7 @@ class MulticaOdooClient:
         context: VerifiedTaskContext,
         *,
         project_root: Path | str,
+        git_resource: object | None = None,
         source_branch: str,
         target_branch: str,
         title: str,
@@ -391,38 +392,108 @@ class MulticaOdooClient:
             read_description_file,
             repository_project_path,
         )
+        from odoo_instance_sdk.execution import ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
 
         host, inferred_project = repository_project_path(context.repository_url)
         selected_project = project_path or inferred_project
         description = read_description_file(description_file)
-        credential = self.credential_context(
-            context,
-            host=host,
-            project_root=project_root,
-            mapping_path=mapping_path,
-            process_environment=process_environment,
+
+        context_step = PreparedAction(
+            step_id="gitlab.mr.revalidate-context",
+            action="gitlab.mr.revalidate-context",
+            description="Revalidate the verified task root before provider mutation",
+            read_only=True,
+            details={
+                "issue_id": context.issue_id,
+                "root_issue_id": context.root_issue_id,
+                "root_creator_id": context.root_creator_id,
+                "host": host,
+                "project_path": selected_project,
+            },
         )
-        server_url = getattr(self.multica.config, "server_url", None)
-        if not isinstance(server_url, str) or not server_url.strip():
-            raise ContextVerificationError("Multica issue URL is unavailable")
-        issue_url = server_url.rstrip("/") + f"/issues/{context.issue_id}"
-        return cast(
-            "Command[MergeRequestPublicationResult]",
-            action_command(
-                "gitlab.mr.publish",
-                lambda: publish_merge_request(
-                    credential=credential,
-                    project_path=selected_project,
-                    source_branch=source_branch,
-                    target_branch=target_branch,
-                    title=title,
-                    description=description,
-                    issue_url=issue_url,
-                    assignee=assignee,
-                ),
-                description="Resolve and create or update one exact GitLab merge request",
-                mutating=True,
-            ),
+        branch_step = PreparedAction(
+            step_id="gitlab.mr.revalidate-branch",
+            action="gitlab.mr.revalidate-branch",
+            description="Revalidate the current checkout branch before provider mutation",
+            read_only=True,
+            details={"expected_branch": source_branch},
+        )
+        publish_step = PreparedAction(
+            step_id="gitlab.mr.publish",
+            action="gitlab.mr.publish",
+            description="Resolve and create or update one exact GitLab merge request",
+            mutating=True,
+            details={
+                "issue_id": context.issue_id,
+                "project_path": selected_project,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "title": title,
+                "description_file": str(Path(description_file).resolve()),
+                "assignee": assignee,
+            },
+        )
+        prepared_steps = (context_step, branch_step, publish_step)
+
+        def operation(
+            run_context: RunContext[MergeRequestPublicationResult],
+        ) -> MergeRequestPublicationResult:
+            run_context.action(context_step.step_id)
+            current_host, current_inferred_project = repository_project_path(context.repository_url)
+            current_project = project_path or current_inferred_project
+            if current_host != host or current_project != selected_project:
+                raise ContextVerificationError("GitLab repository context changed")
+            root = self._resolve_root_creator(context)
+            if context.root_issue_id is not None and root.root_issue_id != context.root_issue_id:
+                raise ContextVerificationError("task root issue changed")
+            if (
+                context.root_creator_id is not None
+                and root.root_creator_id != context.root_creator_id
+            ):
+                raise ContextVerificationError("task root creator changed")
+            run_context.complete_action(context_step.step_id)
+
+            if git_resource is not None:
+                run_context.action(branch_step.step_id)
+                current_branch = _current_branch(git_resource)
+                if current_branch != source_branch:
+                    raise ContextVerificationError("current Git branch changed")
+                run_context.complete_action(branch_step.step_id)
+
+            run_context.action(publish_step.step_id)
+            credential = self.credential_context(
+                context,
+                host=host,
+                project_root=project_root,
+                mapping_path=mapping_path,
+                process_environment=process_environment,
+            )
+            server_url = getattr(self.multica.config, "server_url", None)
+            if not isinstance(server_url, str) or not server_url.strip():
+                raise ContextVerificationError("Multica issue URL is unavailable")
+            result = publish_merge_request(
+                credential=credential,
+                project_path=selected_project,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                title=title,
+                description=description,
+                issue_url=server_url.rstrip("/") + f"/issues/{context.issue_id}",
+                assignee=assignee,
+            )
+            run_context.complete_action(publish_step.step_id)
+            return result
+
+        executable_steps = (
+            prepared_steps if git_resource is not None else (context_step, publish_step)
+        )
+        return Command.create(
+            ExecutionPlan(
+                steps=tuple(step.public_projection() for step in executable_steps)
+            ).with_fingerprint(),
+            operation,
+            executable_steps,
         )
 
     def publish_merge_request(
@@ -798,10 +869,43 @@ def _gitlab_host(value: str) -> str:
 
 
 def _https_host(value: str) -> str | None:
+    raw = value.strip()
+    candidate = raw if "://" in raw else f"https://{raw}"
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
     try:
-        return _gitlab_host(value)
+        hostname = parsed.hostname
+        port = parsed.port
     except ValueError:
         return None
+    if hostname is None or "*" in hostname or not hostname.strip():
+        return None
+    authority = hostname.casefold()
+    if port is not None:
+        authority = f"{authority}:{port}"
+    return authority
+
+
+def _current_branch(git_resource: object) -> str:
+    passthrough = getattr(git_resource, "passthrough", None)
+    if not callable(passthrough):
+        raise ContextVerificationError("Git branch inspection is unavailable")
+    command = passthrough(("symbolic-ref", "--quiet", "--short", "HEAD"))
+    result = command.run() if callable(getattr(command, "run", None)) else command
+    if getattr(result, "returncode", 1) != 0:
+        raise ContextVerificationError("current Git branch is unavailable")
+    branch = getattr(result, "stdout", "")
+    if not isinstance(branch, str) or not branch.strip():
+        raise ContextVerificationError("current Git branch is unavailable")
+    return branch.strip()
 
 
 def _remote_host_for_operation(args: Sequence[str], repository_url: str) -> str | None:
