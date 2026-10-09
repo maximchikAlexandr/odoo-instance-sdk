@@ -116,15 +116,15 @@ def matrix_row(case: Any) -> str:
 _MATRIX_PREFIX = "# Public CLI traceability matrix\n\n"
 CANONICAL_INVENTORY_BASE = "af9e1b3e8d127145b9488f11ec79519f9442db46"
 ORIGINAL_AUDIT_BASE = "0ff164636617c03a51277055af45cef009277368"
-CANONICAL_LEAF_COUNT = 62
+CANONICAL_LEAF_COUNT = 63
 _MATRIX_PROVENANCE = (
     "This is a reviewed projection of "
-    "`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at "
+    "`odoo_instance_sdk.operations::PUBLIC_LEAF_CASES` at "
     f"canonical-inventory base `{CANONICAL_INVENTORY_BASE}`; the original "
     f"full-change audit base remains `{ORIGINAL_AUDIT_BASE}`. It is not a source "
     "registry. Implementation adds the disposition and evidence fields to each "
     "existing `PublicLeafCase`; the generator SHALL emit this exact provenance, "
-    "rewrite the complete 62-row table, and fail the check on any byte drift. "
+    "rewrite the complete 63-row table, and fail the check on any byte drift. "
     "`smoke` means covered in PR smoke and full; `critical` means the full "
     "critical path; `focused` means a full-tier case around the critical path; "
     "`not-applicable` requires the recorded reason."

@@ -107,6 +107,7 @@ from odoo_instance_sdk.models import (
     StartConfig,
     StorageFootprint,
 )
+from odoo_instance_sdk.operations import PUBLIC_LEAF_CASES as PRODUCTION_LEAF_CASES
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -161,6 +162,8 @@ class PublicLeafCase:
 
     @property
     def is_bounded(self) -> bool:
+        if self.path == ("contract", "export"):
+            return False
         return self.classification in {
             "bounded-read-only",
             "process-previewable-read-only",
@@ -847,7 +850,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("contract", "export"),
         ("contract", "export", "--format", "json"),
-        "native-passthrough",
+        "bounded-read-only",
         False,
         cli_only_reason="metadata-only contract export does not use a project SDK primitive",
         exception_reason="metadata-only contract export has its own JSON output boundary",
@@ -856,7 +859,20 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
 )
 
-PUBLIC_LEAF_CASES = tuple(_PUBLIC_LEAF_DATA)
+PUBLIC_LEAF_TEST_CASES = tuple(_PUBLIC_LEAF_DATA)
+
+
+def test_cli_fixture_covers_production_inventory_exactly() -> None:
+    assert {case.path for case in PUBLIC_LEAF_TEST_CASES} == {
+        case.path for case in PRODUCTION_LEAF_CASES
+    }
+    assert {
+        (case.path, case.classification, case.requires_dry_run, case.sdk_primitive)
+        for case in PUBLIC_LEAF_TEST_CASES
+    } == {
+        (case.path, case.classification, case.requires_dry_run, case.sdk_primitive)
+        for case in PRODUCTION_LEAF_CASES
+    }
 
 
 def _matrix_environment() -> SimpleNamespace:
@@ -889,11 +905,11 @@ def _cli_leaf_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> set
     }
 
 
-validate_leaf_metadata(PUBLIC_LEAF_CASES, registered_paths=_cli_leaf_paths(cli))
+validate_leaf_metadata(PUBLIC_LEAF_TEST_CASES, registered_paths=_cli_leaf_paths(cli))
 
 
 def test_public_leaf_inventory_is_complete_and_classified() -> None:
-    paths = [case.path for case in PUBLIC_LEAF_CASES]
+    paths = [case.path for case in PUBLIC_LEAF_TEST_CASES]
     assert len(paths) == len(set(paths))
     assert set(paths) == _cli_leaf_paths(cli)
     valid_classes = {
@@ -904,17 +920,19 @@ def test_public_leaf_inventory_is_complete_and_classified() -> None:
         "rich-live",
         "jsonl-stream",
     }
-    assert all(case.classification in valid_classes for case in PUBLIC_LEAF_CASES)
-    validate_leaf_metadata(PUBLIC_LEAF_CASES)
-    assert all(variant in valid_classes for case in PUBLIC_LEAF_CASES for variant in case.variants)
+    assert all(case.classification in valid_classes for case in PUBLIC_LEAF_TEST_CASES)
+    validate_leaf_metadata(PUBLIC_LEAF_TEST_CASES)
+    assert all(
+        variant in valid_classes for case in PUBLIC_LEAF_TEST_CASES for variant in case.variants
+    )
     assert all(
         case.exception_reason is not None
-        for case in PUBLIC_LEAF_CASES
+        for case in PUBLIC_LEAF_TEST_CASES
         if not case.is_bounded and not case.requires_dry_run
     )
     assert all(
         case.requires_dry_run or case.exception_reason is not None
-        for case in PUBLIC_LEAF_CASES
+        for case in PUBLIC_LEAF_TEST_CASES
         if case.classification in {"mutating-or-spawning", "process-previewable-read-only"}
     )
 
@@ -934,7 +952,7 @@ def test_sdk_first_leaves_do_not_call_parallel_internal_domain_builders() -> Non
 
     repo_root = Path(__file__).parents[2]
     commands_root = repo_root / "src" / "odoo_instance_sdk" / "commands"
-    sdk_paths = {case.path for case in PUBLIC_LEAF_CASES if case.sdk_primitive}
+    sdk_paths = {case.path for case in PUBLIC_LEAF_TEST_CASES if case.sdk_primitive}
     violations: list[str] = []
     for path in sorted(commands_root.rglob("*.py")):
         module = ast.parse(path.read_text(encoding="utf-8"))
@@ -987,7 +1005,7 @@ def test_sdk_primitive_recorded_in_leaf_callback() -> None:
     from pathlib import Path
 
     missing: list[str] = []
-    for case in PUBLIC_LEAF_CASES:
+    for case in PUBLIC_LEAF_TEST_CASES:
         if not case.sdk_primitive:
             continue
         callback = _command(case.path).callback
@@ -1003,7 +1021,7 @@ def test_sdk_primitive_recorded_in_leaf_callback() -> None:
 def test_bounded_catalogue_list_inventory_is_explicit() -> None:
     assert {
         case.path
-        for case in PUBLIC_LEAF_CASES
+        for case in PUBLIC_LEAF_TEST_CASES
         if case.path
         in {
             ("backup", "ls"),
@@ -1084,7 +1102,7 @@ _PREVIEW_HELPER_INVOCATIONS: dict[
     "case",
     [
         pytest.param(case, id=".".join(case.path))
-        for case in PUBLIC_LEAF_CASES
+        for case in PUBLIC_LEAF_TEST_CASES
         if case.requires_dry_run and case.path in _PREVIEW_HELPER_INVOCATIONS
     ],
 )
@@ -2250,7 +2268,7 @@ def _decode_document(document: str, mode: str) -> object:
 
 @pytest.mark.parametrize(
     "case",
-    [case for case in PUBLIC_LEAF_CASES if case.is_bounded],
+    [case for case in PUBLIC_LEAF_TEST_CASES if case.is_bounded],
     ids=lambda case: ".".join(case.path),
 )
 def test_public_cli_leaf_matrix_has_json_toon_parity(
@@ -2446,7 +2464,7 @@ def _invoke_rich_leaf(
 
 @pytest.mark.parametrize(
     "case",
-    [case for case in PUBLIC_LEAF_CASES if case.is_bounded],
+    [case for case in PUBLIC_LEAF_TEST_CASES if case.is_bounded],
     ids=lambda case: ".".join(case.path),
 )
 def test_public_cli_leaf_rich_transport_is_safe_and_deterministic(
@@ -2465,7 +2483,7 @@ def test_public_cli_leaf_rich_transport_is_safe_and_deterministic(
 
 @pytest.mark.parametrize(
     "case",
-    [case for case in PUBLIC_LEAF_CASES if case.path in {("env", "show"), ("env", "ls")}],
+    [case for case in PUBLIC_LEAF_TEST_CASES if case.path in {("env", "show"), ("env", "ls")}],
     ids=lambda case: ".".join(case.path),
 )
 def test_public_cli_leaf_rich_environment_expectations(
@@ -2485,7 +2503,7 @@ def test_public_cli_leaf_rich_environment_expectations(
 def test_public_cli_leaf_rich_scalar_path_remains_unwrapped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    case = next(case for case in PUBLIC_LEAF_CASES if case.path == ("env", "path"))
+    case = next(case for case in PUBLIC_LEAF_TEST_CASES if case.path == ("env", "path"))
     invoked, _execution_calls = _invoke_rich_leaf(case, monkeypatch, tmp_path)
 
     assert invoked.exit_code == 0, invoked.output
@@ -2496,7 +2514,7 @@ def test_public_cli_leaf_rich_scalar_path_remains_unwrapped(
     "case",
     [
         case
-        for case in PUBLIC_LEAF_CASES
+        for case in PUBLIC_LEAF_TEST_CASES
         if case.is_bounded and case.requires_dry_run and case.path != ("module", "install-order")
     ],
     ids=lambda case: ".".join(case.path),
@@ -2790,7 +2808,7 @@ def _option_names(command: click.Command) -> set[str]:
 
 
 def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
-    for case in PUBLIC_LEAF_CASES:
+    for case in PUBLIC_LEAF_TEST_CASES:
         if not case.is_bounded:
             continue
         path = case.path

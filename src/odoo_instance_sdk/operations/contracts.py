@@ -48,6 +48,41 @@ class OperationErrorDetails(msgspec.Struct, frozen=True, forbid_unknown_fields=T
     message: str
 
 
+class WireNestedValue(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Representative nested value used to pin the document wire shape."""
+
+    label: str
+    enabled: bool | None = None
+
+
+class WireCreateValue(msgspec.Struct, frozen=True, tag="create"):
+    name: str
+    count: int = 0
+
+
+class WireDeleteValue(msgspec.Struct, frozen=True, tag="delete"):
+    name: str
+
+
+class WireOperationDocument(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Nested, tagged, defaulted, nullable and alias-capable wire fixture."""
+
+    nested: WireNestedValue
+    action: WireCreateValue | WireDeleteValue
+    alias: str | None = None
+
+
+def _concrete_model(name: str, base: type[msgspec.Struct]) -> type[msgspec.Struct]:
+    """Create a named wire type without importing an operation domain.
+
+    The built-in inventory is metadata-only, but its public schema still needs
+    finite operation references.  Subclassing the common envelope preserves
+    the stable selector/status fields while preventing every operation from
+    advertising the generic base type.
+    """
+    return type(name, (base,), {"__module__": __name__})
+
+
 @dataclass(frozen=True, slots=True)
 class OperationParameter:
     name: str
@@ -105,6 +140,7 @@ class OperationBinding:
     descriptor: OperationDescriptor
     sdk_primitive: str | None = None
     factory: OperationFactory | None = None
+    click_path: tuple[str, ...] | None = None
 
     @property
     def operation_id(self) -> str:
@@ -159,6 +195,7 @@ _ALIASES: dict[tuple[str, ...], tuple[tuple[str, ...], ...]] = {
     ("postgres", "ps"): (("postgres", "status"),),
     ("resource", "ls"): (("resource", "list"),),
     ("module", "ls"): (("module", "list"),),
+    ("remote", "ls"): (("remote", "list"),),
 }
 
 
@@ -257,6 +294,7 @@ _LEAF_ROWS: tuple[tuple[tuple[str, ...], str, bool, str | None], ...] = (
     (("bug-report", "init"), "mutating-or-spawning", True, "bug_report_init_command"),
     (("bug-report", "submit"), "mutating-or-spawning", True, "bug_report_submit_command"),
     (("update",), "mutating-or-spawning", True, "update_command"),
+    (("contract", "export"), "bounded-read-only", False, None),
 )
 
 
@@ -277,26 +315,53 @@ def _operation_id(path: Sequence[str]) -> str:
     return "odcli." + ".".join(path).replace("-", "_")
 
 
+def _operation_parameters(case: PublicLeafCase) -> tuple[OperationParameter, ...]:
+    parameters = [
+        OperationParameter("project", "string|null", default=None),
+        OperationParameter("environment", "string|null", default=None),
+    ]
+    if case.requires_dry_run:
+        parameters.append(OperationParameter("dry_run", "boolean", default=True))
+    return tuple(parameters)
+
+
+def _operation_models(case: PublicLeafCase) -> tuple[type[msgspec.Struct], ...]:
+    stem = "".join(part.replace("-", " ").title().replace(" ", "") for part in case.path)
+    return (
+        _concrete_model(f"{stem}Request", OperationRequest),
+        _concrete_model(f"{stem}Result", OperationResult),
+        _concrete_model(f"{stem}Error", OperationErrorDetails),
+    )
+
+
 def builtin_bindings() -> tuple[OperationBinding, ...]:
     """Build the data-only built-in bindings in canonical inventory order."""
-    return tuple(
-        OperationBinding(
-            descriptor=OperationDescriptor(
-                operation_id=_operation_id(case.path),
-                canonical_path=case.path,
-                aliases=case.aliases,
-                transport={
-                    "native-passthrough": OperationTransport.NATIVE_TTY,
-                    "jsonl-stream": OperationTransport.JSONL_STREAM,
-                    "rich-live": OperationTransport.SESSION,
-                }.get(case.classification, OperationTransport.DOCUMENT),
-                preview=case.requires_dry_run,
-                approval_required=case.classification == "mutating-or-spawning",
-            ),
-            sdk_primitive=case.sdk_primitive or "cli." + ".".join(case.path),
+    rows = []
+    for case in PUBLIC_LEAF_CASES:
+        request_type, result_type, error_type = _operation_models(case)
+        rows.append(
+            OperationBinding(
+                descriptor=OperationDescriptor(
+                    operation_id=_operation_id(case.path),
+                    canonical_path=case.path,
+                    aliases=case.aliases,
+                    request_type=request_type,
+                    result_type=result_type,
+                    error_types=(error_type,),
+                    parameters=_operation_parameters(case),
+                    transport={
+                        "native-passthrough": OperationTransport.NATIVE_TTY,
+                        "jsonl-stream": OperationTransport.JSONL_STREAM,
+                        "rich-live": OperationTransport.SESSION,
+                    }.get(case.classification, OperationTransport.DOCUMENT),
+                    preview=case.requires_dry_run,
+                    approval_required=case.classification == "mutating-or-spawning",
+                ),
+                sdk_primitive=case.sdk_primitive,
+                click_path=case.path if case.sdk_primitive is None else None,
+            )
         )
-        for case in PUBLIC_LEAF_CASES
-    )
+    return tuple(rows)
 
 
 class OperationRegistry:
@@ -330,8 +395,52 @@ class OperationRegistry:
             raise ValueError(f"leaf inventory drift: missing={missing!r}, extra={extra!r}")
 
     def validate_click_tree(self, command: Any) -> None:
-        """Validate the composed Click leaf set without importing callbacks here."""
-        self.validate_paths(click_leaf_paths(command))
+        """Validate canonical leaves and aliases in the composed Click tree."""
+        leaves = click_leaf_commands(command)
+        seen: set[str] = set()
+        for path, leaf in leaves:
+            try:
+                binding = self.for_path(path)
+            except KeyError as exc:
+                raise ValueError(f"unknown Click leaf: {' '.join(path)}") from exc
+            seen.add(binding.operation_id)
+            aliases = getattr(leaf, "_odcli_aliases", None)
+            if aliases is None:
+                aliases = getattr(leaf, "aliases", ())
+            if aliases is None:
+                aliases = ()
+            command_aliases = tuple((*path[:-1], alias) for alias in aliases)
+            composed_paths = {path, *command_aliases}
+            declared_paths = {binding.canonical_path, *binding.aliases}
+            if composed_paths != declared_paths:
+                raise ValueError(
+                    f"alias inventory drift for {' '.join(binding.canonical_path)}: "
+                    f"expected={sorted(declared_paths)!r}, actual={sorted(composed_paths)!r}"
+                )
+            if getattr(leaf, "callback", None) is None:
+                raise ValueError(f"leaf has no callback: {' '.join(path)}")
+        expected = {binding.operation_id for binding in self.bindings}
+        if seen != expected:
+            missing = sorted(expected - seen)
+            raise ValueError(f"Click operation inventory drift: missing={missing!r}")
+        self.validate_sdk_primitives()
+
+    def validate_sdk_primitives(self) -> None:
+        """Reject stale SDK references and accidental CLI-only placeholders."""
+        expected = {case.path: case for case in PUBLIC_LEAF_CASES}
+        for binding in self.bindings:
+            case = expected.get(binding.canonical_path)
+            if case is None:
+                continue
+            if case.sdk_primitive != binding.sdk_primitive:
+                raise ValueError(
+                    f"SDK primitive drift for {' '.join(binding.canonical_path)}: "
+                    f"expected={case.sdk_primitive!r}, actual={binding.sdk_primitive!r}"
+                )
+            if case.sdk_primitive is None and binding.click_path != case.path:
+                raise ValueError(
+                    f"CLI-only binding is not tied to its leaf: {binding.operation_id}"
+                )
 
     def bundle(self) -> dict[str, Any]:
         return contract_bundle(self.bindings)
@@ -345,7 +454,7 @@ def _validate_bindings(bindings: tuple[OperationBinding, ...]) -> None:
         if descriptor.operation_id in ids:
             raise ValueError(f"duplicate operation id: {descriptor.operation_id}")
         ids.add(descriptor.operation_id)
-        if not binding.sdk_primitive and binding.factory is None:
+        if not binding.sdk_primitive and binding.factory is None and binding.click_path is None:
             raise ValueError(f"incomplete binding: {descriptor.operation_id} has no implementation")
         for path in (descriptor.canonical_path, *descriptor.aliases):
             owner = paths.get(path)
@@ -363,6 +472,20 @@ def click_leaf_paths(command: Any, prefix: tuple[str, ...] = ()) -> tuple[tuple[
         leaf
         for name, child in commands.items()
         for leaf in click_leaf_paths(child, (*prefix, str(name)))
+    )
+
+
+def click_leaf_commands(
+    command: Any, prefix: tuple[str, ...] = ()
+) -> tuple[tuple[tuple[str, ...], Any], ...]:
+    """Return canonical leaves with their composed Click command objects."""
+    commands = getattr(command, "commands", None)
+    if not isinstance(commands, Mapping):
+        return ((prefix, command),)
+    return tuple(
+        leaf
+        for name, child in commands.items()
+        for leaf in click_leaf_commands(child, (*prefix, str(name)))
     )
 
 
@@ -394,9 +517,14 @@ def validate_public_inventory(
     return rows
 
 
-def build_registry(bindings: Iterable[OperationBinding] | None = None) -> OperationRegistry:
+def build_registry(
+    bindings: Iterable[OperationBinding] | None = None,
+    providers: Iterable[Any] = (),
+) -> OperationRegistry:
     """Return the validated core registry without importing provider domains."""
-    rows = builtin_bindings() if bindings is None else tuple(bindings)
+    rows = list(builtin_bindings() if bindings is None else tuple(bindings))
+    for provider in providers:
+        rows.extend(provider_bindings(provider))
     return OperationRegistry(rows)
 
 
@@ -439,9 +567,14 @@ def wire_schema(model: type[msgspec.Struct]) -> dict[str, Any]:
 
 
 def assert_compatible_bundle(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
-    """Reject removals or schema changes unless the contract version advances."""
+    """Reject any public descriptor/schema drift unless the version advances."""
     if previous.get("contract_version") != current.get("contract_version"):
         return
+    for key in ("entry_point_group", "envelope"):
+        if previous.get(key) != current.get(key):
+            raise ValueError(f"breaking contract change in bundle: {key}")
+    if previous.get("schemas") != current.get("schemas"):
+        raise ValueError("breaking contract change in bundle: schemas")
     old_operations = {item["id"]: item for item in previous.get("operations", ())}
     new_operations = {item["id"]: item for item in current.get("operations", ())}
     removed = sorted(set(old_operations) - set(new_operations))
@@ -450,7 +583,8 @@ def assert_compatible_bundle(previous: Mapping[str, Any], current: Mapping[str, 
     for operation_id in sorted(old_operations):
         old = old_operations[operation_id]
         new = new_operations[operation_id]
-        for key in ("request_schema", "result_schema", "error_schemas", "transport"):
+        keys = set(old) | set(new)
+        for key in sorted(keys):
             if old.get(key) != new.get(key):
                 raise ValueError(f"breaking contract change in {operation_id}: {key}")
 
@@ -467,6 +601,10 @@ def contract_bundle(bindings: Iterable[OperationBinding] | None = None) -> dict[
         "OperationRequest": OperationRequest,
         "OperationResult": OperationResult,
         "OperationErrorDetails": OperationErrorDetails,
+        "WireCreateValue": WireCreateValue,
+        "WireDeleteValue": WireDeleteValue,
+        "WireNestedValue": WireNestedValue,
+        "WireOperationDocument": WireOperationDocument,
     }
     from odoo_instance_sdk.models.deps import DepsMissingImport, DepsVerifyResult
 
@@ -514,12 +652,21 @@ def contract_bundle(bindings: Iterable[OperationBinding] | None = None) -> dict[
                 "cancellation": descriptor.cancellation,
                 "exit_mapping": descriptor.exit_mapping,
                 "domain_status_field": descriptor.domain_status_field,
+                "implementation": (
+                    {"kind": "sdk-primitive", "reference": binding.sdk_primitive}
+                    if binding.sdk_primitive is not None
+                    else {"kind": "click-callback", "path": list(descriptor.canonical_path)}
+                ),
             }
         )
     return {
         "contract_version": CONTRACT_VERSION,
         "entry_point_group": ENTRY_POINT_GROUP,
-        "envelope": {"name": "OutputDocument", "schema_version": 1},
+        "envelope": {
+            "name": "OutputDocument",
+            "schema_version": 1,
+            "wire_fixture": "WireOperationDocument",
+        },
         "operations": operations,
         "schemas": schemas,
     }
@@ -550,10 +697,15 @@ __all__ = [
     "OperationResult",
     "OperationTransport",
     "PublicLeafCase",
+    "WireCreateValue",
+    "WireDeleteValue",
+    "WireNestedValue",
+    "WireOperationDocument",
     "assert_compatible_bundle",
     "assert_compatible_contract",
     "build_registry",
     "builtin_bindings",
+    "click_leaf_commands",
     "click_leaf_paths",
     "contract_bundle",
     "contract_bytes",
