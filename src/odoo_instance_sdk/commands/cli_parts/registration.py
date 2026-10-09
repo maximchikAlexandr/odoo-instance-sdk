@@ -19,6 +19,7 @@ from odoo_instance_sdk.commands.backup import (  # noqa: I001 -- keep command re
 from odoo_instance_sdk.commands.bug_report import bug_report_group
 from odoo_instance_sdk.commands.contract import contract_group
 from odoo_instance_sdk.commands.context import CliContext
+from odoo_instance_sdk.commands.operation import operation_group as _operation_group
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.output import (
     JsonObject,
@@ -615,6 +616,8 @@ def _ensure_callbacks_loaded() -> None:
 
 
 def _lazy_get_command(ctx: click.Context, name: str) -> click.Command | None:
+    if name == "operation":
+        return _operation_group
     if not ctx.resilient_parsing and (ctx.parent is not None or ctx.params or ctx._protected_args):
         _ensure_callbacks_loaded()
     return cast("click.Command | None", _original_get_command(ctx, name))
