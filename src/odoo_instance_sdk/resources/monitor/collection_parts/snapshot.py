@@ -26,6 +26,7 @@ from odoo_instance_sdk.internal.postgres_compose import (
     SubprocessComposeRunner,
     docker_available,
 )
+from odoo_instance_sdk.internal.publication_routes import PublicationRoute, read_owned_routes
 from odoo_instance_sdk.internal.storage_footprint import (
     DatabaseStorageInput,
     collect_storage_footprint,
@@ -43,6 +44,7 @@ from odoo_instance_sdk.models import (
     PortObservation,
     PostgresClusterState,
     ProjectSummary,
+    PublicationSnapshot,
     PythonEnvFootprint,
     RuntimeMetrics,
     RuntimeState,
@@ -97,6 +99,14 @@ class _SnapshotMixin:
     ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]:
         projects: list[ProjectSummary] = []
         environments: list[EnvironmentSnapshot] = []
+        try:
+            publication_routes = read_owned_routes()
+            publication_error: str | None = None
+        except Exception:
+            # Publication is an additive view.  A malformed or unavailable
+            # route file must not hide the canonical runtime snapshot.
+            publication_routes = ()
+            publication_error = "publication_state_unavailable"
         for plan in plans:
             project_runtime = None
             if plan.project_runtime is not None:
@@ -114,13 +124,66 @@ class _SnapshotMixin:
                     environment_count=len(plan.environments),
                     cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
                     runtime=project_runtime,
+                    publication=self._publication_snapshot(
+                        "project",
+                        plan.project_id,
+                        project_runtime,
+                        publication_routes,
+                        publication_error,
+                    ),
                 )
             )
             environments.extend(
-                self._collect_environment(item.row, plan, item.runtime, probe_results=probe_results)
+                self._collect_environment(
+                    item.row,
+                    plan,
+                    item.runtime,
+                    probe_results=probe_results,
+                    publication_routes=publication_routes,
+                    publication_error=publication_error,
+                )
                 for item in sorted(plan.environments, key=lambda item: str(item.row["id"]))
             )
         return tuple(projects), tuple(sorted(environments, key=lambda item: item.id))
+
+    @staticmethod
+    def _publication_snapshot(
+        owner_kind: Literal["project", "environment"],
+        owner_id: str,
+        runtime: RuntimeMetrics | None,
+        routes: tuple[PublicationRoute, ...],
+        error: str | None,
+    ) -> PublicationSnapshot:
+        if error is not None:
+            return PublicationSnapshot(state="error", reason=error)
+        route = next(
+            (
+                item
+                for item in routes
+                if item.owner_kind == owner_kind and item.owner_id == owner_id
+            ),
+            None,
+        )
+        if route is None:
+            return PublicationSnapshot(state="unpublished")
+        if runtime is None or runtime.state is RuntimeState.STOPPED:
+            reason = "runtime_stopped"
+        elif runtime.state is not RuntimeState.READY:
+            reason = "runtime_not_ready"
+        elif runtime.http_url != route.local_endpoint:
+            reason = "runtime_identity_changed"
+        else:
+            return PublicationSnapshot(
+                state="available",
+                external_url=route.external_url,
+                route_identity=route.route_identity,
+            )
+        return PublicationSnapshot(
+            state="backend_unavailable",
+            external_url=route.external_url,
+            reason=reason,
+            route_identity=route.route_identity,
+        )
 
     def _prune_caches(
         self,
@@ -336,6 +399,8 @@ class _SnapshotMixin:
         runtime_record: sqlite3.Row | None,
         *,
         probe_results: dict[str, ProcessResult] | None = None,
+        publication_routes: tuple[PublicationRoute, ...] = (),
+        publication_error: str | None = None,
     ) -> EnvironmentSnapshot:
         env_id = str(row["id"])
         db_mode = cast("Literal['shared', 'copy']", str(row["db_mode"]))
@@ -408,6 +473,13 @@ class _SnapshotMixin:
             git=git,
             storage=storage,
             pgadmin=pgadmin,
+            publication=self._publication_snapshot(
+                "environment",
+                env_id,
+                runtime,
+                publication_routes,
+                publication_error,
+            ),
         )
 
     @staticmethod

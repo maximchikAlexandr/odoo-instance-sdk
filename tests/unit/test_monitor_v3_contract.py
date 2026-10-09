@@ -31,7 +31,7 @@ from tests.unit.monitor_support import (
 )
 
 
-def test_pgadmin_http_models_are_public_frozen_and_unknown_field_forbidden() -> None:
+def test_pgadmin_http_models_are_public_exports_with_exact_fields() -> None:
     assert sdk.PgAdminEligibility is PgAdminEligibility
     assert sdk.PgAdminEligibilityState is PgAdminEligibilityState
     assert sdk.PgAdminOpenRequest is PgAdminOpenRequest
@@ -64,8 +64,11 @@ def test_pgadmin_http_models_are_public_frozen_and_unknown_field_forbidden() -> 
         "git",
         "storage",
         "pgadmin",
+        "publication",
     )
 
+
+def test_pgadmin_http_models_are_frozen_and_reject_unknown_fields() -> None:
     eligibility = PgAdminEligibility(state=PgAdminEligibilityState.ELIGIBLE)
     with pytest.raises(AttributeError):
         eligibility.state = PgAdminEligibilityState.CLUSTER_UNHEALTHY  # type: ignore[misc]
@@ -79,6 +82,8 @@ def test_pgadmin_http_models_are_public_frozen_and_unknown_field_forbidden() -> 
     with pytest.raises(TypeError):
         HttpError(code=HttpErrorCode.invalid_request, message="invalid", extra="rejected")  # type: ignore[call-arg]
 
+
+def test_pgadmin_http_models_round_trip_and_redact_secrets() -> None:
     assert (
         msgspec.json.decode(
             msgspec.json.encode(
@@ -94,9 +99,16 @@ def test_pgadmin_http_models_are_public_frozen_and_unknown_field_forbidden() -> 
         )
         == b'{"code":"invalid_request","message":"invalid request"}'
     )
+    assert "secret-environment" not in repr(PgAdminOpenRequest(environment_id="secret-environment"))
+    assert "password" not in repr(
+        PgAdminOpenResult(state=PgAdminOpenState.STARTED, url="http://user:password@127.0.0.1")
+    )
+    assert "secret diagnostic" not in repr(
+        HttpError(code=HttpErrorCode.pgadmin_unavailable, message="secret diagnostic")
+    )
 
 
-def test_pgadmin_enum_values_and_safe_reprs() -> None:
+def test_pgadmin_enum_values() -> None:
     assert [item.value for item in PgAdminEligibilityState] == [
         "eligible",
         "environment_not_ready",
@@ -113,14 +125,6 @@ def test_pgadmin_enum_values_and_safe_reprs() -> None:
         "database_not_found",
         "pgadmin_unavailable",
     ]
-
-    assert "secret-environment" not in repr(PgAdminOpenRequest(environment_id="secret-environment"))
-    assert "password" not in repr(
-        PgAdminOpenResult(state=PgAdminOpenState.STARTED, url="http://user:password@127.0.0.1")
-    )
-    assert "secret diagnostic" not in repr(
-        HttpError(code=HttpErrorCode.pgadmin_unavailable, message="secret diagnostic")
-    )
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,18 @@ from odoo_instance_sdk.models.postgres import PostgresServerInfo
 from odoo_instance_sdk.models.runtime import PgAdminEligibility, PortObservation
 
 
+class PublicationSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The route-backed external view of one local runtime."""
+
+    state: Literal["unpublished", "available", "backend_unavailable", "error"]
+    external_url: str | None = None
+    reason: str | None = None
+    route_identity: str | None = None
+
+
+_UNPUBLISHED = PublicationSnapshot(state="unpublished")
+
+
 class ClusterSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     mode: Literal["external", "compose"]
     owned: bool
@@ -73,6 +85,7 @@ class EnvironmentSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     git: GitActivity
     storage: StorageFootprint
     pgadmin: PgAdminEligibility
+    publication: PublicationSnapshot = _UNPUBLISHED
 
 
 class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -83,6 +96,7 @@ class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     environment_count: int
     cluster: ClusterSnapshot | None
     runtime: RuntimeMetrics | None
+    publication: PublicationSnapshot = _UNPUBLISHED
 
 
 class CheckoutClusterSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
