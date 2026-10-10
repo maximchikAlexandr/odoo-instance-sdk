@@ -9,6 +9,7 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 
+import odoo_instance_sdk.storage.catalog_migrate as catalog_migrate
 from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.applied_settings import (
@@ -19,8 +20,14 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from odoo_instance_sdk.storage.catalog_migrate import (
     CATALOG_REVISION,
     _alembic_config,
+    _assert_single_head,
+    _check_expressions,
     _ddl_fingerprint,
+    _generated_column_definitions,
     _historical_ddl_fingerprint,
+    _is_pre_project_ownership_schema,
+    _normalize_ddl_sql,
+    _repair_known_v16_catalog,
     assert_schema_metadata_matches_revision,
     catalog_revision,
     ensure_catalog_migrated,
@@ -151,6 +158,7 @@ def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
         row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")
     }
     assert "applied_settings_json" in environment_columns
+    assert "recovery_json" in environment_columns
     tables = {
         row[0] for row in catalog._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -178,6 +186,9 @@ def test_prior_catalog_revisions_upgrade_to_current_schema(
     conn = sqlite3.connect(str(db))
     try:
         _assert_current_revision(conn)
+        assert "recovery_json" in {
+            row[1] for row in conn.execute("PRAGMA table_info(environments)")
+        }
         backups = {row[1]: row for row in conn.execute("PRAGMA table_info(backups)")}
         assert backups["source_name"][3] == 0
         assert backups["pinned"][3] == 1
@@ -213,10 +224,28 @@ def test_historical_fingerprints_share_common_omissions_but_keep_version_differe
         assert "source_kind" not in {column[0] for column in legacy_by_name[table]}
     assert "launch_identity_json" not in {column[0] for column in v16_by_name["runtime"]}
     assert "launch_identity_json" not in {column[0] for column in legacy_by_name["runtime"]}
+    assert "recovery_json" not in {column[0] for column in v16_by_name["environments"]}
+    assert "recovery_json" not in {column[0] for column in legacy_by_name["environments"]}
     assert "state" not in {column[0] for column in v16_by_name["restores"]}
     assert "state" in {column[0] for column in legacy_by_name["restores"]}
     assert "environments_one_active_branch" not in {index[0] for index in v16_indexes}
     assert "environments_one_active_branch" in {index[0] for index in legacy_indexes}
+
+
+def test_ddl_parsers_fail_closed_on_quoted_and_unbalanced_sql() -> None:
+    assert _normalize_ddl_sql("CREATE TABLE x (name TEXT DEFAULT 'it''s')") == (
+        "CREATE TABLE x (name TEXT DEFAULT 'it''s')"
+    )
+    assert _normalize_ddl_sql("CREATE TABLE x (name TEXT DEFAULT 'unterminated") == (
+        "CREATE TABLE x (name TEXT DEFAULT 'unterminated"
+    )
+    assert _check_expressions(None) == ()
+    assert _check_expressions("CHECK") == ()
+    assert _check_expressions("CHECK (value > 0") == ()
+    assert _generated_column_definitions("value AS (left + (right)) STORED") == (
+        "AS(left +(right))STORED",
+    )
+    assert _generated_column_definitions("value AS (left + (right)") == ()
 
 
 def test_alpha_catalogue_is_backed_up_stamped_and_preserves_rows(tmp_path: Path) -> None:
@@ -446,6 +475,24 @@ def test_real_v16_catalogue_rejects_duplicate_active_branch(tmp_path: Path) -> N
     conn.close()
 
 
+def test_known_v16_ddl_mismatch_is_not_repaired(tmp_path: Path) -> None:
+    db = tmp_path / "catalog-v16-mismatch.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(V16_CATALOG_FIXTURE.read_text())
+    conn.close()
+    _rewrite_catalog_object_sql(
+        db,
+        object_type="table",
+        name="backups",
+        old="format IN ('zip', 'dump')",
+        new="format IN ('zip', 'tar')",
+    )
+    conn = sqlite3.connect(str(db))
+    assert not _repair_known_v16_catalog(conn)
+    assert catalog_revision(conn) is None
+    conn.close()
+
+
 def test_reopen_stamped_catalog_is_idempotent(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=db)
@@ -626,6 +673,81 @@ def test_known_catalogue_ddl_mutations_fail_before_stamp(
     assert _catalogue_state(conn) == before
     assert catalog_revision(conn) is None
     conn.close()
+
+
+def test_pre_project_schema_rejects_foreign_key_and_view_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tables: tuple[tuple[str, tuple[tuple[str, str, int], ...], frozenset[tuple[str, ...]]], ...] = (
+        (
+            "environments",
+            (
+                ("project_id", "TEXT", 1),
+                ("recovery_json", "TEXT", 1),
+                ("name", "TEXT", 1),
+            ),
+            frozenset(),
+        ),
+    )
+    foreign_keys: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...] = (
+        ("environment_events", ()),
+        ("environment_copy_journal", ()),
+        ("backups", ()),
+    )
+    expected: tuple[
+        tuple[tuple[str, tuple[tuple[str, str, int], ...], frozenset[tuple[str, ...]]], ...],
+        frozenset[str],
+        tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...],
+        bool,
+    ] = (tables, frozenset(), foreign_keys, True)
+    monkeypatch.setattr(catalog_migrate, "_reference_fingerprint", lambda: expected)
+
+    monkeypatch.setattr(
+        catalog_migrate,
+        "_schema_fingerprint",
+        lambda _conn: (tables, frozenset(), (("backups", ()),), False),
+    )
+    assert not _is_pre_project_ownership_schema(None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        catalog_migrate,
+        "_schema_fingerprint",
+        lambda _conn: (tables, frozenset(), foreign_keys, False),
+    )
+    assert not _is_pre_project_ownership_schema(None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        catalog_migrate,
+        "_schema_fingerprint",
+        lambda _conn: (
+            (("environments", (("name", "TEXT", 1),), frozenset()),),
+            frozenset(),
+            foreign_keys,
+            True,
+        ),
+    )
+    assert _is_pre_project_ownership_schema(None)  # type: ignore[arg-type]
+
+
+def test_catalogue_head_and_stamp_guards_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class NoHeads:
+        def get_heads(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr(ScriptDirectory, "from_config", lambda _config: NoHeads())
+    with pytest.raises(BackupCatalogError, match="exactly one Alembic head"):
+        _assert_single_head()
+
+    monkeypatch.setattr(catalog_migrate, "_assert_single_head", lambda: "wrong")
+    with pytest.raises(BackupCatalogError, match="does not match Alembic head"):
+        assert_schema_metadata_matches_revision()
+
+    monkeypatch.setattr(catalog_migrate, "_assert_single_head", lambda: CATALOG_REVISION)
+    monkeypatch.setattr(command, "upgrade", lambda _config, _revision: None)
+    monkeypatch.setattr(catalog_migrate, "verify_schema_equivalence", lambda _conn: None)
+    monkeypatch.setattr(catalog_migrate, "catalog_revision", lambda _conn: None)
+    with pytest.raises(BackupCatalogError, match="did not stamp revision"):
+        assert_schema_metadata_matches_revision()
 
 
 def test_foreign_keys_and_indexes_exist_after_fresh_install(tmp_path: Path) -> None:

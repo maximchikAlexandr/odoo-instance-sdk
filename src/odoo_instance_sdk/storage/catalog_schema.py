@@ -228,6 +228,7 @@ environments = Table(
     Column("last_used_at", Text),
     Column("removed_at", Text),
     Column("last_error", Text),
+    Column("recovery_json", Text),
     Column("project_id", Text, ForeignKey("projects.project_id")),
     Column("checkout_repository_root", Text),
     Column("checkout_git_common_dir", Text),
