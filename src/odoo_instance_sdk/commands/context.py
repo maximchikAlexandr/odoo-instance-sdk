@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -266,6 +266,106 @@ class ResolvedContext:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OperationContext:
+    """One invocation-scoped runtime snapshot for a machine operation.
+
+    Selectors and provenance are the only public projection.  Resolved SDK
+    objects are retained privately so a factory can reuse the ingress
+    resolution without opening another catalogue or rediscovering cwd state.
+    """
+
+    cwd: Path
+    project_selector: str | None = None
+    environment_selector: str | None = None
+    provenance: ContextProvenance = "cwd"
+    project_id: str | None = None
+    environment_id: str | None = None
+    environment_name: str | None = None
+    catalogue_owner: str | None = None
+    selected_interpreters: tuple[str, ...] = ()
+    package_set: tuple[str, ...] = ()
+    _resolved: ResolvedContext | None = field(default=None, repr=False, compare=False)
+
+    @classmethod
+    def from_resolved(
+        cls,
+        resolved: ResolvedContext,
+        *,
+        cwd: Path | None = None,
+        project_selector: str | None = None,
+        environment_selector: str | None = None,
+        selected_interpreters: tuple[str, ...] = (),
+        package_set: tuple[str, ...] = (),
+    ) -> OperationContext:
+        runtime = resolved.runtime
+        return cls(
+            cwd=(cwd or Path.cwd()).resolve(),
+            project_selector=project_selector,
+            environment_selector=environment_selector,
+            provenance=resolved.provenance,
+            project_id=runtime.project_id,
+            environment_id=runtime.environment_id,
+            environment_name=runtime.environment_name,
+            catalogue_owner=runtime.project_id,
+            selected_interpreters=selected_interpreters or (str(runtime.python_path),),
+            package_set=package_set,
+            _resolved=resolved,
+        )
+
+    @property
+    def resolved(self) -> ResolvedContext | None:
+        """Return the private ingress resolution for trusted factories."""
+
+        return self._resolved
+
+    @property
+    def runtime(self) -> RuntimeView:
+        if self._resolved is None:
+            raise RuntimeError("operation context has no resolved runtime")
+        return self._resolved.runtime
+
+    @property
+    def project(self) -> str | None:
+        return self.project_selector
+
+    @property
+    def environment(self) -> str | None:
+        return self.environment_selector
+
+    def public_projection(self) -> dict[str, str | tuple[str, ...] | None]:
+        """Return a secret-free, path-free machine envelope projection."""
+
+        return {
+            "project_selector": self.project_selector,
+            "environment_selector": self.environment_selector,
+            "provenance": self.provenance,
+            "project_id": self.project_id,
+            "environment_id": self.environment_id,
+            "environment_name": self.environment_name,
+            "catalogue_owner": self.catalogue_owner,
+            "selected_interpreters": tuple(Path(item).name for item in self.selected_interpreters),
+            "package_set": self.package_set,
+        }
+
+
+def capture_operation_context(
+    cli_context: CliContext,
+    *,
+    resolved: ResolvedContext | None = None,
+    cwd: Path | None = None,
+) -> OperationContext:
+    """Capture selectors and one resolved runtime at the operation boundary."""
+
+    selected = resolved or ready_instance(cli_context)
+    return OperationContext.from_resolved(
+        selected,
+        cwd=cwd,
+        project_selector=cli_context.project,
+        environment_selector=cli_context.env,
+    )
+
+
 pass_cli_context = click.make_pass_decorator(CliContext, ensure=True)
 
 
@@ -488,9 +588,11 @@ def __getattr__(name: str) -> type[OdooClient | OdooClientConfig]:
 __all__ = [
     "BaseProvenance",
     "CliContext",
+    "OperationContext",
     "OwnerKind",
     "ResolvedContext",
     "RuntimeView",
+    "capture_operation_context",
     "environment_provenance",
     "pass_cli_context",
     "project_provenance",

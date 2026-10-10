@@ -217,6 +217,117 @@ def _operation_id(path: Sequence[str]) -> str:
     return "odcli." + ".".join(path).replace("-", "_")
 
 
+def _builtin_factory(case: PublicLeafCase) -> OperationFactory | None:  # noqa: C901
+    """Create a lazy adapter for the existing SDK primitive seam.
+
+    The adapter imports no domain modules during registry construction.  It
+    only resolves the already-captured instance when a local invocation runs.
+    """
+
+    reference = case.sdk_primitive
+    if reference is None and case.path != ("contract", "export"):
+        return None
+
+    def factory(request: msgspec.Struct | None, context: object) -> object:  # noqa: C901
+        from odoo_instance_sdk.commands.context import OperationContext
+
+        if not isinstance(context, OperationContext):
+            raise TypeError("operation factory requires OperationContext")
+        values = msgspec.to_builtins(request) if isinstance(request, msgspec.Struct) else {}
+        if not isinstance(values, dict):
+            raise TypeError("operation request must project to an object")
+        if case.path == ("contract", "export"):
+            import hashlib
+
+            payload = contract_bytes()
+            return {
+                "contract_version": CONTRACT_VERSION,
+                "entry_point_group": ENTRY_POINT_GROUP,
+                "operation_count": len(PUBLIC_LEAF_CASES),
+                "bundle_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        resolved = context.resolved
+        if resolved is None:
+            raise RuntimeError("operation context has no resolved runtime")
+        instance = resolved.instance
+        if reference == "eval_expression_command":
+            from odoo_instance_sdk.internal.automation import eval_expression_command
+
+            return eval_expression_command(
+                instance,
+                str(values["expression"]),
+                commit=bool(values.get("commit", False)),
+            )
+        if reference == "exec_script_command":
+            from odoo_instance_sdk.internal.automation import exec_script_command
+
+            return exec_script_command(
+                instance,
+                str(values["script"]),
+                tuple(str(item) for item in values.get("script_args", [])),
+                commit=bool(values.get("commit", False)),
+            )
+        if reference == "list_modules_command":
+            from odoo_instance_sdk.internal.automation import list_modules_command
+
+            return list_modules_command(
+                instance,
+                tuple(str(item) for item in values.get("modules", [])),
+                state=values.get("state"),
+            )
+        if reference == "run_odoo_tests_command":
+            from odoo_instance_sdk.internal.automation import run_odoo_tests_command
+            from odoo_instance_sdk.models.command import OdooTestSpec
+
+            return run_odoo_tests_command(
+                instance,
+                OdooTestSpec(
+                    modules=tuple(str(item) for item in values.get("modules", [])),
+                    test_tags=str(values.get("test_tags", "/")),
+                    reload_tests=bool(values.get("reload_tests", False)),
+                    allow_empty=bool(values.get("allow_empty", False)),
+                ),
+                http_interface=context.runtime.http_interface,
+                http_port=context.runtime.http_port,
+            )
+        if reference == "verify_deps_command":
+            from odoo_instance_sdk.resources.deps import verify_deps_command
+
+            return verify_deps_command(
+                recorded_python=context.runtime.python_path,
+                worktree_root=context.runtime.root,
+            )
+        target: object | None = None
+        if reference is not None and reference.startswith("OdooInstance."):
+            target = instance
+        elif reference is not None and reference.startswith("DatabaseResource."):
+            target = instance.databases
+        elif reference is not None and reference.startswith("GitResource."):
+            target = instance.git
+        elif reference is not None and reference.startswith("ModuleResource."):
+            target = instance.modules
+        elif reference is not None and reference.startswith("PostgresCluster."):
+            target = getattr(instance, "_postgres_cluster", None)
+        if target is None or reference is None:
+            raise RuntimeError(f"operation {case.path!r} is not available for this context")
+        method = getattr(target, reference.rsplit(".", 1)[-1], None)
+        if not callable(method):
+            raise TypeError(f"SDK primitive is unavailable: {reference}")
+        values.pop("output_format", None)
+        values.pop("dry_run", None)
+        values.pop("yes", None)
+        values.pop("field_selection", None)
+        if case.path == ("db", "ls"):
+            return method(context.runtime.root, **values)
+        if case.path == ("module", "ls"):
+            return method(instance, **values)
+        if case.path in {("module", "info"), ("module", "where"), ("module", "deps")}:
+            return method(values.pop("module", None))
+        return method(**values)
+
+    return factory
+
+
 def builtin_bindings() -> tuple[OperationBinding, ...]:
     """Build the data-only built-in bindings in canonical inventory order."""
     rows = []
@@ -245,6 +356,7 @@ def builtin_bindings() -> tuple[OperationBinding, ...]:
                     approval_required=case.classification == "mutating-or-spawning",
                 ),
                 sdk_primitive=case.sdk_primitive,
+                factory=_builtin_factory(case),
                 click_path=case.path if case.sdk_primitive is None else None,
             )
         )
