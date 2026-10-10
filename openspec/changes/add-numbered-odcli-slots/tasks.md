@@ -1,10 +1,10 @@
 ## 1. Shared alternate-tool foundation
 
-- [ ] 1.1 Add validated numbered/hot-fix identities, deterministic state/tool/launcher/manifest/lock paths, and canonical-default trusted user-root selection without changing real `HOME` or project-local `.odcli`.
-- [ ] 1.2 Extract the existing fix-tool installation path into one package-owned pipeline for temporary uv staging, exact installed provenance, selector-capability probing, atomic publication, and numbered-state preservation on explicit replace.
-- [ ] 1.3 Extract one discriminated manifest, shim renderer, full-lifetime lifecycle lock, bounded inspect/list, and fail-closed removal path that deletes only a structurally verified idle identity plus its state.
-- [ ] 1.4 Reduce `fix_tool.py` to canonical-interpreter bootstrap and PR/reviewer/issue/merge/ancestry/branch policy that delegates install/inspect/remove to the shared module; update compatibility review to shared external resources only.
-- [ ] 1.5 Add shared-engine, packaging-bootstrap, and thin hot-fix-policy tests proving both launcher kinds use the same probe, renderer, lock, manifest, and cleanup implementation.
+- [x] 1.1 Add validated numbered/hot-fix identities, deterministic state/tool/launcher/manifest/lock paths, and canonical-default trusted user-root selection without changing real `HOME` or project-local `.odcli`.
+- [x] 1.2 Extract the existing fix-tool installation path into one package-owned pipeline for temporary uv staging, exact installed provenance, selector-capability probing, atomic publication, and numbered-state preservation on explicit replace.
+- [x] 1.3 Extract one discriminated manifest, shim renderer, full-lifetime lifecycle lock, bounded inspect/list, and fail-closed removal path that deletes only a structurally verified idle identity plus its state.
+- [x] 1.4 Reduce `fix_tool.py` to canonical-interpreter bootstrap and PR/reviewer/issue/merge/ancestry/branch policy that delegates install/inspect/remove to the shared module; update compatibility review to shared external resources only.
+- [x] 1.5 Add shared-engine, packaging-bootstrap, and thin hot-fix-policy tests proving both launcher kinds use the same probe, renderer, lock, manifest, and cleanup implementation.
 
 ## 2. Numbered command adapter
 

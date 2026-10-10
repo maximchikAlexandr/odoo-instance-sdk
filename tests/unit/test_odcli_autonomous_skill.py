@@ -75,19 +75,27 @@ def test_fix_tool_requires_exact_compatibility_and_retires_only_merged_fix(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     fix_tool = _module("fix_tool")
-    monkeypatch.setattr(fix_tool.Path, "home", lambda: tmp_path)
     review_path = tmp_path / "review.json"
     review_path.write_text(
         json.dumps({"session_id": "session-1", "review": {"sha": SHA, "compatible": True}}),
         encoding="utf-8",
     )
     commands: list[list[str]] = []
+    engine_calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **_kwargs: Any) -> str:
         commands.append(argv)
-        if argv[:3] == ["uv", "tool", "install"]:
-            (tmp_path / ".local/share/odcli-fix-tools/118/bin/odcli").touch()
         return ""
+
+    def fake_engine(argv: list[str]) -> dict[str, object] | list[object]:
+        engine_calls.append(argv)
+        if argv[0] == "install":
+            return {"launcher": str(tmp_path / ".local/bin/odcli-fix-118")}
+        if argv[0] == "list":
+            return [{"identifier": "118", "healthy": True}]
+        if argv[0] == "inspect":
+            return {"identifier": "118", "healthy": True, "pr": 119, "branch": None}
+        return {"removed": True}
 
     def fake_gh(argv: list[str]) -> dict[str, object]:
         if argv[:2] == ["pr", "view"]:
@@ -113,17 +121,13 @@ def test_fix_tool_requires_exact_compatibility_and_retires_only_merged_fix(
 
     monkeypatch.setattr(fix_tool, "_run", fake_run)
     monkeypatch.setattr(fix_tool, "_gh_json", fake_gh)
+    monkeypatch.setattr(fix_tool, "_engine_json", fake_engine)
     with pytest.raises(RuntimeError, match="compatibility"):
         fix_tool._install(118, "c" * 40, 119, review_path, None)
     fix_tool._install(118, SHA, 119, review_path, None)
-    shim = tmp_path / ".local/bin/odcli-fix-118"
-    assert "WARNING:" in shim.read_text(encoding="utf-8")
-    assert "shares ~/.odcli" in shim.read_text(encoding="utf-8")
-    compile(shim.read_text(encoding="utf-8"), str(shim), "exec")
+    assert engine_calls[0][:4] == ["install", "--kind", "hotfix", "--identifier"]
     fix_tool._reconcile("c" * 40)
-    assert not shim.exists()
-    assert not (tmp_path / ".odcli/fix-tools/118.json").exists()
-    assert ["uv", "tool", "uninstall", "odoo-instance-sdk"] in commands
+    assert ["remove", "--kind", "hotfix", "--identifier", "118"] in engine_calls
 
 
 def test_closed_issue_alone_does_not_retire_tool(monkeypatch: pytest.MonkeyPatch) -> None:

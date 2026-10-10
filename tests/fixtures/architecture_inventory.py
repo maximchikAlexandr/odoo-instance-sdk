@@ -32,6 +32,10 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/self_update.py", 802),
         ("src/odoo_instance_sdk/internal/self_update.py", 803),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 511),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 710),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 712),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 714),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 721),
     }
 )
 
@@ -72,6 +76,10 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
         "src/odoo_instance_sdk/resources/instance/identity.py",
         511,
     ): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 710): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 712): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 714): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 721): "alternate lifecycle JSON transport",
 }
 
 

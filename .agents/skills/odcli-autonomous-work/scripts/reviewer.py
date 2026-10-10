@@ -179,8 +179,9 @@ def _compatibility(sha: str, model: str | None, output: Path | None) -> None:
     instructions = (SKILL_DIR / "compatibility-prompt.md").read_text(encoding="utf-8")
     session, result = _run_codex(
         prompt=f"Review exact OdCLI fix commit {sha} against installed canonical OdCLI and "
-        "registered fix tools. Check all shared "
-        "~/.odcli formats, migrations, locks, and concurrent-use effects. Return compatible=true "
+        "registered fix tools. Check explicit-root selector confinement and all shared "
+        "project/Odoo/PostgreSQL/database/filestore/Docker/port resources. Catalogue formats "
+        "and migrations are isolated by selected roots. Return compatible=true "
         "only if this version can safely coexist with canonical OdCLI and other fix versions. "
         "Uncertainty means false. Do not modify anything.",
         instructions=instructions,
