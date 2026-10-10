@@ -286,7 +286,7 @@ def render_launcher(manifest: AlternateManifest) -> str:
         f"    os.environ[{USER_ROOT_ENV!r}] = {str(identity_value.state_root)!r}\n"
         f"    os.environ[{LAUNCHER_KIND_ENV!r}] = {identity_value.kind!r}\n"
         f"    os.environ[{LAUNCHER_ID_ENV!r}] = {identity_value.identifier!r}\n"
-        f"    {warning}"
+        f"{warning}"
         f"    raise SystemExit(subprocess.call([{str(manifest.executable)!r}, *sys.argv[1:]]))\n"
     )
 

@@ -12,6 +12,30 @@ from typing import Final
 
 SourceLocation = tuple[str, int]
 
+ALTERNATE_LIFECYCLE_MODULE: Final = "src/odoo_instance_sdk/internal/alternate_tool.py"
+ALTERNATE_POLICY_SURFACES: Final[frozenset[str]] = frozenset(
+    {
+        "src/odoo_instance_sdk/commands/slot.py",
+        ".agents/skills/odcli-autonomous-work/scripts/fix_tool.py",
+    }
+)
+ALTERNATE_LIFECYCLE_MECHANIC_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "UV_TOOL_DIR",
+        "UV_TOOL_BIN_DIR",
+        "direct_url.json",
+        "lifecycle.lock",
+        "render_launcher(",
+        "_provenance(",
+        "_probe(",
+        "lifecycle_lock(",
+        "fcntl.flock(",
+        "shutil.rmtree(",
+        "os.replace(",
+        "tempfile.",
+    }
+)
+
 
 DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 

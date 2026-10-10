@@ -22,7 +22,7 @@
 
 ## 4. Integrated acceptance and documentation
 
-- [ ] 4.1 Add acceptance with canonical `odcli`, two numbered revisions, and two hot-fix revisions using incompatible SQLite migrations concurrently; prove each process accesses only its selected root.
-- [ ] 4.2 Add migration/update/removal acceptance proving no alternate adopts legacy/canonical state, canonical update preserves alternates, and shared removal of one numbered or policy-eligible hot fix preserves every neighbor.
-- [ ] 4.3 Document the single shared lifecycle, thin numbered/hot-fix policy split, setup/use/revision/retirement, no-copy rule, old-style remediation, and non-isolated external resources.
-- [ ] 4.4 Add an architecture guard against duplicate uv/provenance/probe/shim/lock/remove mechanics and run focused, skill, packaging, output/inventory, Ruff, strict mypy, repository, diff, and strict OpenSpec gates.
+- [x] 4.1 Add acceptance with canonical `odcli`, two numbered revisions, and two hot-fix revisions using incompatible SQLite migrations concurrently; prove each process accesses only its selected root.
+- [x] 4.2 Add migration/update/removal acceptance proving no alternate adopts legacy/canonical state, canonical update preserves alternates, and shared removal of one numbered or policy-eligible hot fix preserves every neighbor.
+- [x] 4.3 Document the single shared lifecycle, thin numbered/hot-fix policy split, setup/use/revision/retirement, no-copy rule, old-style remediation, and non-isolated external resources.
+- [x] 4.4 Add an architecture guard against duplicate uv/provenance/probe/shim/lock/remove mechanics and run focused, skill, packaging, output/inventory, Ruff, strict mypy, repository, diff, and strict OpenSpec gates.

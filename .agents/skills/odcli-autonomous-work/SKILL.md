@@ -21,6 +21,10 @@ Use the installed `odcli` for the main task. Treat a broken operation **and** a 
 - Save the compatibility result with `scripts/reviewer.py --output <review-json> compatibility <full-sha>`, then install only that reviewed revision with `scripts/fix_tool.py install <issue-number> <full-sha> --pr <pr-number> --review <review-json>`. Its shared-engine shim warns on every invocation, selects the isolated root, and forwards arguments to that revision's `odcli`. Never confuse it with canonical `odcli` or install over the canonical uv tool.
 - For agent-driven updates use `scripts/fix_tool.py update`, which runs canonical `odcli update` and then reconciles isolated fix tools. Cleanup is allowed only when the linked GitHub PR is merged into the default branch and the installed revision contains that merge, and no local unmerged/checked-out branch would be lost. A closed issue alone is insufficient. If GitHub or ancestry cannot be checked, keep the fix tool and tell the user why. A direct user-run `odcli update` does not invoke this skill-only cleanup.
 
+The former `~/.odcli/fix-tools` registry is legacy state. The shared lifecycle
+does not adopt or rewrite it; use the reviewed install/reconcile workflow for a
+new isolated hot fix and treat old manifests as explicit remediation material.
+
 ## Boundaries
 
 The reviewer wrapper needs a locally authenticated `codex` executable; fix-tool management needs `uv` and authenticated `gh`. None is a new project runtime dependency. Use `--model` on the reviewer wrapper when a stronger locally available model is desired. It injects additional developer instructions, not a replacement system prompt. Review runs read-only; the wrapper alone writes the validated review verdict. Do not claim the separate session proves model independence. Do not edit canonical, numbered, or hot-fix roots except through OdCLI's supported operations and the shared lifecycle engine.

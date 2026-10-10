@@ -4,6 +4,7 @@ import contextlib
 import importlib
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -120,7 +121,7 @@ def test_remove_rejects_identity_swapped_manifest_after_lock(
         (identity_value.state_root / "sentinel").write_text("keep", encoding="utf-8")
 
     @contextlib.contextmanager
-    def swapping_lock(_identity_value: AlternateIdentity, *, exclusive: bool):
+    def swapping_lock(_identity_value: AlternateIdentity, *, exclusive: bool) -> Iterator[int]:
         assert exclusive
         original = numbered.manifest.read_bytes()
         numbered.manifest.write_bytes(neighboring.manifest.read_bytes())

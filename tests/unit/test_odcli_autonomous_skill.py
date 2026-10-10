@@ -140,10 +140,15 @@ def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
     odcli.write_text(f"#!{interpreter} -s\n", encoding="utf-8")
     monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(odcli))
     calls: list[list[str]] = []
+
+    def record_run(argv: list[str]) -> str:
+        calls.append(argv)
+        return json.dumps({"launcher": str(tmp_path / "launcher")})
+
     monkeypatch.setattr(
         fix_tool,
         "_run",
-        lambda argv: calls.append(argv) or json.dumps({"launcher": str(tmp_path / "launcher")}),
+        record_run,
     )
     review_path = tmp_path / "review.json"
     review_path.write_text(

@@ -533,6 +533,39 @@ Rich tables may shorten paths beneath `HOME`, but `odcli env path` always emits
 the absolute worktree path for safe shell navigation. Do not copy a displayed
 `~` shorthand into JSON or use a project-local `.odcli/` path as global state.
 
+### Exact-revision slots and hot fixes
+
+Canonical `odcli` manages exact-revision numbered launchers through the shared
+alternate-tool lifecycle:
+
+```bash
+odcli slot install 2 <40-character-lowercase-sha>
+odcli-2 env ls
+odcli slot install 2 <new-sha> --replace
+odcli slot list
+odcli slot remove 2
+```
+
+`odcli-N` and the reviewed `odcli-fix-<issue>` skill workflow use the same
+installation, provenance, selector probe, manifest, launcher lock, inspection,
+and fail-closed removal implementation. Their policy adapters differ only in
+numbered replacement versus hot-fix review, merge, ancestry, branch, and
+retirement gates. A fresh alternate root is absent until first use and never
+copies canonical, legacy, numbered, or neighboring state. The process `HOME`
+is unchanged, so Git, SSH, uv, and unrelated user configuration remain shared.
+
+Old-style records under `~/.odcli/fix-tools` are not adopted or migrated by
+the shared lifecycle. Keep them for explicit remediation or retire them through
+the reviewed skill workflow; do not edit manifests or state by hand. A failed
+provenance or selector check leaves no published launcher.
+
+User-root isolation covers OdCLI-managed SQLite catalogues, configuration,
+backups, environments, project runtime state, locks, bug reports, and
+migration/update journals only. Project checkouts, Odoo processes, PostgreSQL
+clusters and databases, filestores, Docker resources, and ports remain
+external; use separate project copies or explicitly disjoint resources before
+running revisions concurrently.
+
 ### Module, translation, and Git workflows
 
 Module discovery reads safe literal `__manifest__.py` files on demand; it does

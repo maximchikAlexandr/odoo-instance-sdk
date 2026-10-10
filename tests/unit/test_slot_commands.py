@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from click.testing import CliRunner
@@ -15,7 +15,7 @@ SHA = "a" * 40
 
 def _document(result: Any) -> dict[str, Any]:
     assert result.exit_code in (0, 1), result.output
-    return json.loads(result.stdout)
+    return cast("dict[str, Any]", json.loads(result.stdout))
 
 
 def test_slot_help_states_isolation_boundary() -> None:
