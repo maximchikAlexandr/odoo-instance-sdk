@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -20,8 +21,9 @@ from odoo_instance_sdk.internal.alternate_tool import (
     remove_alternate_tool,
     render_launcher,
 )
-from odoo_instance_sdk.internal.self_update import assert_direct_update_allowed
-from odoo_instance_sdk.internal.storage_migration import migrate_storage
+from odoo_instance_sdk.internal.self_update import assert_direct_update_allowed, update
+from odoo_instance_sdk.internal.storage_migration import legacy_storage_roots, migrate_storage
+from tests.unit.self_update_test_support import _prepare_update_case
 
 pytestmark = pytest.mark.integration
 
@@ -48,7 +50,7 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_revision(executable: Path, column: str) -> None:
+def _write_revision(executable: Path, column: str, *, run_startup_migration: bool = False) -> None:
     source = f"""#!{sys.executable}
 import os
 import sqlite3
@@ -56,9 +58,40 @@ import sys
 import time
 from pathlib import Path
 
+forbidden_roots = tuple(
+    os.path.abspath(value)
+    for value in os.environ["ODCLI_ACCEPTANCE_FORBIDDEN_ROOTS"].split(os.pathsep)
+    if value
+)
+
+def _path_values(value):
+    if isinstance(value, (str, bytes, os.PathLike)):
+        yield os.fsdecode(value)
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            yield from _path_values(item)
+
+def _under_root(value, root):
+    candidate = os.fsdecode(value)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(os.getcwd(), candidate)
+    candidate = os.path.normpath(candidate)
+    return candidate == root or candidate.startswith(root + os.sep)
+
+def _guard_cross_root_access(event, args):
+    for value in _path_values(args):
+        if any(_under_root(value, root) for root in forbidden_roots):
+            raise RuntimeError(f"cross-root access blocked by acceptance spy: {{event}} {{value}}")
+
+sys.addaudithook(_guard_cross_root_access)
 label = sys.argv[1]
 root = Path(os.environ.get("ODCLI_USER_ROOT", Path.home() / ".odcli")).resolve()
 root.mkdir(mode=0o700, parents=True, exist_ok=True)
+if {run_startup_migration!r}:
+    from odoo_instance_sdk.internal.storage_migration import ensure_storage_migrated
+
+    assert ensure_storage_migrated().state == "complete"
+(root / "spy-installed").write_text("audit", encoding="utf-8")
 barrier = Path(os.environ["ODCLI_ACCEPTANCE_BARRIER"])
 (root / "ready").write_text(label, encoding="utf-8")
 while not barrier.exists():
@@ -85,10 +118,15 @@ def _publish_fixture(
     sha: str,
     column: str,
     pr: int | None = None,
+    run_startup_migration: bool = False,
 ) -> AlternateManifest:
     identity_value.tool_root.mkdir(mode=0o700, parents=True)
     identity_value.tool_bin.mkdir(mode=0o700, parents=True)
-    _write_revision(identity_value.executable, column)
+    _write_revision(
+        identity_value.executable,
+        column,
+        run_startup_migration=run_startup_migration,
+    )
     initial = AlternateManifest(
         identity_value,
         sha,
@@ -130,15 +168,21 @@ def _assert_schema(root: Path, column: str, label: str) -> None:
 
 
 def test_incompatible_revision_migrations_are_confined_to_selected_roots(  # noqa: C901
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Run five incompatible catalogue schemas through the shared launcher boundary."""
     home = tmp_path / "home"
     home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     canonical = home / ".odcli"
     canonical.mkdir(mode=0o700)
     canonical_sentinel = canonical / "sentinel"
     canonical_sentinel.write_text("canonical", encoding="utf-8")
+    legacy = dict(legacy_storage_roots())
+    for root in legacy.values():
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (root / "sentinel").write_text("legacy", encoding="utf-8")
+    legacy_digests = {root: _tree_digest(root) for root in legacy.values()}
 
     identities = {
         "numbered-1": identity("numbered", "1", home=home),
@@ -159,7 +203,15 @@ def test_incompatible_revision_migrations_are_confined_to_selected_roots(  # noq
             sha=_SHA_BY_LABEL[label],
             column=columns[label],
             pr=int(label.rsplit("-", 1)[1]) if label.startswith("hotfix") else None,
+            run_startup_migration=True,
         )
+    state_roots = {"canonical": canonical}
+    state_roots.update(
+        {label: identity_value.state_root for label, identity_value in identities.items()}
+    )
+    for label, root in state_roots.items():
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (root / "sentinel").write_text(label, encoding="utf-8")
     canonical_executable = tmp_path / "canonical-odcli"
     _write_revision(canonical_executable, columns["canonical"])
 
@@ -170,23 +222,36 @@ def test_incompatible_revision_migrations_are_confined_to_selected_roots(  # noq
         environment.pop(name, None)
 
     processes: list[tuple[str, Path, subprocess.Popen[str]]] = []
+    all_forbidden = (*state_roots.values(), *legacy.values())
+    canonical_environment = dict(environment)
+    canonical_environment["ODCLI_ACCEPTANCE_FORBIDDEN_ROOTS"] = os.pathsep.join(
+        str(root) for root in all_forbidden if root != canonical
+    )
     canonical_process = subprocess.Popen(
         [str(canonical_executable), "canonical"],
         cwd=tmp_path,
-        env=environment,
+        env=canonical_environment,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     processes.append(("canonical", canonical, canonical_process))
     for label, identity_value in identities.items():
+        process_environment = dict(environment)
+        process_environment["ODCLI_ACCEPTANCE_FORBIDDEN_ROOTS"] = (
+            os.pathsep.join(str(root) for name, root in state_roots.items() if name != label)
+            + os.pathsep
+            + os.pathsep.join(str(root) for root in legacy.values())
+        )
         process = subprocess.Popen(
             [str(identity_value.launcher), label],
             cwd=tmp_path,
-            env=environment,
+            env=process_environment,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         processes.append((label, identity_value.state_root, process))
 
@@ -199,8 +264,7 @@ def test_incompatible_revision_migrations_are_confined_to_selected_roots(  # noq
         details: list[object] = []
         for label, _root, process in processes:
             if process.poll() is None:
-                details.append((label, "running"))
-                continue
+                os.killpg(process.pid, signal.SIGKILL)
             stdout, stderr = process.communicate(timeout=1)
             details.append((label, process.returncode, stdout, stderr))
         pytest.fail(f"revision processes did not reach the migration barrier: {details}")
@@ -217,14 +281,19 @@ def test_incompatible_revision_migrations_are_confined_to_selected_roots(  # noq
         _assert_schema(root, columns[label], label)
         assert (root / "access.log").read_text(encoding="utf-8") == label
         assert (root / "ready").read_text(encoding="utf-8") == label
+        assert (root / "spy-installed").read_text(encoding="utf-8") == "audit"
 
     assert canonical_sentinel.read_text(encoding="utf-8") == "canonical"
+    for root, digest in legacy_digests.items():
+        assert _tree_digest(root) == digest
     for label, root, _process in processes[1:]:
         assert root == identities[label].state_root
         assert {path.name for path in root.iterdir()} == {
             "access.log",
             "catalog.sqlite3",
             "ready",
+            "sentinel",
+            "spy-installed",
         }
 
 
@@ -233,6 +302,7 @@ def test_canonical_migration_update_guard_and_selective_removal_preserve_neighbo
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     canonical = home / ".odcli"
     canonical.mkdir(mode=0o700)
     (canonical / "sentinel").write_text("canonical", encoding="utf-8")
@@ -258,16 +328,24 @@ def test_canonical_migration_update_guard_and_selective_removal_preserve_neighbo
         root.mkdir(mode=0o700)
         (root / "sentinel").write_text(label, encoding="utf-8")
 
+    alternates = (numbered_one, numbered_two, hotfix_42, hotfix_43)
     preserved = {
-        numbered_two.state_root: _tree_digest(numbered_two.state_root),
-        hotfix_43.state_root: _tree_digest(hotfix_43.state_root),
-        numbered_two.manager_root: _tree_digest(numbered_two.manager_root),
-        hotfix_43.manager_root: _tree_digest(hotfix_43.manager_root),
+        root: _tree_digest(root)
+        for alternate in alternates
+        for root in (alternate.state_root, alternate.manager_root)
     }
 
     assert migrate_storage(home=home, legacy=legacy).state == "complete"
     assert (canonical / "sentinel").read_text(encoding="utf-8") == "canonical"
     assert (legacy["data"] / "sentinel").exists()
+    for root, digest in preserved.items():
+        assert _tree_digest(root) == digest
+
+    monkeypatch.delenv("ODCLI_USER_ROOT", raising=False)
+    monkeypatch.delenv("ODCLI_LAUNCHER_KIND", raising=False)
+    monkeypatch.delenv("ODCLI_LAUNCHER_ID", raising=False)
+    update_result = update(ref="main", executor=_prepare_update_case(monkeypatch, tmp_path, {}))
+    assert update_result.outcome == "updated"
     for root, digest in preserved.items():
         assert _tree_digest(root) == digest
 
@@ -284,5 +362,14 @@ def test_canonical_migration_update_guard_and_selective_removal_preserve_neighbo
         assert not removed.tool_root.exists()
         assert not removed.tool_bin.exists()
         assert not removed.state_root.exists()
-    for root, digest in preserved.items():
+    remaining = (numbered_two, hotfix_43)
+    for root, digest in {
+        root: digest
+        for root, digest in preserved.items()
+        if any(
+            root == candidate
+            for alternate in remaining
+            for candidate in (alternate.state_root, alternate.manager_root)
+        )
+    }.items():
         assert _tree_digest(root) == digest
