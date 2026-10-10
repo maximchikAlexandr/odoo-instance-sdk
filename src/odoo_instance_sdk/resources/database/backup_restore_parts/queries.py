@@ -58,6 +58,7 @@ if TYPE_CHECKING:
         RunContext,
     )
     from odoo_instance_sdk.internal.transport import OdooHttpClient
+    from odoo_instance_sdk.models import DatabaseObservation
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
@@ -82,6 +83,10 @@ class _QueriesMixin:
             steps: Sequence[PreparedStep] = (),
             optional_steps: Sequence[str] = (),
         ) -> Command[T]: ...
+        def _observe_impl(self) -> DatabaseObservation: ...
+        def _observe_exists_impl(
+            self, name: str, *, psql_step_id: str | None = None
+        ) -> DatabaseObservation: ...
         def _download_backup_part(
             self,
             database_name: str,
@@ -506,10 +511,12 @@ class _QueriesMixin:
         return tuple(str(name) for name in result)
 
     def list(self) -> tuple[Database, ...]:
-        db_names = self.names()
+        # Preserve the caller's active execution ledger for lifecycle owners;
+        # the public ``observe_command`` remains available to machine callers.
+        observation = self._observe_impl()
+        db_names = observation.names
 
         ck = self._cluster
-        catalog = self._instance._client.get_catalog()
 
         databases = []
         for name in db_names:
@@ -519,14 +526,6 @@ class _QueriesMixin:
             else:
                 backup = NoBackup()
             databases.append(Database(name=name, backup=backup))
-
-        if ck is not None:
-            db_host, db_port = ck
-            restored_names = catalog.distinct_restored_database_names(db_host, db_port)
-            current_set = set(db_names)
-            for rname in restored_names:
-                if rname not in current_set:
-                    catalog.record_database_dropped(db_host, db_port, rname)
 
         return tuple(databases)
 
@@ -571,43 +570,16 @@ class _QueriesMixin:
     def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool:
         from odoo_instance_sdk.internal.proc import active_context
 
-        ck = self._cluster
-        direct_result = self._planned_exists_result(name, psql_step_id)
-        if direct_result is not None:
-            return direct_result
-
-        try:
-            databases = self.list()
-        except DatabaseManagerUnavailableError:
-            if ck is not None and self._instance.config.db_user is not None:
-                db_host, db_port = ck
-                result = _verify_database_via_psql(
-                    db_host,
-                    db_port,
-                    self._instance.config.db_user,
-                    self._instance.config.db_password,
-                    name,
-                    step_id=psql_step_id,
-                )
-                if result is True:
-                    return True
-                if result is False:
-                    catalog = self._instance._client.get_catalog()
-                    catalog.record_database_dropped(db_host, db_port, name)
-                    return False
-            raise
-
-        found = any(db.name == name for db in databases)
+        observation = self._observe_exists_impl(name, psql_step_id=psql_step_id)
         if psql_step_id is not None:
             context = active_context()
-            if context is not None and context.planned(psql_step_id):
+            if (
+                context is not None
+                and context.planned(psql_step_id)
+                and not context.consumed(psql_step_id)
+            ):
                 context.skip(psql_step_id)
-        if not found and ck is not None:
-            db_host, db_port = ck
-            catalog = self._instance._client.get_catalog()
-            if catalog.has_tracked_database(db_host, db_port, name):
-                catalog.record_database_dropped(db_host, db_port, name)
-        return found
+        return name in observation.names
 
     def _planned_exists_result(self, name: str, step_id: str | None) -> bool | None:
         ck = self._cluster
@@ -627,10 +599,6 @@ class _QueriesMixin:
             raise DatabaseManagerUnavailableError(
                 f"PostgreSQL database existence probe failed for {name!r}"
             )
-        if not result:
-            catalog = self._instance._client.get_catalog()
-            if catalog.has_tracked_database(db_host, db_port, name):
-                catalog.record_database_dropped(db_host, db_port, name)
         return result
 
     def __getitem__(self, index: int) -> Database:
@@ -704,25 +672,19 @@ class _QueriesMixin:
                     name,
                     step_id=psql_step_id,
                 )
-                catalog = self._instance._client.get_catalog()
                 if exists_result is True:
                     backup = self._latest_backup_for(db_host, db_port, name)
                     return Database(name=name, backup=backup)
                 if exists_result is False:
-                    catalog.record_database_dropped(db_host, db_port, name)
                     return Database(name=name, backup=NoBackup())
                 return Database(name=name, backup=NoBackup())
             raise
 
         ck = self._cluster
-        catalog = self._instance._client.get_catalog()
 
         found = any(db.name == name for db in databases)
 
         if not found:
-            if ck is not None:
-                db_host, db_port = ck
-                catalog.record_database_dropped(db_host, db_port, name)
             return Database(name=name, backup=NoBackup())
 
         if ck is not None:

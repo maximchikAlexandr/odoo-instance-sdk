@@ -229,6 +229,43 @@ class _RestoreMixin:
             )
 
     @_translate_sqlite_error
+    def record_databases_dropped(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_names: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Record proven drops in one catalogue transaction.
+
+        The latest-event check retains the existing idempotency rule while the
+        surrounding transaction prevents a partial multi-name reconciliation.
+        """
+        host = normalize_db_host(db_host)
+        changed: list[str] = []
+        with self._conn:
+            for database_name in database_names:
+                row = self._conn.execute(
+                    "SELECT event_type FROM database_events "
+                    "WHERE db_host=? AND db_port=? AND database_name=? "
+                    "ORDER BY sequence DESC LIMIT 1",
+                    (host, db_port, database_name),
+                ).fetchone()
+                if row is None or row["event_type"] != "dropped":
+                    self._conn.execute(
+                        "INSERT INTO database_events "
+                        "(db_host, db_port, database_name, event_type, occurred_at, backup_id) "
+                        "VALUES (?, ?, ?, 'dropped', datetime('now'), NULL)",
+                        (host, db_port, database_name),
+                    )
+                    changed.append(database_name)
+                self._conn.execute(
+                    "DELETE FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
+                    "AND state='incomplete'",
+                    (host, db_port, database_name),
+                )
+        return tuple(changed)
+
+    @_translate_sqlite_error
     def _record_database_bootstrapped(
         self,
         db_host: str | None,

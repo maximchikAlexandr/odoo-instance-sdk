@@ -970,6 +970,26 @@ def test_record_database_dropped_idempotent(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_record_databases_dropped_is_atomic_and_idempotent(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+
+    assert catalog.record_databases_dropped("localhost", 5432, ("one", "two")) == (
+        "one",
+        "two",
+    )
+    assert catalog.record_databases_dropped("localhost", 5432, ("one", "two")) == ()
+    rows = catalog._conn.execute(
+        "SELECT database_name, event_type FROM database_events "
+        "WHERE db_host=? AND db_port=? ORDER BY database_name",
+        ("localhost", 5432),
+    ).fetchall()
+    assert [(row["database_name"], row["event_type"]) for row in rows] == [
+        ("one", "dropped"),
+        ("two", "dropped"),
+    ]
+    catalog.close()
+
+
 def test_record_database_dropped_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     catalog.record_database_dropped(None, 5432, "mydb")
