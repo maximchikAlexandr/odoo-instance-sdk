@@ -24,6 +24,24 @@ def test_ticket_settings_parse_and_serialize(tmp_path: Path) -> None:
     assert "jira_" not in config.to_manifest().lower()
 
 
+def test_ticket_base_url_accepts_tracker_path(tmp_path: Path) -> None:
+    config = ProjectConfig._from_mapping(
+        {"ticket_link_enabled": True, "ticket_base_url": "HTTPS://tracker.example/issues/"},
+        repository_root=tmp_path,
+    )
+
+    assert config.ticket_base_url == "https://tracker.example/issues"
+    assert 'ticket_base_url = "https://tracker.example/issues"' in config.to_manifest()
+
+
+@pytest.mark.parametrize(
+    "url", ["https://tracker.example/issues?token=x", "https://user@tracker.example/issues"]
+)
+def test_ticket_base_url_rejects_query_and_credentials(tmp_path: Path, url: str) -> None:
+    with pytest.raises(ConfigError, match=r"invalid project\.ticket_base_url"):
+        ProjectConfig._from_mapping({"ticket_base_url": url}, repository_root=tmp_path)
+
+
 def test_historical_ticket_settings_migrate_without_vendor_keys(tmp_path: Path) -> None:
     config = ProjectConfig._from_mapping(
         {"jira_enabled": True, "jira_base_url": "https://tracker.example/"},

@@ -9,7 +9,7 @@ from odoo_instance_sdk.exceptions import InvalidBaseUrlError, NonLocalInstanceEr
 _cleartext_warned: list[bool] = [False]
 
 
-def normalize_base_url(raw: str) -> str:
+def normalize_base_url(raw: str, *, allow_path: bool = False) -> str:
     parsed = urlsplit(raw)
     scheme = parsed.scheme.lower()
     if scheme not in ("http", "https"):
@@ -34,9 +34,9 @@ def normalize_base_url(raw: str) -> str:
     else:
         netloc = f"{hostname}:{port}" if port is not None else hostname
     path = parsed.path.rstrip("/")
-    if path not in ("", "/"):
+    if path not in ("", "/") and not allow_path:
         raise InvalidBaseUrlError(f"Path in base URL is not allowed: {path!r}")
-    return f"{scheme}://{netloc}"
+    return f"{scheme}://{netloc}{path if allow_path else ''}"
 
 
 def is_loopback_host(hostname: str) -> bool:
