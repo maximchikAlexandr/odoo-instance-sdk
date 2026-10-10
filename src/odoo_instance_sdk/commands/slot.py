@@ -15,7 +15,6 @@ else:
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
-    action_command,
     bordered_table,
     emit,
     fail,
@@ -25,8 +24,9 @@ from odoo_instance_sdk.commands.output import (
     run_or_preview,
     success_document,
 )
-from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.alternate_tool import (
+    SHA_RE,
     AlternateIdentity,
     AlternateManifest,
     AlternateToolError,
@@ -36,6 +36,7 @@ from odoo_instance_sdk.internal.alternate_tool import (
     remove_alternate_tool,
     selected_identity,
 )
+from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
 
 
 class _SlotNumberType(IntParamType):
@@ -60,6 +61,18 @@ def _canonical_only() -> None:
 
 def _slot_identity(number: str) -> AlternateIdentity:
     return identity("numbered", number, home=Path.home())
+
+
+def _validate_slot_sha(sha: str) -> None:
+    if not SHA_RE.fullmatch(sha):
+        raise ValueError("revision must be a complete lowercase SHA")
+
+
+def _slot_plan(command: Command[object]) -> JsonObject:
+    step = command.plan.steps[0]
+    if not isinstance(step, ActionStep) or not isinstance(step.details, dict):
+        raise AlternateToolError("slot command has no resolved operation plan")
+    return step.details
 
 
 def _rich_install(document: OutputDocument) -> str:
@@ -105,16 +118,50 @@ def slot_install_command(
     number: str, sha: str, *, replace: bool = False
 ) -> Command[AlternateManifest]:
     """Capture one immutable install snapshot for preview and execution."""
+    _validate_slot_sha(sha)
     _canonical_only()
     identity_value = _slot_identity(number)
-    return cast(
-        "Command[AlternateManifest]",
-        action_command(
-            "slot-install",
-            lambda: install_alternate_tool(identity_value, sha, replace=replace),
-            description=f"Install numbered-{number} at the requested revision",
-            mutating=True,
+    details: dict[str, str | bool] = {
+        "kind": identity_value.kind,
+        "identifier": identity_value.identifier,
+        "sha": sha,
+        "replace": replace,
+        "launcher": str(identity_value.launcher),
+        "state": str(identity_value.state_root),
+        "manager": str(identity_value.manager_root),
+        "tool": str(identity_value.tool_root),
+    }
+    action = PreparedAction(
+        step_id="slot-install",
+        action="slot-install",
+        description=f"Install numbered-{number} at the requested revision",
+        details=details,
+        mutating=True,
+    )
+
+    def install() -> AlternateManifest:
+        return install_alternate_tool(identity_value, sha, replace=replace)
+
+    def callback(context: RunContext[AlternateManifest]) -> AlternateManifest:
+        context.action("slot-install")
+        result = install()
+        context.complete_action("slot-install")
+        return result
+
+    return Command.create(
+        ExecutionPlan(
+            steps=(
+                ActionStep(
+                    step_id="slot-install",
+                    action="slot-install",
+                    description=f"Install numbered-{number} at the requested revision",
+                    details=cast("JsonValue", details),
+                    mutating=True,
+                ),
+            )
         ),
+        callback,
+        (action,),
     )
 
 
@@ -122,6 +169,15 @@ def slot_remove_command(number: str) -> Command[JsonObject]:
     """Capture one immutable removal snapshot for preview and execution."""
     _canonical_only()
     identity_value = _slot_identity(number)
+    details: dict[str, str | bool] = {
+        "kind": identity_value.kind,
+        "identifier": identity_value.identifier,
+        "removed": True,
+        "launcher": str(identity_value.launcher),
+        "state": str(identity_value.state_root),
+        "manager": str(identity_value.manager_root),
+        "tool": str(identity_value.tool_root),
+    }
 
     def remove() -> JsonObject:
         remove_alternate_tool(identity_value)
@@ -131,38 +187,35 @@ def slot_remove_command(number: str) -> Command[JsonObject]:
             "identifier": identity_value.identifier,
         }
 
-    return cast(
-        "Command[JsonObject]",
-        action_command(
-            "slot-remove",
-            remove,
-            description=f"Remove numbered-{number} after idle identity checks",
-            mutating=True,
-        ),
+    action = PreparedAction(
+        step_id="slot-remove",
+        action="slot-remove",
+        description=f"Remove numbered-{number} after idle identity checks",
+        details=details,
+        mutating=True,
     )
 
+    def callback(context: RunContext[JsonObject]) -> JsonObject:
+        context.action("slot-remove")
+        result = remove()
+        context.complete_action("slot-remove")
+        return result
 
-def _install_preview(number: str, sha: str, replace: bool) -> JsonObject:
-    identity_value = _slot_identity(number)
-    return {
-        "kind": identity_value.kind,
-        "identifier": identity_value.identifier,
-        "sha": sha,
-        "replace": replace,
-        "launcher": str(identity_value.launcher),
-        "state": str(identity_value.state_root),
-    }
-
-
-def _remove_preview(number: str) -> JsonObject:
-    identity_value = _slot_identity(number)
-    return {
-        "kind": identity_value.kind,
-        "identifier": identity_value.identifier,
-        "removed": True,
-        "launcher": str(identity_value.launcher),
-        "state": str(identity_value.state_root),
-    }
+    return Command.create(
+        ExecutionPlan(
+            steps=(
+                ActionStep(
+                    step_id="slot-remove",
+                    action="slot-remove",
+                    description=f"Remove numbered-{number} after idle identity checks",
+                    details=cast("JsonValue", details),
+                    mutating=True,
+                ),
+            )
+        ),
+        callback,
+        (action,),
+    )
 
 
 @click.group(
@@ -212,7 +265,7 @@ def slot_install(
             result=lambda manifest: cast(
                 "JsonObject", cast("AlternateManifest", manifest).to_json()
             ),
-            preview=lambda _command: _install_preview(number, sha, replace),
+            preview=lambda command: _slot_plan(cast("Command[object]", command)),
             rich=_rich_install,
         )
     except Exception as exc:
@@ -255,7 +308,7 @@ def slot_remove(number: str, dry_run: bool, output_format: str | None, json_outp
             mode=mode,
             dry_run=dry_run,
             result=lambda result: cast("JsonObject", result),
-            preview=lambda _command: _remove_preview(number),
+            preview=lambda command: _slot_plan(cast("Command[object]", command)),
             rich=_rich_remove,
         )
     except Exception as exc:

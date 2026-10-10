@@ -7,7 +7,8 @@ from typing import Any, cast
 import pytest
 from click.testing import CliRunner
 
-from odoo_instance_sdk.commands.slot import slot_group
+from odoo_instance_sdk.commands.slot import slot_group, slot_install_command, slot_remove_command
+from odoo_instance_sdk.execution import ActionStep
 from odoo_instance_sdk.internal.alternate_tool import AlternateToolError
 
 SHA = "a" * 40
@@ -83,6 +84,51 @@ def test_install_delegates_exact_sha_and_replace_intent(
     assert result.exit_code == 0, result.output
     assert calls == [("numbered", "2", replace, tmp_path.resolve())]
     assert _document(result)["result"]["sha"] == SHA
+
+
+def test_install_invalid_sha_dry_run_fails_before_immutable_plan(
+    tmp_path: Path,
+) -> None:
+    result = CliRunner().invoke(
+        slot_group,
+        ["install", "2", "not-a-sha", "--dry-run", "--format", "json"],
+        env={"HOME": str(tmp_path)},
+    )
+    assert result.exit_code == 1
+    document = _document(result)
+    assert document["dry_run"] is True
+    assert "complete lowercase SHA" in document["error"]["message"]
+    assert not (tmp_path / ".local").exists()
+
+
+def test_slot_preview_is_the_frozen_command_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("ODCLI_LAUNCHER_KIND", raising=False)
+    monkeypatch.delenv("ODCLI_LAUNCHER_ID", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    install_plan = slot_install_command("2", SHA, replace=True).plan
+    remove_plan = slot_remove_command("2").plan
+    assert isinstance(install_plan.steps[0], ActionStep)
+    assert isinstance(remove_plan.steps[0], ActionStep)
+    runner = CliRunner()
+    install_result = runner.invoke(
+        slot_group,
+        ["install", "2", SHA, "--replace", "--dry-run", "--format", "json"],
+        env={"HOME": str(tmp_path)},
+    )
+    remove_result = runner.invoke(
+        slot_group,
+        ["remove", "2", "--dry-run", "--format", "json"],
+        env={"HOME": str(tmp_path)},
+    )
+    assert install_result.exit_code == remove_result.exit_code == 0
+    assert _document(install_result)["result"] == json.loads(
+        json.dumps(install_plan.steps[0].details)
+    )
+    assert _document(remove_result)["result"] == json.loads(
+        json.dumps(remove_plan.steps[0].details)
+    )
 
 
 def test_list_is_bounded_and_format_parity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

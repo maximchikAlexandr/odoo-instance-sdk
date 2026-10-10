@@ -78,6 +78,8 @@ classification is bounded and whose contract requires `--dry-run`:
 | `git sync` | mutating-or-spawning |
 | `bug-report init` | mutating-or-spawning |
 | `bug-report submit` | mutating-or-spawning |
+| `slot install` | mutating-or-spawning |
+| `slot remove` | mutating-or-spawning |
 | `update` | mutating-or-spawning (`update --check` is process-previewable-read-only) |
 | `psql` | native-passthrough |
 | `run` | native-passthrough |

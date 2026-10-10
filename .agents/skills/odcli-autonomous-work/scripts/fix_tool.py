@@ -17,6 +17,11 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ISSUE_RE = re.compile(r"^[1-9][0-9]*$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 REPO_ROOT = Path(__file__).resolve().parents[4]
+_PROVENANCE_PROBE = (
+    "import importlib.metadata,json; "
+    "d=importlib.metadata.distribution('odoo-instance-sdk'); "
+    "print(d.read_text('direct_url.json') or '')"
+)
 
 
 def _run(argv: list[str], *, env: dict[str, str] | None = None) -> str:
@@ -65,21 +70,23 @@ def _canonical_source(interpreter: Path) -> None:
     raw = _run(
         [
             str(interpreter),
-            "-m",
-            "odoo_instance_sdk.internal.alternate_tool",
-            "provenance",
+            "-I",
+            "-c",
+            _PROVENANCE_PROBE,
         ]
     )
     try:
         payload = json.loads(raw.strip())
     except json.JSONDecodeError as exc:
         raise RuntimeError("canonical distribution has no readable VCS provenance") from exc
-    source = payload.get("repository") if isinstance(payload, dict) else None
-    commit = payload.get("sha") if isinstance(payload, dict) else None
+    source = payload.get("url") if isinstance(payload, dict) else None
+    vcs_info = payload.get("vcs_info") if isinstance(payload, dict) else None
+    commit = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
     if (
         source != f"https://github.com/{REPOSITORY}.git"
         or not isinstance(commit, str)
         or not SHA_RE.fullmatch(commit)
+        or commit != commit.lower()
     ):
         raise RuntimeError("canonical distribution provenance is not the trusted repository")
 

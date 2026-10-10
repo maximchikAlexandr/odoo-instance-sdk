@@ -6,6 +6,7 @@ import json
 import os
 import threading
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -65,9 +66,16 @@ def _published(identity_value: AlternateIdentity, *, sha: str = "a" * 40) -> Alt
 class _StagedRunner:
     """Deterministic process double keyed by the lifecycle step being exercised."""
 
-    def __init__(self, interpreter: Path, provenance_sha: str) -> None:
+    def __init__(
+        self,
+        interpreter: Path,
+        provenance_sha: str,
+        *,
+        stage_barrier: threading.Barrier | None = None,
+    ) -> None:
         self.interpreter = interpreter
         self.provenance_sha = provenance_sha
+        self.stage_barrier = stage_barrier
         self.steps: list[str] = []
 
     def _stage(self, env: dict[str, str] | None) -> str:
@@ -78,6 +86,8 @@ class _StagedRunner:
         binary = tool_bin / "odcli"
         binary.write_text(f"#!{self.interpreter}\n", encoding="utf-8")
         binary.chmod(0o700)
+        if self.stage_barrier is not None:
+            self.stage_barrier.wait(timeout=5)
         return ""
 
     def _provenance(self, _env: dict[str, str] | None) -> str:
@@ -106,6 +116,34 @@ class _StagedRunner:
             "alternate-provenance": self._provenance,
         }.get(step_id, self._empty)(env)
         return ProcessResult((executable, *args), 0, response, "", 0.0, None, ())
+
+
+@contextlib.contextmanager
+def _reject_exclusive_lock(_identity_value: AlternateIdentity, *, exclusive: bool) -> Iterator[int]:
+    if exclusive:
+        raise AlternateToolError("alternate launcher is still running: odcli-1")
+    yield 0
+
+
+def _probe_success(
+    _identity_value: AlternateIdentity, _interpreter: Path, _env: dict[str, str]
+) -> None:
+    return None
+
+
+@dataclass(slots=True)
+class _InstallAttempt:
+    identity_value: AlternateIdentity
+    successes: list[AlternateManifest]
+    errors: list[AlternateToolError]
+
+    def __call__(self) -> None:
+        try:
+            self.successes.append(
+                alternate_tool.install_alternate_tool(self.identity_value, "c" * 40)
+            )
+        except AlternateToolError as error:
+            self.errors.append(error)
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "01", " 1", "1 ", "one"])
@@ -279,39 +317,7 @@ def test_provenance_mismatch_publishes_nothing(
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
     interpreter.chmod(0o700)
 
-    def fake_run(
-        executable: str,
-        args: tuple[str, ...] = (),
-        *,
-        env: dict[str, str] | None = None,
-        **_kwargs: object,
-    ) -> ProcessResult:
-        if executable == "uv":
-            assert env is not None
-            Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
-            tool_bin = Path(env["UV_TOOL_BIN_DIR"])
-            tool_bin.mkdir(mode=0o700, parents=True)
-            binary = tool_bin / "odcli"
-            binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
-            binary.chmod(0o700)
-        elif "direct_url.json" in args[-1]:
-            return ProcessResult(
-                (executable, *args),
-                0,
-                json.dumps(
-                    {
-                        "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
-                        "vcs_info": {"commit_id": "b" * 40},
-                    }
-                ),
-                "",
-                0.0,
-                None,
-                (),
-            )
-        return ProcessResult((executable, *args), 0, "", "", 0.0, None, ())
-
-    monkeypatch.setattr(alternate_tool, "run_captured", fake_run)
+    monkeypatch.setattr(alternate_tool, "run_captured", _StagedRunner(interpreter, "b" * 40))
     with pytest.raises(AlternateToolError, match="does not match"):
         alternate_tool.install_alternate_tool(numbered, "c" * 40)
     assert not numbered.launcher.exists()
@@ -325,13 +331,7 @@ def test_running_slot_blocks_replacement_before_publication(
     numbered = identity("numbered", "1", home=tmp_path)
     _published(numbered)
 
-    @contextlib.contextmanager
-    def running_lock(_identity: AlternateIdentity, *, exclusive: bool) -> Iterator[int]:
-        if exclusive:
-            raise AlternateToolError("alternate launcher is still running: odcli-1")
-        yield 0
-
-    monkeypatch.setattr(alternate_tool, "lifecycle_lock", running_lock)
+    monkeypatch.setattr(alternate_tool, "lifecycle_lock", _reject_exclusive_lock)
     interpreter = tmp_path / "python"
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr(alternate_tool, "_interpreter", lambda _path: interpreter)
@@ -340,24 +340,8 @@ def test_running_slot_blocks_replacement_before_publication(
         "_provenance",
         lambda _path, _env: {"repository": REPOSITORY_URL, "sha": "b" * 40},
     )
-    monkeypatch.setattr(alternate_tool, "_probe", lambda _identity, _interpreter, _env: None)
-
-    def staged_run(
-        executable: str,
-        _args: tuple[str, ...] = (),
-        *,
-        env: dict[str, str] | None = None,
-        **_kwargs: object,
-    ) -> ProcessResult:
-        assert executable == "uv" and env is not None
-        Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
-        Path(env["UV_TOOL_BIN_DIR"]).mkdir(mode=0o700, parents=True)
-        binary = Path(env["UV_TOOL_BIN_DIR"]) / "odcli"
-        binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
-        binary.chmod(0o700)
-        return ProcessResult((executable,), 0, "", "", 0.0, None, ())
-
-    monkeypatch.setattr(alternate_tool, "run_captured", staged_run)
+    monkeypatch.setattr(alternate_tool, "_probe", _probe_success)
+    monkeypatch.setattr(alternate_tool, "run_captured", _StagedRunner(interpreter, "b" * 40))
     with pytest.raises(AlternateToolError, match="still running"):
         alternate_tool.install_alternate_tool(numbered, "b" * 40, replace=True)
 
@@ -392,56 +376,16 @@ def test_concurrent_no_replace_install_has_one_winner(
     interpreter = tmp_path / "python"
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
     interpreter.chmod(0o700)
-    staged = threading.Barrier(2)
-
-    def fake_run(
-        executable: str,
-        args: tuple[str, ...] = (),
-        *,
-        env: dict[str, str] | None = None,
-        **_kwargs: object,
-    ) -> ProcessResult:
-        if executable == "uv":
-            assert env is not None
-            Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
-            tool_bin = Path(env["UV_TOOL_BIN_DIR"])
-            tool_bin.mkdir(mode=0o700, parents=True)
-            binary = tool_bin / "odcli"
-            binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
-            binary.chmod(0o700)
-            staged.wait(timeout=5)
-        elif "direct_url.json" in args[-1]:
-            return ProcessResult(
-                (executable, *args),
-                0,
-                json.dumps(
-                    {
-                        "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
-                        "vcs_info": {"commit_id": "c" * 40},
-                    }
-                ),
-                "",
-                0.0,
-                None,
-                (),
-            )
-        return ProcessResult((executable, *args), 0, "", "", 0.0, None, ())
-
-    monkeypatch.setattr(alternate_tool, "run_captured", fake_run)
-    outcomes: list[object] = []
-
-    def install() -> None:
-        try:
-            outcomes.append(alternate_tool.install_alternate_tool(numbered, "c" * 40))
-        except Exception as error:
-            outcomes.append(error)
-
-    threads = [threading.Thread(target=install) for _ in range(2)]
+    runner = _StagedRunner(interpreter, "c" * 40, stage_barrier=threading.Barrier(2))
+    monkeypatch.setattr(alternate_tool, "run_captured", runner)
+    successes: list[AlternateManifest] = []
+    errors: list[AlternateToolError] = []
+    attempts = tuple(_InstallAttempt(numbered, successes, errors) for _ in range(2))
+    threads = [threading.Thread(target=attempt) for attempt in attempts]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
-    assert len(outcomes) == 2
-    assert sum(isinstance(outcome, AlternateManifest) for outcome in outcomes) == 1
-    assert sum(isinstance(outcome, AlternateToolError) for outcome in outcomes) == 1
+    assert len(successes) == 1
+    assert len(errors) == 1
     assert inspect_alternate_tool(numbered)["sha"] == "c" * 40

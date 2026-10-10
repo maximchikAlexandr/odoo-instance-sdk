@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import selectors
 import signal
 import sqlite3
@@ -35,6 +36,13 @@ _SHA_BY_LABEL = {
     "numbered-2": "3" * 40,
     "hotfix-42": "4" * 40,
     "hotfix-43": "5" * 40,
+}
+_STDERR_PATTERN_BY_LABEL = {
+    "canonical": r"\A\Z",
+    "numbered-1": r"\A\Z",
+    "numbered-2": r"\A\Z",
+    "hotfix-42": r"odcli-fix-42",
+    "hotfix-43": r"odcli-fix-43",
 }
 
 
@@ -305,10 +313,7 @@ def test_incompatible_revision_migrations_are_confined_to_selected_roots(
         stdout, stderr = process.communicate(timeout=5)
         assert process.returncode == 0, f"{label}: stdout={stdout!r} stderr={stderr!r}"
         assert stdout == ""
-        if label.startswith("hotfix"):
-            assert f"odcli-fix-{label.rsplit('-', 1)[1]}" in stderr
-        else:
-            assert stderr == ""
+        assert re.search(_STDERR_PATTERN_BY_LABEL[label], stderr) is not None
         _assert_schema(root, columns[label], label)
         assert (root / "access.log").read_text(encoding="utf-8") == label
         assert (root / "ready").read_text(encoding="utf-8") == label
