@@ -4,7 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -80,46 +80,43 @@ def test_fix_tool_requires_exact_compatibility_and_retires_only_merged_fix(
         json.dumps({"session_id": "session-1", "review": {"sha": SHA, "compatible": True}}),
         encoding="utf-8",
     )
-    commands: list[list[str]] = []
     engine_calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], **_kwargs: Any) -> str:
-        commands.append(argv)
-        return ""
+    engine_responses: dict[str, dict[str, object] | list[object]] = {
+        "install": {"launcher": str(tmp_path / ".local/bin/odcli-fix-118")},
+        "list": [{"identifier": "118", "healthy": True}],
+        "inspect": {"identifier": "118", "healthy": True, "pr": 119, "branch": None},
+        "remove": {"removed": True},
+    }
 
     def fake_engine(argv: list[str]) -> dict[str, object] | list[object]:
         engine_calls.append(argv)
-        if argv[0] == "install":
-            return {"launcher": str(tmp_path / ".local/bin/odcli-fix-118")}
-        if argv[0] == "list":
-            return [{"identifier": "118", "healthy": True}]
-        if argv[0] == "inspect":
-            return {"identifier": "118", "healthy": True, "pr": 119, "branch": None}
-        return {"removed": True}
+        return engine_responses[argv[0]]
+
+    gh_responses: dict[tuple[str, str], dict[str, object]] = {
+        ("pr", "view"): {
+            "headRefOid": SHA,
+            "state": "MERGED",
+            "mergedAt": "2026-10-05T00:00:00Z",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": MERGE_SHA},
+            "closingIssuesReferences": [
+                {
+                    "number": 118,
+                    "repository": {
+                        "name": "odoo-instance-sdk",
+                        "owner": {"login": "maximchikAlexandr"},
+                    },
+                }
+            ],
+        },
+        ("issue", "view"): {"state": "CLOSED"},
+    }
 
     def fake_gh(argv: list[str]) -> dict[str, object]:
-        if argv[:2] == ["pr", "view"]:
-            return {
-                "headRefOid": SHA,
-                "state": "MERGED",
-                "mergedAt": "2026-10-05T00:00:00Z",
-                "baseRefName": "main",
-                "mergeCommit": {"oid": MERGE_SHA},
-                "closingIssuesReferences": [
-                    {
-                        "number": 118,
-                        "repository": {
-                            "name": "odoo-instance-sdk",
-                            "owner": {"login": "maximchikAlexandr"},
-                        },
-                    }
-                ],
-            }
-        if argv[:2] == ["issue", "view"]:
-            return {"state": "CLOSED"}
-        return {"status": "ahead"}
+        key = cast("tuple[str, str]", tuple(argv[:2]))
+        return gh_responses.get(key, {"status": "ahead"})
 
-    monkeypatch.setattr(fix_tool, "_run", fake_run)
     monkeypatch.setattr(fix_tool, "_gh_json", fake_gh)
     monkeypatch.setattr(fix_tool, "_engine_json", fake_engine)
     with pytest.raises(RuntimeError, match="compatibility"):

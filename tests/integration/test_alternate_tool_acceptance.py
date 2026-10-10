@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import selectors
 import signal
 import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TextIO, cast
 
 import pytest
 
@@ -94,6 +96,7 @@ if {run_startup_migration!r}:
 (root / "spy-installed").write_text("audit", encoding="utf-8")
 barrier = Path(os.environ["ODCLI_ACCEPTANCE_BARRIER"])
 (root / "ready").write_text(label, encoding="utf-8")
+print(f"ready:{{label}}", flush=True)
 while not barrier.exists():
     time.sleep(0.01)
 with sqlite3.connect(root / "catalog.sqlite3") as connection:
@@ -167,7 +170,47 @@ def _assert_schema(root: Path, column: str, label: str) -> None:
     assert rows == [(label, label)]
 
 
-def test_incompatible_revision_migrations_are_confined_to_selected_roots(  # noqa: C901
+def _await_process_readiness(
+    processes: list[tuple[str, Path, subprocess.Popen[str]]], *, timeout: float = 15.0
+) -> None:
+    """Read one explicit readiness event from every child without polling or sleeping."""
+    selector = selectors.DefaultSelector()
+    pending = {label for label, _root, _process in processes}
+    try:
+        for label, _root, process in processes:
+            if process.stdout is None:
+                raise AssertionError(  # noqa: TRY301
+                    f"{label}: readiness stream is unavailable"
+                )
+            selector.register(process.stdout, selectors.EVENT_READ, label)
+        deadline = time.monotonic() + timeout
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(  # noqa: TRY301
+                    f"processes did not reach readiness: {sorted(pending)}"
+                )
+            for key, _events in selector.select(remaining):
+                label = cast("str", key.data)
+                stream = cast("TextIO", key.fileobj)
+                line = stream.readline()
+                if line != f"ready:{label}\n":
+                    raise AssertionError(  # noqa: TRY301
+                        f"{label}: unexpected readiness event {line!r}"
+                    )
+                pending.remove(label)
+                selector.unregister(stream)
+    except AssertionError:
+        for _label, _root, process in processes:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=1)
+        raise
+    finally:
+        selector.close()
+
+
+def test_incompatible_revision_migrations_are_confined_to_selected_roots(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Run five incompatible catalogue schemas through the shared launcher boundary."""
@@ -255,19 +298,7 @@ def test_incompatible_revision_migrations_are_confined_to_selected_roots(  # noq
         )
         processes.append((label, identity_value.state_root, process))
 
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if all((root / "ready").exists() for _label, root, _process in processes):
-            break
-        time.sleep(0.01)
-    else:
-        details: list[object] = []
-        for label, _root, process in processes:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate(timeout=1)
-            details.append((label, process.returncode, stdout, stderr))
-        pytest.fail(f"revision processes did not reach the migration barrier: {details}")
+    _await_process_readiness(processes)
     barrier.write_text("go", encoding="utf-8")
 
     for label, root, process in processes:

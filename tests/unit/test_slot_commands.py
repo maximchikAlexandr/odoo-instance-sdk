@@ -50,9 +50,18 @@ def test_install_rejects_invalid_number_before_shared_engine(
     assert "positive decimal" in document["error"]["message"]
 
 
-@pytest.mark.parametrize("replace", [False, True])
+@pytest.mark.parametrize(
+    ("replace", "args"),
+    [
+        (False, ["install", "2", SHA, "--format", "json"]),
+        (True, ["install", "2", SHA, "--replace", "--format", "json"]),
+    ],
+)
 def test_install_delegates_exact_sha_and_replace_intent(
-    monkeypatch: pytest.MonkeyPatch, replace: bool, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    replace: bool,
+    args: list[str],
+    tmp_path: Path,
 ) -> None:
     calls: list[tuple[str, str, bool, Path]] = []
 
@@ -70,10 +79,6 @@ def test_install_delegates_exact_sha_and_replace_intent(
         return Manifest()
 
     monkeypatch.setattr("odoo_instance_sdk.commands.slot.install_alternate_tool", install)
-    args = ["install", "2", SHA]
-    if replace:
-        args.append("--replace")
-    args.extend(["--format", "json"])
     result = CliRunner().invoke(slot_group, args, env={"HOME": str(tmp_path)})
     assert result.exit_code == 0, result.output
     assert calls == [("numbered", "2", replace, tmp_path.resolve())]

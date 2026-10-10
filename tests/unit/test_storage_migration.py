@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,51 @@ def _tree_digest(root: Path) -> str:
         if path.is_file():
             digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+_PATH_ACCESS_METHODS = (
+    "chmod",
+    "exists",
+    "is_dir",
+    "is_file",
+    "is_symlink",
+    "mkdir",
+    "open",
+    "read_bytes",
+    "read_text",
+    "resolve",
+    "rglob",
+    "stat",
+    "write_text",
+)
+
+
+@contextmanager
+def _forbid_path_access(
+    monkeypatch: pytest.MonkeyPatch, forbidden: tuple[Path, ...]
+) -> Iterator[list[Path]]:
+    touched: list[Path] = []
+    with monkeypatch.context() as spy:
+        for method_name in _PATH_ACCESS_METHODS:
+            original = getattr(Path, method_name)
+
+            def guarded(
+                path: Path,
+                *args: object,
+                _original: object = original,
+                _method_name: str = method_name,
+                **kwargs: object,
+            ) -> object:
+                candidate = Path(os.fspath(path)).absolute()
+                if any(candidate == root or candidate.is_relative_to(root) for root in forbidden):
+                    touched.append(candidate)
+                    raise AssertionError(
+                        f"alternate startup crossed root via {_method_name}: {candidate}"
+                    )
+                return _original(path, *args, **kwargs)  # type: ignore[operator]
+
+            spy.setattr(Path, method_name, guarded)
+        yield touched
 
 
 def test_fresh_migration_uses_one_root_and_leaves_repository_odcli_alone(tmp_path: Path) -> None:
@@ -79,8 +126,9 @@ def test_alternate_startup_skips_legacy_discovery_and_keeps_roots_untouched(
 
 def test_alternate_environment_path_check_does_not_inspect_legacy_roots(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("ODCLI_USER_ROOT", "/tmp/odcli-alternate")
+    monkeypatch.setenv("ODCLI_USER_ROOT", str(tmp_path / "alternate"))
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.storage_migration.legacy_storage_roots",
         lambda *_args, **_kwargs: pytest.fail("alternate path check inspected legacy roots"),
@@ -110,48 +158,13 @@ def test_alternate_startup_spy_never_reads_canonical_legacy_or_neighbor_roots(
         (root / "sentinel.txt").parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         (root / "sentinel.txt").write_text(f"sentinel-{index}", encoding="utf-8")
     before = {root: _tree_digest(root) for root in forbidden}
-    touched: list[Path] = []
 
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("ODCLI_USER_ROOT", str(selected))
     monkeypatch.setenv("ODCLI_LAUNCHER_KIND", "numbered")
     monkeypatch.setenv("ODCLI_LAUNCHER_ID", "2")
 
-    with monkeypatch.context() as spy:
-        for method_name in (
-            "chmod",
-            "exists",
-            "is_dir",
-            "is_file",
-            "is_symlink",
-            "mkdir",
-            "open",
-            "read_bytes",
-            "read_text",
-            "resolve",
-            "rglob",
-            "stat",
-            "write_text",
-        ):
-            original = getattr(Path, method_name)
-
-            def guarded(
-                path: Path,
-                *args: object,
-                _original: object = original,
-                _method_name: str = method_name,
-                **kwargs: object,
-            ) -> object:
-                candidate = Path(os.fspath(path)).absolute()
-                if any(candidate == root or candidate.is_relative_to(root) for root in forbidden):
-                    touched.append(candidate)
-                    raise AssertionError(
-                        f"alternate startup crossed root via {_method_name}: {candidate}"
-                    )
-                return _original(path, *args, **kwargs)  # type: ignore[operator]
-
-            spy.setattr(Path, method_name, guarded)
-
+    with _forbid_path_access(monkeypatch, forbidden) as touched:
         from odoo_instance_sdk.internal.paths import is_legacy_environment_path
         from odoo_instance_sdk.internal.storage_migration import ensure_storage_migrated
 

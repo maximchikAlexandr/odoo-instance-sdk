@@ -62,6 +62,52 @@ def _published(identity_value: AlternateIdentity, *, sha: str = "a" * 40) -> Alt
     return manifest
 
 
+class _StagedRunner:
+    """Deterministic process double keyed by the lifecycle step being exercised."""
+
+    def __init__(self, interpreter: Path, provenance_sha: str) -> None:
+        self.interpreter = interpreter
+        self.provenance_sha = provenance_sha
+        self.steps: list[str] = []
+
+    def _stage(self, env: dict[str, str] | None) -> str:
+        assert env is not None
+        Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
+        tool_bin = Path(env["UV_TOOL_BIN_DIR"])
+        tool_bin.mkdir(mode=0o700, parents=True)
+        binary = tool_bin / "odcli"
+        binary.write_text(f"#!{self.interpreter}\n", encoding="utf-8")
+        binary.chmod(0o700)
+        return ""
+
+    def _provenance(self, _env: dict[str, str] | None) -> str:
+        return json.dumps(
+            {
+                "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                "vcs_info": {"commit_id": self.provenance_sha},
+            }
+        )
+
+    def _empty(self, _env: dict[str, str] | None) -> str:
+        return ""
+
+    def __call__(
+        self,
+        executable: str,
+        args: tuple[str, ...] = (),
+        *,
+        env: dict[str, str] | None = None,
+        step_id: str = "",
+        **_kwargs: object,
+    ) -> ProcessResult:
+        self.steps.append(step_id)
+        response = {
+            "alternate-tool-install": self._stage,
+            "alternate-provenance": self._provenance,
+        }.get(step_id, self._empty)(env)
+        return ProcessResult((executable, *args), 0, response, "", 0.0, None, ())
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "01", " 1", "1 ", "one"])
 def test_identity_rejects_noncanonical_numbers(value: str, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="positive decimal"):
@@ -154,43 +200,18 @@ def test_install_uses_one_staged_provenance_probe_and_preserves_numbered_state(
     sentinel.write_text("keep", encoding="utf-8")
     interpreter = tmp_path / "python"
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
-    calls: list[tuple[str, tuple[str, ...]]] = []
-
-    def fake_run(
-        executable: str,
-        args: tuple[str, ...] = (),
-        *,
-        env: dict[str, str] | None = None,
-        **_kwargs: object,
-    ) -> ProcessResult:
-        calls.append((executable, args))
-        if executable == "uv":
-            assert env is not None
-            Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
-            tool_bin = Path(env["UV_TOOL_BIN_DIR"])
-            tool_bin.mkdir(mode=0o700, parents=True)
-            binary = tool_bin / "odcli"
-            binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
-            binary.chmod(0o700)
-            stdout = ""
-        elif "direct_url.json" in args[-1]:
-            stdout = json.dumps(
-                {
-                    "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
-                    "vcs_info": {"commit_id": "c" * 40},
-                }
-            )
-        else:
-            stdout = ""
-        return ProcessResult((executable, *args), 0, stdout, "", 0.0, None, ())
-
-    monkeypatch.setattr(alternate_tool, "run_captured", fake_run)
+    runner = _StagedRunner(interpreter, "c" * 40)
+    monkeypatch.setattr(alternate_tool, "run_captured", runner)
     manifest = alternate_tool.install_alternate_tool(numbered, "c" * 40, replace=True)
 
     assert manifest.sha == "c" * 40
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert inspect_alternate_tool(numbered)["sha"] == "c" * 40
-    assert [args[0] for _executable, args in calls] == ["tool", "-c", "-c"]
+    assert runner.steps == [
+        "alternate-tool-install",
+        "alternate-provenance",
+        "alternate-selector-probe",
+    ]
 
 
 def test_hotfix_install_uses_the_shared_provenance_and_probe_lifecycle(
@@ -199,42 +220,8 @@ def test_hotfix_install_uses_the_shared_provenance_and_probe_lifecycle(
     hotfix = identity("hotfix", "42", home=tmp_path)
     interpreter = tmp_path / "python"
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
-    calls: list[tuple[str, tuple[str, ...]]] = []
-
-    def fake_run(
-        executable: str,
-        args: tuple[str, ...] = (),
-        *,
-        env: dict[str, str] | None = None,
-        **_kwargs: object,
-    ) -> ProcessResult:
-        calls.append((executable, args))
-        if executable == "uv":
-            assert env is not None
-            Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
-            tool_bin = Path(env["UV_TOOL_BIN_DIR"])
-            tool_bin.mkdir(mode=0o700, parents=True)
-            binary = tool_bin / "odcli"
-            binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
-            binary.chmod(0o700)
-        elif "direct_url.json" in args[-1]:
-            return ProcessResult(
-                (executable, *args),
-                0,
-                json.dumps(
-                    {
-                        "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
-                        "vcs_info": {"commit_id": "d" * 40},
-                    }
-                ),
-                "",
-                0.0,
-                None,
-                (),
-            )
-        return ProcessResult((executable, *args), 0, "", "", 0.0, None, ())
-
-    monkeypatch.setattr(alternate_tool, "run_captured", fake_run)
+    runner = _StagedRunner(interpreter, "d" * 40)
+    monkeypatch.setattr(alternate_tool, "run_captured", runner)
     manifest = alternate_tool.install_alternate_tool(
         hotfix,
         "d" * 40,
@@ -247,7 +234,11 @@ def test_hotfix_install_uses_the_shared_provenance_and_probe_lifecycle(
     assert manifest.identity == hotfix
     assert inspect_alternate_tool(hotfix)["sha"] == "d" * 40
     assert manifest.pr == 119
-    assert [args[0] for _executable, args in calls] == ["tool", "-c", "-c"]
+    assert runner.steps == [
+        "alternate-tool-install",
+        "alternate-provenance",
+        "alternate-selector-probe",
+    ]
 
     remove_alternate_tool(hotfix)
     assert not hotfix.launcher.exists()
