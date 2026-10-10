@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 
@@ -36,7 +37,12 @@ from odoo_instance_sdk.project import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
-    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, RunContext
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        PrivateJsonValue,
+        RunContext,
+    )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
@@ -67,6 +73,57 @@ class _BootstrapFollowup:
             self.verify_action,
             self.record_action,
         )
+
+
+def _init_action_details(
+    project_path: Path,
+    effective_config: ProjectConfig,
+    *,
+    postgres_allocated: bool,
+    local_config: bool,
+    postgres_image: str | None,
+    allow_partial: bool,
+    resume_existing: bool,
+    no_input: bool,
+    dry_run: bool,
+    remote_database_names: list[str] | None,
+) -> dict[str, JsonValue]:
+    """Expose only the target and a digest of sanitized manifest inputs."""
+    from odoo_instance_sdk.internal.proc.redaction import (
+        capture_sensitive_argv_indices,
+        redacted_argv,
+        redacted_projection,
+    )
+
+    manifest = manifest_dict(effective_config, postgres_allocated=postgres_allocated)
+    default_run_args = tuple(effective_config.default_run_args)
+    manifest["default_run_args"] = list(
+        redacted_argv(
+            default_run_args,
+            sensitive_indices=capture_sensitive_argv_indices(default_run_args),
+        )
+    )
+    projection: dict[str, JsonValue] = {
+        "project_path": str(project_path.resolve()),
+        "manifest": manifest,
+        "postgres_image": postgres_image,
+        "local_config": local_config,
+        "allow_partial": allow_partial,
+        "resume_existing": resume_existing,
+        "no_input": no_input,
+        "dry_run": dry_run,
+        "remote_database_names": cast("JsonValue", remote_database_names),
+    }
+    redacted = redacted_projection(projection, field="init-manifest")
+    digest = hashlib.sha256(
+        json.dumps(redacted, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return {
+        "project_path": projection["project_path"],
+        "manifest_input_digest": digest,
+    }
 
 
 def _execute_remote_database_names_phase(
@@ -275,6 +332,21 @@ def init_project_command(
         action="verify-init-manifest" if resume_existing else "init",
         description=(
             "Verify existing project manifest" if resume_existing else "Write project manifest"
+        ),
+        details=cast(
+            "PrivateJsonValue",
+            _init_action_details(
+                project_path,
+                effective_config,
+                postgres_allocated=postgres_allocated,
+                local_config=local_config,
+                postgres_image=postgres_image,
+                allow_partial=allow_partial,
+                resume_existing=resume_existing,
+                no_input=no_input,
+                dry_run=dry_run,
+                remote_database_names=remote_database_names,
+            ),
         ),
         read_only=resume_existing,
         mutating=not resume_existing,
