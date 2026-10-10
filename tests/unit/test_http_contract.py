@@ -186,7 +186,13 @@ def test_snapshot_bytes_match_production_openapi_schema_and_are_not_cli_envelope
     payload = json.loads(response.content)
     schema = app.openapi()["components"]["schemas"]["Snapshot"]
     _validate_json(payload, schema, app.openapi()["components"]["schemas"])
-    assert set(payload) == {"schema_version", "generated_at", "projects", "environments"}
+    assert set(payload) == {
+        "schema_version",
+        "generated_at",
+        "projects",
+        "environments",
+        "observation",
+    }
     assert monitor.project_ids == ["project_x"]
 
 

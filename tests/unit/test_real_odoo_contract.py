@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,20 +25,20 @@ from tests.integration.real_odoo.contracts import (
     ContractError,
     check_matrix_document,
 )
-from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES
 
 
 def test_generated_matrix_matches_canonical_inventory() -> None:
     path = Path("tests/integration/real_odoo/command-matrix.md")
     actual = path.read_bytes()
-    check_matrix_document(str(path), PUBLIC_LEAF_CASES)
+    check_matrix_document(str(path), PUBLIC_LEAF_TEST_CASES)
     assert actual == path.read_bytes()
-    assert actual.count(b"| `") == 62
+    assert actual.count(b"| `") == 63
 
 
 def test_new_leaf_without_metadata_fails_closed() -> None:
     incomplete = replace(
-        PUBLIC_LEAF_CASES[0], e2e_disposition=None, e2e_evidence=(), e2e_rationale=""
+        PUBLIC_LEAF_TEST_CASES[0], e2e_disposition=None, e2e_evidence=(), e2e_rationale=""
     )
     with pytest.raises(ContractError, match="missing E2E disposition"):
         from tests.integration.real_odoo.contracts import validate_leaf_metadata
@@ -46,7 +47,15 @@ def test_new_leaf_without_metadata_fails_closed() -> None:
 
 
 def test_new_leaf_without_sdk_boundary_fails_closed() -> None:
-    incomplete = replace(PUBLIC_LEAF_CASES[0], sdk_primitive=None, cli_only_reason=None)
+    source = PUBLIC_LEAF_TEST_CASES[0]
+    incomplete = SimpleNamespace(
+        path=source.path,
+        sdk_primitive=None,
+        cli_only_reason=None,
+        e2e_disposition=source.e2e_disposition,
+        e2e_evidence=source.e2e_evidence,
+        e2e_rationale=source.e2e_rationale,
+    )
     with pytest.raises(ContractError, match="sdk_primitive or cli_only_reason"):
         from tests.integration.real_odoo.contracts import validate_leaf_metadata
 

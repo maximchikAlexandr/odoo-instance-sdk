@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.models import Snapshot, SnapshotObservation, SnapshotSectionObservation
 
 
 @pytest.mark.unit
@@ -56,6 +58,56 @@ def test_monitor_port_and_host_pass_through(
     assert captured["host"] == "127.0.0.1"
     assert captured["headless"] is False
     assert captured["no_open"] is False
+
+
+@pytest.mark.dashboard
+def test_monitor_cli_server_boundary_preserves_v3_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    observed_at = datetime(2026, 8, 24, tzinfo=UTC)
+
+    class Monitor:
+        def snapshot(self, project_id: str | None = None) -> Snapshot:
+            assert project_id == "project_x"
+            return Snapshot(
+                schema_version=3,
+                generated_at=observed_at,
+                projects=(),
+                environments=(),
+                observation=SnapshotObservation(
+                    schema_version=3,
+                    observed_at=observed_at,
+                    requested_sections=("catalogue", "runtime"),
+                    completed_sections=("catalogue",),
+                    unknown_sections=("runtime",),
+                    sections=(
+                        SnapshotSectionObservation(section="catalogue", observed_at=observed_at),
+                        SnapshotSectionObservation(
+                            section="runtime",
+                            observed_at=observed_at,
+                            complete=False,
+                            reason="runtime observation unavailable",
+                        ),
+                    ),
+                ),
+            )
+
+    def fake_run_server(**_: Any) -> None:
+        from odoo_instance_sdk.http.app import create_app
+
+        with TestClient(
+            create_app(headless=True, monitor=Monitor()), base_url="http://localhost"
+        ) as client:
+            response = client.get("/api/v1/snapshot?project_id=project_x")
+        assert response.status_code == 200
+        assert response.json()["observation"]["unknown_sections"] == ["runtime"]
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.serve.run_server", fake_run_server)
+    result = CliRunner().invoke(cli, ["monitor", "--headless", "--no-open"])
+    assert result.exit_code == 0, result.output
 
 
 @pytest.mark.unit

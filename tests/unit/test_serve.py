@@ -28,6 +28,8 @@ from odoo_instance_sdk.models import (
     RuntimeMetrics,
     RuntimeState,
     Snapshot,
+    SnapshotObservation,
+    SnapshotSectionObservation,
     StorageFootprint,
 )
 
@@ -256,6 +258,53 @@ def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
 
 
 @pytest.mark.dashboard
+def test_snapshot_server_round_trips_v3_observation_metadata() -> None:
+    observed_at = datetime(2026, 8, 24, tzinfo=UTC)
+
+    class Monitor:
+        def snapshot(self, project_id: str | None = None) -> Snapshot:
+            assert project_id == "project_x"
+            return Snapshot(
+                schema_version=3,
+                generated_at=observed_at,
+                projects=(),
+                environments=(),
+                observation=SnapshotObservation(
+                    schema_version=3,
+                    observed_at=observed_at,
+                    requested_sections=("catalogue", "runtime"),
+                    completed_sections=("catalogue",),
+                    unknown_sections=("runtime",),
+                    sections=(
+                        SnapshotSectionObservation(section="catalogue", observed_at=observed_at),
+                        SnapshotSectionObservation(
+                            section="runtime",
+                            observed_at=observed_at,
+                            complete=False,
+                            reason="runtime observation unavailable",
+                        ),
+                    ),
+                ),
+            )
+
+    with _client(headless=True, monitor=Monitor()) as client:
+        response = client.get("/api/v1/snapshot?project_id=project_x")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == 3
+    assert payload["observation"]["requested_sections"] == ["catalogue", "runtime"]
+    assert payload["observation"]["unknown_sections"] == ["runtime"]
+    assert payload["observation"]["sections"][1] == {
+        "section": "runtime",
+        "observed_at": "2026-08-24T00:00:00Z",
+        "source_age_seconds": None,
+        "complete": False,
+        "reason": "runtime observation unavailable",
+    }
+
+
+@pytest.mark.dashboard
 def test_snapshot_has_exact_json_content_type_and_body() -> None:
     class Monitor:
         def snapshot(self, project_id: str | None = None) -> Snapshot:
@@ -434,6 +483,9 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                     "database_name": "db_x",
                     "commit_sha": "abc",
                     "branch": "main",
+                    "create_time": None,
+                    "cpu_seconds": None,
+                    "sampled_at": None,
                 },
                 "git": {
                     "default_branch": "main",
@@ -461,6 +513,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                 "pgadmin": {"state": "eligible"},
             }
         ],
+        "observation": None,
     }
 
 

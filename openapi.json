@@ -847,6 +847,28 @@
               }
             ]
           },
+          "cpu_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "create_time": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "database_name": {
             "anyOf": [
               {
@@ -900,6 +922,17 @@
               }
             ]
           },
+          "sampled_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "started_at": {
             "anyOf": [
               {
@@ -951,6 +984,17 @@
           "generated_at": {
             "type": "string"
           },
+          "observation": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SnapshotObservation"
+              }
+            ],
+            "default": null
+          },
           "projects": {
             "items": {
               "$ref": "#/components/schemas/ProjectSummary"
@@ -968,6 +1012,127 @@
           "environments"
         ],
         "title": "Snapshot",
+        "type": "object"
+      },
+      "SnapshotObservation": {
+        "additionalProperties": false,
+        "description": "Truth metadata for one finite snapshot collection pass.",
+        "properties": {
+          "completed_sections": {
+            "items": {
+              "enum": [
+                "artifact",
+                "catalogue",
+                "docker",
+                "git",
+                "postgresql",
+                "runtime",
+                "storage"
+              ]
+            },
+            "type": "array"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "requested_sections": {
+            "items": {
+              "enum": [
+                "artifact",
+                "catalogue",
+                "docker",
+                "git",
+                "postgresql",
+                "runtime",
+                "storage"
+              ]
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SnapshotSectionObservation"
+            },
+            "type": "array"
+          },
+          "unknown_sections": {
+            "items": {
+              "enum": [
+                "artifact",
+                "catalogue",
+                "docker",
+                "git",
+                "postgresql",
+                "runtime",
+                "storage"
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "requested_sections",
+          "completed_sections",
+          "unknown_sections",
+          "sections"
+        ],
+        "title": "SnapshotObservation",
+        "type": "object"
+      },
+      "SnapshotSectionObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "default": true,
+            "type": "boolean"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "section": {
+            "enum": [
+              "artifact",
+              "catalogue",
+              "docker",
+              "git",
+              "postgresql",
+              "runtime",
+              "storage"
+            ]
+          },
+          "source_age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "section",
+          "observed_at"
+        ],
+        "title": "SnapshotSectionObservation",
         "type": "object"
       },
       "StorageFootprint": {

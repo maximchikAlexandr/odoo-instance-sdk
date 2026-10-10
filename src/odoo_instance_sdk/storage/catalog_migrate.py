@@ -19,7 +19,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0007"
+CATALOG_REVISION = "0008"
 
 
 def _migrations_dir() -> Path:
@@ -199,6 +199,7 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:  # noqa: C901
                     "code_ownership",
                     "artifact_root",
                     "adoption_input_fingerprint",
+                    "recovery_json",
                 }
             )
         if table == "backups":
@@ -281,6 +282,7 @@ def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:  # noqa: C90
                     "code_ownership",
                     "artifact_root",
                     "adoption_input_fingerprint",
+                    "recovery_json",
                 }
             )
         if table == "runtime":

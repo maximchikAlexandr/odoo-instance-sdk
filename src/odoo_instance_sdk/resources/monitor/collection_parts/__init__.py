@@ -13,6 +13,7 @@ from odoo_instance_sdk.models import (
     StorageFootprint,
 )
 from odoo_instance_sdk.resources.monitor.collection_parts.collect import _CollectMixin
+from odoo_instance_sdk.resources.monitor.collection_parts.planning import _SnapshotPlanningMixin
 from odoo_instance_sdk.resources.monitor.collection_parts.snapshot import _SnapshotMixin
 from odoo_instance_sdk.resources.monitor.planning import (
     _default_monitor_executor,
@@ -23,7 +24,7 @@ from odoo_instance_sdk.resources.monitor.planning import (
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class EnvironmentMonitor(_CollectMixin, _SnapshotMixin):
+class EnvironmentMonitor(_CollectMixin, _SnapshotPlanningMixin, _SnapshotMixin):
     """Read-only collector that assembles a typed ``Snapshot`` from the catalog.
 
     Construction is cheap (no catalog open). ``snapshot()``

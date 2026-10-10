@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/odcli/contract-fixture.json",
+  "title": "OperationContractFixture",
+  "type": "object",
+  "properties": {
+    "request": {
+      "$ref": "#/$defs/OperationRequest"
+    },
+    "result": {
+      "$ref": "#/$defs/FixtureResult"
+    },
+    "error": {
+      "$ref": "#/$defs/FixtureError"
+    },
+    "alias": {
+      "$ref": "#/$defs/DepsMissingImport"
+    },
+    "wire": {
+      "$ref": "#/$defs/WireOperationDocument"
+    },
+    "plugin": {
+      "$ref": "#/$defs/FixturePluginPayload"
+    }
+  },
+  "required": [
+    "request",
+    "result",
+    "error",
+    "alias",
+    "wire",
+    "plugin"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "OperationRequest": {
+      "title": "OperationRequest",
+      "description": "Common selector envelope for finite built-ins.",
+      "type": "object",
+      "properties": {
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "FixtureResult": {
+      "title": "FixtureResult",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "greeting": {
+          "type": "string"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/FixturePluginPayload"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "status",
+        "greeting"
+      ],
+      "additionalProperties": false
+    },
+    "FixturePluginPayload": {
+      "title": "FixturePluginPayload",
+      "description": "Concrete extensible payload, rather than an untyped JSON map.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "FixtureError": {
+      "title": "FixtureError",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "DepsMissingImport": {
+      "title": "DepsMissingImport",
+      "description": "One missing addon import discovered during dependency verification.",
+      "type": "object",
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "import": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "module",
+        "import"
+      ],
+      "additionalProperties": false
+    },
+    "WireOperationDocument": {
+      "title": "WireOperationDocument",
+      "description": "Nested, tagged, defaulted, nullable and alias-capable wire fixture.",
+      "type": "object",
+      "properties": {
+        "nested": {
+          "$ref": "#/$defs/WireNestedValue"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WireCreateValue"
+            },
+            {
+              "$ref": "#/$defs/WireDeleteValue"
+            }
+          ],
+          "discriminator": {
+            "propertyName": "type",
+            "mapping": {
+              "create": "#/$defs/WireCreateValue",
+              "delete": "#/$defs/WireDeleteValue"
+            }
+          }
+        },
+        "alias": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "nested",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "WireNestedValue": {
+      "title": "WireNestedValue",
+      "description": "Representative nested value used to pin the document wire shape.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "WireCreateValue": {
+      "title": "WireCreateValue",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "create"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "default": 0
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ]
+    },
+    "WireDeleteValue": {
+      "title": "WireDeleteValue",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "delete"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ]
+    }
+  }
+}

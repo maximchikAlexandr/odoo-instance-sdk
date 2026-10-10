@@ -295,12 +295,15 @@ export type RuntimeMetrics = {
     child_pids: Array<number>;
     commit_sha: string | null;
     cpu_percent: number | null;
+    cpu_seconds?: number | null;
+    create_time?: number | null;
     database_name: string | null;
     http_port: number | null;
     http_url: string | null;
     memory_bytes: number | null;
     process_count: number;
     root_pid: number | null;
+    sampled_at?: string | null;
     started_at: string | null;
     state: RuntimeState;
 };
@@ -320,8 +323,34 @@ export enum RuntimeState {
 export type Snapshot = {
     environments: Array<EnvironmentSnapshot>;
     generated_at: string;
+    observation?: null | SnapshotObservation;
     projects: Array<ProjectSummary>;
     schema_version: number;
+};
+
+/**
+ * SnapshotObservation
+ *
+ * Truth metadata for one finite snapshot collection pass.
+ */
+export type SnapshotObservation = {
+    completed_sections: Array<'artifact' | 'catalogue' | 'docker' | 'git' | 'postgresql' | 'runtime' | 'storage'>;
+    observed_at: string;
+    requested_sections: Array<'artifact' | 'catalogue' | 'docker' | 'git' | 'postgresql' | 'runtime' | 'storage'>;
+    schema_version: number;
+    sections: Array<SnapshotSectionObservation>;
+    unknown_sections: Array<'artifact' | 'catalogue' | 'docker' | 'git' | 'postgresql' | 'runtime' | 'storage'>;
+};
+
+/**
+ * SnapshotSectionObservation
+ */
+export type SnapshotSectionObservation = {
+    complete?: boolean;
+    observed_at: string;
+    reason?: string | null;
+    section: 'artifact' | 'catalogue' | 'docker' | 'git' | 'postgresql' | 'runtime' | 'storage';
+    source_age_seconds?: number | null;
 };
 
 /**

@@ -34,7 +34,7 @@ from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES
 
 ROOT_HELP_DESCRIPTIONS = (
     "Prepare and reset project databases.",
@@ -182,6 +182,8 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "shell",
         "doctor",
         "remote",
+        "contract",
+        "operation",
         "stop",
         "update",
         "eval",
@@ -291,7 +293,7 @@ def test_shell_completion_still_discovers_nested_commands() -> None:
 
 
 def test_command_local_json_alias_is_removed() -> None:
-    for case in PUBLIC_LEAF_CASES:
+    for case in PUBLIC_LEAF_TEST_CASES:
         if not case.is_bounded:
             continue
         path = case.path
@@ -561,8 +563,13 @@ def test_discovered_public_methods() -> None:
             "locks",
             "locks_command",
             "names",
+            "observe",
+            "observe_command",
+            "observe_exists",
             "psql",
             "psql_command",
+            "reconcile_databases",
+            "reconcile_databases_command",
             "reset_admin_password",
             "reset_admin_password_command",
             "restore",
@@ -621,6 +628,7 @@ def test_discovered_public_methods() -> None:
         BackupCatalog: (
             "active_environment_for",
             "add_environment_event",
+            "adopt_environment_replacement_recovery",
             "adopted_environment_for",
             "clear_environment_runtime",
             "close",
@@ -643,8 +651,11 @@ def test_discovered_public_methods() -> None:
             "list_environment_runtimes",
             "list_environments",
             "list_environments_with_runtimes",
+            "reconcile_databases_dropped",
             "record_database_dropped",
+            "record_databases_dropped",
             "record_deletion",
+            "record_environment_replacement_failure",
             "record_environment_use",
             "record_restore",
             "record_validation",
