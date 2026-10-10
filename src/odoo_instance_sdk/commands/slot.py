@@ -93,7 +93,18 @@ def _rich_remove(document: OutputDocument) -> str:
     return f"Removed {result.get('kind', 'numbered')}-{result.get('identifier', '')}."
 
 
-@click.group("slot", help="Manage canonical exact-revision numbered OdCLI slots.")
+@click.group(
+    "slot",
+    help=(
+        "Manage canonical exact-revision numbered OdCLI slots. Numbered slots "
+        "isolate only OdCLI-managed user state (SQLite catalogue, configuration, "
+        "backups, environment artifacts, project runtime state, locks, bug reports, "
+        "and migration/update journals). They do not isolate project checkouts, Odoo "
+        "processes, PostgreSQL clusters or databases, filestores, Docker resources, "
+        "or ports; use separate project copies or disjoint external-resource "
+        "configuration before concurrent use."
+    ),
+)
 def slot_group() -> None:
     """Install, inspect, and remove numbered OdCLI revisions."""
 

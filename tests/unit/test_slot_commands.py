@@ -18,6 +18,20 @@ def _document(result: Any) -> dict[str, Any]:
     return json.loads(result.stdout)
 
 
+def test_slot_help_states_isolation_boundary() -> None:
+    result = CliRunner().invoke(slot_group, ["--help"])
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.split())
+    assert (
+        "Numbered slots isolate only OdCLI-managed user state (SQLite catalogue, "
+        "configuration, backups, environment artifacts, project runtime state, locks, "
+        "bug reports, and migration/update journals). They do not isolate project "
+        "checkouts, Odoo processes, PostgreSQL clusters or databases, filestores, "
+        "Docker resources, or ports; use separate project copies or disjoint "
+        "external-resource configuration before concurrent use."
+    ) in help_text
+
+
 @pytest.mark.parametrize("number", ["0", "-1", "01", " 1", "1 ", "one"])
 def test_install_rejects_invalid_number_before_shared_engine(
     monkeypatch: pytest.MonkeyPatch, number: str
