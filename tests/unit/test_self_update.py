@@ -19,6 +19,7 @@ from odoo_instance_sdk.execution import ProcessStep
 from odoo_instance_sdk.internal.proc import RecordingExecutor
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
+    assert_direct_update_allowed,
     read_uv_tool_direct_url,
     update,
     update_command,
@@ -154,6 +155,66 @@ _UPDATE_COORDINATOR_MATRIX = (
         expected_install_arg=_SHA_B,
     ),
 )
+
+
+@pytest.mark.parametrize(
+    ("kind", "identifier", "remediation"),
+    (
+        ("numbered", "2", "odcli slot install 2"),
+        ("hotfix", "42", "skill-managed canonical"),
+    ),
+)
+def test_alternate_launcher_rejects_direct_self_update_before_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    identifier: str,
+    remediation: str,
+) -> None:
+    monkeypatch.setenv("ODCLI_LAUNCHER_KIND", kind)
+    monkeypatch.setenv("ODCLI_LAUNCHER_ID", identifier)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.read_uv_tool_direct_url",
+        lambda: pytest.fail("alternate update inspected installed provenance"),
+    )
+
+    with pytest.raises(UpdateError, match=remediation):
+        assert_direct_update_allowed()
+    with pytest.raises(UpdateError, match=remediation):
+        update_command(ref=_SHA_B)
+
+
+@pytest.mark.parametrize(
+    ("kind", "identifier", "remediation"),
+    (
+        ("numbered", "3", "odcli slot install 3"),
+        ("hotfix", "43", "skill-managed canonical"),
+    ),
+)
+def test_cli_alternate_update_rejects_before_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    identifier: str,
+    remediation: str,
+) -> None:
+    from click.testing import CliRunner
+
+    from odoo_instance_sdk.commands.update import update_command_cli
+
+    monkeypatch.setenv("ODCLI_LAUNCHER_KIND", kind)
+    monkeypatch.setenv("ODCLI_LAUNCHER_ID", identifier)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.update.prepare_maintenance_environment",
+        lambda: pytest.fail("alternate update entered maintenance setup"),
+    )
+
+    result = CliRunner().invoke(
+        update_command_cli,
+        ["--check", "--format", "json"],
+        prog_name="odcli",
+    )
+
+    assert result.exit_code == 1, result.output
+    assert remediation in result.output
 
 
 def _assert_expected_command_result(

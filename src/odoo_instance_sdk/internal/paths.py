@@ -26,6 +26,8 @@ class EnvironmentArtifactPaths:
 def is_legacy_environment_path(value: str | None) -> bool:
     if value is None:
         return False
+    if os.environ.get(USER_ROOT_ENV):
+        return False
     legacy_root = storage_migration.legacy_storage_roots(Path.home())["data"] / "environments"
     return Path(value).expanduser().resolve().is_relative_to(legacy_root)
 
