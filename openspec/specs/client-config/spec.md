@@ -183,7 +183,7 @@ Resulting URL MUST быть local; remote URL в `from_config()` MUST завер
 
 ### Requirement: User-level backup retention settings
 
-The SDK SHALL read and update `backup.retention_days` and `backup.auto_prune` in the existing platformdirs configuration `user.toml` through `client.backups.retention()` and an immutable `set_retention_command(...)` plus convenience method. Defaults SHALL be 14 days and false. Age SHALL be a positive integer, not a boolean; enablement SHALL be a boolean. Project manifests SHALL NOT override automatic deletion policy. Public results SHALL expose effective values and the absolute settings path without unrelated configuration or secrets. The updater SHALL preserve `backup.max_uncompressed_bytes`, every unrelated table/key and existing file content outside the two owned assignments, write atomically with user-only permissions, and SHALL NOT add a TOML or generic settings dependency.
+The SDK SHALL read and update `backup.retention_days` and `backup.auto_prune` in the existing platformdirs configuration `user.toml` through `client.backups.retention()` and an immutable `set_retention_command(...)` plus convenience method. Defaults SHALL be 14 days and false. Age SHALL be a positive integer, not a boolean; enablement SHALL be a boolean. Project manifests SHALL NOT override automatic deletion policy. Public results SHALL expose effective values and the absolute settings path without unrelated configuration or secrets. The updater SHALL preserve `backup.max_uncompressed_bytes`, every unrelated table/key and existing file content outside the two owned assignments, write atomically with user-only permissions, and SHALL NOT add a TOML or generic settings dependency. The owned `[backup]` section SHALL end at the next TOML table header, including an array-of-tables header, so no following table receives retention assignments.
 
 #### Scenario: First use and explicit enablement
 
@@ -203,3 +203,7 @@ The SDK SHALL read and update `backup.retention_days` and `backup.auto_prune` in
 - **WHEN** an update is previewed
 - **THEN** the resolved settings and destination are shown without creating or modifying the file
 
+#### Scenario: Array-of-tables after backup remains independent
+
+- **WHEN** `user.toml` contains `[backup]` followed by `[[profile]]` and the retention policy is updated
+- **THEN** the written document remains valid TOML, `retention_days` and `auto_prune` parse only from `backup`, and every `profile` entry and unrelated section is preserved

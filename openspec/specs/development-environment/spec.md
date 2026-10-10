@@ -1244,6 +1244,8 @@ The public environment SDK SHALL support an inspectable `adopt_command(project, 
 
 Adoption SHALL require COPY mode, an explicit compatible base and exactly one explicit supported COPY source: the integrated `EnvironmentCheckoutOptions.remote_name` named-source selector or `EnvironmentCheckoutOptions.backup_id` retained catalogue UUID selector. It SHALL reuse existing source selection, credential handling, archive verification, provenance, neutralization, isolated database/filestore, Python selection, port allocation, readiness, retention and recovery semantics. It SHALL NOT enable creation of a virtual environment implicitly, change a project default database or mark a merely provisioned environment as HTTP-ready.
 
+Adoption and ordinary checkout SHALL use the same internal provenance normalization and the same public/execution projection builders after their mode-specific validation. The captured `base_revision` SHALL populate `plan.provenance.resolved_base_revision` for both paths; adoption SHALL retain its separate caller-owned checkout and repository-identity checks.
+
 #### Scenario: Adopt a native external checkout
 
 - **WHEN** a valid existing checkout and compatible explicit COPY inputs are supplied
@@ -1263,6 +1265,11 @@ Adoption SHALL require COPY mode, an explicit compatible base and exactly one ex
 
 - **WHEN** adoption is asked to use SHARED mode, infer a source, or select two COPY sources
 - **THEN** it fails before provisioning with an actionable typed validation result
+
+#### Scenario: Public adoption plan retains captured base provenance
+
+- **WHEN** `adopt_command()` captures a valid explicit base and its public plan is inspected before execution
+- **THEN** `plan.provenance.resolved_base_revision` equals the captured resolved commit and the execution projection uses the same normalized provenance
 
 ### Requirement: Code ownership is separate from environment artifact ownership
 

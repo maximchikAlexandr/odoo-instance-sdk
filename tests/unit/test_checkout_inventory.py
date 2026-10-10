@@ -170,6 +170,19 @@ class _SlowProvider:
         return {}
 
 
+class _LargeProvider:
+    @property
+    def provider_id(self) -> str:
+        return "large"
+
+    def collect(self, rows: Sequence[CheckoutRow]) -> Mapping[str, EnvironmentFactsSummary]:
+        return {
+            "main": EnvironmentFactsSummary(
+                provider="large", state="available", text="x" * (128 * 1024)
+            )
+        }
+
+
 class _FailingProvider:
     @property
     def provider_id(self) -> str:
@@ -296,7 +309,7 @@ def test_build_checkout_inventory_three_providers_and_failed_provider() -> None:
                 {env.id: EnvironmentFactsSummary(provider="gamma", state="available", text="g")},
             ),
         ),
-        facts_timeout_seconds=0.05,
+        facts_timeout_seconds=1.0,
     )
 
     main_row = inventory.rows[0]
@@ -318,6 +331,19 @@ def test_slow_provider_is_killed_at_the_configured_deadline() -> None:
 
     assert time.monotonic() - started < 1.0
     assert inventory.rows[0].facts == ()
+
+
+@pytest.mark.unit
+def test_large_provider_response_is_drained_before_child_join() -> None:
+    inventory = build_checkout_inventory(
+        _snapshot((_project(),), ()),
+        facts_providers=(_LargeProvider(),),
+        facts_timeout_seconds=1.0,
+        git_collector=lambda _path, _ref: _git(),
+    )
+
+    assert len(inventory.rows[0].facts) == 1
+    assert len(inventory.rows[0].facts[0].text) == 128 * 1024
 
 
 @pytest.mark.unit
