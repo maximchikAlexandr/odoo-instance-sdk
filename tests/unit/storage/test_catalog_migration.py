@@ -28,6 +28,7 @@ from tests.unit.monitor_support import make_env
 from tests.unit.storage.catalog_alpha_fixture import write_alpha_catalog
 
 V16_CATALOG_FIXTURE = Path(__file__).parents[2] / "fixtures" / "catalog_v16.sql"
+V15_CATALOG_FIXTURE = Path(__file__).parents[2] / "fixtures" / "catalog_v15.sql"
 
 
 def _assert_current_revision(conn: sqlite3.Connection) -> None:
@@ -254,6 +255,97 @@ def test_real_v16_catalogue_is_repaired_stamped_and_preserves_rows(tmp_path: Pat
     }
     assert "environments_one_active_branch" in indexes
     catalog.close()
+
+
+def test_real_v15_catalogue_upgrades_and_preserves_related_rows(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(V15_CATALOG_FIXTURE.read_text())
+    conn.execute(
+        "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
+        ("project-v15", "/repo", "/repo/.git", "2026-01-01", "2026-01-01"),
+    )
+    conn.execute(
+        """INSERT INTO backups
+           (id, source_base_url, database_name, format, filestore_requested, state, started_at)
+           VALUES ('backup-v15', 'https://example.test', 'alpha', 'zip', 1, 'available',
+                   '2026-01-01')"""
+    )
+    conn.execute(
+        """INSERT INTO backup_events (backup_id, event_type, occurred_at)
+           VALUES ('backup-v15', 'download_succeeded', '2026-01-01')"""
+    )
+    conn.execute(
+        """INSERT INTO restores (db_host, db_port, database_name, backup_id, restored_at)
+           VALUES ('127.0.0.1', 5432, 'alpha_copy', 'backup-v15', '2026-01-01')"""
+    )
+    conn.execute(
+        """INSERT INTO environments
+           (id, name, repository_root, git_common_dir, branch, base_ref, worktree_path,
+            generated_config_path, python_environment_path, python_environment_owned,
+            dependency_lock_path, db_mode, backup_id, runtime_json, state, created_at)
+           VALUES ('environment-v15', 'alpha', '/repo', '/repo/.git', 'feature-1', 'main',
+                   '/worktree', '/worktree/odoo.conf', '/venv', 0, '/lock', 'copy',
+                   'backup-v15', '{}', 'ready', '2026-01-01')"""
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+    _assert_current_revision(catalog._conn)
+    verify_schema_equivalence(catalog._conn)
+    assert catalog._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert (
+        catalog._conn.execute("SELECT project_id FROM backups WHERE id='backup-v15'").fetchone()[0]
+        == "project-v15"
+    )
+    assert catalog._conn.execute("SELECT state FROM restores").fetchone()[0] == "complete"
+    assert catalog._conn.execute("SELECT COUNT(*) FROM backup_events").fetchone()[0] == 1
+    assert catalog.get_environment("environment-v15") is not None
+    catalog.close()
+
+    reopened = BackupCatalog(db_path=db)
+    _assert_current_revision(reopened._conn)
+    reopened.close()
+
+
+def test_unrecognized_v15_catalogue_is_not_rewritten(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(V15_CATALOG_FIXTURE.read_text())
+    conn.execute("ALTER TABLE backups ADD COLUMN unexpected TEXT")
+    conn.close()
+
+    with pytest.raises(BackupCatalogError, match="schema is not equivalent"):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert catalog_revision(conn) is None
+    assert "project_id" not in {row[1] for row in conn.execute("PRAGMA table_info(backups)")}
+    conn.close()
+
+
+def test_v15_repair_rolls_back_when_foreign_keys_are_invalid(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(V15_CATALOG_FIXTURE.read_text())
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        """INSERT INTO backup_events (backup_id, event_type, occurred_at)
+           VALUES ('missing', 'download_succeeded', '2026-01-01')"""
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(BackupCatalogError, match="invalid foreign key references"):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert catalog_revision(conn) is None
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert "project_id" not in {row[1] for row in conn.execute("PRAGMA table_info(backups)")}
+    assert conn.execute("SELECT COUNT(*) FROM backup_events").fetchone()[0] == 1
+    conn.close()
 
 
 def test_real_v16_catalogue_rejects_duplicate_active_branch(tmp_path: Path) -> None:
