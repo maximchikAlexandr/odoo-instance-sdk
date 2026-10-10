@@ -202,6 +202,29 @@ def _assert_runtime_environment(provenance: InstalledProvenance) -> None:
             )
 
 
+def assert_direct_update_allowed() -> None:
+    """Reject self-update from a numbered or hot-fix launcher context."""
+    if not os.environ.get("ODCLI_LAUNCHER_KIND") and not os.environ.get("ODCLI_LAUNCHER_ID"):
+        return
+    from odoo_instance_sdk.internal.alternate_tool import selected_identity
+
+    try:
+        launcher = selected_identity()
+    except ValueError as exc:
+        raise UpdateError("invalid alternate launcher context; refusing self-update") from exc
+    if launcher is None:
+        return
+    if launcher.kind == "numbered":
+        raise UpdateError(
+            f"{launcher.launcher_name} cannot self-update; run `odcli slot install "
+            f"{launcher.identifier} <40-character-lowercase-sha> --replace`"
+        )
+    raise UpdateError(
+        f"{launcher.launcher_name} cannot self-update; use skill-managed canonical "
+        "`odcli update` reconciliation"
+    )
+
+
 def _read_direct_url_payload(dist: Distribution) -> dict[str, JsonValue] | None:
     raw = dist.read_text("direct_url.json")
     if not raw:
@@ -691,6 +714,7 @@ def _ensure_maintenance_path() -> None:
 
 def prepare_maintenance_environment() -> None:
     """Recover HOME and PATH when a legacy child launched hermetically."""
+    assert_direct_update_allowed()
     if not os.environ.get("HOME"):
         # Keep the uv-tool path symlink intact; resolving it would jump to the
         # host's shared Python and lose the isolated tool home.
@@ -758,6 +782,7 @@ def _record_maintenance_pid() -> None:
 
 def _maintenance_run() -> UpdateResult:
     """Run migrations and verify inside the maintenance child process."""
+    assert_direct_update_allowed()
     _record_maintenance_pid()
     provenance = read_uv_tool_direct_url()
     journal = _read_journal(_update_journal_path())
@@ -796,6 +821,7 @@ def is_maintenance_mode() -> bool:
 
 def run_maintenance() -> int:
     """Entry point for the maintenance child; writes one JSON document."""
+    assert_direct_update_allowed()
     prepare_maintenance_environment()
     result = _maintenance_run()
     sys.stdout.write(json.dumps(msgspec.to_builtins(result), indent=2, sort_keys=True))
@@ -836,6 +862,7 @@ def update_command(
     force_mutation: bool = False,
 ) -> Command[UpdateResult]:
     """Return the immutable ``Command[UpdateResult]`` for ``odcli update``."""
+    assert_direct_update_allowed()
     from odoo_instance_sdk.internal.self_update_commands import (
         _build_already_current_command,
         _build_check_command,
@@ -930,6 +957,7 @@ def preflight_update_command(
     executor: ProcessExecutor | None = None,
 ) -> Command[UpdateResult]:
     """Capture the read-only preflight stage for an immutable target."""
+    assert_direct_update_allowed()
     from odoo_instance_sdk.internal.self_update_commands import _build_preflight_command
 
     return _build_preflight_command(
