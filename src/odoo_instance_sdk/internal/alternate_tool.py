@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -314,6 +315,57 @@ def _safe_existing(path: Path, *, directory: bool = False) -> bool:
     return True
 
 
+def _reject_symlink_components(path: Path, *, stop: Path) -> None:
+    """Reject symlinked deterministic parents before creating or replacing state."""
+    current = path
+    stop = stop.resolve()
+    while True:
+        if current.is_symlink():
+            raise AlternateToolError(f"refusing to use symlink: {current}")
+        if current == stop or current.parent == current:
+            return
+        current = current.parent
+
+
+def _check_install_target(identity_value: AlternateIdentity, *, replace: bool) -> None:
+    """Recheck all install policy and containment facts at the publication boundary."""
+    _reject_symlink_components(identity_value.manager_root.parent, stop=identity_value.home)
+    for target in (
+        identity_value.manager_root,
+        identity_value.manifest,
+        identity_value.lock,
+        identity_value.launcher,
+        identity_value.tool_root,
+        identity_value.tool_bin,
+        identity_value.state_root,
+    ):
+        if target.is_symlink():
+            raise AlternateToolError(f"refusing to replace symlink: {target}")
+        if not _under(target, identity_value.home):
+            raise AlternateToolError(f"alternate target escapes home: {target}")
+    existing = any(
+        target.exists()
+        for target in (
+            identity_value.manifest,
+            identity_value.launcher,
+            identity_value.tool_root,
+            identity_value.tool_bin,
+            identity_value.state_root,
+        )
+    )
+    if existing and not replace:
+        raise AlternateToolError(f"{identity_value.launcher_name} already exists")
+    if identity_value.kind == "hotfix" and replace:
+        raise AlternateToolError("hot-fix replacement is not supported")
+    if replace:
+        if not identity_value.manifest.is_file() or identity_value.manifest.is_symlink():
+            raise AlternateToolError("cannot replace an unverified alternate manifest")
+        previous = _read_manifest(identity_value.manifest, home=identity_value.home)
+        if previous.identity != identity_value:
+            raise AlternateToolError("cannot replace an identity-mismatched alternate")
+        _verify_structure(previous)
+
+
 def _under(path: Path, root: Path) -> bool:
     try:
         return path.resolve(strict=False).is_relative_to(root.resolve())
@@ -434,8 +486,20 @@ def _verify_structure(manifest: AlternateManifest) -> None:
 @contextlib.contextmanager
 def lifecycle_lock(identity_value: AlternateIdentity, *, exclusive: bool) -> Iterator[int]:
     """Acquire the same lock used by rendered launchers for a full operation."""
+    _reject_symlink_components(identity_value.manager_root.parent, stop=identity_value.home)
+    if identity_value.manager_root.is_symlink() or identity_value.lock.is_symlink():
+        raise AlternateToolError(f"refusing to use symlink: {identity_value.lock}")
     identity_value.lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(identity_value.lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fd = os.open(
+            identity_value.lock,
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError as exc:
+        raise AlternateToolError(
+            f"cannot safely open lifecycle lock: {identity_value.lock}"
+        ) from exc
     try:
         mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         try:
@@ -468,32 +532,7 @@ def install_alternate_tool(  # noqa: C901
         raise ValueError("revision must be a complete lowercase SHA")
     if repository != REPOSITORY_URL:
         raise ValueError("unsupported source repository")
-    existing = (
-        identity_value.manager_root.exists()
-        or identity_value.manifest.exists()
-        or identity_value.launcher.exists()
-    )
-    occupied_state = identity_value.state_root.exists()
-    if (existing or occupied_state) and not replace:
-        raise AlternateToolError(f"{identity_value.launcher_name} already exists")
-    for target in (
-        identity_value.manifest,
-        identity_value.launcher,
-        identity_value.tool_root,
-        identity_value.tool_bin,
-        identity_value.state_root,
-    ):
-        if target.is_symlink():
-            raise AlternateToolError(f"refusing to replace symlink: {target}")
-    if identity_value.kind == "hotfix" and replace:
-        raise AlternateToolError("hot-fix replacement is not supported")
-    if replace:
-        if not identity_value.manifest.is_file() or identity_value.manifest.is_symlink():
-            raise AlternateToolError("cannot replace an unverified alternate manifest")
-        previous = _read_manifest(identity_value.manifest, home=identity_value.home)
-        if previous.identity != identity_value:
-            raise AlternateToolError("cannot replace an identity-mismatched alternate")
-        _verify_structure(previous)
+    _check_install_target(identity_value, replace=replace)
     manager_parent = identity_value.manager_root.parent
     manager_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{identity_value.identifier}.", dir=manager_parent))
@@ -540,8 +579,9 @@ def install_alternate_tool(  # noqa: C901
             review_session=review_session,
             branch=branch,
         )
-        identity_value.manager_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         with lifecycle_lock(identity_value, exclusive=True):
+            _check_install_target(identity_value, replace=replace)
+            identity_value.manager_root.mkdir(mode=0o700, parents=True, exist_ok=True)
             backup = (
                 identity_value.manager_root.parent
                 / f".{identity_value.identifier}.backup-{uuid.uuid4().hex}"
@@ -707,6 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             command.add_argument("--kind", choices=("numbered", "hotfix"), required=True)
             command.add_argument("--identifier", required=True)
+    commands.add_parser("provenance")
     args = parser.parse_args(argv)
     try:
         if args.command == "install":
@@ -719,6 +760,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     inspect_alternate_tool(identity(args.kind, args.identifier)), sort_keys=True
                 )
             )
+        elif args.command == "provenance":
+            print(json.dumps(_provenance(Path(sys.executable), dict(os.environ)), sort_keys=True))
         else:
             remove_alternate_tool(identity(args.kind, args.identifier))
             print(json.dumps({"removed": True, "kind": args.kind, "identifier": args.identifier}))

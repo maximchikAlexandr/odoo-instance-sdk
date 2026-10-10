@@ -833,11 +833,16 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
     PublicLeafCase(
         ("slot", "install"),
-        ("slot", "install", "2", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        (
+            "slot",
+            "install",
+            "2",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--dry-run",
+        ),
         "mutating-or-spawning",
-        False,
+        True,
         cli_only_reason="CLI-only numbered-slot lifecycle projection over the shared alternate-tool engine",
-        exception_reason="CLI-only slot installation has no preview mode; lifecycle effects are delegated to the shared engine",
         e2e_disposition="not-applicable",
         e2e_rationale="numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture",
     ),
@@ -852,11 +857,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
     PublicLeafCase(
         ("slot", "remove"),
-        ("slot", "remove", "2"),
+        ("slot", "remove", "2", "--dry-run"),
         "mutating-or-spawning",
-        False,
+        True,
         cli_only_reason="CLI-only numbered-slot lifecycle projection over the shared alternate-tool engine",
-        exception_reason="CLI-only slot removal has no preview mode; lifecycle effects are delegated to the shared engine",
         e2e_disposition="not-applicable",
         e2e_rationale="numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture",
     ),
@@ -2349,7 +2353,9 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
                 [*args, "--format", mode],
                 input="pass\n" if case.path == ("exec",) else None,
             )
-            assert failure.exit_code == 1, failure.output
+            dry_run_is_safe = case.path in {("slot", "install"), ("slot", "remove")}
+            expected_failure = not dry_run_is_safe
+            assert failure.exit_code == (1 if expected_failure else 0), failure.output
             assert failure.stderr == ""
             assert failure.stdout.strip()
             assert "\x1b" not in failure.stdout
@@ -2363,7 +2369,9 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert success_documents[0] == success_documents[1]
     assert failure_documents[0] == failure_documents[1]
     assert success_documents[0][0]["ok"] is True  # type: ignore[index]
-    assert failure_documents[0][0]["ok"] is False  # type: ignore[index]
+    dry_run_is_safe = case.path in {("slot", "install"), ("slot", "remove")}
+    expected_failure = not dry_run_is_safe
+    assert failure_documents[0][0]["ok"] is (not expected_failure)  # type: ignore[index]
     assert success_documents[0][0]["dry_run"] is ("--dry-run" in case.args)  # type: ignore[index]
     failure_dry_run = "--dry-run" in case.args and case.path != ("init",)
     assert failure_documents[0][0]["dry_run"] is failure_dry_run  # type: ignore[index]

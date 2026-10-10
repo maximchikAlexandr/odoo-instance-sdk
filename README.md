@@ -539,9 +539,9 @@ Canonical `odcli` manages exact-revision numbered launchers through the shared
 alternate-tool lifecycle:
 
 ```bash
-odcli slot install 2 <40-character-lowercase-sha>
+odcli slot install 2 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 odcli-2 env ls
-odcli slot install 2 <new-sha> --replace
+odcli slot install 2 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --replace
 odcli slot list
 odcli slot remove 2
 ```

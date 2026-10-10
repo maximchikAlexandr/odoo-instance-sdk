@@ -15,16 +15,20 @@ else:
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
+    action_command,
     bordered_table,
     emit,
     fail,
     output_options,
     render_rich_text,
     resolve_output_mode,
+    run_or_preview,
     success_document,
 )
+from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.internal.alternate_tool import (
     AlternateIdentity,
+    AlternateManifest,
     AlternateToolError,
     identity,
     install_alternate_tool,
@@ -62,6 +66,8 @@ def _rich_install(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
+    if document.dry_run:
+        return f"Plan: install numbered-{result.get('identifier', '')}."
     return f"Installed {result.get('kind', 'numbered')}-{result.get('identifier', '')}."
 
 
@@ -90,7 +96,73 @@ def _rich_remove(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
+    if document.dry_run:
+        return f"Plan: remove numbered-{result.get('identifier', '')}."
     return f"Removed {result.get('kind', 'numbered')}-{result.get('identifier', '')}."
+
+
+def slot_install_command(
+    number: str, sha: str, *, replace: bool = False
+) -> Command[AlternateManifest]:
+    """Capture one immutable install snapshot for preview and execution."""
+    _canonical_only()
+    identity_value = _slot_identity(number)
+    return cast(
+        "Command[AlternateManifest]",
+        action_command(
+            "slot-install",
+            lambda: install_alternate_tool(identity_value, sha, replace=replace),
+            description=f"Install numbered-{number} at the requested revision",
+            mutating=True,
+        ),
+    )
+
+
+def slot_remove_command(number: str) -> Command[JsonObject]:
+    """Capture one immutable removal snapshot for preview and execution."""
+    _canonical_only()
+    identity_value = _slot_identity(number)
+
+    def remove() -> JsonObject:
+        remove_alternate_tool(identity_value)
+        return {
+            "removed": True,
+            "kind": identity_value.kind,
+            "identifier": identity_value.identifier,
+        }
+
+    return cast(
+        "Command[JsonObject]",
+        action_command(
+            "slot-remove",
+            remove,
+            description=f"Remove numbered-{number} after idle identity checks",
+            mutating=True,
+        ),
+    )
+
+
+def _install_preview(number: str, sha: str, replace: bool) -> JsonObject:
+    identity_value = _slot_identity(number)
+    return {
+        "kind": identity_value.kind,
+        "identifier": identity_value.identifier,
+        "sha": sha,
+        "replace": replace,
+        "launcher": str(identity_value.launcher),
+        "state": str(identity_value.state_root),
+    }
+
+
+def _remove_preview(number: str) -> JsonObject:
+    identity_value = _slot_identity(number)
+    return {
+        "kind": identity_value.kind,
+        "identifier": identity_value.identifier,
+        "removed": True,
+        "launcher": str(identity_value.launcher),
+        "state": str(identity_value.state_root),
+    }
 
 
 @click.group(
@@ -120,22 +192,31 @@ def slot_group() -> None:
 @click.argument("number", type=_SLOT_NUMBER)
 @click.argument("sha")
 @click.option("--replace", is_flag=True, help="Replace an existing idle numbered slot.")
+@click.option("--dry-run", is_flag=True, default=False, help="Inspect without installing.")
 @output_options
 def slot_install(
     number: str,
     sha: str,
     replace: bool,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     mode = resolve_output_mode(output_format, json_output)
     try:
-        _canonical_only()
-        manifest = install_alternate_tool(_slot_identity(number), sha, replace=replace)
-        result = cast("JsonObject", manifest.to_json())
-        emit(success_document(command="slot.install", result=result), mode, rich=_rich_install)
+        run_or_preview(
+            lambda: slot_install_command(number, sha, replace=replace),
+            command_name="slot.install",
+            mode=mode,
+            dry_run=dry_run,
+            result=lambda manifest: cast(
+                "JsonObject", cast("AlternateManifest", manifest).to_json()
+            ),
+            preview=lambda _command: _install_preview(number, sha, replace),
+            rich=_rich_install,
+        )
     except Exception as exc:
-        fail(mode, "slot.install", exc, dry_run=False)
+        fail(mode, "slot.install", exc, dry_run=dry_run)
 
 
 @slot_group.command(
@@ -163,21 +244,29 @@ def slot_list(output_format: str | None, json_output: bool) -> None:
     ),
 )
 @click.argument("number", type=_SLOT_NUMBER)
+@click.option("--dry-run", is_flag=True, default=False, help="Inspect without removing.")
 @output_options
-def slot_remove(number: str, output_format: str | None, json_output: bool) -> None:
+def slot_remove(number: str, dry_run: bool, output_format: str | None, json_output: bool) -> None:
     mode = resolve_output_mode(output_format, json_output)
     try:
-        _canonical_only()
-        identity_value = _slot_identity(number)
-        remove_alternate_tool(identity_value)
-        result: JsonObject = {
-            "removed": True,
-            "kind": identity_value.kind,
-            "identifier": identity_value.identifier,
-        }
-        emit(success_document(command="slot.remove", result=result), mode, rich=_rich_remove)
+        run_or_preview(
+            lambda: slot_remove_command(number),
+            command_name="slot.remove",
+            mode=mode,
+            dry_run=dry_run,
+            result=lambda result: cast("JsonObject", result),
+            preview=lambda _command: _remove_preview(number),
+            rich=_rich_remove,
+        )
     except Exception as exc:
-        fail(mode, "slot.remove", exc, dry_run=False)
+        fail(mode, "slot.remove", exc, dry_run=dry_run)
 
 
-__all__ = ["slot_group", "slot_install", "slot_list", "slot_remove"]
+__all__ = [
+    "slot_group",
+    "slot_install",
+    "slot_install_command",
+    "slot_list",
+    "slot_remove",
+    "slot_remove_command",
+]

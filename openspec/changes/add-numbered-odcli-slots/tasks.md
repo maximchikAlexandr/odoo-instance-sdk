@@ -15,10 +15,10 @@
 
 ## 3. Runtime confinement and update policy
 
-- [ ] 3.1 Gate legacy platformdirs adoption so only canonical startup performs discovery/copy/rewrite/cleanup and every explicit alternate root starts independently.
-- [ ] 3.2 Propagate selected-root identity through remaining SDK-owned global consumers, catalogues, locks, reports, storage/update journals, and migration paths.
-- [ ] 3.3 Reject numbered and hot-fix self-update before planning/effects with launcher-specific canonical remediation while preserving isolated ordinary `odcli update`.
-- [ ] 3.4 Add path, migration, update, and process-boundary regressions proving canonical compatibility, empty alternate roots, and zero cross-root access.
+- [x] 3.1 Gate legacy platformdirs adoption so only canonical startup performs discovery/copy/rewrite/cleanup and every explicit alternate root starts independently.
+- [x] 3.2 Propagate selected-root identity through remaining SDK-owned global consumers, catalogues, locks, reports, storage/update journals, and migration paths.
+- [x] 3.3 Reject numbered and hot-fix self-update before planning/effects with launcher-specific canonical remediation while preserving isolated ordinary `odcli update`.
+- [x] 3.4 Add path, migration, update, and process-boundary regressions proving canonical compatibility, empty alternate roots, and zero cross-root access.
 
 ## 4. Integrated acceptance and documentation
 

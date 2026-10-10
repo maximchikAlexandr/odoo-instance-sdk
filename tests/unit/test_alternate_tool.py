@@ -4,6 +4,7 @@ import contextlib
 import importlib
 import json
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 
 from odoo_instance_sdk.internal import alternate_tool
 from odoo_instance_sdk.internal.alternate_tool import (
+    REPOSITORY_URL,
     AlternateIdentity,
     AlternateManifest,
     AlternateToolError,
@@ -249,3 +251,206 @@ def test_hotfix_install_uses_the_shared_provenance_and_probe_lifecycle(
 
     remove_alternate_tool(hotfix)
     assert not hotfix.launcher.exists()
+
+
+def test_install_rejects_invalid_sha_before_creating_any_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    monkeypatch.setattr(
+        alternate_tool, "run_captured", lambda *_args, **_kwargs: pytest.fail("unexpected run")
+    )
+    with pytest.raises(ValueError, match="complete lowercase SHA"):
+        alternate_tool.install_alternate_tool(numbered, "not-a-sha")
+    assert not numbered.manager_root.exists()
+    assert not numbered.state_root.exists()
+
+
+def test_install_without_replace_preserves_existing_slot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    _published(numbered)
+    original = numbered.manifest.read_bytes()
+    monkeypatch.setattr(
+        alternate_tool, "run_captured", lambda *_args, **_kwargs: pytest.fail("unexpected run")
+    )
+    with pytest.raises(AlternateToolError, match="already exists"):
+        alternate_tool.install_alternate_tool(numbered, "b" * 40)
+    assert numbered.manifest.read_bytes() == original
+
+
+def test_provenance_mismatch_publishes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+
+    def fake_run(
+        executable: str,
+        args: tuple[str, ...] = (),
+        *,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> ProcessResult:
+        if executable == "uv":
+            assert env is not None
+            Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
+            tool_bin = Path(env["UV_TOOL_BIN_DIR"])
+            tool_bin.mkdir(mode=0o700, parents=True)
+            binary = tool_bin / "odcli"
+            binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
+            binary.chmod(0o700)
+        elif "direct_url.json" in args[-1]:
+            return ProcessResult(
+                (executable, *args),
+                0,
+                json.dumps(
+                    {
+                        "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                        "vcs_info": {"commit_id": "b" * 40},
+                    }
+                ),
+                "",
+                0.0,
+                None,
+                (),
+            )
+        return ProcessResult((executable, *args), 0, "", "", 0.0, None, ())
+
+    monkeypatch.setattr(alternate_tool, "run_captured", fake_run)
+    with pytest.raises(AlternateToolError, match="does not match"):
+        alternate_tool.install_alternate_tool(numbered, "c" * 40)
+    assert not numbered.launcher.exists()
+    assert not numbered.manifest.exists()
+    assert not numbered.state_root.exists()
+
+
+def test_running_slot_blocks_replacement_before_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    _published(numbered)
+
+    @contextlib.contextmanager
+    def running_lock(_identity: AlternateIdentity, *, exclusive: bool) -> Iterator[int]:
+        if exclusive:
+            raise AlternateToolError("alternate launcher is still running: odcli-1")
+        yield 0
+
+    monkeypatch.setattr(alternate_tool, "lifecycle_lock", running_lock)
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(alternate_tool, "_interpreter", lambda _path: interpreter)
+    monkeypatch.setattr(
+        alternate_tool,
+        "_provenance",
+        lambda _path, _env: {"repository": REPOSITORY_URL, "sha": "b" * 40},
+    )
+    monkeypatch.setattr(alternate_tool, "_probe", lambda _identity, _interpreter, _env: None)
+
+    def staged_run(
+        executable: str,
+        _args: tuple[str, ...] = (),
+        *,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> ProcessResult:
+        assert executable == "uv" and env is not None
+        Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
+        Path(env["UV_TOOL_BIN_DIR"]).mkdir(mode=0o700, parents=True)
+        binary = Path(env["UV_TOOL_BIN_DIR"]) / "odcli"
+        binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
+        binary.chmod(0o700)
+        return ProcessResult((executable,), 0, "", "", 0.0, None, ())
+
+    monkeypatch.setattr(alternate_tool, "run_captured", staged_run)
+    with pytest.raises(AlternateToolError, match="still running"):
+        alternate_tool.install_alternate_tool(numbered, "b" * 40, replace=True)
+
+
+def test_remove_rejects_symlinked_lock_and_launcher(
+    tmp_path: Path,
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    neighboring = identity("numbered", "2", home=tmp_path)
+    _published(numbered)
+    _published(neighboring, sha="b" * 40)
+    numbered.lock.parent.mkdir(mode=0o700, exist_ok=True)
+    numbered.lock.touch(mode=0o600)
+    numbered.lock.unlink()
+    numbered.lock.symlink_to(neighboring.lock)
+    with pytest.raises(AlternateToolError, match=r"identity mismatch|symlink"):
+        remove_alternate_tool(numbered)
+    numbered.lock.unlink()
+    numbered.lock.touch(mode=0o600)
+    numbered.launcher.unlink()
+    numbered.launcher.symlink_to(neighboring.launcher)
+    with pytest.raises(AlternateToolError, match=r"identity mismatch|symlink"):
+        remove_alternate_tool(numbered)
+    assert neighboring.launcher.exists()
+    assert neighboring.manifest.exists()
+
+
+def test_concurrent_no_replace_install_has_one_winner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+    staged = threading.Barrier(2)
+
+    def fake_run(
+        executable: str,
+        args: tuple[str, ...] = (),
+        *,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> ProcessResult:
+        if executable == "uv":
+            assert env is not None
+            Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
+            tool_bin = Path(env["UV_TOOL_BIN_DIR"])
+            tool_bin.mkdir(mode=0o700, parents=True)
+            binary = tool_bin / "odcli"
+            binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
+            binary.chmod(0o700)
+            staged.wait(timeout=5)
+        elif "direct_url.json" in args[-1]:
+            return ProcessResult(
+                (executable, *args),
+                0,
+                json.dumps(
+                    {
+                        "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                        "vcs_info": {"commit_id": "c" * 40},
+                    }
+                ),
+                "",
+                0.0,
+                None,
+                (),
+            )
+        return ProcessResult((executable, *args), 0, "", "", 0.0, None, ())
+
+    monkeypatch.setattr(alternate_tool, "run_captured", fake_run)
+    outcomes: list[object] = []
+
+    def install() -> None:
+        try:
+            outcomes.append(alternate_tool.install_alternate_tool(numbered, "c" * 40))
+        except Exception as error:
+            outcomes.append(error)
+
+    threads = [threading.Thread(target=install) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert len(outcomes) == 2
+    assert sum(isinstance(outcome, AlternateManifest) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, AlternateToolError) for outcome in outcomes) == 1
+    assert inspect_alternate_tool(numbered)["sha"] == "c" * 40

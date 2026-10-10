@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -34,22 +35,61 @@ def _canonical_interpreter() -> Path:
     executable = shutil.which("odcli")
     if executable is None:
         raise RuntimeError("canonical odcli is not available on PATH")
+    canonical_executable = (Path.home() / ".local" / "bin" / "odcli").resolve()
+    executable_path = Path(executable)
     try:
-        first_line = Path(executable).read_text(encoding="utf-8").splitlines()[0]
+        if executable_path.is_symlink() or executable_path.resolve() != canonical_executable:
+            raise RuntimeError("canonical odcli is not the trusted user installation")
+        executable_stat = executable_path.stat()
+        if not stat.S_ISREG(executable_stat.st_mode) or not executable_stat.st_mode & 0o111:
+            raise RuntimeError("canonical odcli is not a regular executable")
+        first_line = executable_path.read_text(encoding="utf-8").splitlines()[0]
     except (OSError, IndexError) as exc:
         raise RuntimeError("cannot inspect the canonical odcli executable") from exc
     if not first_line.startswith("#!"):
         raise RuntimeError("canonical odcli has no absolute interpreter shebang")
     interpreter = Path(first_line[2:].strip().split()[0])
-    if not interpreter.is_absolute() or not interpreter.is_file():
+    canonical_tool_root = Path.home() / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    if (
+        not interpreter.is_absolute()
+        or interpreter.is_symlink()
+        or not interpreter.is_file()
+        or not interpreter.resolve().is_relative_to(canonical_tool_root.resolve())
+        or not interpreter.stat().st_mode & 0o111
+    ):
         raise RuntimeError("canonical odcli interpreter is not an absolute executable")
     return interpreter
 
 
-def _engine_json(arguments: list[str]) -> dict[str, object] | list[object]:
+def _canonical_source(interpreter: Path) -> None:
     raw = _run(
         [
-            str(_canonical_interpreter()),
+            str(interpreter),
+            "-m",
+            "odoo_instance_sdk.internal.alternate_tool",
+            "provenance",
+        ]
+    )
+    try:
+        payload = json.loads(raw.strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("canonical distribution has no readable VCS provenance") from exc
+    source = payload.get("repository") if isinstance(payload, dict) else None
+    commit = payload.get("sha") if isinstance(payload, dict) else None
+    if (
+        source != f"https://github.com/{REPOSITORY}.git"
+        or not isinstance(commit, str)
+        or not SHA_RE.fullmatch(commit)
+    ):
+        raise RuntimeError("canonical distribution provenance is not the trusted repository")
+
+
+def _engine_json(arguments: list[str]) -> dict[str, object] | list[object]:
+    interpreter = _canonical_interpreter()
+    _canonical_source(interpreter)
+    raw = _run(
+        [
+            str(interpreter),
             "-m",
             "odoo_instance_sdk.internal.alternate_tool",
             *arguments,

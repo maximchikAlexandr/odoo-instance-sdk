@@ -56,10 +56,11 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/self_update.py", 828),
         ("src/odoo_instance_sdk/internal/self_update.py", 829),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 511),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 713),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 715),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 717),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 724),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 754),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 756),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 758),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 764),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 767),
     }
 )
 
@@ -100,10 +101,11 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
         "src/odoo_instance_sdk/resources/instance/identity.py",
         511,
     ): "lifecycle cleanup diagnostic transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 713): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 715): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 717): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 724): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 754): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 756): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 758): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 764): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 767): "alternate lifecycle JSON transport",
 }
 
 

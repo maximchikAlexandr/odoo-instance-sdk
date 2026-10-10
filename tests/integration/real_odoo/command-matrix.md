@@ -65,9 +65,9 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `ps` | bounded-read-only | no | critical | E2E-CP-12: single-snapshot process/resource inventory |
 | `bug-report init` | mutating-or-spawning | yes | not-applicable | local offline draft creation is covered by focused command tests and publishes no GitHub issue |
 | `bug-report submit` | mutating-or-spawning | yes | not-applicable | publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture |
-| `slot install` | mutating-or-spawning | no | not-applicable | numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture |
+| `slot install` | mutating-or-spawning | yes | not-applicable | numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture |
 | `slot list` | bounded-read-only | no | not-applicable | numbered lifecycle inventory is covered by focused unit tests outside the disposable Odoo fixture |
-| `slot remove` | mutating-or-spawning | no | not-applicable | numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture |
+| `slot remove` | mutating-or-spawning | yes | not-applicable | numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture |
 | `update` | mutating-or-spawning | yes | not-applicable | mutates the operator uv tool outside the disposable Odoo fixture; `update --check` is the process-previewable-read-only variant |
 
 ## Scenario coverage

@@ -256,13 +256,15 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:713` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:754` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:715` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:756` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:717` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:758` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:724` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:764` — shared
+  alternate-tool JSON transport used by the canonical-interpreter bootstrap.
+- `src/odoo_instance_sdk/internal/alternate_tool.py:767` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap;
   remove these entries only when lifecycle delegation has a centralized
   machine-output adapter.
