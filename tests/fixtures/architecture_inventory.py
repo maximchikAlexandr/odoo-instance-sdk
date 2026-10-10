@@ -20,7 +20,9 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 555),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 556),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 474),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 476),
+        ("src/odoo_instance_sdk/commands/contract.py", 32),
+        ("src/odoo_instance_sdk/commands/operation.py", 89),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
         ("src/odoo_instance_sdk/commands/output.py", 289),
@@ -53,8 +55,10 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        474,
+        476,
     ): "documented --version metadata flag transport",
+    ("src/odoo_instance_sdk/commands/contract.py", 32): "metadata-only contract export transport",
+    ("src/odoo_instance_sdk/commands/operation.py", 89): "bounded JSONL session transport",
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
@@ -78,12 +82,9 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
-
-
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/resources/test_database_resource.py", 634),
+        ("tests/unit/resources/test_database_resource.py", 807),
         ("tests/unit/test_monitor_cache_and_docker.py", 119),
         ("tests/unit/test_cluster_resources.py", 188),
         ("tests/unit/test_real_odoo_ci_components.py", 40),
@@ -95,6 +96,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_mutmut_results.py", 32),
         ("tests/unit/test_mutmut_results.py", 47),
         ("tests/unit/test_odcli_autonomous_skill.py", 56),
+        ("tests/unit/test_cli_surface.py", 59),
     }
 )
 

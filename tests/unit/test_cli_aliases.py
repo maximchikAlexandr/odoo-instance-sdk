@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,7 @@ def _group(name: str) -> click.Group:
 
 
 def _leaf_args(case: AliasCase, spelling: str) -> list[str]:
-    public_case = next(item for item in PUBLIC_LEAF_CASES if item.path == case.public_path)
+    public_case = next(item for item in PUBLIC_LEAF_TEST_CASES if item.path == case.public_path)
     args = list(public_case.args)
     args[args.index(case.canonical)] = spelling
     return args

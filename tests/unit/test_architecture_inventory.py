@@ -19,7 +19,6 @@ from tests.fixtures.architecture_inventory import (
     DIRECT_HTTPX_USAGE,
     DIRECT_OUTPUT_WRITES,
     DIRECT_SUBPROCESS_LAUNCHES,
-    EXPLICIT_IMPRECISE_ANNOTATIONS,
     MODULE_LOCAL_SUBPROCESS_PATCHES,
     OUTPUT_WRITE_REASONS,
     PUBLIC_PROCESS_METHODS,
@@ -141,6 +140,8 @@ def _annotations(node: ast.AST) -> list[ast.expr]:
         if node.returns is not None:
             annotations.append(node.returns)
         return annotations
+    if isinstance(node, ast.TypeAlias):
+        return [node.value]
     return []
 
 
@@ -380,9 +381,8 @@ def test_direct_output_inventory_is_exact() -> None:
 
 def test_production_imprecise_annotation_inventory_is_exact() -> None:
     discovered = _discover_imprecise_annotations()
-    assert discovered == EXPLICIT_IMPRECISE_ANNOTATIONS, (
-        "imprecise production annotations at "
-        + _format_locations({(path, line) for path, lines in discovered.items() for line in lines})
+    assert not discovered, "imprecise production annotations at " + _format_locations(
+        {(path, line) for path, lines in discovered.items() for line in lines}
     )
     escape_hatches = _discover_type_escape_hatches()
     assert not escape_hatches, "universal production type escape hatches at " + _format_locations(
