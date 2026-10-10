@@ -9,10 +9,14 @@ from odoo_instance_sdk.internal.dbreplace.planning import (
 from odoo_instance_sdk.internal.dbreplace.validation import (
     build_copy_replacement_command as build_copy_replacement_command,
 )
+from odoo_instance_sdk.internal.dbreplace_recovery import (
+    CopyReplacementRecovery as CopyReplacementRecovery,
+)
 from odoo_instance_sdk.models import CopyReplacementResult as CopyReplacementResult
 
 __all__ = [
     "CopyReplacementFailureContext",
+    "CopyReplacementRecovery",
     "CopyReplacementResult",
     "build_copy_replacement_command",
 ]
