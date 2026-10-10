@@ -133,7 +133,8 @@ class _RestoreMixin:
             if claim is None or claim["state"] != "active":
                 raise BackupCatalogError("replacement cluster claim is not active")
             self._conn.execute(
-                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL WHERE id=?",
+                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL, "
+                "recovery_json=NULL WHERE id=?",
                 (backup_id, environment_id),
             )
             self._conn.execute(
@@ -181,7 +182,8 @@ class _RestoreMixin:
             if row is None or row["db_mode"] != "copy" or row["target_db_name"] != target_database:
                 raise BackupCatalogError("environment replacement rollback identity changed")
             self._conn.execute(
-                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL WHERE id=?",
+                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL, "
+                "recovery_json=NULL WHERE id=?",
                 (backup_id, environment_id),
             )
             self._conn.execute(

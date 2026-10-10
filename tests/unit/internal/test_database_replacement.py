@@ -20,6 +20,7 @@ import pytest
 
 from odoo_instance_sdk.execution import ProcessStep
 from odoo_instance_sdk.internal.dbreplace.validation import build_copy_replacement_command
+from odoo_instance_sdk.internal.dbreplace_recovery import decode_recovery
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -502,8 +503,11 @@ def test_replacement_incomplete_compensation_persists_sanitized_cleanup_context(
     assert row is not None
     assert row["state"] == "cleanup_failed"
     assert "copy replacement cleanup_failed" in str(row["last_error"])
-    assert "copy_target" in str(row["last_error"])
-    assert f"backup={backup_id}" in str(row["last_error"])
+    assert "retained=" not in str(row["last_error"])
+    recovery = decode_recovery(row["recovery_json"])
+    assert recovery.environment_id == environment.id
+    assert recovery.backup_id == backup_id
+    assert recovery.target_database == "copy_target"
     catalog.close()
 
 

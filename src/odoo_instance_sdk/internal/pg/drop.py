@@ -22,6 +22,7 @@ from odoo_instance_sdk.execution import (
     _PlanObservation,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
+from odoo_instance_sdk.internal.dbreplace_recovery import recovery_values
 from odoo_instance_sdk.internal.files import open_directory_path_without_symlinks
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
@@ -160,13 +161,9 @@ def _validate_allowed_environment(
     ):
         raise ConfigError("copy environment ownership changed before database drop")
     if expected_rollback_database is not None:
-        raw = row["last_error"]
-        if not isinstance(raw, str) or "copy replacement cleanup_failed" not in raw:
+        retained = recovery_values(row, allow_legacy=True)
+        if not retained:
             raise ConfigError("retained rollback ownership evidence is unavailable")
-        try:
-            retained = json.loads(raw.split("retained=", 1)[1].split(";", 1)[0])
-        except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ConfigError("retained rollback ownership evidence is malformed") from exc
         if (
             not isinstance(retained, dict)
             or retained.get("rollback_database") != expected_rollback_database

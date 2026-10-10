@@ -46,7 +46,7 @@ class _EnvironmentMixin:
                 source_db_name, target_db_name, backup_id,
                 runtime_json, applied_settings_json, state, created_at, last_used_at,
                 removed_at, last_error, project_id, checkout_repository_root,
-                checkout_git_common_dir, checkout_commit_sha, code_ownership,
+                recovery_json, checkout_git_common_dir, checkout_commit_sha, code_ownership,
                 artifact_root, adoption_input_fingerprint
             ) VALUES (
                 :id, :name, :repository_root, :git_common_dir, :branch, :base_ref,
@@ -55,7 +55,7 @@ class _EnvironmentMixin:
                 :source_db_name, :target_db_name, :backup_id,
                 :runtime_json, :applied_settings_json, :state, :created_at, :last_used_at,
                 :removed_at, :last_error, :project_id, :checkout_repository_root,
-                :checkout_git_common_dir, :checkout_commit_sha, :code_ownership,
+                :recovery_json, :checkout_git_common_dir, :checkout_commit_sha, :code_ownership,
                 :artifact_root, :adoption_input_fingerprint
             )""",
             {
@@ -83,6 +83,7 @@ class _EnvironmentMixin:
                 "last_error": sanitize_last_error(str(env.get("last_error")))
                 if env.get("last_error")
                 else None,
+                "recovery_json": env.get("recovery_json"),
                 "project_id": env.get("project_id"),
                 "checkout_repository_root": env.get(
                     "checkout_repository_root", env["repository_root"]
@@ -99,6 +100,50 @@ class _EnvironmentMixin:
             },
         )
         self._conn.commit()
+
+    @_translate_sqlite_error
+    def record_environment_replacement_failure(
+        self,
+        environment_id: str,
+        recovery_json: str,
+        *,
+        last_error: str,
+        message: str,
+    ) -> None:
+        """Persist replacement failure state, evidence, and event atomically."""
+        if not isinstance(recovery_json, str) or not recovery_json or len(recovery_json) > 16_384:
+            raise BackupCatalogError("replacement recovery is invalid")
+        diagnostic = sanitize_last_error(last_error) or "copy replacement cleanup failed"
+        event_message = sanitize_event_message(message)
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE environments SET state=?, last_error=?, recovery_json=? WHERE id=?",
+                ("cleanup_failed", diagnostic, recovery_json, environment_id),
+            )
+            if cursor.rowcount != 1:
+                raise BackupCatalogError("environment row disappeared during replacement failure")
+            self._conn.execute(
+                "INSERT INTO environment_events "
+                "(environment_id, operation, outcome, occurred_at, message) "
+                "VALUES (?, 'sync', 'failed', datetime('now'), ?)",
+                (environment_id, event_message),
+            )
+
+    @_translate_sqlite_error
+    def adopt_environment_replacement_recovery(
+        self, environment_id: str, recovery_json: str
+    ) -> None:
+        """Adopt known legacy evidence only during an explicit repair."""
+        if not isinstance(recovery_json, str) or not recovery_json or len(recovery_json) > 16_384:
+            raise BackupCatalogError("replacement recovery is invalid")
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE environments SET recovery_json=? "
+                "WHERE id=? AND state='cleanup_failed' AND recovery_json IS NULL",
+                (recovery_json, environment_id),
+            )
+            if cursor.rowcount != 1:
+                raise BackupCatalogError("replacement recovery adoption identity changed")
 
     @_translate_sqlite_error
     def _finalize_environment_checkout(

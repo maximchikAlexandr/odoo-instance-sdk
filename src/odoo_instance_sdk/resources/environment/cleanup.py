@@ -15,6 +15,11 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.db_name import validate_filestore_containment
+from odoo_instance_sdk.internal.dbreplace_recovery import (
+    CopyReplacementRecovery,
+    recovery_from_row,
+    recovery_mapping,
+)
 from odoo_instance_sdk.internal.locks import (
     environment_lock_path,
     exclusive_lock,
@@ -44,7 +49,6 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     EnvironmentSelector,
     EnvironmentState,
     T,
-    _replacement_retained_error,
     _validate_retained_removal_evidence,
 )
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize_db_host
@@ -274,7 +278,14 @@ class _CleanupMixin:
 
             instance._postgres_cluster = PostgresCluster.from_project(env.repository_root)
             drop_name = env.target_db_name
-            retained = _replacement_retained_error(env.last_error)
+            recovery_value = recovery_from_row(
+                self._client.get_catalog().get_environment(str(env.id)), allow_legacy=True
+            )
+            retained = (
+                recovery_mapping(recovery_value)
+                if isinstance(recovery_value, CopyReplacementRecovery)
+                else (recovery_value or {})
+            )
             if retained.get("target_present") is False and retained.get("rollback_present") is True:
                 rollback_name = retained.get("rollback_database")
                 if isinstance(rollback_name, str) and rollback_name:
@@ -296,9 +307,12 @@ class _CleanupMixin:
                 idempotent_absent=True,
             )
             prepared = cast("PreparedCommand[None]", command._prepared())
+            expected_recovery = dict(retained)
 
             def validate_retained_replay() -> None:
-                _validate_retained_removal_evidence(self._client.get_catalog(), env)
+                _validate_retained_removal_evidence(
+                    self._client.get_catalog(), env, expected=expected_recovery
+                )
 
             if (
                 drop_name == env.target_db_name
@@ -756,11 +770,17 @@ class _CleanupMixin:
             )
         instance = self._client.instance.from_config(config_path, master_password=master_pwd)
         db_port = instance.config.db_port or 5432
-        retained = _replacement_retained_error(env.last_error)
+        recovery_value = recovery_from_row(catalog.get_environment(str(env.id)), allow_legacy=True)
+        retained = (
+            recovery_mapping(recovery_value)
+            if isinstance(recovery_value, CopyReplacementRecovery)
+            else (recovery_value or {})
+        )
         if (
             env.state is EnvironmentState.CLEANUP_FAILED
+            and recovery_value is None
             and isinstance(env.last_error, str)
-            and "copy replacement cleanup_failed" in env.last_error
+            and env.last_error.startswith("copy replacement cleanup_failed;")
             and not retained
         ):
             raise EnvironmentConflictError(
