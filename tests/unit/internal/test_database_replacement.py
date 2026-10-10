@@ -18,9 +18,11 @@ from unittest.mock import MagicMock
 import msgspec
 import pytest
 
+from odoo_instance_sdk.exceptions import LockConflictError
 from odoo_instance_sdk.execution import ProcessStep
 from odoo_instance_sdk.internal.dbreplace.validation import build_copy_replacement_command
 from odoo_instance_sdk.internal.dbreplace_recovery import decode_recovery
+from odoo_instance_sdk.internal.locks import environment_lock_path, exclusive_lock
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -207,6 +209,42 @@ def _environment_row(catalog: BackupCatalog, environment: DevelopmentEnvironment
     return row
 
 
+def _legacy_cleanup_failed(
+    catalog: BackupCatalog,
+    environment: DevelopmentEnvironment,
+    backup_id: uuid.UUID,
+    filestore: Path,
+    *,
+    last_error: str | None = None,
+) -> DevelopmentEnvironment:
+    rollback_filestore = filestore.with_name(f"copy_target_odcli_rb_{environment.id.hex[:20]}")
+    rollback_filestore.mkdir()
+    evidence = {
+        "backup_id": str(backup_id),
+        "previous_backup_id": str(environment.backup_id),
+        "target_database": "copy_target",
+        "rollback_database": rollback_filestore.name,
+        "rollback_filestore": rollback_filestore.name,
+        "published": True,
+        "target_present": True,
+        "rollback_present": False,
+        "rollback_filestore_present": True,
+        "stage": "provenance/cleanup",
+    }
+    catalog.update_environment(
+        str(environment.id),
+        {
+            "state": EnvironmentState.CLEANUP_FAILED.value,
+            "last_error": last_error
+            or "copy replacement cleanup_failed; retained="
+            + json.dumps(evidence, separators=(",", ":"))
+            + "; legacy cleanup",
+            "recovery_json": None,
+        },
+    )
+    return msgspec.structs.replace(environment, state=EnvironmentState.CLEANUP_FAILED)
+
+
 def test_replacement_dry_run_captures_rollback_and_compensation_actions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -222,6 +260,131 @@ def test_replacement_dry_run_captures_rollback_and_compensation_actions(
     assert "database.replace.publish-provenance" in step_ids
     assert "database.replace.compensate.restore-database" in step_ids
     assert _environment_row(catalog, environment)["backup_id"] == str(environment.backup_id)
+    catalog.close()
+
+
+def test_replacement_legacy_adoption_is_inert_during_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+    )
+    client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
+    filestore = tmp_path / "environment" / "data" / "filestore" / "copy_target"
+    environment = _legacy_cleanup_failed(catalog, environment, backup_id, filestore)
+    before = tuple(path.name for path in filestore.parent.iterdir())
+    legacy_error = _environment_row(catalog, environment)["last_error"]
+
+    build_copy_replacement_command(client, environment, backup_id, executor=executor)
+
+    row = _environment_row(catalog, environment)
+    assert row["recovery_json"] is None
+    assert row["last_error"] == legacy_error
+    assert tuple(path.name for path in filestore.parent.iterdir()) == before
+    assert [step.step_id for step in executor.executed] == ["database.replace.inspect"]
+    catalog.close()
+
+
+def test_replacement_legacy_adoption_runs_after_revalidation_and_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+    )
+    client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
+    filestore = tmp_path / "environment" / "data" / "filestore" / "copy_target"
+    environment = _legacy_cleanup_failed(catalog, environment, backup_id, filestore)
+    original_adopt = catalog.adopt_environment_replacement_recovery
+    observed = False
+
+    def adopt_under_guard(environment_id: str, recovery_json: str) -> None:
+        nonlocal observed
+        with (
+            pytest.raises(LockConflictError),
+            exclusive_lock(environment_lock_path(environment_id)),
+        ):
+            pass
+        observed = True
+        original_adopt(environment_id, recovery_json)
+
+    monkeypatch.setattr(catalog, "adopt_environment_replacement_recovery", adopt_under_guard)
+    command = build_copy_replacement_command(client, environment, backup_id, executor=executor)
+
+    command.run()
+
+    assert observed
+    recovery = decode_recovery(_environment_row(catalog, environment)["recovery_json"])
+    assert recovery.environment_id == environment.id
+    assert recovery.backup_id == backup_id
+    assert recovery.target_present is True
+    assert recovery.rollback_filestore_present is True
+    catalog.close()
+
+
+@pytest.mark.parametrize(
+    ("case", "last_error"),
+    [
+        (
+            "stale",
+            "copy replacement cleanup_failed; retained="
+            + json.dumps(
+                {
+                    "backup_id": str(uuid.uuid4()),
+                    "target_database": "copy_target",
+                    "rollback_database": "copy_target_odcli_rb_stale",
+                    "published": True,
+                },
+                separators=(",", ":"),
+            )
+            + "; legacy cleanup",
+        ),
+        (
+            "contradictory",
+            "copy replacement cleanup_failed; retained="
+            + json.dumps(
+                {
+                    "backup_id": str(uuid.uuid4()),
+                    "target_database": "other_target",
+                    "rollback_database": "copy_target_odcli_rb_contradictory",
+                    "published": True,
+                },
+                separators=(",", ":"),
+            )
+            + "; legacy cleanup",
+        ),
+        ("malformed", "copy replacement cleanup_failed; retained={not-json}; legacy cleanup"),
+        (
+            "secret-bearing",
+            'copy replacement cleanup_failed; retained={"password=secret": true}; legacy cleanup',
+        ),
+    ],
+)
+def test_replacement_invalid_legacy_evidence_never_mutates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    last_error: str,
+) -> None:
+    del case
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+    )
+    client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
+    filestore = tmp_path / "environment" / "data" / "filestore" / "copy_target"
+    environment = _legacy_cleanup_failed(
+        catalog, environment, backup_id, filestore, last_error=last_error
+    )
+    before = tuple(path.name for path in filestore.parent.iterdir())
+    stored_last_error = _environment_row(catalog, environment)["last_error"]
+
+    with pytest.raises(Exception, match=r"retained replacement|provenance|ownership"):
+        build_copy_replacement_command(client, environment, backup_id, executor=executor)
+
+    row = _environment_row(catalog, environment)
+    assert row["recovery_json"] is None
+    assert row["last_error"] == stored_last_error
+    assert tuple(path.name for path in filestore.parent.iterdir()) == before
+    assert all(step.step_id == "database.replace.inspect" for step in executor.executed)
     catalog.close()
 
 

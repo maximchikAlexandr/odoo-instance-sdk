@@ -552,7 +552,7 @@ def _validate_plan(  # noqa: C901
 
 def _revalidate(  # noqa: C901
     plan: CopyReplacementPlan, context: RunContext[None], step_id: str
-) -> None:
+) -> tuple[bool, bool, bool]:
     catalog = plan.client.get_catalog()
     row = catalog.get_environment(str(plan.environment.id))
     if (
@@ -674,6 +674,7 @@ def _revalidate(  # noqa: C901
         raise EnvironmentConflictError(
             "active_sessions", "active target database sessions block replacement"
         )
+    return target_exists, rollback_exists, sessions
 
 
 def _rename(context: RunContext[None], step_id: str, *, message: str) -> None:

@@ -124,23 +124,6 @@ def build_copy_replacement_command(  # noqa: C901
         target_exists=planning_target,
         rollback_exists=planning_rollback,
     )
-    environment_row = client.get_catalog().get_environment(str(plan.environment.id))
-    if plan.environment.state is EnvironmentState.CLEANUP_FAILED:
-        retained = _retained_failure(environment_row)
-        if retained and environment_row is not None and environment_row["recovery_json"] is None:
-            recovery = _recovery_for_plan(
-                plan,
-                target_present=planning_target,
-                rollback_present=planning_rollback,
-                rollback_filestore_present=(
-                    plan.rollback_filestore.is_dir() and not plan.rollback_filestore.is_symlink()
-                ),
-                published=bool(retained.get("published", False)),
-                stage=str(retained.get("stage", "preflight")),
-            )
-            client.get_catalog().adopt_environment_replacement_recovery(
-                str(plan.environment.id), encode_recovery(recovery)
-            )
     retry_from_rollback = plan.retry_from_rollback
     if not planning_target and not (retry_from_rollback and planning_rollback):
         raise EnvironmentConflictError(
@@ -285,7 +268,31 @@ def build_copy_replacement_command(  # noqa: C901
             ):
                 context.action("database.replace.validate")
                 context.skip(_INSPECT)
-                _revalidate(plan, cast("RunContext[None]", context), _REVALIDATE)
+                revalidated_target, revalidated_rollback, _ = _revalidate(
+                    plan, cast("RunContext[None]", context), _REVALIDATE
+                )
+                if plan.environment.state is EnvironmentState.CLEANUP_FAILED:
+                    environment_row = catalog.get_environment(str(plan.environment.id))
+                    retained = _retained_failure(environment_row)
+                    if (
+                        retained
+                        and environment_row is not None
+                        and environment_row["recovery_json"] is None
+                    ):
+                        recovery = _recovery_for_plan(
+                            plan,
+                            target_present=revalidated_target,
+                            rollback_present=revalidated_rollback,
+                            rollback_filestore_present=(
+                                plan.rollback_filestore.is_dir()
+                                and not plan.rollback_filestore.is_symlink()
+                            ),
+                            published=bool(retained.get("published", False)),
+                            stage=str(retained.get("stage", "preflight")),
+                        )
+                        catalog.adopt_environment_replacement_recovery(
+                            str(plan.environment.id), encode_recovery(recovery)
+                        )
                 execution_payload = restore_payload
                 if not plan.cleanup_only:
                     from odoo_instance_sdk.internal.restore_stages import (
