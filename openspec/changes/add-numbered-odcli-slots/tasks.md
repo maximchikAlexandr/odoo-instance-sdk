@@ -15,8 +15,9 @@
 
 - [ ] 3.1 Gate legacy platformdirs migration so canonical startup retains existing adoption while an explicit noncanonical root performs no legacy/canonical discovery, copy, rewrite, lock, or cleanup.
 - [ ] 3.2 Make the generated numbered launcher hold the shared lifecycle lock, preserve exact argv/exit status without a shell, and pass only root, slot, and executable identity selectors to the child.
-- [ ] 3.3 Reject numbered-context slot management and every self-update mode before planning or effects, with the canonical exact-SHA replace remediation; retain ordinary `odcli update` behavior and isolation from slots.
-- [ ] 3.4 Add unit and process-boundary regressions for fresh root behavior, migration bypass, canonical migration compatibility, full-lifetime locking, argument fidelity, direct-update rejection, and no cross-root access.
+- [ ] 3.3 Reject numbered-context `slot install`, `slot list`, and `slot remove` before manager manifest discovery, command planning, or effects.
+- [ ] 3.4 Reject every numbered-context self-update mode before planning or effects, with the canonical exact-SHA replace remediation; retain ordinary `odcli update` behavior and isolation from slots.
+- [ ] 3.5 Add unit and process-boundary regressions for fresh root behavior, migration bypass, canonical migration compatibility, direct-update rejection, and no cross-root access.
 
 ## 4. Integrated acceptance and documentation
 
