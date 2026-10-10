@@ -16,6 +16,11 @@ The Git resource SHALL use the already-resolved project ticket settings from the
 - **AND** dry-run and execution share scope, tag, ticket, URL, staged paths, and command snapshot
 - **AND** no supported identifier, provenance key, machine field, error, or help text names a ticket vendor
 
+#### Scenario: Commit link preserves tracker path
+
+- **WHEN** `ticket_base_url` is configured as `https://tracker.example/issues/` and the resolved ticket is `PROJ-123`
+- **THEN** the commit message links to `https://tracker.example/issues/PROJ-123` in its second paragraph
+
 #### Scenario: Infer prefix deterministically
 
 - **WHEN** no `--tag` is supplied
