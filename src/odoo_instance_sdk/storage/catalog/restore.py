@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -240,29 +241,58 @@ class _RestoreMixin:
         The latest-event check retains the existing idempotency rule while the
         surrounding transaction prevents a partial multi-name reconciliation.
         """
+        with self._conn:
+            return self._record_databases_dropped_in_transaction(db_host, db_port, database_names)
+
+    @_translate_sqlite_error
+    def reconcile_databases_dropped(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_names: tuple[str, ...],
+        validate: Callable[[], None],
+    ) -> tuple[str, ...]:
+        """Validate live absence while holding the catalogue write boundary."""
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            validate()
+            changed = self._record_databases_dropped_in_transaction(
+                db_host, db_port, database_names
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return changed
+
+    def _record_databases_dropped_in_transaction(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_names: tuple[str, ...],
+    ) -> tuple[str, ...]:
         host = normalize_db_host(db_host)
         changed: list[str] = []
-        with self._conn:
-            for database_name in database_names:
-                row = self._conn.execute(
-                    "SELECT event_type FROM database_events "
-                    "WHERE db_host=? AND db_port=? AND database_name=? "
-                    "ORDER BY sequence DESC LIMIT 1",
-                    (host, db_port, database_name),
-                ).fetchone()
-                if row is None or row["event_type"] != "dropped":
-                    self._conn.execute(
-                        "INSERT INTO database_events "
-                        "(db_host, db_port, database_name, event_type, occurred_at, backup_id) "
-                        "VALUES (?, ?, ?, 'dropped', datetime('now'), NULL)",
-                        (host, db_port, database_name),
-                    )
-                    changed.append(database_name)
+        for database_name in database_names:
+            row = self._conn.execute(
+                "SELECT event_type FROM database_events "
+                "WHERE db_host=? AND db_port=? AND database_name=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (host, db_port, database_name),
+            ).fetchone()
+            if row is None or row["event_type"] != "dropped":
                 self._conn.execute(
-                    "DELETE FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
-                    "AND state='incomplete'",
+                    "INSERT INTO database_events "
+                    "(db_host, db_port, database_name, event_type, occurred_at, backup_id) "
+                    "VALUES (?, ?, ?, 'dropped', datetime('now'), NULL)",
                     (host, db_port, database_name),
                 )
+                changed.append(database_name)
+            self._conn.execute(
+                "DELETE FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
+                "AND state='incomplete'",
+                (host, db_port, database_name),
+            )
         return tuple(changed)
 
     @_translate_sqlite_error

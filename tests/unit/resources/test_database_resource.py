@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -251,14 +251,15 @@ class TestList:
             cluster_port=5432,
         )
         mock_catalog = MagicMock()
+        mock_catalog.reconcile_databases_dropped.return_value = ("staging",)
         with patch.object(inst, "_client") as mock_client:
             mock_client.get_catalog.return_value = mock_catalog
             with patch.object(inst.databases, "_observe_impl", return_value=observation):
                 result = inst.databases.reconcile_databases(observation)
 
         assert result.reconciled_names == ("staging",)
-        mock_catalog.record_databases_dropped.assert_called_once_with(
-            "localhost", 5432, ("staging",)
+        mock_catalog.reconcile_databases_dropped.assert_called_once_with(
+            "localhost", 5432, ("staging",), ANY
         )
 
     def test_reconciliation_rejects_reappeared_database(self, client: OdooClient) -> None:
@@ -279,6 +280,7 @@ class TestList:
             cluster_port=5432,
         )
         mock_catalog = MagicMock()
+        mock_catalog.reconcile_databases_dropped.side_effect = lambda *_args: _args[-1]()
         with (
             patch.object(inst, "_client") as mock_client,
             patch.object(inst.databases, "_observe_impl", return_value=current),
@@ -286,6 +288,100 @@ class TestList:
         ):
             mock_client.get_catalog.return_value = mock_catalog
             inst.databases.reconcile_databases(observation)
+        mock_catalog.reconcile_databases_dropped.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("reason", "observation"),
+        [
+            (
+                "inconclusive",
+                DatabaseObservation(
+                    names=(),
+                    evidence_source="psql",
+                    tracked_names=("staging",),
+                    missing_names=("staging",),
+                    inconclusive=True,
+                    cluster_host="localhost",
+                    cluster_port=5432,
+                ),
+            ),
+            (
+                "foreign-cluster",
+                DatabaseObservation(
+                    names=(),
+                    evidence_source="odoo",
+                    tracked_names=("staging",),
+                    missing_names=("staging",),
+                    cluster_host="other",
+                    cluster_port=5432,
+                ),
+            ),
+            (
+                "mismatched-observation",
+                DatabaseObservation(
+                    names=("staging",),
+                    evidence_source="odoo",
+                    tracked_names=("staging",),
+                    missing_names=("staging",),
+                    cluster_host="localhost",
+                    cluster_port=5432,
+                ),
+            ),
+        ],
+    )
+    def test_reconciliation_rejects_invalid_observation_before_mutation(
+        self,
+        client: OdooClient,
+        reason: str,
+        observation: DatabaseObservation,
+    ) -> None:
+        inst = _make_instance_with_cluster_key(client)
+        mock_catalog = MagicMock()
+        with (
+            patch.object(inst, "_client") as mock_client,
+            pytest.raises(DatabaseReconciliationError, match=reason),
+        ):
+            mock_client.get_catalog.return_value = mock_catalog
+            inst.databases.reconcile_databases(observation)
+        mock_catalog.reconcile_databases_dropped.assert_not_called()
+
+    def test_repeated_reconciliation_returns_only_new_events(self, client: OdooClient) -> None:
+        inst = _make_instance_with_cluster_key(client)
+        observation = DatabaseObservation(
+            names=(),
+            evidence_source="odoo",
+            tracked_names=("staging",),
+            missing_names=("staging",),
+            cluster_host="localhost",
+            cluster_port=5432,
+        )
+        mock_catalog = MagicMock()
+        mock_catalog.reconcile_databases_dropped.side_effect = [("staging",), ()]
+        with patch.object(inst, "_client") as mock_client:
+            mock_client.get_catalog.return_value = mock_catalog
+            with patch.object(inst.databases, "_observe_impl", return_value=observation):
+                first = inst.databases.reconcile_databases(observation)
+                second = inst.databases.reconcile_databases(observation)
+
+        assert first.reconciled_names == ("staging",)
+        assert second.reconciled_names == ()
+
+    def test_repeated_read_polling_does_not_publish_events(self, client: OdooClient) -> None:
+        inst = _make_instance_with_cluster_key(client, configured_names=("prod",))
+        mock_catalog = MagicMock()
+        mock_catalog.distinct_restored_database_names.return_value = ("staging",)
+        mock_catalog.latest_restore.return_value = None
+        with (
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": ["prod"]})),
+            patch.object(inst, "_client") as mock_client,
+        ):
+            mock_client.get_catalog.return_value = mock_catalog
+            for _ in range(3):
+                inst.databases.list()
+                inst.databases.exists("staging")
+                inst.databases.current()
+
+        mock_catalog.record_database_dropped.assert_not_called()
         mock_catalog.record_databases_dropped.assert_not_called()
 
 
@@ -1821,6 +1917,32 @@ class TestDrop:
 
         assert result.db == "mydb"
         mock_catalog.record_database_dropped.assert_called_once_with("localhost", 5432, "mydb")
+
+    def test_with_tracked_database_calls_explicit_reconciliation(self, client: OdooClient) -> None:
+        inst = _make_instance_with_cluster_key(client)
+        mock_cm = _mock_http({"result": True})
+        mock_catalog = MagicMock()
+        observation = DatabaseObservation(
+            names=(),
+            evidence_source="odoo",
+            tracked_names=("mydb",),
+            missing_names=("mydb",),
+            cluster_host="localhost",
+            cluster_port=5432,
+        )
+        with (
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
+            patch.object(inst, "_client") as mock_client,
+            patch.object(inst.databases, "observe_exists", return_value=observation),
+            patch.object(inst.databases, "reconcile_databases") as reconcile,
+            patch.object(inst.databases, "exists", return_value=False),
+        ):
+            mock_client.get_catalog.return_value = mock_catalog
+            result = inst.databases.drop("mydb")
+
+        assert result.db == "mydb"
+        reconcile.assert_called_once_with(observation)
+        mock_catalog.record_database_dropped.assert_not_called()
 
     def test_without_cluster_key_does_not_record_dropped(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": True})

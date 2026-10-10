@@ -990,6 +990,25 @@ def test_record_databases_dropped_is_atomic_and_idempotent(tmp_path: Path) -> No
     catalog.close()
 
 
+def test_reconcile_databases_dropped_holds_transaction_during_validation(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "transactional-reconcile.db")
+    seen: list[bool] = []
+
+    def validate() -> None:
+        seen.append(catalog._conn.in_transaction)
+        raise ValueError("stale")
+
+    with pytest.raises(ValueError, match="stale"):
+        catalog.reconcile_databases_dropped("localhost", 5432, ("one",), validate)
+
+    assert seen == [True]
+    assert catalog._conn.in_transaction is False
+    assert catalog._conn.execute("SELECT COUNT(*) FROM database_events").fetchone()[0] == 0
+    catalog.close()
+
+
 def test_record_database_dropped_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     catalog.record_database_dropped(None, 5432, "mydb")

@@ -238,25 +238,34 @@ class _ObservationMixin:
 
         def run(context: RunContext[DatabaseReconciliationResult]) -> DatabaseReconciliationResult:
             context.action(action.step_id)
+            reconciled_names: tuple[str, ...] = ()
             if candidates:
-                current = (
-                    self._observe_exists_impl(candidates[0])
-                    if captured.evidence_source == "psql" and len(candidates) == 1
-                    else self._observe_impl()
-                )
-                if current.inconclusive:
-                    raise DatabaseReconciliationError("inconclusive")
-                if (current.cluster_host, current.cluster_port) != (host, port):
-                    raise DatabaseReconciliationError("foreign-cluster")
-                if set(candidates) - set(current.missing_names):
-                    raise DatabaseReconciliationError("stale-observation")
-                self._instance._client.get_catalog().record_databases_dropped(
-                    host, port, candidates
+                catalog = self._instance._client.get_catalog()
+
+                def validate() -> None:
+                    current = (
+                        self._observe_exists_impl(candidates[0])
+                        if captured.evidence_source == "psql" and len(candidates) == 1
+                        else self._observe_impl()
+                    )
+                    if current.inconclusive:
+                        raise DatabaseReconciliationError("inconclusive")
+                    if (current.cluster_host, current.cluster_port) != (host, port):
+                        raise DatabaseReconciliationError("foreign-cluster")
+                    if set(current.names) & set(candidates):
+                        raise DatabaseReconciliationError("stale-observation")
+                    if set(candidates) - set(current.tracked_names):
+                        raise DatabaseReconciliationError("mismatched-observation")
+                    if set(candidates) - set(current.missing_names):
+                        raise DatabaseReconciliationError("stale-observation")
+
+                reconciled_names = catalog.reconcile_databases_dropped(
+                    host, port, candidates, validate
                 )
             return DatabaseReconciliationResult(
                 cluster_host=host,
                 cluster_port=port,
-                reconciled_names=candidates,
+                reconciled_names=reconciled_names,
             )
 
         return Command.from_prepared(
@@ -270,16 +279,12 @@ class _ObservationMixin:
         cluster = self._cluster
         if observation.inconclusive:
             raise DatabaseReconciliationError("inconclusive")
-        if not observation.missing_names:
-            if cluster is None or cluster[0] is None:
-                raise DatabaseReconciliationError("cluster-unavailable")
-            return cluster[0], cluster[1]
-        if (
-            cluster is None
-            or cluster[0] is None
-            or (observation.cluster_host, observation.cluster_port) != cluster
-        ):
+        if cluster is None or cluster[0] is None:
+            raise DatabaseReconciliationError("cluster-unavailable")
+        if (observation.cluster_host, observation.cluster_port) != cluster:
             raise DatabaseReconciliationError("foreign-cluster")
+        if set(observation.names) & set(observation.missing_names):
+            raise DatabaseReconciliationError("mismatched-observation")
         if not set(observation.missing_names).issubset(set(observation.tracked_names)):
             raise DatabaseReconciliationError("untracked-database")
         return cluster[0], cluster[1]

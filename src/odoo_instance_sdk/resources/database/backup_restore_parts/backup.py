@@ -48,6 +48,7 @@ if TYPE_CHECKING:
         RunContext,
     )
     from odoo_instance_sdk.internal.transport import OdooHttpClient
+    from odoo_instance_sdk.models import DatabaseObservation
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
@@ -66,6 +67,8 @@ class _BackupMixin:
         def _cluster(self) -> tuple[str | None, int] | None: ...
         def _http(self, timeout: float | None = None) -> AbstractContextManager[OdooHttpClient]: ...
         def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool: ...
+        def observe_exists(self, name: str) -> DatabaseObservation: ...
+        def reconcile_databases(self, observation: DatabaseObservation) -> object: ...
         def _psql_probe_for(self, name: str, step_id: str) -> PreparedStep | None: ...
         def exists(self, name: str) -> bool: ...
 
@@ -670,11 +673,15 @@ class _BackupMixin:
         if ck is not None:
             db_host, db_port = ck
             catalog = self._instance._client.get_catalog()
-            catalog.record_database_dropped(
-                db_host,
-                db_port,
-                database_name,
-            )
+            try:
+                observation = self.observe_exists(database_name)
+            except DatabaseManagerUnavailableError:
+                observation = None
+            if observation is not None and observation.missing_names:
+                self.reconcile_databases(observation)
+            else:
+                # Untracked explicit drops retain their existing audit event.
+                catalog.record_database_dropped(db_host, db_port, database_name)
 
         return DropResult(db=database_name)
 
