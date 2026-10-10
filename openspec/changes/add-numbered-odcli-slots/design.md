@@ -29,9 +29,9 @@
 
 ### D2. Общий маленький identity/path contract, разные managers
 
-Typed helper валидирует canonical positive decimal identity и вычисляет deterministic state/manager/tool/bin/launcher/manifest/lock paths. Numbered manager остаётся public `odcli slot`; hot-fix manager остаётся skill-local и сохраняет PR/issue/reviewer policy. Они переиспользуют только identity/path, verified uv provenance, lifecycle lock и shim rendering primitives, но не получают generic registry/service abstraction.
+Typed helper валидирует canonical positive decimal identity и вычисляет deterministic state/manager/tool/bin/launcher/manifest/lock paths. На этом общий implementation contract заканчивается. Numbered manager остаётся public `odcli slot`; hot-fix manager остаётся skill-local и сохраняет PR/issue/reviewer policy. Каждый manager независимо реализует и тестирует собственные provenance/capability checks, lifecycle-lock acquisition и shim rendering в своей write-зоне; общих provenance/lock/shim helpers между ними нет.
 
-Это минимальная общая граница: duplicating root validation создаёт риск расхождения, а объединение user workflows стирает разные ownership и retirement rules.
+Это минимальная общая граница: duplicating root validation создаёт риск расхождения, а общий lifecycle/publisher слой добавил бы coupling между разными ownership и retirement rules.
 
 ### D3. Детерминированные layouts
 
@@ -74,7 +74,7 @@ Process/packaging fixtures создают populated canonical и legacy roots, �
 | Alternate identity/path helper | Нужен двум launcher видам для одинаковой валидации/containment | Разрозненные `_paths()` и literals | Оставить компактный typed helper |
 | Numbered lifecycle manager | Нужен для user-managed exact-SHA slots | Existing uv/fix-tool patterns | Оставить public CLI без registry service |
 | Hot-fix manager rewrite | Нужен, потому что существующий workflow пишет canonical state | Existing `fix_tool.py`/reviewer/skill | Изменить на isolated root, не создавать второй manager |
-| Manifest + lifecycle lock | Нужны для ownership и running protection | Existing fix-tool JSON/flock pattern | Переиспользовать один manifest и lock на launcher |
+| Manager-specific manifest + lifecycle lock | Нужны для ownership и running protection | Existing fix-tool JSON/flock pattern | Оставить по одному manifest/lock на launcher, но реализовать независимо внутри каждого manager без shared helper |
 | Отдельный updater | Не нужен | Canonical replace или skill reconciliation | Убрать; direct alternate update запрещён |
 | State copier/migrator | Не нужен и опасен | Fresh empty root | Убрать |
 | Registry DB/daemon/generic plugin layer | Не нужен | Deterministic paths + bounded manifests | Убрать |

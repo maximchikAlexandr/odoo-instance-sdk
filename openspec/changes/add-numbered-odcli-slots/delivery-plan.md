@@ -17,9 +17,9 @@ Stage mapping: `WP-MYL-445-01 -> 1`, `WP-MYL-445-02 -> 2`, `WP-MYL-445-03 -> 2`,
 - **Stage:** `1`.
 - **Tasks:** `1.1`, `1.2`, `1.3`.
 - **Depends on:** нет.
-- **Самостоятельный deliverable:** validated numbered/hot-fix identity/path contract и canonical-default global-root selector с доказательством, что все SDK-owned global providers используют выбранный root, а real `HOME` и repository-local `.odcli` неизменны.
+- **Самостоятельный deliverable:** validated numbered/hot-fix identity/path-only contract и canonical-default global-root selector с доказательством, что все SDK-owned global providers используют выбранный root, а real `HOME` и repository-local `.odcli` неизменны.
 - **Owned responsibility scope:** central paths, compact alternate-launcher identity/manifest path types и provider inventory tests. Critical shared files: `src/odoo_instance_sdk/internal/paths.py`, новый узкий `internal/alternate_tool.py` или эквивалентный module, focused provider tests.
-- **Contract surface:** canonical positive decimal identities; deterministic state/manager/tool/launcher/manifest/lock paths; absent selector означает `~/.odcli`; trusted explicit selector не меняет `HOME`; никаких daemon, registry DB, dependency или generic manager framework.
+- **Contract surface:** canonical positive decimal identities; deterministic state/manager/tool/launcher/manifest/lock paths; absent selector означает `~/.odcli`; trusted explicit selector не меняет `HOME`; никаких shared provenance/capability, lock-acquisition или shim-rendering primitives, daemon, registry DB, dependency либо generic manager framework.
 - **DoD / evidence:** canonical/numbered/hot-fix provider matrices проходят; direct global home writes инвентаризированы; invalid identity/path cases fail before filesystem mutation; project-local paths не redirected; focused Ruff/mypy/tests проходят.
 - **Parallel safety:** единолично владеет shared identity/path contract; stage-2 successors только потребляют его после завершения.
 
@@ -29,10 +29,10 @@ Stage mapping: `WP-MYL-445-01 -> 1`, `WP-MYL-445-02 -> 2`, `WP-MYL-445-03 -> 2`,
 - **Tasks:** `2.1`, `2.2`, `2.3`, `2.4`, `2.5`.
 - **Depends on:** `WP-MYL-445-01`.
 - **Самостоятельный deliverable:** canonical `odcli slot install/list/remove` безопасно управляет numbered uv tools, а `odcli-N` держит lock, точно делегирует ordinary CLI и отвергает manager surface до discovery/effects.
-- **Owned responsibility scope:** numbered lifecycle coordinator, uv exact-SHA/provenance/capability probe consumption, manifest/shim rendering, CLI registration/output/public-leaf inventory и numbered-focused tests. Critical shared files: новый numbered manager module, `commands/slot.py`, `commands/cli_parts/registration.py`, `tests/unit/test_cli_output_modes.py`.
+- **Owned responsibility scope:** numbered lifecycle coordinator, его собственные uv exact-SHA provenance/capability probe, lock acquisition и manifest/shim rendering, CLI registration/output/public-leaf inventory и numbered-focused tests. Critical shared files: новый numbered manager module, `commands/slot.py`, `commands/cli_parts/registration.py`, `tests/unit/test_cli_output_modes.py`.
 - **Contract surface:** fixed repository/full SHA; staged verified atomic publish; one manifest/lock; bounded list; fail-closed replace/remove; exact argv/exit; no shell; no manager reads from numbered context.
 - **DoD / evidence:** mismatch publishes nothing; replace requires explicit idle ownership; running/corrupt/symlink/path-escape removal fails closed; removing one slot preserves canonical, hot-fix and numbered neighbors; output/public-leaf tests pass.
-- **Parallel safety:** пишет только numbered manager/CLI surfaces и fixtures; не изменяет central paths/storage/self-update или `.agents/skills/odcli-autonomous-work`, принадлежащие siblings.
+- **Parallel safety:** пишет только numbered manager/CLI surfaces и fixtures; provenance/capability, lock и shim logic принадлежат этому manager и не импортируются hot-fix workflow; не изменяет central paths/storage/self-update или `.agents/skills/odcli-autonomous-work`, принадлежащие siblings.
 
 ## WP-MYL-445-03 — Runtime confinement, migration и update policy
 
@@ -51,10 +51,10 @@ Stage mapping: `WP-MYL-445-01 -> 1`, `WP-MYL-445-02 -> 2`, `WP-MYL-445-03 -> 2`,
 - **Tasks:** `4.1`, `4.2`, `4.3`, `4.4`.
 - **Depends on:** `WP-MYL-445-01`.
 - **Самостоятельный deliverable:** existing `odcli-fix-ISSUE` workflow публикует exact reviewed revision с `~/.odcli-fix-ISSUE`, не пишет canonical registry/state и selectively retires только доказанно eligible idle hot fix.
-- **Owned responsibility scope:** `.agents/skills/odcli-autonomous-work/SKILL.md`, `compatibility-prompt.md`, `scripts/fix_tool.py`, необходимые reviewer inputs и `tests/unit/test_odcli_autonomous_skill.py` plus directly related fixtures. Critical shared files ограничены этой skill-owned зоной.
+- **Owned responsibility scope:** `.agents/skills/odcli-autonomous-work/SKILL.md`, `compatibility-prompt.md`, `scripts/fix_tool.py`, собственные skill-local provenance/capability checks, lock acquisition и shim rendering, необходимые reviewer inputs и `tests/unit/test_odcli_autonomous_skill.py` plus directly related fixtures. Critical shared files ограничены этой skill-owned зоной.
 - **Contract surface:** fixed SHA/repo/PR/issue/reviewer gates; manager metadata outside state/canonical; selector capability before publish; external-resource compatibility only; full-lifetime lock; existing merge/ancestry/issue/branch gates; exact selective cleanup; old-style shared-state manifests fail closed without adoption.
 - **DoD / evidence:** two hot fixes use distinct roots; warning names SHA/root; direct update rejected through shared SDK guard; eligible retirement removes one root/tool/launcher/manifest and preserves all neighbors; active/corrupt/legacy cases retain artifacts and report remediation; skill tests pass.
-- **Parallel safety:** пишет только existing skill scripts/docs/tests and consumes WP-01 contract; не изменяет SDK runtime/self-update or numbered CLI files owned by WP-02/WP-03.
+- **Parallel safety:** пишет только existing skill scripts/docs/tests and consumes WP-01 identity/path contract; provenance/capability, lock и shim logic остаются внутри skill и не импортируют numbered manager; не изменяет SDK runtime/self-update or numbered CLI files owned by WP-02/WP-03.
 
 ## WP-MYL-445-05 — Integrated multi-root acceptance и publication gate
 

@@ -1,12 +1,12 @@
 ## 1. Alternate-root identity foundation
 
-- [ ] 1.1 Add validated numbered-slot and hot-fix identities plus deterministic state, manager, tool, launcher, manifest, and lock paths without a registry database or new dependency.
+- [ ] 1.1 Add only validated numbered-slot and hot-fix identities plus deterministic state, manager, tool, launcher, manifest, and lock paths without provenance, lock-acquisition, shim-rendering, registry, or service helpers.
 - [ ] 1.2 Extend the central global path provider with canonical-default and trusted explicit-root selection while preserving real `HOME` and repository-local `.odcli` paths.
 - [ ] 1.3 Add provider inventory tests proving every SDK-owned global path descends from exactly one selected root and canonical behavior remains unchanged.
 
 ## 2. Numbered exact-SHA lifecycle manager
 
-- [ ] 2.1 Implement immutable install/replace commands using slot-specific uv layouts, fixed repository origin, full-SHA validation, temporary staging, installed-provenance and root-selector capability verification, lifecycle locking, and atomic publication.
+- [ ] 2.1 Implement immutable install/replace commands using slot-specific uv layouts and numbered-manager-owned provenance/capability checks, lock acquisition, shim rendering, temporary staging, and atomic publication.
 - [ ] 2.2 Implement bounded numbered-slot list projection from valid manager manifests without executing slot code or scanning arbitrary home paths.
 - [ ] 2.3 Implement fail-closed numbered-slot removal with exact path, symlink, manifest, launcher-content, running-lock, and neighboring-root protections.
 - [ ] 2.4 Register canonical `slot install`, `slot list`, and `slot remove` through the SDK-first command and Rich/JSON/TOON boundaries, including public-leaf inventory and machine parity tests.
@@ -22,8 +22,8 @@
 ## 4. Existing hot-fix workflow isolation
 
 - [ ] 4.1 Move hot-fix manager metadata and locks out of canonical `~/.odcli`, select deterministic `~/.odcli-fix-ISSUE`, and update the skill contract without copying any existing user state.
-- [ ] 4.2 Update hot-fix install/reviewer gates to verify exact SHA, repository, isolated-root capability, launcher identity, and compatibility of explicitly shared external resources before publication.
-- [ ] 4.3 Update hot-fix shim and skill-managed reconcile/retire flow to hold lifecycle locks and remove only the eligible hot-fix launcher, uv layout, metadata, branch when safe, and `~/.odcli-fix-ISSUE`, preserving canonical and neighboring roots.
+- [ ] 4.2 Update hot-fix install/reviewer gates with skill-owned provenance/capability checks and shim rendering to verify exact SHA, repository, isolated-root capability, launcher identity, and compatibility of explicitly shared external resources before publication.
+- [ ] 4.3 Update hot-fix shim and skill-managed reconcile/retire flow with skill-owned lock acquisition to hold lifecycle locks and remove only the eligible hot-fix launcher, uv layout, metadata, branch when safe, and `~/.odcli-fix-ISSUE`, preserving canonical and neighboring roots.
 - [ ] 4.4 Add autonomous-skill tests for two concurrent hot fixes, fresh isolated migration, direct-update rejection, selective retirement, active-lock/corrupt-identity failure, and canonical/numbered/neighbor byte preservation.
 
 ## 5. Integrated acceptance and documentation
