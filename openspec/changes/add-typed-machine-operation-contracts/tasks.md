@@ -52,12 +52,12 @@
 
 ## 7. Separate database observation from reconciliation
 
-- [ ] 7.1 Characterize every current `DatabaseResource.list/exists/current` catalogue write and all startup/registration/destructive/repair call sites that rely on it; characterize backup list/latest as inert.
-- [ ] 7.2 Add typed database observation models carrying names, exact evidence source, tracked/missing names and inconclusive state without catalogue mutation.
-- [ ] 7.3 Refactor list/exists/current and their commands to return/consume observational results and remove implicit dropped-event writes, including Odoo-unavailable psql fallback paths.
-- [ ] 7.4 Implement previewable `reconcile_databases_command` with exact cluster/database observation, live absence revalidation, transaction/lock use and idempotent dropped events.
-- [ ] 7.5 Migrate required startup, registration, destructive postcondition and repair owners to call explicit reconciliation at their named mutation boundary.
-- [ ] 7.6 Add stale/reappeared/inconclusive/foreign identity tests and repeated polling spies proving list/exists/current/monitor/inventory/backup reads remain write-free.
+- [x] 7.1 Characterize every current `DatabaseResource.list/exists/current` catalogue write and all startup/registration/destructive/repair call sites that rely on it; characterize backup list/latest as inert.
+- [x] 7.2 Add typed database observation models carrying names, exact evidence source, tracked/missing names and inconclusive state without catalogue mutation.
+- [x] 7.3 Refactor list/exists/current and their commands to return/consume observational results and remove implicit dropped-event writes, including Odoo-unavailable psql fallback paths.
+- [x] 7.4 Implement previewable `reconcile_databases_command` with exact cluster/database observation, live absence revalidation, transaction/lock use and idempotent dropped events.
+- [x] 7.5 Migrate required startup, registration, destructive postcondition and repair owners to call explicit reconciliation at their named mutation boundary.
+- [x] 7.6 Add stale/reappeared/inconclusive/foreign identity tests and repeated polling spies proving list/exists/current/monitor/inventory/backup reads remain write-free.
 
 ## 8. Persist structured DB replacement recovery
 
