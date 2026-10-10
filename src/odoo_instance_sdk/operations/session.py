@@ -8,13 +8,15 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import IO, Literal, cast
+from typing import IO, Literal, TypeVar, cast
 
 import msgspec
 
 from odoo_instance_sdk.commands.output import sanitize_diagnostic
 from odoo_instance_sdk.execution import Command, JsonValue, fingerprint_plan
 from odoo_instance_sdk.internal.proc import StepEvent
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +188,7 @@ def _read_decision(
 
 def run_approval_session(  # noqa: C901
     operation_id: str,
-    build_command: Callable[[], Command[object]],
+    build_command: Callable[[], Command[T]],
     input_stream: IO[str],
     output_stream: IO[str],
     *,
@@ -195,7 +197,7 @@ def run_approval_session(  # noqa: C901
     """Preview one command and consume exactly one bounded decision."""
 
     records: list[dict[str, JsonValue]] = []
-    command: Command[object] | None = None
+    command: Command[T] | None = None
     try:
         command = build_command()
         digest = command.plan.fingerprint or fingerprint_plan(command.plan)

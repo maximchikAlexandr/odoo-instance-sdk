@@ -4,6 +4,7 @@ import gc
 import io
 import json
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import msgspec
@@ -38,6 +39,14 @@ class ReadRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_on
 
 def _context() -> OperationContext:
     return OperationContext(cwd=Path("/private/project"), project_selector="selected")
+
+
+def _data_code(record: Mapping[str, object]) -> str:
+    data = record.get("data")
+    assert isinstance(data, Mapping)
+    code = data.get("code")
+    assert isinstance(code, str)
+    return code
 
 
 def _binding(factory: object, *, approval: bool = False) -> OperationBinding:
@@ -109,7 +118,8 @@ def test_approval_session_runs_the_same_command_after_matching_fingerprint() -> 
     first = run_approval_session("fixture.write", build, io.StringIO(""), preview)
     assert first.exit_code == 1
     assert executions == []
-    fingerprint = first.records[1]["fingerprint"]
+    fingerprint = first.records[1].get("fingerprint")
+    assert isinstance(fingerprint, str)
 
     approved = io.StringIO(json.dumps({"decision": "approve", "fingerprint": fingerprint}) + "\n")
     output = io.StringIO()
@@ -132,13 +142,19 @@ def test_approval_session_rejects_stale_decision_without_execution() -> None:
         private = PreparedAction(
             step_id="write", action="write", description="write", mutating=True
         )
+
+        def callback(context: RunContext[str]) -> str:
+            executions.append("ran")
+            context.action("write")
+            return "done"
+
         return Command.create(
             ExecutionPlan(
                 steps=(
                     ActionStep(step_id="write", action="write", description="write", mutating=True),
                 )
             ),
-            lambda context: (executions.append("ran"), context.action("write"), "done")[2],
+            callback,
             (private,),
         )
 
@@ -152,7 +168,7 @@ def test_approval_session_rejects_stale_decision_without_execution() -> None:
 
     assert outcome.exit_code == 1
     assert outcome.records[-1]["event"] == "error"
-    assert outcome.records[-1]["data"]["code"] == "stale_approval"
+    assert _data_code(outcome.records[-1]) == "stale_approval"
     assert executions == []
 
 
@@ -163,13 +179,19 @@ def test_cancel_and_timeout_are_non_execution_terminal_outcomes() -> None:
         private = PreparedAction(
             step_id="write", action="write", description="write", mutating=True
         )
+
+        def callback(context: RunContext[str]) -> str:
+            executions.append("ran")
+            context.action("write")
+            return "done"
+
         return Command.create(
             ExecutionPlan(
                 steps=(
                     ActionStep(step_id="write", action="write", description="write", mutating=True),
                 )
             ),
-            lambda context: (executions.append("ran"), context.action("write"), "done")[2],
+            callback,
             (private,),
         )
 
@@ -183,7 +205,7 @@ def test_cancel_and_timeout_are_non_execution_terminal_outcomes() -> None:
     assert cancelled.records[-1]["event"] == "cancelled"
 
     class SlowInput(io.StringIO):
-        def readline(self, size: int = -1) -> str:
+        def readline(self, size: int = -1) -> str:  # type: ignore[override]
             time.sleep(0.02)
             return super().readline(size)
 
@@ -196,7 +218,7 @@ def test_cancel_and_timeout_are_non_execution_terminal_outcomes() -> None:
     )
     assert timed_out.exit_code == 1
     assert timed_out.records[-1]["event"] == "error"
-    assert timed_out.records[-1]["data"]["code"] == "timeout"
+    assert _data_code(timed_out.records[-1]) == "timeout"
     assert executions == []
 
 
@@ -207,7 +229,7 @@ def test_preview_contains_only_the_redacted_public_plan() -> None:
         argv=("tool", private_value),
         secret_values=(private_value,),
     )
-    command = Command.create(
+    command: Command[str] = Command.create(
         ExecutionPlan(steps=(private.public_projection(),)),
         lambda context: context.process("write"),
         (private,),
@@ -226,13 +248,19 @@ def test_session_limits_always_emit_typed_terminal_bounded_output_error() -> Non
         private = PreparedAction(
             step_id="write", action="write", description="write", mutating=True
         )
+
+        def callback(context: RunContext[str]) -> str:
+            executions.append("ran")
+            context.action("write")
+            return "done"
+
         return Command.create(
             ExecutionPlan(
                 steps=(
                     ActionStep(step_id="write", action="write", description="write", mutating=True),
                 )
             ),
-            lambda context: (executions.append("ran"), context.action("write"), "done")[2],
+            callback,
             (private,),
         )
 
@@ -242,8 +270,10 @@ def test_session_limits_always_emit_typed_terminal_bounded_output_error() -> Non
 
         assert outcome.exit_code != 0
         assert outcome.records[-1]["event"] == "error"
-        assert outcome.records[-1]["data"]["code"] == "bounded_output"
-        assert json.loads(output.getvalue().splitlines()[-1])["data"]["code"] == "bounded_output"
+        assert _data_code(outcome.records[-1]) == "bounded_output"
+        terminal = json.loads(output.getvalue().splitlines()[-1])
+        assert isinstance(terminal, Mapping)
+        assert _data_code(terminal) == "bounded_output"
     assert executions == []
 
 
@@ -254,13 +284,18 @@ def test_session_decision_is_strict_and_forbids_unknown_fields() -> None:
         private = PreparedAction(
             step_id="write", action="write", description="write", mutating=True
         )
+
+        def callback(context: RunContext[str]) -> str:
+            context.action("write")
+            return "done"
+
         return Command.create(
             ExecutionPlan(
                 steps=(
                     ActionStep(step_id="write", action="write", description="write", mutating=True),
                 )
             ),
-            lambda context: context.action("write") or "done",
+            callback,
             (private,),
         )
 
@@ -272,7 +307,7 @@ def test_session_decision_is_strict_and_forbids_unknown_fields() -> None:
         outcome = run_approval_session("fixture.write", build, io.StringIO(raw), io.StringIO())
         assert outcome.exit_code != 0
         assert outcome.records[-1]["event"] == "error"
-        assert outcome.records[-1]["data"]["code"] == "invalid_sequence"
+        assert _data_code(outcome.records[-1]) == "invalid_sequence"
 
 
 def test_session_cli_rejects_ineligible_operation_with_jsonl_error_without_prompt() -> None:
@@ -283,7 +318,7 @@ def test_session_cli_rejects_ineligible_operation_with_jsonl_error_without_promp
     records = [json.loads(line) for line in result.stdout.splitlines()]
     assert len(records) == 1
     assert records[0]["event"] == "error"
-    assert records[0]["data"]["code"] == "session_transport_required"
+    assert _data_code(records[0]) == "session_transport_required"
     assert "schema_version" not in records[0]
 
 
@@ -308,8 +343,9 @@ def test_session_eof_and_input_limits_are_typed_terminal_errors() -> None:
         outcome = run_approval_session("fixture.write", build, input_stream, output, limits=limits)
         assert outcome.exit_code == 1
         assert outcome.records[-1]["event"] == "error"
-        assert outcome.records[-1]["data"]["code"] in {"eof", "input_limit"}
-        assert json.loads(output.getvalue().splitlines()[-1]) == outcome.records[-1]
+        assert _data_code(outcome.records[-1]) in {"eof", "input_limit"}
+        terminal = json.loads(output.getvalue().splitlines()[-1])
+        assert terminal == outcome.records[-1]
 
 
 def test_session_interrupt_cancels_and_drops_private_command_snapshot() -> None:
@@ -335,10 +371,11 @@ def test_session_interrupt_cancels_and_drops_private_command_snapshot() -> None:
 
     first = run_approval_session("fixture.write", build, io.StringIO(), io.StringIO())
     assert first.exit_code == 1
-    assert first.records[-1]["data"]["code"] == "eof"
+    assert _data_code(first.records[-1]) == "eof"
 
     output = io.StringIO()
-    fingerprint = first.records[1]["fingerprint"]
+    fingerprint = first.records[1].get("fingerprint")
+    assert isinstance(fingerprint, str)
     second = run_approval_session(
         "fixture.write",
         build,
