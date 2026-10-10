@@ -654,7 +654,10 @@ def remove_alternate_tool(identity_value: AlternateIdentity) -> None:
         raise AlternateToolError("alternate manifest identity mismatch")
     _verify_structure(manifest)
     with lifecycle_lock(identity_value, exclusive=True):
-        _verify_structure(_read_manifest(identity_value.manifest, home=identity_value.home))
+        locked_manifest = _read_manifest(identity_value.manifest, home=identity_value.home)
+        if locked_manifest.identity != identity_value:
+            raise AlternateToolError("alternate manifest identity mismatch")
+        _verify_structure(locked_manifest)
         if identity_value.state_root.is_symlink():
             raise AlternateToolError("alternate state root is a symlink")
         for directory in (identity_value.tool_root, identity_value.tool_bin):

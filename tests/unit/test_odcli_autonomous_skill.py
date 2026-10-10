@@ -130,6 +130,67 @@ def test_fix_tool_requires_exact_compatibility_and_retires_only_merged_fix(
     assert ["remove", "--kind", "hotfix", "--identifier", "118"] in engine_calls
 
 
+def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fix_tool = _module("fix_tool")
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    odcli = tmp_path / "odcli"
+    odcli.write_text(f"#!{interpreter} -s\n", encoding="utf-8")
+    monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(odcli))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        fix_tool,
+        "_run",
+        lambda argv: calls.append(argv) or json.dumps({"launcher": str(tmp_path / "launcher")}),
+    )
+    review_path = tmp_path / "review.json"
+    review_path.write_text(
+        json.dumps({"session_id": "session", "review": {"sha": SHA, "compatible": True}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        fix_tool,
+        "_gh_json",
+        lambda _argv: {
+            "headRefOid": SHA,
+            "closingIssuesReferences": [
+                {
+                    "number": 42,
+                    "repository": {
+                        "name": "odoo-instance-sdk",
+                        "owner": {"login": "maximchikAlexandr"},
+                    },
+                }
+            ],
+        },
+    )
+
+    assert fix_tool._canonical_interpreter() == interpreter
+    fix_tool._install(42, SHA, 119, review_path, None)
+    assert calls == [
+        [
+            str(interpreter),
+            "-m",
+            "odoo_instance_sdk.internal.alternate_tool",
+            "install",
+            "--kind",
+            "hotfix",
+            "--identifier",
+            "42",
+            "--sha",
+            SHA,
+            "--pr",
+            "119",
+            "--review-sha",
+            SHA,
+            "--review-session",
+            "session",
+        ]
+    ]
+
+
 def test_closed_issue_alone_does_not_retire_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     fix_tool = _module("fix_tool")
     monkeypatch.setattr(

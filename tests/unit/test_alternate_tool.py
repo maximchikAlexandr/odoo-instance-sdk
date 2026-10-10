@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import json
 import os
@@ -107,6 +108,39 @@ def test_running_alternate_cannot_be_removed(tmp_path: Path) -> None:
         remove_alternate_tool(numbered)
 
 
+def test_remove_rejects_identity_swapped_manifest_after_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    neighboring = identity("numbered", "2", home=tmp_path)
+    _published(numbered)
+    _published(neighboring, sha="b" * 40)
+    for identity_value in (numbered, neighboring):
+        identity_value.state_root.mkdir(mode=0o700)
+        (identity_value.state_root / "sentinel").write_text("keep", encoding="utf-8")
+
+    @contextlib.contextmanager
+    def swapping_lock(_identity_value: AlternateIdentity, *, exclusive: bool):
+        assert exclusive
+        original = numbered.manifest.read_bytes()
+        numbered.manifest.write_bytes(neighboring.manifest.read_bytes())
+        try:
+            yield 0
+        finally:
+            numbered.manifest.write_bytes(original)
+
+    monkeypatch.setattr(alternate_tool, "lifecycle_lock", swapping_lock)
+    with pytest.raises(AlternateToolError, match="identity mismatch"):
+        remove_alternate_tool(numbered)
+
+    for identity_value in (numbered, neighboring):
+        assert identity_value.launcher.exists()
+        assert identity_value.manifest.exists()
+        assert identity_value.tool_root.exists()
+        assert identity_value.tool_bin.exists()
+        assert (identity_value.state_root / "sentinel").read_text(encoding="utf-8") == "keep"
+
+
 def test_install_uses_one_staged_provenance_probe_and_preserves_numbered_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -154,3 +188,63 @@ def test_install_uses_one_staged_provenance_probe_and_preserves_numbered_state(
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert inspect_alternate_tool(numbered)["sha"] == "c" * 40
     assert [args[0] for _executable, args in calls] == ["tool", "-c", "-c"]
+
+
+def test_hotfix_install_uses_the_shared_provenance_and_probe_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hotfix = identity("hotfix", "42", home=tmp_path)
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def fake_run(
+        executable: str,
+        args: tuple[str, ...] = (),
+        *,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> ProcessResult:
+        calls.append((executable, args))
+        if executable == "uv":
+            assert env is not None
+            Path(env["UV_TOOL_DIR"]).mkdir(mode=0o700, parents=True)
+            tool_bin = Path(env["UV_TOOL_BIN_DIR"])
+            tool_bin.mkdir(mode=0o700, parents=True)
+            binary = tool_bin / "odcli"
+            binary.write_text(f"#!{interpreter}\n", encoding="utf-8")
+            binary.chmod(0o700)
+        elif "direct_url.json" in args[-1]:
+            return ProcessResult(
+                (executable, *args),
+                0,
+                json.dumps(
+                    {
+                        "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                        "vcs_info": {"commit_id": "d" * 40},
+                    }
+                ),
+                "",
+                0.0,
+                None,
+                (),
+            )
+        return ProcessResult((executable, *args), 0, "", "", 0.0, None, ())
+
+    monkeypatch.setattr(alternate_tool, "run_captured", fake_run)
+    manifest = alternate_tool.install_alternate_tool(
+        hotfix,
+        "d" * 40,
+        replace=False,
+        pr=119,
+        review_sha="d" * 40,
+        review_session="session",
+    )
+
+    assert manifest.identity == hotfix
+    assert inspect_alternate_tool(hotfix)["sha"] == "d" * 40
+    assert manifest.pr == 119
+    assert [args[0] for _executable, args in calls] == ["tool", "-c", "-c"]
+
+    remove_alternate_tool(hotfix)
+    assert not hotfix.launcher.exists()
