@@ -144,6 +144,7 @@ def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
         row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")
     }
     assert "applied_settings_json" in environment_columns
+    assert "recovery_json" in environment_columns
     tables = {
         row[0] for row in catalog._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
@@ -171,6 +172,9 @@ def test_prior_catalog_revisions_upgrade_to_current_schema(
     conn = sqlite3.connect(str(db))
     try:
         _assert_current_revision(conn)
+        assert "recovery_json" in {
+            row[1] for row in conn.execute("PRAGMA table_info(environments)")
+        }
         backups = {row[1]: row for row in conn.execute("PRAGMA table_info(backups)")}
         assert backups["source_name"][3] == 0
         assert backups["pinned"][3] == 1

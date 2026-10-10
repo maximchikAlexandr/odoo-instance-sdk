@@ -16,6 +16,11 @@ import msgspec
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
 from odoo_instance_sdk.internal.dbprep.materialize import _capture_restore_inputs
+from odoo_instance_sdk.internal.dbreplace_recovery import (
+    CopyReplacementRecovery,
+    recovery_from_row,
+    recovery_mapping,
+)
 from odoo_instance_sdk.internal.odoo_config import (
     _resolve_data_dir,
     parse_db_names,
@@ -117,26 +122,8 @@ def _file_digest(path: Path) -> str:
 
 
 def _durable_failure_message(failure: CopyReplacementFailureContext, error: BaseException) -> str:
-    retained = {
-        "stage": failure.stage,
-        "backup_id": None if failure.backup_id is None else str(failure.backup_id),
-        "previous_backup_id": (
-            None if failure.previous_backup_id is None else str(failure.previous_backup_id)
-        ),
-        "target_database": failure.target_database,
-        "rollback_database": failure.rollback_database,
-        "rollback_filestore": (
-            None if failure.rollback_filestore is None else Path(failure.rollback_filestore).name
-        ),
-        "published": failure.published,
-        "target_present": failure.target_present,
-        "rollback_present": failure.rollback_present,
-        "rollback_filestore_present": failure.rollback_filestore_present,
-    }
-    detail = json.dumps(retained, sort_keys=True, separators=(",", ":"))
     reason = sanitize_last_error(str(error)) or type(error).__name__
-    legacy = "" if failure.backup_id is None else f" backup={failure.backup_id}"
-    return f"copy replacement cleanup_failed; retained={detail};{legacy} {reason}"[:2000]
+    return f"copy replacement cleanup_failed: {reason}"[:2000]
 
 
 def _identifier(value: str) -> str:
@@ -247,21 +234,41 @@ def _row_identity(row: sqlite3.Row | None) -> tuple[tuple[str, str | None], ...]
 
 
 def _retained_failure(row: sqlite3.Row | None) -> dict[str, JsonValue]:
-    """Decode only the bounded structured replacement context, if present."""
-    if row is None:
+    """Read structured evidence, allowing legacy text only for explicit repair."""
+    value = recovery_from_row(cast("Mapping[str, object] | None", row), allow_legacy=True)
+    if value is None:
         return {}
-    try:
-        raw = cast("Mapping[str, JsonValue]", row)["last_error"]
-    except (KeyError, IndexError, TypeError):
-        return {}
-    if not isinstance(raw, str) or "retained=" not in raw:
-        return {}
-    payload = raw.split("retained=", 1)[1].split(";", 1)[0]
-    try:
-        value = json.loads(payload)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    if isinstance(value, CopyReplacementRecovery):
+        return recovery_mapping(value)
+    return value
+
+
+def _recovery_for_plan(
+    plan: CopyReplacementPlan,
+    *,
+    target_present: bool | None,
+    rollback_present: bool | None,
+    rollback_filestore_present: bool | None,
+    published: bool = False,
+    stage: str = "preflight",
+) -> CopyReplacementRecovery:
+    return CopyReplacementRecovery(
+        version=1,
+        environment_id=plan.environment.id,
+        backup_id=plan.backup.id,
+        previous_backup_id=plan.environment.backup_id,
+        target_database=plan.target_database,
+        rollback_database=plan.rollback_database,
+        filestore=plan.filestore.name,
+        rollback_filestore=plan.rollback_filestore.name,
+        cluster_id=plan.cluster_id,
+        data_directory=str(plan.data_directory),
+        stage=stage,
+        published=published,
+        target_present=target_present,
+        rollback_present=rollback_present,
+        rollback_filestore_present=rollback_filestore_present,
+    )
 
 
 def _validate_retained_evidence(
@@ -281,6 +288,18 @@ def _validate_retained_evidence(
         "rollback_database": plan.rollback_database,
         "rollback_filestore": plan.rollback_filestore.name,
     }
+    structured_identity = {
+        "environment_id": str(plan.environment.id),
+        "cluster_id": plan.cluster_id,
+        "data_directory": str(plan.data_directory),
+        "filestore": plan.filestore.name,
+    }
+    if any(
+        key in retained and retained.get(key) != value for key, value in structured_identity.items()
+    ):
+        raise EnvironmentConflictError(
+            "replacement_conflict", "structured replacement identity does not match selection"
+        )
     if any(retained.get(key) != value for key, value in expected.items()):
         raise EnvironmentConflictError(
             "replacement_conflict", "retained replacement evidence does not match selection"
@@ -290,9 +309,14 @@ def _validate_retained_evidence(
             "replacement_conflict", "retained replacement publication evidence is invalid"
         )
     previous_backup_id = retained.get("previous_backup_id")
-    if not isinstance(previous_backup_id, str) or not previous_backup_id:
+    expected_previous = (
+        str(plan.environment.backup_id) if plan.environment.backup_id is not None else None
+    )
+    if not isinstance(previous_backup_id, str) or (
+        not bool(retained.get("published")) and previous_backup_id != expected_previous
+    ):
         raise EnvironmentConflictError(
-            "replacement_conflict", "retained replacement provenance evidence is invalid"
+            "replacement_conflict", "retained replacement provenance evidence does not match"
         )
     recorded_target = retained.get("target_present")
     recorded_rollback = retained.get("rollback_present")
@@ -528,7 +552,7 @@ def _validate_plan(  # noqa: C901
 
 def _revalidate(  # noqa: C901
     plan: CopyReplacementPlan, context: RunContext[None], step_id: str
-) -> None:
+) -> tuple[bool, bool, bool]:
     catalog = plan.client.get_catalog()
     row = catalog.get_environment(str(plan.environment.id))
     if (
@@ -650,6 +674,7 @@ def _revalidate(  # noqa: C901
         raise EnvironmentConflictError(
             "active_sessions", "active target database sessions block replacement"
         )
+    return target_exists, rollback_exists, sessions
 
 
 def _rename(context: RunContext[None], step_id: str, *, message: str) -> None:

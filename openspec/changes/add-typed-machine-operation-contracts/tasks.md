@@ -61,12 +61,12 @@
 
 ## 8. Persist structured DB replacement recovery
 
-- [ ] 8.1 Add versioned frozen `CopyReplacementRecovery` and a nullable `recovery_json` column through the single Alembic lineage with current/legacy/retry migration fixtures.
-- [ ] 8.2 Persist cleanup-failed environment state, sanitized diagnostic, structured recovery and event atomically; stop writing new executable evidence inside `last_error`.
-- [ ] 8.3 Make replacement retry/repair validate and consume only structured recovery plus exact live environment/backup/cluster/database/filestore evidence.
-- [ ] 8.4 Clear structured recovery only with successful compensated or published postconditions while preserving event and transaction journals.
-- [ ] 8.5 Implement one explicit guarded legacy adoption path for the known bounded `retained=...` form and reject malformed, contradictory or secret-bearing text without mutation.
-- [ ] 8.6 Add interruption/retry/rollback/publication/legacy/unknown-form tests proving locks, checksums, permissions, ownership, cleanup and redaction remain intact.
+- [x] 8.1 Add versioned frozen `CopyReplacementRecovery` and a nullable `recovery_json` column through the single Alembic lineage with current/legacy/retry migration fixtures.
+- [x] 8.2 Persist cleanup-failed environment state, sanitized diagnostic, structured recovery and event atomically; stop writing new executable evidence inside `last_error`.
+- [x] 8.3 Make replacement retry/repair validate and consume only structured recovery plus exact live environment/backup/cluster/database/filestore evidence.
+- [x] 8.4 Clear structured recovery only with successful compensated or published postconditions while preserving event and transaction journals.
+- [x] 8.5 Implement one explicit guarded legacy adoption path for the known bounded `retained=...` form and reject malformed, contradictory or secret-bearing text without mutation.
+- [x] 8.6 Add interruption/retry/rollback/publication/legacy/unknown-form tests proving locks, checksums, permissions, ownership, cleanup and redaction remain intact.
 
 ## 9. Cross-contract verification and documentation
 

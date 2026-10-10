@@ -1,6 +1,5 @@
 from __future__ import annotations  # noqa: I001 -- keep checkout model aliases grouped; remove when Ruff supports grouped aliases.
 
-import json
 import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -17,6 +16,11 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.dependency_sync import (
     resolve_hash_lock,
+)
+from odoo_instance_sdk.internal.dbreplace_recovery import (
+    CopyReplacementRecovery,
+    recovery_from_row,
+    recovery_mapping,
 )
 from odoo_instance_sdk.internal.project_init import (
     project_owned_data_dir,
@@ -126,25 +130,36 @@ class CopyCleanupPlan:
 
 
 def _replacement_retained_error(value: str | None) -> dict[str, JsonValue]:
-    if not isinstance(value, str) or "copy replacement cleanup_failed" not in value:
+    """Decode legacy evidence only for an explicit cleanup repair."""
+    if not isinstance(value, str):
         return {}
-    try:
-        payload = value.split("retained=", 1)[1].split(";", 1)[0]
-        decoded = json.loads(payload)
-    except (IndexError, TypeError, ValueError, json.JSONDecodeError):
-        return {}
+    decoded = recovery_from_row({"last_error": value}, allow_legacy=True)
     return decoded if isinstance(decoded, dict) else {}
 
 
 def _validate_retained_removal_evidence(
-    catalog: BackupCatalog, env: DevelopmentEnvironment
+    catalog: BackupCatalog,
+    env: DevelopmentEnvironment,
+    expected: Mapping[str, JsonValue] | None = None,
 ) -> None:
     """Reject a removal command whose durable replacement evidence changed."""
-    retained = _replacement_retained_error(env.last_error)
+    row = catalog.get_environment(str(env.id))
+    retained_value = recovery_from_row(row, allow_legacy=True)
+    retained = (
+        recovery_mapping(retained_value)
+        if isinstance(retained_value, CopyReplacementRecovery)
+        else (retained_value or {})
+    )
+    if expected is not None:
+        retained = dict(expected)
     if not retained:
         return
-    row = catalog.get_environment(str(env.id))
-    current = _replacement_retained_error(None if row is None else row["last_error"])
+    current_value = recovery_from_row(catalog.get_environment(str(env.id)), allow_legacy=True)
+    current = (
+        recovery_mapping(current_value)
+        if isinstance(current_value, CopyReplacementRecovery)
+        else (current_value or {})
+    )
     for key in (
         "backup_id",
         "previous_backup_id",
