@@ -55,6 +55,7 @@ ROOT_HELP_DESCRIPTIONS = (
     "Export Odoo module translations.",
     "Generate VS Code launch configuration.",
     "Generate and safely synchronize Odoo Git workflows.",
+    "Manage canonical exact-revision numbered OdCLI slots.",
 )
 
 
@@ -197,6 +198,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "monitor",
         "resource",
         "ps",
+        "slot",
     }
     assert "--project" in result.output
     assert "--env" in result.output

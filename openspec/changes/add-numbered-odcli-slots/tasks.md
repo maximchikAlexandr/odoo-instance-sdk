@@ -8,10 +8,10 @@
 
 ## 2. Numbered command adapter
 
-- [ ] 2.1 Add canonical `slot install NUMBER SHA [--replace]`, `slot list`, and `slot remove NUMBER` as a thin adapter over shared lifecycle operations with no uv, manifest, shim, lock, or cleanup implementation in the command layer.
-- [ ] 2.2 Register the slot group through existing command/output boundaries, public-leaf inventory, and Rich/JSON/TOON parity.
-- [ ] 2.3 Reject numbered-context slot management before shared-engine discovery or effects and preserve exact argv/exit behavior for ordinary numbered commands.
-- [ ] 2.4 Add numbered policy/output tests for invalid identity, existing-vs-replace intent, bounded list, running/corrupt removal, and neighbor preservation using shared-engine fixtures.
+- [x] 2.1 Add canonical `slot install NUMBER SHA [--replace]`, `slot list`, and `slot remove NUMBER` as a thin adapter over shared lifecycle operations with no uv, manifest, shim, lock, or cleanup implementation in the command layer.
+- [x] 2.2 Register the slot group through existing command/output boundaries, public-leaf inventory, and Rich/JSON/TOON parity.
+- [x] 2.3 Reject numbered-context slot management before shared-engine discovery or effects and preserve exact argv/exit behavior for ordinary numbered commands.
+- [x] 2.4 Add numbered policy/output tests for invalid identity, existing-vs-replace intent, bounded list, running/corrupt removal, and neighbor preservation using shared-engine fixtures.
 
 ## 3. Runtime confinement and update policy
 

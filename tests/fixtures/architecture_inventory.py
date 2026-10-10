@@ -20,7 +20,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 555),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 556),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 474),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 475),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
         ("src/odoo_instance_sdk/commands/output.py", 289),
@@ -57,7 +57,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        474,
+        475,
     ): "documented --version metadata flag transport",
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (

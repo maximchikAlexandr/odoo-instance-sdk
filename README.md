@@ -687,6 +687,9 @@ sentence; use the entry's `--help` for exact options.
 - `odcli remote remove` — Remove one named source configuration without deleting artifacts.
 - `odcli bug-report init` — Create a local bug-report draft from explicit metadata.
 - `odcli bug-report submit` — Validate and publish one local bug-report draft.
+- `odcli slot install` — Install an exact-revision numbered OdCLI slot.
+- `odcli slot list` — List bounded numbered-slot metadata without executing revisions.
+- `odcli slot remove` — Remove one idle numbered slot after identity checks.
 - `odcli env show` — Show one environment's selected runtime and ownership metadata.
 - `odcli resource ls` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.

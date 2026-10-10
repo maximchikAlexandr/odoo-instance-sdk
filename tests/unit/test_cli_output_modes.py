@@ -832,6 +832,35 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture",
     ),
     PublicLeafCase(
+        ("slot", "install"),
+        ("slot", "install", "2", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "mutating-or-spawning",
+        False,
+        cli_only_reason="CLI-only numbered-slot lifecycle projection over the shared alternate-tool engine",
+        exception_reason="CLI-only slot installation has no preview mode; lifecycle effects are delegated to the shared engine",
+        e2e_disposition="not-applicable",
+        e2e_rationale="numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("slot", "list"),
+        ("slot", "list"),
+        "bounded-read-only",
+        False,
+        cli_only_reason="CLI-only bounded numbered-slot metadata projection over the shared alternate-tool engine",
+        e2e_disposition="not-applicable",
+        e2e_rationale="numbered lifecycle inventory is covered by focused unit tests outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("slot", "remove"),
+        ("slot", "remove", "2"),
+        "mutating-or-spawning",
+        False,
+        cli_only_reason="CLI-only numbered-slot lifecycle projection over the shared alternate-tool engine",
+        exception_reason="CLI-only slot removal has no preview mode; lifecycle effects are delegated to the shared engine",
+        e2e_disposition="not-applicable",
+        e2e_rationale="numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
         ("update",),
         ("update", "--dry-run"),
         "mutating-or-spawning",
@@ -1333,6 +1362,41 @@ def _patch_leaf_external(  # noqa: C901
 
     path = case.path
     if path == ("init",):
+        return
+
+    if path[:1] == ("slot",):
+        manifest = SimpleNamespace(
+            to_json=lambda: {
+                "kind": "numbered",
+                "identifier": "2",
+                "sha": "a" * 40,
+                "launcher": str(tmp_path / ".local/bin/odcli-2"),
+            }
+        )
+        row = {
+            "kind": "numbered",
+            "identifier": "2",
+            "sha": "a" * 40,
+            "launcher": str(tmp_path / ".local/bin/odcli-2"),
+            "tool": str(tmp_path / ".local/share/odcli-slots/2/tool"),
+            "state": str(tmp_path / ".odcli-2"),
+            "healthy": True,
+        }
+        if path == ("slot", "install"):
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.slot.install_alternate_tool",
+                fail_operation if failing else lambda *_args, **_kwargs: manifest,
+            )
+        elif path == ("slot", "list"):
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.slot.list_alternate_tools",
+                fail_operation if failing else lambda *_args, **_kwargs: (row,),
+            )
+        else:
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.slot.remove_alternate_tool",
+                fail_operation if failing else lambda *_args, **_kwargs: None,
+            )
         return
 
     if path == ("doctor",):
