@@ -740,6 +740,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
 - `odcli ps` — Show process and resource inventory from one monitor snapshot.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
+- `odcli contract export` — Export the deterministic machine-operation contract bundle.
 - `odcli update` — Self-upgrade an OdCLI uv-tool install.
 <!-- cli-command-inventory:end -->
 
@@ -802,9 +803,13 @@ See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
 database backup/restore, catalogue inspect, database inventory, dependency
 verification, shared test execution, persisted environment stop, COPY database
 replacement, environments, PostgreSQL, monitoring, and inspect-then-run
-command siblings. `PUBLIC_LEAF_CASES` records the SDK primitive or CLI-only
-reason for every leaf; the complete boundary inventory and allowlist rationale
-are in [docs/execution-boundary.md](docs/execution-boundary.md).
+command siblings. `odoo_instance_sdk.operations.PUBLIC_LEAF_CASES` records the
+SDK primitive or CLI-only reason for every leaf; test-only invocation/evidence
+fixtures are kept separate. See [machine-operation contracts](docs/machine-operation-contracts.md)
+for local machine invocation, installed providers, schema generation, monitor
+snapshot-v3 semantics, explicit database reconciliation, and compatibility
+versioning. The complete boundary inventory and allowlist rationale are in
+[docs/execution-boundary.md](docs/execution-boundary.md).
 
 The SDK-first rule governs that boundary: every CLI leaf records either a
 public `sdk_primitive` or a concrete `cli_only_reason` for transport-only

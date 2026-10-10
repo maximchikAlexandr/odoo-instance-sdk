@@ -6,10 +6,22 @@ operation callbacks.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
-LeafCase = TypeVar("LeafCase")
+LeafCase_co = TypeVar("LeafCase_co", covariant=True)
+
+
+class LeafFactory(Protocol[LeafCase_co]):
+    def __call__(
+        self,
+        *,
+        path: tuple[str, ...],
+        classification: str,
+        requires_dry_run: bool,
+        sdk_primitive: str | None,
+        cli_only_reason: str | None,
+        aliases: tuple[tuple[str, ...], ...],
+    ) -> LeafCase_co: ...
 
 
 _ALIASES: dict[tuple[str, ...], tuple[tuple[str, ...], ...]] = {
@@ -127,7 +139,7 @@ _LEAF_ROWS: tuple[tuple[tuple[str, ...], str, bool, str | None], ...] = (
 )
 
 
-def build_public_leaf_cases(factory: Callable[..., LeafCase]) -> tuple[LeafCase, ...]:
+def build_public_leaf_cases(factory: LeafFactory[LeafCase_co]) -> tuple[LeafCase_co, ...]:
     """Instantiate the inventory with the public contract row type."""
     return tuple(
         factory(

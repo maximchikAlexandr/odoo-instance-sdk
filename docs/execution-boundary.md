@@ -2,10 +2,11 @@
 
 This page documents the public inspect-then-run contract implemented by the
 SDK and CLI. The checked `PublicLeafCase`/`PUBLIC_LEAF_CASES` table in
-`tests/unit/test_cli_output_modes.py` is the only leaf inventory; this page is
-an explanatory mirror of that table, not a second source of truth. If a leaf
-changes, update the canonical table and its characterization tests first,
-then update this page.
+`odoo_instance_sdk.operations` is the only production leaf inventory; this
+page is an explanatory mirror, not a second source of truth. Test-only
+invocation and evidence fixtures live in `tests/unit/test_cli_output_modes.py`.
+If a leaf changes, update the production inventory and its characterization
+fixtures first, then update this page.
 
 ## Inspect-then-run contract
 
@@ -233,9 +234,15 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:555-556` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:474` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:476` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
+- `src/odoo_instance_sdk/commands/contract.py:23` — metadata-only contract
+  export transport; remove only if contract export uses a replacement
+  centralized emitter.
+- `src/odoo_instance_sdk/commands/operation.py:83` — bounded JSONL session
+  transport; remove only if session records use a replacement centralized
+  emitter.
 - `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:115` — in-memory Rich serialization
