@@ -87,6 +87,46 @@ def _ticket_project(root: Path) -> None:
     )
 
 
+def test_passthrough_preserves_native_args_and_checkout_cwd(tmp_path: Path) -> None:
+    _repo(tmp_path)
+
+    command = GitResource(_instance(tmp_path)).passthrough_command(("status", "--short"))
+
+    step = command.plan.process_steps[0]
+    assert step.argv == ("git", "status", "--short")
+    assert step.cwd == str(tmp_path)
+    assert step.interactive is True
+    assert step.environment_overrides == ()
+    assert command.run().returncode == 0
+
+
+def test_credentialed_passthrough_captures_output_instead_of_inheriting_stdio(
+    tmp_path: Path,
+) -> None:
+    _repo(tmp_path)
+    _git(
+        tmp_path,
+        "config",
+        "alias.canary",
+        "!printf security-canary; printf security-canary >&2",
+    )
+
+    command = GitResource(_instance(tmp_path)).passthrough_command(
+        ("canary",),
+        environment={"GITLAB_TOKEN": "security-canary"},
+        secret_values=("security-canary",),
+    )
+
+    step = command.plan.process_steps[0]
+    assert step.interactive is False
+    assert "security-canary" not in repr(command.plan)
+    result = command.run()
+    assert result.returncode == 0
+    assert "security-canary" not in result.stdout
+    assert "security-canary" not in result.stderr
+    assert "security-canary" not in repr(result)
+
+
 def test_commit_context_resolves_module_ticket_and_url(tmp_path: Path) -> None:
     _repo(tmp_path)
     module = tmp_path / "addons" / "sale"

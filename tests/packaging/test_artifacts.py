@@ -244,4 +244,4 @@ def test_dashboard_source_has_stable_monitor_affordances() -> None:
     assert 'data-testid="cluster-card"' in app
     assert 'data-testid="environment-card"' in app
     assert 'data-testid="open-odoo"' in app
-    assert "window.open(rt.http_url" in app
+    assert 'window.open(externalUrl, "_blank", "noopener,noreferrer")' in app

@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from msgspec.structs import replace
 
-from odoo_instance_sdk.exceptions import EnvironmentConflictError
+from odoo_instance_sdk.exceptions import EnvironmentConflictError, PublicationError
 from odoo_instance_sdk.internal.paths import get_backups_dir
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
@@ -26,7 +27,13 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
     prepared_command,
 )
-from odoo_instance_sdk.models import Backup, BackupFormat, Database, NoBackup
+from odoo_instance_sdk.models import (
+    Backup,
+    BackupFormat,
+    Database,
+    EnvironmentCodeOwnership,
+    NoBackup,
+)
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
@@ -151,7 +158,7 @@ class TestEnvRemove:
             + "port = 5432\n"
         )
         filestore = project_manifest / ".odcli" / "filestore"
-        filestore.mkdir()
+        filestore.mkdir(exist_ok=True)
         marker = filestore / "source-data"
         marker.write_text("keep")
         opts = EnvironmentCheckoutOptions(
@@ -427,6 +434,55 @@ class TestCopyRemoveRecovery:
 
         assert env_client.environments.get(str(env.id)).state is EnvironmentState.READY
         assert Path(env.generated_config_path).is_file()
+
+    def test_publication_cleanup_failure_preserves_caller_owned_checkout(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/rm-publication-cleanup",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                source_database="comerta",
+            ),
+        )
+        worktree = Path(env.worktree_path)
+        caller_bytes = worktree / "caller-owned.txt"
+        caller_bytes.write_bytes(b"caller-owned-checkout")
+        caller_env = replace(
+            env,
+            code_ownership=EnvironmentCodeOwnership.CALLER_OWNED,
+        )
+        publication_config = tmp_path / "publication.toml"
+        publication_config.write_text("publication = {}", encoding="utf-8")
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.paths.get_publication_config_path",
+            lambda: publication_config,
+        )
+
+        def fail_publication(*_args: object, **_kwargs: object) -> None:
+            raise PublicationError("reload rejected")
+
+        monkeypatch.setattr(
+            env_client.publication,
+            "unpublish_if_configured",
+            fail_publication,
+        )
+
+        with pytest.raises(EnvironmentConflictError, match="publication cleanup failed"):
+            env_client.environments.remove_command(
+                caller_env,
+                executor=RecordingExecutor(),
+            ).run()
+
+        assert caller_bytes.read_bytes() == b"caller-owned-checkout"
+        assert worktree.is_dir()
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.CLEANUP_FAILED
 
     def test_cluster_mismatch_fails_closed_without_destructive_calls(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path

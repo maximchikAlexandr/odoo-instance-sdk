@@ -57,6 +57,17 @@ def _build_cli_args(config: StartConfig, *, secret_config_path: str | None = Non
     return build_args(config, secret_config_path=secret_config_path)
 
 
+def _project_binding(project: ProjectConfig) -> tuple[str, Path]:
+    """Validate the persisted database/filestore binding as one unit."""
+    database = project.default_source_database
+    filestore = project.managed_filestore
+    if database is None or filestore is None:
+        raise InstanceConfigurationError("project binding is incomplete")
+    from odoo_instance_sdk.project import managed_filestore_path
+
+    return database, managed_filestore_path(project)
+
+
 @dataclass(frozen=True, slots=True)
 class _RuntimeBinding:
     """Private owner-neutral identity shared by environment and project instances."""
@@ -292,6 +303,7 @@ class InstanceFactory:
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         root = project.repository_root.resolve()
+        binding = _project_binding(project)
         project_environment = load_project_environment(root)
         generated_config_path = project_generated_config_path(root)
         if (
@@ -316,8 +328,16 @@ class InstanceFactory:
         start_cfg.http_port = resolve_project_http_port(
             project.preferred_http_port, start_cfg.http_port
         )
-        if project.default_source_database is not None:
-            start_cfg.db_name = project.default_source_database
+        database, binding_path = binding
+        start_cfg.db_name = database
+        managed_filestore = _project_path(
+            root,
+            binding_path,
+            field="managed_filestore",
+            directory=True,
+        )
+        start_cfg.data_dir = str(managed_filestore)
+        start_cfg.dbfilter = database
         normalized = normalize_base_url(f"http://{start_cfg.http_interface}:{start_cfg.http_port}")
         try:
             assert_local(normalized)

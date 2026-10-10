@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
@@ -450,7 +454,7 @@ def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_pat
             "--python",
             f"python-{payload}",
             "--database",
-            f"db-{payload}",
+            "db-safe",
             "--project",
             str(tmp_path),
         ]
@@ -493,3 +497,40 @@ def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_pat
     assert "\x1b" not in result.output
     assert "\x7f" not in result.output
     assert "\x9b" not in result.output
+
+
+def test_dry_run_rejects_control_byte_database_before_manifest_or_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    spawn = MagicMock(side_effect=AssertionError("cluster spawn must not be reached"))
+    monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", spawn)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--allow-partial",
+            "--dry-run",
+            "--format",
+            "json",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--database",
+            "db-\x00\x1b[2J\x9b31m\x7f",
+            "--postgres",
+            "compose",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigError)
+    assert not (tmp_path / ".odcli" / "project.toml").exists()
+    spawn.assert_not_called()

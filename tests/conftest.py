@@ -410,6 +410,7 @@ def project_manifest(
 ) -> Path:
     manifest_dir = git_repo / ".odcli"
     manifest_dir.mkdir(exist_ok=True)
+    (manifest_dir / "filestore").mkdir(exist_ok=True)
     manifest = manifest_dir / "project.toml"
     fake_odoo = fake_python.parent / "odoo-bin"
     fake_odoo.write_text("#!/bin/sh\nexit 0\n")
@@ -423,6 +424,7 @@ def project_manifest(
             python = "{fake_python}"
             source_config = "{rel_config}"
             default_source_database = "comerta"
+            managed_filestore = ".odcli/filestore"
         """
         )
     )

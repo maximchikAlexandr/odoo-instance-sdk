@@ -12,6 +12,7 @@ from odoo_instance_sdk.models import OdooProcess
 from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.environment import EnvironmentResource
 from odoo_instance_sdk.resources.instance import InstanceFactory
+from odoo_instance_sdk.resources.publication import PublicationResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
@@ -27,11 +28,13 @@ class OdooClient:
     instance: InstanceFactory = field(init=False)
     backups: BackupResource = field(init=False)
     environments: EnvironmentResource = field(init=False)
+    publication: PublicationResource = field(init=False)
 
     def __post_init__(self) -> None:
         self.instance = InstanceFactory(_client=self)
         self.backups = BackupResource(_client=self)
         self.environments = EnvironmentResource(_client=self)
+        self.publication = PublicationResource(_client=self)
         atexit.register(self._cleanup_secret_configs)
 
     def __repr__(self) -> str:
