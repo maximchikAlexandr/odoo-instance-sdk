@@ -250,7 +250,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:469` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/internal/self_update.py:801-803` — maintenance child
+- `src/odoo_instance_sdk/internal/self_update.py:827-829` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement
   centralized emitter.
 - `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
