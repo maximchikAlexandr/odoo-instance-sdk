@@ -202,19 +202,95 @@ def test_cli_alternate_update_rejects_before_maintenance(
 
     monkeypatch.setenv("ODCLI_LAUNCHER_KIND", kind)
     monkeypatch.setenv("ODCLI_LAUNCHER_ID", identifier)
-    monkeypatch.setattr(
+    touched: list[str] = []
+
+    def unexpected(name: str) -> Callable[..., object]:
+        def record(*_args: object, **_kwargs: object) -> object:
+            touched.append(name)
+            pytest.fail(f"alternate update crossed guard through {name}")
+
+        return record
+
+    for target in (
         "odoo_instance_sdk.commands.update.prepare_maintenance_environment",
-        lambda: pytest.fail("alternate update entered maintenance setup"),
-    )
+        "odoo_instance_sdk.commands.update.update_command",
+        "odoo_instance_sdk.commands.update.preflight_update_command",
+        "odoo_instance_sdk.internal.self_update.read_uv_tool_direct_url",
+        "odoo_instance_sdk.internal.self_update_commands.read_uv_tool_direct_url",
+        "odoo_instance_sdk.internal.self_update._update_lock_path",
+        "odoo_instance_sdk.internal.self_update._update_journal_path",
+        "odoo_instance_sdk.internal.self_update._update_snapshot_dir",
+        "odoo_instance_sdk.internal.self_update_commands.exclusive_lock",
+        "odoo_instance_sdk.internal.self_update_commands.SubprocessExecutor",
+    ):
+        monkeypatch.setattr(target, unexpected(target))
 
-    result = CliRunner().invoke(
-        update_command_cli,
-        ["--check", "--format", "json"],
-        prog_name="odcli",
-    )
+    for mode, args in (
+        ("normal", ["--yes", "--format", "json"]),
+        ("check", ["--check", "--format", "json"]),
+        ("dry-run", ["--dry-run", "--format", "json"]),
+    ):
+        result = CliRunner().invoke(update_command_cli, args, prog_name="odcli")
 
-    assert result.exit_code == 1, result.output
-    assert remediation in result.output
+        assert result.exit_code == 1, f"{mode}: {result.output}"
+        assert remediation in result.output
+    assert touched == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "identifier", "remediation"),
+    (
+        ("numbered", "4", "odcli slot install 4"),
+        ("hotfix", "44", "skill-managed canonical"),
+    ),
+)
+def test_alternate_sdk_and_maintenance_entrypoints_reject_before_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    identifier: str,
+    remediation: str,
+) -> None:
+    from odoo_instance_sdk.internal import self_update
+
+    monkeypatch.setenv("ODCLI_LAUNCHER_KIND", kind)
+    monkeypatch.setenv("ODCLI_LAUNCHER_ID", identifier)
+    touched: list[str] = []
+
+    def unexpected(name: str) -> Callable[..., object]:
+        def record(*_args: object, **_kwargs: object) -> object:
+            touched.append(name)
+            pytest.fail(f"alternate update crossed guard through {name}")
+
+        return record
+
+    for target in (
+        "odoo_instance_sdk.internal.self_update.read_uv_tool_direct_url",
+        "odoo_instance_sdk.internal.self_update_commands.read_uv_tool_direct_url",
+        "odoo_instance_sdk.internal.self_update._update_lock_path",
+        "odoo_instance_sdk.internal.self_update._update_journal_path",
+        "odoo_instance_sdk.internal.self_update._update_snapshot_dir",
+        "odoo_instance_sdk.internal.self_update_commands.exclusive_lock",
+        "odoo_instance_sdk.internal.self_update_commands.SubprocessExecutor",
+    ):
+        monkeypatch.setattr(target, unexpected(target))
+
+    entrypoints = (
+        ("update", self_update.update),
+        ("update_command", lambda: update_command(ref=_SHA_B)),
+        ("update_check", lambda: update_command(ref=_SHA_B, check=True)),
+        ("update_dry_run", lambda: update_command(ref=_SHA_B, dry_run=True)),
+        (
+            "preflight",
+            lambda: self_update.preflight_update_command(ref=_SHA_B),
+        ),
+        ("maintenance_setup", self_update.prepare_maintenance_environment),
+        ("maintenance", self_update.run_maintenance),
+        ("maintenance_recovery", self_update._maintenance_run),
+    )
+    for _name, entrypoint in entrypoints:
+        with pytest.raises(UpdateError, match=remediation):
+            entrypoint()
+    assert touched == []
 
 
 def _assert_expected_command_result(
