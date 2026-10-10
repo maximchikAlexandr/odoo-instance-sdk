@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import contextlib
 import shutil
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -24,18 +23,15 @@ from odoo_instance_sdk.internal.postgres_compose import (
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
+    SNAPSHOT_SECTIONS,
     CheckoutInventory,
-    PostgresClusterState,
     ProcessInventory,
     Snapshot,
+    SnapshotRequest,
 )
-from odoo_instance_sdk.resources.environment import EnvironmentState
 from odoo_instance_sdk.resources.monitor.planning import (
     _PROBE_TIMEOUT_SECONDS,
     _SCHEMA_VERSION,
-    _EnvironmentPlan,
-    _ProjectPlan,
-    _SnapshotPlan,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, MonitorCatalogSnapshot
@@ -53,11 +49,16 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.models import (
         ClusterResourceSnapshot,
         EnvironmentSnapshot,
+        PostgresClusterState,
         ProjectSummary,
+        SnapshotObservation,
+        SnapshotSection,
     )
     from odoo_instance_sdk.resources.monitor.planning import (
         _DockerProvider,
         _GitProvider,
+        _ProjectPlan,
+        _SnapshotPlan,
     )
 
 
@@ -82,7 +83,12 @@ class _CollectMixin:
             resources: dict[str, ClusterResourceSnapshot],
             *,
             probe_results: dict[str, ProcessResult] | None = None,
-        ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]: ...
+            sections: frozenset[SnapshotSection] | None = None,
+        ) -> tuple[
+            tuple[ProjectSummary, ...],
+            tuple[EnvironmentSnapshot, ...],
+            dict[SnapshotSection, str],
+        ]: ...
 
         def _prune_caches(
             self,
@@ -100,9 +106,40 @@ class _CollectMixin:
             probe_results: dict[str, ProcessResult] | None = None,
         ) -> PostgresClusterState: ...
 
-    def snapshot(self, project_id: str | None = None, *, include_removed: bool = False) -> Snapshot:
+        def _plan_snapshot(
+            self,
+            catalog: BackupCatalog,
+            *,
+            project_id: str | None = None,
+            include_removed: bool = False,
+            probe_results: dict[str, ProcessResult] | None = None,
+            catalog_rows: MonitorCatalogSnapshot | None = None,
+            request: SnapshotRequest | None = None,
+        ) -> _SnapshotPlan: ...
+
+        @staticmethod
+        def _snapshot_observation(
+            observed_at: datetime,
+            sections: frozenset[SnapshotSection],
+            projects: tuple[ProjectSummary, ...],
+            environments: tuple[EnvironmentSnapshot, ...],
+            resources: dict[str, ClusterResourceSnapshot],
+            section_outcomes: Mapping[SnapshotSection, str] | None = None,
+        ) -> SnapshotObservation: ...
+
+    def snapshot(
+        self,
+        project_id: str | None = None,
+        *,
+        include_removed: bool = False,
+        request: SnapshotRequest | None = None,
+    ) -> Snapshot:
         """Build one immutable snapshot command and execute it."""
-        return self.snapshot_command(project_id, include_removed=include_removed).run()
+        if request is None:
+            return self.snapshot_command(project_id, include_removed=include_removed).run()
+        return self.snapshot_command(
+            project_id, include_removed=include_removed, request=request
+        ).run()
 
     def processes(self, project_id: str | None = None) -> ProcessInventory:
         """Project one ``ProcessInventory`` from a single canonical snapshot.
@@ -425,7 +462,11 @@ class _CollectMixin:
         return tuple(credentials_by_database[name] for name in sorted(credentials_by_database))
 
     def snapshot_command(
-        self, project_id: str | None = None, *, include_removed: bool = False
+        self,
+        project_id: str | None = None,
+        *,
+        include_removed: bool = False,
+        request: SnapshotRequest | None = None,
     ) -> Command[Snapshot]:
         """Capture one finite monitor collection operation.
 
@@ -434,6 +475,8 @@ class _CollectMixin:
         collection so the command ledger still records a complete finite run;
         ``watch`` constructs a fresh command for every tick.
         """
+        if request is not None:
+            include_removed = request.include_removed
         from odoo_instance_sdk.execution import Command, ExecutionPlan
         from odoo_instance_sdk.internal.proc import (
             PreparedAction,
@@ -453,7 +496,7 @@ class _CollectMixin:
             read_only=True,
         )
         probe_steps, catalog_rows = self._capture_probe_steps(
-            project_id=project_id, include_removed=include_removed
+            project_id=project_id, include_removed=include_removed, request=request
         )
         captured_steps: tuple[PreparedStep | PreparedAction, ...] = (*probe_steps, action)
 
@@ -485,12 +528,22 @@ class _CollectMixin:
                         include_removed=include_removed,
                         probe_results=probe_results,
                         catalog_rows=catalog_rows,
+                        request=request,
                     )
                 else:
-                    snapshot = self._snapshot_impl(
-                        project_id=project_id,
-                        include_removed=include_removed,
-                    )
+                    if request is not None:
+                        snapshot = self._snapshot_impl(
+                            project_id=project_id,
+                            include_removed=include_removed,
+                            probe_results={},
+                            catalog_rows=catalog_rows,
+                            request=request,
+                        )
+                    else:
+                        snapshot = self._snapshot_impl(
+                            project_id=project_id,
+                            include_removed=include_removed,
+                        )
                 context.complete_action(action.step_id)
                 return snapshot
             finally:
@@ -513,7 +566,11 @@ class _CollectMixin:
         )
 
     def _capture_probe_steps(  # noqa: C901
-        self, *, project_id: str | None, include_removed: bool
+        self,
+        *,
+        project_id: str | None,
+        include_removed: bool,
+        request: SnapshotRequest | None = None,
     ) -> tuple[tuple[PreparedStep, ...], MonitorCatalogSnapshot]:
         """Capture the finite process probe manifest for one snapshot command.
 
@@ -535,6 +592,7 @@ class _CollectMixin:
         except (BackupCatalogError, sqlite3.Error, OSError):
             return (), MonitorCatalogSnapshot((), (), ())
 
+        selected = frozenset(request.sections if request is not None else SNAPSHOT_SECTIONS)
         rows = catalog_rows.environments
         registered_projects = catalog_rows.projects
         steps: list[PreparedStep] = []
@@ -550,9 +608,21 @@ class _CollectMixin:
             )
             if project_id is not None and resolved_project != project_id:
                 continue
+            if (
+                request is not None
+                and request.project_ids
+                and resolved_project not in request.project_ids
+            ):
+                continue
+            if (
+                request is not None
+                and request.environment_ids
+                and env_id not in request.environment_ids
+            ):
+                continue
             base_ref = _validated_base_ref(row["base_ref"])
             git_commands: tuple[tuple[str, tuple[str, ...]], ...] = ()
-            if self.git_provider is None and base_ref is not None:
+            if "git" in selected and self.git_provider is None and base_ref is not None:
                 upstream_ref = f"{base_ref}@{{upstream}}"
                 local_ref = f"refs/heads/{base_ref}"
                 git_commands = (
@@ -593,28 +663,29 @@ class _CollectMixin:
                     )
                 )
             du = shutil.which("du") or "du"
-            steps.append(
-                PreparedStep(
-                    step_id=f"monitor.{env_id}.storage.worktree",
-                    argv=(du, "-sb", str(worktree)),
-                    cwd=str(worktree.parent),
-                    timeout=_PROBE_TIMEOUT_SECONDS,
-                    read_only=True,
-                    text=True,
+            if "storage" in selected:
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{env_id}.storage.worktree",
+                        argv=(du, "-sb", str(worktree)),
+                        cwd=str(worktree.parent),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
+                    )
                 )
-            )
             database = (
                 row["target_db_name"] if str(row["db_mode"]) == "copy" else row["source_db_name"]
             )
             db_config = None
-            if database:
+            if database and "postgresql" in selected:
                 try:
                     from odoo_instance_sdk.models import StartConfig
 
                     db_config = StartConfig.from_odoo_config(str(row["generated_config_path"]))
                 except Exception:
                     db_config = None
-            if database:
+            if database and "postgresql" in selected:
                 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 
                 steps.append(
@@ -632,7 +703,7 @@ class _CollectMixin:
                         _require_binary=False,
                     ).prepared_step
                 )
-            if bool(int(row["python_environment_owned"])):
+            if "storage" in selected and bool(int(row["python_environment_owned"])):
                 steps.append(
                     PreparedStep(
                         step_id=f"monitor.{env_id}.storage.python",
@@ -644,21 +715,27 @@ class _CollectMixin:
                     )
                 )
             environment_root = Path(str(row["generated_config_path"])).parent
-            for suffix, path in (
-                ("cache", environment_root / "cache"),
-                ("artifacts", environment_root / "artifacts"),
-            ):
-                steps.append(
-                    PreparedStep(
-                        step_id=f"monitor.{env_id}.storage.{suffix}",
-                        argv=(du, "-sb", str(path)),
-                        cwd=str(path.parent),
-                        timeout=_PROBE_TIMEOUT_SECONDS,
-                        read_only=True,
-                        text=True,
+            if "storage" in selected:
+                for suffix, path in (
+                    ("cache", environment_root / "cache"),
+                    ("artifacts", environment_root / "artifacts"),
+                ):
+                    steps.append(
+                        PreparedStep(
+                            step_id=f"monitor.{env_id}.storage.{suffix}",
+                            argv=(du, "-sb", str(path)),
+                            cwd=str(path.parent),
+                            timeout=_PROBE_TIMEOUT_SECONDS,
+                            read_only=True,
+                            text=True,
+                        )
                     )
-                )
-            if str(row["db_mode"]) == "copy" and row["target_db_name"]:
+            if (
+                "storage" in selected
+                and "postgresql" in selected
+                and str(row["db_mode"]) == "copy"
+                and row["target_db_name"]
+            ):
                 database_name = str(row["target_db_name"]).replace("'", "''")
                 if row["target_db_name"] is not None:
                     from odoo_instance_sdk.internal.pg.builder import build_psql_specification
@@ -727,7 +804,7 @@ class _CollectMixin:
                 projects.add((repository, resolved_project))
 
         for repository, project_name in sorted(projects, key=lambda item: (str(item[0]), item[1])):
-            if self.docker_provider is not None:
+            if "docker" not in selected or self.docker_provider is not None:
                 continue
             from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
@@ -774,6 +851,8 @@ class _CollectMixin:
         for repository, project_name in sorted(
             repositories, key=lambda item: (str(item[0]), item[1])
         ):
+            if "artifact" not in selected:
+                continue
             steps.append(
                 PreparedStep(
                     step_id=f"monitor.{project_name}.git.worktrees",
@@ -801,6 +880,7 @@ class _CollectMixin:
         include_removed: bool = False,
         probe_results: dict[str, ProcessResult] | None = None,
         catalog_rows: MonitorCatalogSnapshot | None = None,
+        request: SnapshotRequest | None = None,
     ) -> Snapshot:
         """Perform one coherent collection pass and return an immutable snapshot."""
         generated_at = datetime.now(UTC)
@@ -817,14 +897,17 @@ class _CollectMixin:
                 include_removed=include_removed,
                 probe_results=probe_results,
                 catalog_rows=catalog_rows,
+                request=request,
             )
         finally:
             catalog.close()
-        resources, active_clusters = self._collect_cluster_resources(
-            list(plan.projects), probe_results=probe_results
+        resources, active_clusters = (
+            self._collect_cluster_resources(list(plan.projects), probe_results=probe_results)
+            if "docker" in plan.sections
+            else ({}, set())
         )
-        projects, environments = self._collect_snapshot_rows(
-            plan.projects, resources, probe_results=probe_results
+        projects, environments, section_outcomes = self._collect_snapshot_rows(
+            plan.projects, resources, probe_results=probe_results, sections=plan.sections
         )
         self._prune_caches(
             set(plan.environment_ids),
@@ -833,141 +916,19 @@ class _CollectMixin:
             set(plan.statuses),
             set(plan.cpu_points),
         )
+        observed_at = datetime.now(UTC)
+        observation = self._snapshot_observation(
+            observed_at,
+            plan.sections,
+            projects,
+            environments,
+            resources,
+            section_outcomes,
+        )
         return Snapshot(
             schema_version=_SCHEMA_VERSION,
             generated_at=generated_at,
             projects=projects,
             environments=environments,
+            observation=observation,
         )
-
-    def _plan_snapshot(  # noqa: C901
-        self,
-        catalog: BackupCatalog,
-        *,
-        project_id: str | None = None,
-        include_removed: bool = False,
-        probe_results: dict[str, ProcessResult] | None = None,
-        catalog_rows: MonitorCatalogSnapshot | None = None,
-    ) -> _SnapshotPlan:
-        """Read catalog runtime once and derive deterministic project plans."""
-        if catalog_rows is None:
-            try:
-                snapshot_rows = catalog._monitor_snapshot_rows(include_removed=include_removed)
-            except (BackupCatalogError, sqlite3.Error) as exc:
-                raise MonitorError("monitor catalog unavailable") from exc
-        else:
-            snapshot_rows = catalog_rows
-        rows = snapshot_rows.environments
-        registered_projects = snapshot_rows.projects
-        project_runtimes = snapshot_rows.project_runtimes
-        groups: dict[str, list[_EnvironmentPlan]] = {}
-        project_details: dict[str, Path] = {
-            str(row["project_id"]): Path(str(row["repository_root"])).resolve()
-            for row in registered_projects
-        }
-        project_runtime_by_id = {str(row["owner_id"]): row for row in project_runtimes}
-        environment_ids: set[str] = set()
-        worktrees: set[Path] = set()
-        cpu_points: set[tuple[int, float]] = set()
-        for row, runtime in rows:
-            repository = Path(str(row["repository_root"])).resolve()
-            git_common = Path(str(row["git_common_dir"])).resolve()
-            resolved_project_id = str(
-                row["project_id"] or f"project_{repo_key(repository, git_common)}"
-            )
-            groups.setdefault(resolved_project_id, []).append(_EnvironmentPlan(row, runtime))
-            project_details.setdefault(resolved_project_id, repository)
-            environment_ids.add(str(row["id"]))
-            worktrees.add(Path(str(row["worktree_path"])).resolve())
-            if runtime is not None:
-                with contextlib.suppress(TypeError, ValueError):
-                    cpu_points.add((int(runtime["root_pid"]), float(runtime["create_time"])))
-        for runtime in project_runtimes:
-            with contextlib.suppress(TypeError, ValueError):
-                cpu_points.add((int(runtime["root_pid"]), float(runtime["create_time"])))
-        plans: list[_ProjectPlan] = []
-        statuses: set[str] = set()
-        for resolved_project_id, environments in groups.items():
-            first = environments[0].row
-            repo_root = Path(str(first["repository_root"]))
-            # Filtering is intentionally before manifest/status/Docker work.
-            # The catalog grouping and cache-pruning inputs remain cheap.
-            if project_id is not None and resolved_project_id != project_id:
-                continue
-            if all(
-                str(item.row["state"]) == EnvironmentState.REMOVED.value for item in environments
-            ):
-                cluster, state = None, None
-            else:
-                cluster, state = self._project_cluster(
-                    repo_root,
-                    statuses,
-                    project_id=resolved_project_id,
-                    probe_results=probe_results,
-                )
-            plans.append(
-                _ProjectPlan(
-                    resolved_project_id,
-                    repo_root,
-                    cluster,
-                    state,
-                    tuple(environments),
-                    project_runtime=project_runtime_by_id.get(resolved_project_id),
-                )
-            )
-        for resolved_project_id, repo_root in project_details.items():
-            if resolved_project_id in groups:
-                continue
-            if project_id is not None and resolved_project_id != project_id:
-                continue
-            cluster, state = self._project_cluster(
-                repo_root,
-                statuses,
-                project_id=resolved_project_id,
-                probe_results=probe_results,
-            )
-            plans.append(
-                _ProjectPlan(
-                    resolved_project_id,
-                    repo_root,
-                    cluster,
-                    state,
-                    (),
-                    project_runtime=project_runtime_by_id.get(resolved_project_id),
-                )
-            )
-        return _SnapshotPlan(
-            tuple(sorted(plans, key=lambda item: item.project_id)),
-            frozenset(environment_ids),
-            frozenset(worktrees),
-            frozenset(statuses),
-            frozenset(cpu_points),
-        )
-
-    def _project_cluster(
-        self,
-        repo_root: Path,
-        statuses: set[str],
-        *,
-        project_id: str,
-        probe_results: dict[str, ProcessResult] | None = None,
-    ) -> tuple[PostgresCluster | None, PostgresClusterState | None]:
-        try:
-            if (
-                probe_results is None
-                or PostgresCluster.from_project.__module__ != "odoo_instance_sdk.resources.postgres"
-            ):
-                cluster = PostgresCluster.from_project(repo_root)
-            else:
-                from odoo_instance_sdk.project import ProjectConfig
-
-                cluster = PostgresCluster._from_config(
-                    ProjectConfig.load(repo_root),
-                    repository_root=repo_root,
-                    compose_runner=self._docker_runner,
-                    project_id=project_id.removeprefix("project_"),
-                )
-            statuses.add(str(cluster.compose_file.resolve()))
-            return cluster, self._cached_status(cluster, probe_results=probe_results)
-        except (ProjectManifestNotFoundError, PostgresClusterError, OSError):
-            return None, None

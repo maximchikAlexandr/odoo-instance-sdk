@@ -54,6 +54,9 @@ class RuntimeMetrics(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     database_name: str | None
     commit_sha: str | None
     branch: str | None
+    create_time: float | None = None
+    cpu_seconds: float | None = None
+    sampled_at: datetime | None = None
 
 
 class ClusterContainer(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

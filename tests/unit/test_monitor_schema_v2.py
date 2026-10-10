@@ -238,20 +238,23 @@ def test_port_observation_maps_bounded_address_states(
     patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
     monkeypatch.setattr(
         EnvironmentMonitor,
-        "_collect_runtime",
-        lambda *_: RuntimeMetrics(
-            state=RuntimeState.READY,
-            root_pid=1,
-            child_pids=(),
-            process_count=1,
-            cpu_percent=0.0,
-            memory_bytes=1,
-            started_at=None,
-            http_url="http://127.0.0.1:8069",
-            http_port=8069,
-            database_name="db",
-            commit_sha="abc",
-            branch="main",
+        "_collect_runtime_with_outcome",
+        lambda *_: (
+            RuntimeMetrics(
+                state=RuntimeState.READY,
+                root_pid=1,
+                child_pids=(),
+                process_count=1,
+                cpu_percent=0.0,
+                memory_bytes=1,
+                started_at=None,
+                http_url="http://127.0.0.1:8069",
+                http_port=8069,
+                database_name="db",
+                commit_sha="abc",
+                branch="main",
+            ),
+            False,
         ),
     )
     monkeypatch.setattr(
@@ -305,20 +308,23 @@ def test_artifact_failures_are_isolated_and_port_observation_is_bounded(
     monkeypatch.setattr(EnvironmentMonitor, "_probe_readiness", lambda *_: RuntimeState.READY)
     monkeypatch.setattr(
         EnvironmentMonitor,
-        "_collect_runtime",
-        lambda *_: RuntimeMetrics(
-            state=RuntimeState.READY,
-            root_pid=12345,
-            child_pids=(),
-            process_count=1,
-            cpu_percent=0.0,
-            memory_bytes=1,
-            started_at=None,
-            http_url="http://127.0.0.1:8069",
-            http_port=8069,
-            database_name="mydb",
-            commit_sha="abc123",
-            branch="main",
+        "_collect_runtime_with_outcome",
+        lambda *_: (
+            RuntimeMetrics(
+                state=RuntimeState.READY,
+                root_pid=12345,
+                child_pids=(),
+                process_count=1,
+                cpu_percent=0.0,
+                memory_bytes=1,
+                started_at=None,
+                http_url="http://127.0.0.1:8069",
+                http_port=8069,
+                database_name="mydb",
+                commit_sha="abc123",
+                branch="main",
+            ),
+            False,
         ),
     )
     monkeypatch.setattr(

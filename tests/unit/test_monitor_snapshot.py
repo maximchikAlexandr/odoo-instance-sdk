@@ -1390,6 +1390,18 @@ def test_default_monitor_works_with_core_process_dependency(tmp_path: Path) -> N
     assert snapshot.environments == ()
 
 
+def test_repeated_monitor_reads_leave_catalogue_bytes_unchanged(tmp_path: Path) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _make_catalog(tmp_path).close()
+    before = catalog_path.read_bytes()
+    monitor = EnvironmentMonitor(catalog_path=catalog_path)
+
+    monitor.snapshot()
+    monitor.snapshot()
+
+    assert catalog_path.read_bytes() == before
+
+
 def test_cluster_status_cached_5s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.time.monotonic",
