@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import textwrap
 from collections.abc import Iterator
 from pathlib import Path
@@ -84,8 +85,8 @@ def fake_python(tmp_path: Path) -> Path:
     bindir.mkdir(parents=True, exist_ok=True)
     pybin = bindir / "fakepython"
     pybin.write_text(
-        textwrap.dedent("""\
-        #!/usr/bin/env python3
+        textwrap.dedent(f"""\
+        #!{sys.executable}
         import sys
         if len(sys.argv) > 1 and sys.argv[1] == "-c" and "sys.prefix" in sys.argv[2]:
             print("True")

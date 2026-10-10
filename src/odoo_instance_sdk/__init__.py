@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     import msgspec
 
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.commands.context import OperationContext
     from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
     from odoo_instance_sdk.exceptions import (
         BackupCatalogError,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         DatabaseAlreadyExistsError,
         DatabaseError,
         DatabaseManagerUnavailableError,
+        DatabaseReconciliationError,
         DetachedLaunchCleanupError,
         DropFailedError,
         DuplicateStepError,
@@ -84,6 +86,7 @@ if TYPE_CHECKING:
         fingerprint_plan,
     )
     from odoo_instance_sdk.models import (
+        SNAPSHOT_SECTIONS,
         AdminPasswordResetResult,
         Backup,
         BackupBranchOrigin,
@@ -118,8 +121,10 @@ if TYPE_CHECKING:
         CommandResult,
         Database,
         DatabaseFootprint,
+        DatabaseObservation,
         DatabasePreparationAction,
         DatabasePreparationResult,
+        DatabaseReconciliationResult,
         DatabaseRefreshOptions,
         DiagnosticWarning,
         DropResult,
@@ -169,6 +174,10 @@ if TYPE_CHECKING:
         RuntimeState,
         ServerUnavailabilityReason,
         Snapshot,
+        SnapshotObservation,
+        SnapshotRequest,
+        SnapshotSection,
+        SnapshotSectionObservation,
         SqlExecutionResult,
         StartConfig,
         StatsCapabilities,
@@ -233,6 +242,7 @@ if TYPE_CHECKING:
             | PublicationResult
             | PublicationSettings
             | PublicationTarget
+            | OperationContext
         ]
         | _CanonicalBytes
         | _CanonicalProjection
@@ -333,6 +343,15 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "odoo_instance_sdk.exceptions",
         "DatabaseManagerUnavailableError",
     ),
+    "DatabaseReconciliationError": (
+        "odoo_instance_sdk.exceptions",
+        "DatabaseReconciliationError",
+    ),
+    "DatabaseObservation": ("odoo_instance_sdk.models", "DatabaseObservation"),
+    "DatabaseReconciliationResult": (
+        "odoo_instance_sdk.models",
+        "DatabaseReconciliationResult",
+    ),
     "DatabasePreparationAction": ("odoo_instance_sdk.models", "DatabasePreparationAction"),
     "DatabasePreparationResult": ("odoo_instance_sdk.models", "DatabasePreparationResult"),
     "DatabaseRefreshOptions": ("odoo_instance_sdk.models", "DatabaseRefreshOptions"),
@@ -418,6 +437,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "OdooClient": ("odoo_instance_sdk.client", "OdooClient"),
     "OdooClientConfig": ("odoo_instance_sdk.config", "OdooClientConfig"),
     "OdooInstance": ("odoo_instance_sdk.resources.instance", "OdooInstance"),
+    "OperationContext": ("odoo_instance_sdk.commands.context", "OperationContext"),
     "OdooInstanceSdkError": ("odoo_instance_sdk.exceptions", "OdooInstanceSdkError"),
     "OdooProcess": ("odoo_instance_sdk.models", "OdooProcess"),
     "OdooTestResult": ("odoo_instance_sdk.models", "OdooTestResult"),
@@ -515,12 +535,20 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "RestoreResult": ("odoo_instance_sdk.models", "RestoreResult"),
     "RuntimeMetrics": ("odoo_instance_sdk.models", "RuntimeMetrics"),
     "RuntimeState": ("odoo_instance_sdk.models", "RuntimeState"),
+    "SNAPSHOT_SECTIONS": ("odoo_instance_sdk.models", "SNAPSHOT_SECTIONS"),
     "ServerUnavailabilityReason": (
         "odoo_instance_sdk.models",
         "ServerUnavailabilityReason",
     ),
     "SqlExecutionResult": ("odoo_instance_sdk.models", "SqlExecutionResult"),
     "Snapshot": ("odoo_instance_sdk.models", "Snapshot"),
+    "SnapshotObservation": ("odoo_instance_sdk.models", "SnapshotObservation"),
+    "SnapshotRequest": ("odoo_instance_sdk.models", "SnapshotRequest"),
+    "SnapshotSection": ("odoo_instance_sdk.models", "SnapshotSection"),
+    "SnapshotSectionObservation": (
+        "odoo_instance_sdk.models",
+        "SnapshotSectionObservation",
+    ),
     "StartConfig": ("odoo_instance_sdk.models", "StartConfig"),
     "StopEnvironmentResult": ("odoo_instance_sdk.models", "StopEnvironmentResult"),
     "TestCommandSnapshot": ("odoo_instance_sdk.models", "TestCommandSnapshot"),
@@ -566,6 +594,7 @@ def __getattr__(name: str) -> LazyExport:
 # models are added while preserving the historical order in that map.
 if TYPE_CHECKING:
     __all__ = [
+        "SNAPSHOT_SECTIONS",
         "ActionStep",
         "AdminPasswordResetResult",
         "Backup",
@@ -627,8 +656,11 @@ if TYPE_CHECKING:
         "DatabaseInventoryItem",
         "DatabaseInventoryResult",
         "DatabaseManagerUnavailableError",
+        "DatabaseObservation",
         "DatabasePreparationAction",
         "DatabasePreparationResult",
+        "DatabaseReconciliationError",
+        "DatabaseReconciliationResult",
         "DatabaseRefreshOptions",
         "DatabaseResource",
         "DepsDistributionDetail",
@@ -757,6 +789,10 @@ if TYPE_CHECKING:
         "RuntimeState",
         "ServerUnavailabilityReason",
         "Snapshot",
+        "SnapshotObservation",
+        "SnapshotRequest",
+        "SnapshotSection",
+        "SnapshotSectionObservation",
         "SqlExecutionResult",
         "StartConfig",
         "StatsCapabilities",

@@ -241,9 +241,9 @@ def _source_cache_consumed() -> bool:
 def _write_command_matrix() -> None:
     from scripts.check_e2e_contract import MATRIX
     from tests.integration.real_odoo.contracts import render_matrix_document
-    from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+    from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES
 
-    content = render_matrix_document(MATRIX.read_text(encoding="utf-8"), PUBLIC_LEAF_CASES)
+    content = render_matrix_document(MATRIX.read_text(encoding="utf-8"), PUBLIC_LEAF_TEST_CASES)
     encoded = content.encode("utf-8")
     if len(encoded) > 2 * 1024 * 1024:
         raise ValueError("generated command matrix exceeds evidence text limit")

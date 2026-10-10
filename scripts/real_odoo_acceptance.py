@@ -314,12 +314,12 @@ def _emitted_ids_for_selector(selector: str) -> frozenset[str]:
         function_name == "test_remaining_focused_public_leaves_use_canonical_inventory"
         and parameter
     ):
-        from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+        from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES
 
         path_value = parameter.removesuffix("]")
         return frozenset(
             evidence
-            for case in PUBLIC_LEAF_CASES
+            for case in PUBLIC_LEAF_TEST_CASES
             if ".".join(case.path) == path_value
             for evidence in case.e2e_evidence
         )
@@ -411,10 +411,10 @@ def _junit_evidence_ids(root: ET.Element) -> frozenset[str]:
 
 def _static_contract() -> dict[str, object]:
     from tests.integration.real_odoo.contracts import check_matrix_document, validate_leaf_metadata
-    from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+    from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES
 
-    validate_leaf_metadata(PUBLIC_LEAF_CASES)
-    check_matrix_document(str(MATRIX), PUBLIC_LEAF_CASES)
+    validate_leaf_metadata(PUBLIC_LEAF_TEST_CASES)
+    check_matrix_document(str(MATRIX), PUBLIC_LEAF_TEST_CASES)
     matrix_text = MATRIX.read_text(encoding="utf-8")
     evidence_ids = _matrix_evidence_ids(matrix_text)
     scenario_names = SCENARIO.findall(SPEC.read_text(encoding="utf-8"))
@@ -453,8 +453,8 @@ def _static_contract() -> dict[str, object]:
     )
     return {
         "inventory": {
-            "rows": len(PUBLIC_LEAF_CASES),
-            "unique_paths": len({case.path for case in PUBLIC_LEAF_CASES}),
+            "rows": len(PUBLIC_LEAF_TEST_CASES),
+            "unique_paths": len({case.path for case in PUBLIC_LEAF_TEST_CASES}),
             "matrix_matches": True,
         },
         "evidence": {

@@ -14,7 +14,7 @@ from tests.integration.real_odoo.contracts import (  # noqa: E402
     check_matrix_document,
     render_matrix_document,
 )
-from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES  # noqa: E402
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES  # noqa: E402
 
 MATRIX = ROOT / "tests/integration/real_odoo/command-matrix.md"
 
@@ -25,11 +25,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.write:
         MATRIX.write_text(
-            render_matrix_document(MATRIX.read_text(encoding="utf-8"), PUBLIC_LEAF_CASES),
+            render_matrix_document(MATRIX.read_text(encoding="utf-8"), PUBLIC_LEAF_TEST_CASES),
             encoding="utf-8",
         )
     else:
-        check_matrix_document(str(MATRIX), PUBLIC_LEAF_CASES)
+        check_matrix_document(str(MATRIX), PUBLIC_LEAF_TEST_CASES)
     return 0
 
 

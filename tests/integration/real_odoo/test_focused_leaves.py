@@ -18,7 +18,7 @@ from tests.integration.real_odoo.focused_support import (
     focused_catalog as _focused_catalog_fixture,
     focused_project as _focused_project_fixture,
 )
-from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES, PublicLeafCase
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES, PublicLeafCase
 
 pytestmark = [
     pytest.mark.real_odoo,
@@ -34,7 +34,7 @@ focused_project = _focused_project_fixture
     "case",
     [
         case
-        for case in PUBLIC_LEAF_CASES
+        for case in PUBLIC_LEAF_TEST_CASES
         if case.e2e_disposition == "focused" and case.e2e_evidence != ("E2E-FC-05",)
     ],
     ids=lambda case: ".".join(case.path),

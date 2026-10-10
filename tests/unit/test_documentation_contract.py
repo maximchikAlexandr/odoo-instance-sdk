@@ -18,6 +18,7 @@ _ensure_callbacks_loaded()
 ROOT = Path(__file__).resolve().parents[2]
 README = ROOT / "README.md"
 SDK_DOC = ROOT / "docs" / "python-sdk.md"
+OPERATION_DOC = ROOT / "docs" / "machine-operation-contracts.md"
 INVENTORY = re.compile(
     r"<!-- cli-command-inventory:start -->(.*?)<!-- cli-command-inventory:end -->",
     re.DOTALL,
@@ -117,7 +118,7 @@ def test_shell_examples_parse(path: Path) -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "path",
-    [README, ROOT / "CONTRIBUTING.md", ROOT / "CHANGELOG.md", SDK_DOC],
+    [README, ROOT / "CONTRIBUTING.md", ROOT / "CHANGELOG.md", SDK_DOC, OPERATION_DOC],
 )
 def test_relative_markdown_links_resolve(path: Path) -> None:
     for target in LINK.findall(path.read_text(encoding="utf-8")):
@@ -190,3 +191,19 @@ def test_developer_workflow_docs_reject_stale_scope_claims() -> None:
     assert "the platform cache directory" not in readme
     assert "future `env show` is not included" not in unreleased
     assert "Focused `odcli env show` projection" in unreleased
+
+
+@pytest.mark.unit
+def test_machine_operation_documentation_covers_cross_contract_delivery() -> None:
+    document = OPERATION_DOC.read_text(encoding="utf-8")
+    for phrase in (
+        "odoo_instance_sdk.operations.PUBLIC_LEAF_CASES",
+        "odcli contract export",
+        "odcli operation session",
+        "odoo_instance_sdk.operations` entry-point group",
+        "Snapshot-v3",
+        "reconcile_databases_command",
+        "recovery_json",
+        "operation-contract version",
+    ):
+        assert phrase in document, phrase
