@@ -15,6 +15,7 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import Backup, BackupFormat, BackupState, BackupValidationStatus
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.catalog.provenance import restore_provenance
 from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_revision
 from tests.unit.monitor_support import make_env, runtime_kwargs
 
@@ -836,6 +837,13 @@ def test_restore_provenance_rejects_mixed_evidence_atomically(tmp_path: Path) ->
     catalog.close()
 
 
+def test_restore_provenance_rejects_invalid_digest_and_unknown_source_kind() -> None:
+    with pytest.raises(BackupCatalogError, match="lowercase 64-hex"):
+        restore_provenance(None, "local_archive", "A" * 64)
+    with pytest.raises(BackupCatalogError, match="supported source_kind"):
+        restore_provenance(None, "unsupported", None)
+
+
 def test_record_restore_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
@@ -967,6 +975,45 @@ def test_record_database_dropped_idempotent(tmp_path: Path) -> None:
     ).fetchall()
     assert len(events) == 1
     assert events[0]["event_type"] == "dropped"
+    catalog.close()
+
+
+def test_record_databases_dropped_is_atomic_and_idempotent(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+
+    assert catalog.record_databases_dropped("localhost", 5432, ("one", "two")) == (
+        "one",
+        "two",
+    )
+    assert catalog.record_databases_dropped("localhost", 5432, ("one", "two")) == ()
+    rows = catalog._conn.execute(
+        "SELECT database_name, event_type FROM database_events "
+        "WHERE db_host=? AND db_port=? ORDER BY database_name",
+        ("localhost", 5432),
+    ).fetchall()
+    assert [(row["database_name"], row["event_type"]) for row in rows] == [
+        ("one", "dropped"),
+        ("two", "dropped"),
+    ]
+    catalog.close()
+
+
+def test_reconcile_databases_dropped_holds_transaction_during_validation(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "transactional-reconcile.db")
+    seen: list[bool] = []
+
+    def validate() -> None:
+        seen.append(catalog._conn.in_transaction)
+        raise ValueError("stale")
+
+    with pytest.raises(ValueError, match="stale"):
+        catalog.reconcile_databases_dropped("localhost", 5432, ("one",), validate)
+
+    assert seen == [True]
+    assert catalog._conn.in_transaction is False
+    assert catalog._conn.execute("SELECT COUNT(*) FROM database_events").fetchone()[0] == 0
     catalog.close()
 
 
