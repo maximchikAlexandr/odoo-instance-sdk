@@ -24,47 +24,47 @@ SDK MUST NOT выдавать прямой публичный доступ к п
 
 ### Requirement: Получение списка и проверка существования базы
 
-`instance.databases.list()` MUST вызывать Odoo 19.0 JSON-RPC endpoint `/web/database/list` и возвращать tuple `Database` в порядке ответа Odoo.
+`instance.databases.list()` SHALL call the Odoo 19.0 JSON-RPC endpoint `/web/database/list` and return a tuple of `Database` values in Odoo response order.
 
-SDK MUST NOT угадывать default database и MUST NOT предоставлять `resolve_default()`.
+The SDK SHALL NOT guess a default database and SHALL NOT provide `resolve_default()`.
 
-`list()` MUST populate `backup` для каждого `Database` в результате: если инстанс имеет cluster-ключ (`db_port is not None`), для каждого имени вызвать `catalog.latest_restore(db_host, db_port, name)` — non-None становится `backup`, `None` → `NoBackup()`. Для инстансов без cluster-ключа `backup` MUST быть `NoBackup()` для всех.
+`list()` SHALL populate `backup` for each returned `Database`: when the instance has a cluster key (`db_port is not None`), each name SHALL use `catalog.latest_restore(db_host, db_port, name)` and project `None` as `NoBackup()`; without a cluster key every row SHALL use `NoBackup()`.
 
-`instance.databases.exists(name)` MUST вызвать `list()` и вернуть точный membership result. После проверки, если `name` не существует, инстанс имеет cluster-ключ И есть restores row для (cluster, `name`), SDK MUST записать `database_events "dropped"` для `name` (с идемпотентностью — см. `database-restore-tracking` spec). `exists()` сверка MUST проверять ТОЛЬКО `name`, не все tracked databases.
+`instance.databases.exists(name)` SHALL observe exact membership using the same bounded Odoo/psql fallback rules as before. `list()`, `exists(name)`, `current()` and their command forms SHALL NOT append `database_events`, backfill catalogue state or otherwise reconcile missing databases. When tracked restore names are absent, their typed observation SHALL report exact missing names and the evidence source so an explicit reconciliation operation can act later.
 
-Если `list()` raises `DatabaseManagerUnavailableError` (Odoo недоступен): `exists(name)` применяет psql fallback по тем же правилам, что `current()` (cluster-ключ + `db_user is not None`): psql confirms → True (reconciliation не пишется); psql absent → False + `dropped` event (с идемпотентностью); psql non-zero/timeout → inconclusive → propagate `DatabaseManagerUnavailableError`. Без cluster-ключа/`db_user` → propagate.
+If `list()` raises `DatabaseManagerUnavailableError`, `exists(name)` SHALL use psql only with a cluster key and `db_user`: confirmed present returns true; confirmed absent returns false plus an observational missing result; non-zero/timeout is inconclusive and propagates `DatabaseManagerUnavailableError`. Without cluster key or `db_user`, it SHALL propagate.
 
-Если listing отключён или endpoint недоступен, методы MUST выбрасывать `DatabaseManagerUnavailableError`, а не возвращать пустой tuple.
+If listing is disabled or unavailable, methods SHALL raise `DatabaseManagerUnavailableError`, not return an empty tuple.
 
 #### Scenario: Несколько удалённых баз
 
-- **WHEN** remote Odoo возвращает несколько database names
-- **THEN** `list()` возвращает tuple `Database` для каждого имени без выбора одного default
+- **WHEN** remote Odoo returns several database names
+- **THEN** `list()` returns one tuple row per name without choosing a default or writing catalogue state
 
 #### Scenario: Listing недоступен
 
-- **WHEN** Odoo не предоставляет database list
-- **THEN** SDK сообщает явную typed error
+- **WHEN** Odoo does not provide database listing
+- **THEN** the SDK reports an explicit typed error and does not reconcile the catalogue
 
-#### Scenario: Сверка пропавшей базы
+#### Scenario: Missing tracked database is observed
 
-- **WHEN** `exists("staging")` возвращает False, инстанс имеет cluster-ключ, restores содержит строку для "staging"
-- **THEN** catalog получает один `database_events "dropped"` для (cluster, "staging") с идемпотентностью
+- **WHEN** `exists("staging")` observes false and tracked restore evidence exists for that exact cluster/name
+- **THEN** the result identifies `staging` as missing and no `dropped` event is written
 
 #### Scenario: list() populate backup для каждой базы
 
-- **WHEN** `list()` возвращает ("prod", "staging") для from_config()-инстанса, restores содержит mapping для "prod", не для "staging"
-- **THEN** результат: `(Database("prod", backup=<Backup>), Database("staging", backup=NoBackup()))`
+- **WHEN** `list()` returns `("prod", "staging")` for a configured instance and restores contain only `prod`
+- **THEN** the result is `(Database("prod", backup=<Backup>), Database("staging", backup=NoBackup()))` with no catalogue write
 
 #### Scenario: list() без cluster-ключа
 
-- **WHEN** `list()` вызван на __call__()-инстансе без cluster-ключа
-- **THEN** все `Database` имеют `backup=NoBackup()`, restores и database_events не затрагиваются
+- **WHEN** `list()` runs on an instance without a cluster key
+- **THEN** every `Database` has `backup=NoBackup()` and restores/database events are untouched
 
-#### Scenario: Пустой list() с tracked restores
+#### Scenario: Empty list with tracked restores is observational
 
-- **WHEN** `list()` возвращает `()` для from_config()-инстанса, restores содержит "staging" и "test"
-- **THEN** catalog получает `dropped` для "staging" и "test" (оба отсутствуют в пустом списке, с идемпотентностью)
+- **WHEN** `list()` returns `()` while tracked restores contain `staging` and `test`
+- **THEN** the observation reports both names as missing and appends no `dropped` event
 
 ### Requirement: Удаление базы
 
@@ -616,3 +616,36 @@ The public database removal path SHALL accept an `incomplete` restore binding as
 
 - **WHEN** the cluster, target identity, source provenance, active use, volume attachment, or filestore containment differs from the captured incomplete binding at execution time
 - **THEN** removal fails closed and retains the evidence for diagnosis
+
+### Requirement: Explicit database reconciliation operation
+
+The SDK SHALL expose a typed previewable `reconcile_databases_command` that accepts or captures an exact database observation, lists proposed missing-name events, and revalidates cluster identity, tracked restore evidence and current database absence under the existing catalogue transaction before appending idempotent `dropped` events. A stale, inconclusive, foreign or mismatched observation SHALL fail before mutation.
+
+#### Scenario: Confirmed missing database is reconciled
+
+- **WHEN** preview identifies a tracked database as absent and execution revalidates the same exact absence and cluster identity
+- **THEN** one idempotent `dropped` event is appended for that database and the typed result reports the change
+
+#### Scenario: Database reappears before execution
+
+- **WHEN** a previewed missing database is present during execution revalidation
+- **THEN** no event is appended and the command fails with a stale-observation result
+
+#### Scenario: Inconclusive probe does not reconcile
+
+- **WHEN** neither Odoo listing nor the bounded psql fallback proves absence
+- **THEN** reconciliation fails without a catalogue write
+
+### Requirement: Required lifecycle owners call reconciliation explicitly
+
+Startup/registration, destructive postconditions and existing repair paths that require catalogue reconciliation SHALL call the explicit reconciliation operation at their named mutation boundary. Monitor, inventory, list, exists, current and schema/contract discovery SHALL remain observational.
+
+#### Scenario: Startup reconciliation remains available
+
+- **WHEN** a startup or registration flow is contractually required to reconcile a proven missing database
+- **THEN** it invokes the explicit reconciler after proof and records the same idempotent audit outcome
+
+#### Scenario: Polling read remains inert
+
+- **WHEN** automation repeatedly polls list, exists, current, monitor or inventory
+- **THEN** no database event or catalogue row changes until an explicit reconciliation operation runs
