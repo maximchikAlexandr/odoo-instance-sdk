@@ -69,8 +69,10 @@ def _backup_catalog(db_path: Path) -> Path:
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> tuple[tuple[str, str, int], ...]:
     return tuple(
-        (str(row[1]), str(row[2]), int(bool(row[3]) or bool(row[5])))
-        for row in conn.execute(f"PRAGMA table_info({table})")
+        sorted(
+            (str(row[1]), str(row[2]), int(bool(row[3]) or bool(row[5])))
+            for row in conn.execute(f"PRAGMA table_info({table})")
+        )
     )
 
 
@@ -251,7 +253,9 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:  # noqa: C901
         ) from exc
 
 
-def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:  # noqa: C901
+def _is_legacy_provenance_schema(  # noqa: C901
+    conn: sqlite3.Connection, *, pre_project_ownership: bool = False
+) -> bool:
     """Recognize the pre-source-neutral schema before stamping it as 0001."""
     actual_tables, actual_indexes, actual_foreign_keys, actual_view = _schema_fingerprint(conn)
     expected_tables, expected_indexes, expected_foreign_keys, expected_view = (
@@ -261,6 +265,15 @@ def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:  # noqa: C90
         "backups_source_group_idx",
         "environments_project_checkout_idx",
     }
+    if pre_project_ownership:
+        legacy_indexes -= {
+            "backups_project_idx",
+            "restores_cluster_identity_idx",
+            "database_events_cluster_identity_idx",
+        }
+        expected_foreign_keys = tuple(
+            (table, () if table == "backups" else keys) for table, keys in expected_foreign_keys
+        )
     if actual_indexes != legacy_indexes or actual_foreign_keys != expected_foreign_keys:
         return False
     if actual_view != expected_view:
@@ -286,16 +299,20 @@ def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:  # noqa: C90
         if table == "runtime":
             expected_columns = _without_runtime_launch_identity(expected_columns)
         if table == "backups":
-            expected_columns = tuple(
-                item for item in expected_columns if item[0] not in {"source_name", "pinned"}
-            )
+            absent = {"source_name", "pinned"}
+            if pre_project_ownership:
+                absent.add("project_id")
+            expected_columns = tuple(item for item in expected_columns if item[0] not in absent)
         if table == "environment_copy_journal":
             expected_columns = tuple(
                 item for item in expected_columns if item[0] != "backup_ownership"
             )
         if table in {"restores", "database_events"}:
             expected_columns = tuple(
-                item for item in expected_columns if item[0] not in {"source_kind", "source_sha256"}
+                item
+                for item in expected_columns
+                if item[0] not in {"source_kind", "source_sha256"}
+                and not (pre_project_ownership and table == "restores" and item[0] == "state")
             )
         if table in {"restores", "database_events"}:
             expected_columns = tuple(
@@ -305,6 +322,80 @@ def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:  # noqa: C90
         if tuple(columns) != expected_columns or keys != expected_keys:
             return False
     return len(actual_tables) == len(expected_tables)
+
+
+def _repair_known_v15_catalog(conn: sqlite3.Connection) -> None:
+    """Bring the verified pre-project-ownership schema to the Alembic 0001 shape."""
+    if int(conn.execute("PRAGMA user_version").fetchone()[0]) != 15:
+        return
+    if not _is_legacy_provenance_schema(conn, pre_project_ownership=True):
+        return
+    foreign_keys_enabled = int(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            conn.execute("ALTER TABLE backups ADD COLUMN project_id TEXT")
+            conn.execute(
+                """UPDATE backups
+                   SET project_id = (
+                       SELECT MIN(p.project_id)
+                       FROM environments e
+                       JOIN projects p ON p.repository_root = e.repository_root
+                                      AND p.git_common_dir = e.git_common_dir
+                       WHERE e.backup_id = backups.id
+                   )
+                   WHERE (SELECT COUNT(DISTINCT p.project_id)
+                          FROM environments e
+                          JOIN projects p ON p.repository_root = e.repository_root
+                                         AND p.git_common_dir = e.git_common_dir
+                          WHERE e.backup_id = backups.id) = 1"""
+            )
+            conn.execute(
+                """CREATE TABLE backups__v16 (
+                    id TEXT PRIMARY KEY,
+                    source_base_url TEXT NOT NULL,
+                    database_name TEXT NOT NULL,
+                    format TEXT NOT NULL CHECK (format IN ('zip', 'dump')),
+                    filestore_requested INTEGER NOT NULL CHECK (filestore_requested IN (0, 1)),
+                    path TEXT, filename TEXT, size_bytes INTEGER, sha256 TEXT,
+                    state TEXT NOT NULL CHECK (state IN ('downloading', 'available', 'failed', 'deleted')),
+                    started_at TEXT NOT NULL, downloaded_at TEXT, failed_at TEXT, deleted_at TEXT,
+                    error_type TEXT, error_message TEXT,
+                    project_id TEXT REFERENCES projects(project_id), source_git_branch TEXT
+                )"""
+            )
+            columns = ", ".join(str(row[1]) for row in conn.execute("PRAGMA table_info(backups)"))
+            conn.execute(f"INSERT INTO backups__v16 ({columns}) SELECT {columns} FROM backups")
+            conn.execute("DROP TABLE backups")
+            conn.execute("ALTER TABLE backups__v16 RENAME TO backups")
+            conn.execute(
+                "CREATE INDEX backups_lookup_idx ON backups "
+                "(source_base_url, database_name, downloaded_at DESC)"
+            )
+            conn.execute("CREATE INDEX backups_state_idx ON backups(state)")
+            conn.execute(
+                "CREATE INDEX backups_point_order_idx ON backups "
+                "(COALESCE(downloaded_at, started_at) DESC, id ASC)"
+            )
+            conn.execute("CREATE INDEX backups_project_idx ON backups(project_id)")
+            conn.execute(
+                "CREATE INDEX restores_cluster_identity_idx ON restores "
+                "(cluster_id, db_host, db_port, database_name, restored_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX database_events_cluster_identity_idx ON database_events "
+                "(cluster_id, db_host, db_port, database_name, sequence DESC)"
+            )
+            conn.execute(
+                "ALTER TABLE restores ADD COLUMN state TEXT NOT NULL DEFAULT 'complete' "
+                "CHECK (state IN ('complete', 'incomplete'))"
+            )
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise BackupCatalogError("legacy catalog has invalid foreign key references")
+            conn.execute("PRAGMA user_version = 16")
+    finally:
+        conn.execute(f"PRAGMA foreign_keys={foreign_keys_enabled}")
 
 
 def _assert_single_head() -> str:
@@ -333,6 +424,7 @@ def ensure_catalog_migrated(db_path: Path) -> None:
             command.upgrade(config, "head")
             return
         _backup_catalog(db_path)
+        _repair_known_v15_catalog(conn)
         _repair_known_v16_catalog(conn)
         try:
             verify_schema_equivalence(conn)
