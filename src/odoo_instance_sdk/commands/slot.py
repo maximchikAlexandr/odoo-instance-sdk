@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from click.types import IntParamType
 
@@ -15,6 +15,7 @@ else:
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
+    action_command,
     bordered_table,
     emit,
     fail,
@@ -36,7 +37,6 @@ from odoo_instance_sdk.internal.alternate_tool import (
     remove_alternate_tool,
     selected_identity,
 )
-from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
 
 
 class _SlotNumberType(IntParamType):
@@ -51,6 +51,11 @@ class _SlotNumberType(IntParamType):
 
 
 _SLOT_NUMBER = _SlotNumberType()
+
+
+class _SlotPlanCommand(Protocol):
+    @property
+    def plan(self) -> ExecutionPlan: ...
 
 
 def _canonical_only() -> None:
@@ -68,7 +73,9 @@ def _validate_slot_sha(sha: str) -> None:
         raise ValueError("revision must be a complete lowercase SHA")
 
 
-def _slot_plan(command: Command[object]) -> JsonObject:
+def _slot_plan(
+    command: _SlotPlanCommand,
+) -> JsonObject:
     step = command.plan.steps[0]
     if not isinstance(step, ActionStep) or not isinstance(step.details, dict):
         raise AlternateToolError("slot command has no resolved operation plan")
@@ -131,37 +138,12 @@ def slot_install_command(
         "manager": str(identity_value.manager_root),
         "tool": str(identity_value.tool_root),
     }
-    action = PreparedAction(
-        step_id="slot-install",
-        action="slot-install",
+    return action_command(
+        "slot-install",
+        lambda: install_alternate_tool(identity_value, sha, replace=replace),
         description=f"Install numbered-{number} at the requested revision",
-        details=details,
+        details=cast("JsonValue", details),
         mutating=True,
-    )
-
-    def install() -> AlternateManifest:
-        return install_alternate_tool(identity_value, sha, replace=replace)
-
-    def callback(context: RunContext[AlternateManifest]) -> AlternateManifest:
-        context.action("slot-install")
-        result = install()
-        context.complete_action("slot-install")
-        return result
-
-    return Command.create(
-        ExecutionPlan(
-            steps=(
-                ActionStep(
-                    step_id="slot-install",
-                    action="slot-install",
-                    description=f"Install numbered-{number} at the requested revision",
-                    details=cast("JsonValue", details),
-                    mutating=True,
-                ),
-            )
-        ),
-        callback,
-        (action,),
     )
 
 
@@ -187,34 +169,12 @@ def slot_remove_command(number: str) -> Command[JsonObject]:
             "identifier": identity_value.identifier,
         }
 
-    action = PreparedAction(
-        step_id="slot-remove",
-        action="slot-remove",
+    return action_command(
+        "slot-remove",
+        remove,
         description=f"Remove numbered-{number} after idle identity checks",
-        details=details,
+        details=cast("JsonValue", details),
         mutating=True,
-    )
-
-    def callback(context: RunContext[JsonObject]) -> JsonObject:
-        context.action("slot-remove")
-        result = remove()
-        context.complete_action("slot-remove")
-        return result
-
-    return Command.create(
-        ExecutionPlan(
-            steps=(
-                ActionStep(
-                    step_id="slot-remove",
-                    action="slot-remove",
-                    description=f"Remove numbered-{number} after idle identity checks",
-                    details=cast("JsonValue", details),
-                    mutating=True,
-                ),
-            )
-        ),
-        callback,
-        (action,),
     )
 
 
@@ -265,7 +225,7 @@ def slot_install(
             result=lambda manifest: cast(
                 "JsonObject", cast("AlternateManifest", manifest).to_json()
             ),
-            preview=lambda command: _slot_plan(cast("Command[object]", command)),
+            preview=_slot_plan,
             rich=_rich_install,
         )
     except Exception as exc:
@@ -308,7 +268,7 @@ def slot_remove(number: str, dry_run: bool, output_format: str | None, json_outp
             mode=mode,
             dry_run=dry_run,
             result=lambda result: cast("JsonObject", result),
-            preview=lambda command: _slot_plan(cast("Command[object]", command)),
+            preview=_slot_plan,
             rich=_rich_remove,
         )
     except Exception as exc:

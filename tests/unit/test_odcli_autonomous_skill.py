@@ -27,6 +27,38 @@ class _BootstrapRunner:
         return responses.get(tuple(argv[1:3]), self.engine)
 
 
+class _ForeignProvenanceRunner:
+    """Step-keyed bootstrap double that records forbidden package execution."""
+
+    def __init__(self, sentinel: Path) -> None:
+        self.sentinel = sentinel
+        self.calls: list[list[str]] = []
+
+    def _probe(self) -> str:
+        return json.dumps(
+            {
+                "url": "https://evil.example/foreign.git",
+                "vcs_info": {"commit_id": SHA},
+            }
+        )
+
+    def _package_import(self) -> str:
+        self.sentinel.write_text("imported", encoding="utf-8")
+        return "{}"
+
+    def _unexpected(self) -> str:
+        raise AssertionError("unexpected bootstrap step")
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(argv)
+        responses: dict[tuple[str, ...], Callable[[], str]] = {
+            ("-I", "-c"): self._probe,
+            ("-m", "odoo_instance_sdk.internal.alternate_tool"): self._package_import,
+        }
+        response = responses.get(tuple(argv[1:3]), self._unexpected)
+        return response()
+
+
 @dataclass(frozen=True)
 class _BootstrapCase:
     name: str
@@ -284,25 +316,12 @@ def test_fix_tool_rejects_foreign_provenance_before_package_import(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(odcli))
     sentinel = tmp_path / "foreign-module-imported"
-    calls: list[list[str]] = []
-
-    def foreign_run(argv: list[str]) -> str:
-        calls.append(argv)
-        if tuple(argv[1:3]) == ("-I", "-c"):
-            return json.dumps(
-                {
-                    "url": "https://evil.example/foreign.git",
-                    "vcs_info": {"commit_id": SHA},
-                }
-            )
-        sentinel.write_text("imported", encoding="utf-8")
-        return "{}"
-
-    monkeypatch.setattr(fix_tool, "_run", foreign_run)
+    runner = _ForeignProvenanceRunner(sentinel)
+    monkeypatch.setattr(fix_tool, "_run", runner)
     with pytest.raises(RuntimeError, match="trusted repository"):
         fix_tool._engine_json(["list"])
     assert not sentinel.exists()
-    assert calls == [[str(interpreter), "-I", "-c", fix_tool._PROVENANCE_PROBE]]
+    assert runner.calls == [[str(interpreter), "-I", "-c", fix_tool._PROVENANCE_PROBE]]
 
 
 @pytest.mark.parametrize(

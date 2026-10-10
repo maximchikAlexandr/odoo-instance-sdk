@@ -474,16 +474,23 @@ def test_inventory_entries_are_line_specific_and_exist() -> None:
 def test_alternate_lifecycle_mechanics_have_one_owner() -> None:
     shared = (_REPO_ROOT / ALTERNATE_LIFECYCLE_MODULE).read_text(encoding="utf-8")
     assert all(token in shared for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS)
+    bootstrap_path = ".agents/skills/odcli-autonomous-work/scripts/fix_tool.py"
+    bootstrap = (_REPO_ROOT / bootstrap_path).read_text(encoding="utf-8")
     duplicate_locations = {
         f"{path}:{token}"
         for path in ALTERNATE_POLICY_SURFACES
         for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS
         if token in (_REPO_ROOT / path).read_text(encoding="utf-8")
     }
-    assert not duplicate_locations, (
+    bootstrap_probe = f"{bootstrap_path}:direct_url.json"
+    assert duplicate_locations <= {bootstrap_probe}, (
         "alternate lifecycle mechanics escaped the shared module: "
-        + ", ".join(sorted(duplicate_locations))
+        + ", ".join(sorted(duplicate_locations - {bootstrap_probe}))
     )
+    assert bootstrap.count("direct_url.json") == 1
+    assert "import importlib.metadata,json;" in bootstrap
+    assert "distribution('odoo-instance-sdk')" in bootstrap
+    assert '"-I"' in bootstrap and '"-c"' in bootstrap
 
 
 def test_repository_rules_enforce_the_post_35_gate() -> None:
