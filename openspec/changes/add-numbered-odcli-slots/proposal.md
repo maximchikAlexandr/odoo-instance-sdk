@@ -5,8 +5,9 @@ Concurrent agents can install different OdCLI revisions, but ordinary, numbered,
 ## What Changes
 
 - Add one explicit SDK/CLI user-root selector: ordinary `odcli` keeps `~/.odcli`, numbered `odcli-N` uses `~/.odcli-N`, and `odcli-fix-ISSUE` uses `~/.odcli-fix-ISSUE`.
-- Add canonical numbered-slot install/replace/list/remove management with exact-SHA uv environments and verified provenance.
-- Update the existing skill-local hot-fix installer, shim, compatibility review, reconciliation, and cleanup to use its deterministic isolated root and manager metadata outside canonical state.
+- Extract the existing hot-fix install/provenance/manifest/lock/shim/remove mechanics into one package-owned alternate-tool lifecycle module and reuse it for both launcher kinds.
+- Add canonical numbered-slot install/replace/list/remove as a thin identity/policy adapter over that shared lifecycle.
+- Reduce the existing skill-local hot-fix script to PR/reviewer/merge-retirement policy plus delegation to the shared lifecycle, with its deterministic isolated root and manager metadata outside canonical state.
 - Preserve real `HOME`, so Git, SSH, uv, and unrelated settings remain shared and unchanged.
 - Start every alternate root empty; never copy canonical, legacy, numbered, or neighboring hot-fix state, absolute paths, or migration history.
 - Run legacy-storage adoption only for ordinary canonical `odcli`; alternate revisions migrate only their selected root.
@@ -29,4 +30,4 @@ Concurrent agents can install different OdCLI revisions, but ordinary, numbered,
 
 ## Impact
 
-The change affects the central path provider, startup storage migration, self-update selection, canonical slot CLI, uv provenance handling, `.agents/skills/odcli-autonomous-work` fix-tool workflow, its tests, packaging acceptance, and documentation. It adds no dependency and does not change repository-local `.odcli`, Odoo/PostgreSQL ownership, database/filestore formats, Docker naming, or port allocation.
+The change affects the central path provider, one shared alternate-tool lifecycle module, startup storage migration, self-update selection, canonical slot CLI, `.agents/skills/odcli-autonomous-work` as a thin policy wrapper, its tests, packaging acceptance, and documentation. It adds no dependency and does not change repository-local `.odcli`, Odoo/PostgreSQL ownership, database/filestore formats, Docker naming, or port allocation.

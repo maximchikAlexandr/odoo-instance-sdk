@@ -1,5 +1,16 @@
 ## ADDED Requirements
 
+### Requirement: One shared alternate-tool lifecycle
+Numbered and hot-fix launchers SHALL use one package-owned implementation for deterministic identity paths, uv installation, exact provenance, selector-capability probing, manifest serialization, shim rendering, lifecycle locking, bounded inspection, and fail-closed removal. Numbered command code and the hot-fix skill wrapper SHALL contain only their distinct policy and presentation logic and SHALL NOT implement or copy those lifecycle mechanics.
+
+#### Scenario: Both launcher kinds use one lifecycle implementation
+- **WHEN** a numbered slot and a reviewed hot fix are installed, invoked, inspected, and removed
+- **THEN** both operations pass through the same install/probe/manifest/shim/lock/remove implementation while their adapters apply only numbered replace policy or hot-fix PR/reviewer/retirement policy
+
+#### Scenario: Duplicate lifecycle mechanics are rejected
+- **WHEN** architecture checks inspect the numbered command and hot-fix skill surfaces
+- **THEN** they fail if either surface contains its own uv installer, provenance verifier, capability probe, shim renderer, lifecycle-lock implementation, or cleanup algorithm outside the shared module
+
 ### Requirement: Numbered slot identity and isolated user root
 The system SHALL accept only a positive decimal slot number without signs, leading zeroes, whitespace, or suffixes. Slot `N` SHALL expose launcher `odcli-N`, select the absolute root `<real-home>/.odcli-N`, and preserve the process `HOME` and all Git, SSH, uv, and unrelated user configuration. Ordinary `odcli` SHALL continue to select `<real-home>/.odcli` when no explicit root is present.
 
@@ -16,7 +27,7 @@ The system SHALL accept only a positive decimal slot number without signs, leadi
 - **THEN** it fails before creating, replacing, or deleting a launcher, tool environment, manifest, or state root
 
 ### Requirement: Exact-SHA slot installation and provenance
-Canonical `odcli slot install N SHA` SHALL require a full lowercase 40-character Git SHA, resolve it against the fixed credential-free SDK repository, install it in a slot-specific uv tool directory, and verify the installed distribution's repository and commit provenance before publishing `odcli-N`. A newly installed slot SHALL start with no `~/.odcli-N` directory or contents. An existing slot SHALL fail closed unless explicit replacement is requested.
+Canonical `odcli slot install N SHA` SHALL require a full lowercase 40-character Git SHA and delegate fixed-repository installation, installed provenance, root-selector capability, manifest, launcher publication, and cleanup to the shared alternate-tool lifecycle. A newly installed slot SHALL start with no `~/.odcli-N` directory or contents. An existing slot SHALL fail closed unless explicit replacement is requested.
 
 #### Scenario: Fresh exact revision is installed
 - **WHEN** a valid unused number and repository commit SHA are supplied
@@ -31,7 +42,7 @@ Canonical `odcli slot install N SHA` SHALL require a full lowercase 40-character
 - **THEN** the command fails without changing that slot, canonical `odcli`, or any other slot
 
 ### Requirement: Explicit slot replacement
-Canonical `odcli slot install N SHA --replace` SHALL be the only supported revision-changing path for a numbered slot. It SHALL take the slot's exclusive lifecycle lock, verify the replacement in a temporary slot-local uv layout, publish the verified launcher and manifest as one recoverable transition, and preserve `~/.odcli-N` for the replacement revision to migrate only when it is next invoked. It SHALL NOT invoke or modify canonical `odcli update`.
+Canonical `odcli slot install N SHA --replace` SHALL be the only supported revision-changing path for a numbered slot. The numbered adapter SHALL authorize explicit replacement, then delegate exclusive locking, temporary verification, recoverable publication, and manifest/shim changes to the shared lifecycle. It SHALL preserve `~/.odcli-N` for the replacement revision to migrate only when next invoked and SHALL NOT invoke or modify canonical `odcli update`.
 
 #### Scenario: Replace an idle slot
 - **WHEN** an existing idle slot is explicitly replaced with a different valid SHA
@@ -42,7 +53,7 @@ Canonical `odcli slot install N SHA --replace` SHALL be the only supported revis
 - **THEN** replacement fails before changing its launcher, manifest, uv environment, or state
 
 ### Requirement: Bounded slot discovery and safe removal
-Canonical `odcli slot list` SHALL report only valid manager manifests with slot number, verified requested SHA, launcher path, tool path, state path, and structural health; it SHALL NOT execute installed slot code or scan arbitrary home directories. Canonical `odcli slot remove N` SHALL take the exclusive lifecycle lock, validate every target against deterministic manager-owned paths and the recorded launcher identity, and remove only slot `N`'s launcher, uv tool layout, manifest, lock after release, and `~/.odcli-N`. It SHALL fail closed on symlinks, identity mismatch, unexpected path escape, or a running slot.
+Canonical `odcli slot list` SHALL project the shared lifecycle's bounded inspection of valid manifests with slot number, verified requested SHA, launcher path, tool path, state path, and structural health; it SHALL NOT execute installed slot code or scan arbitrary home directories. Canonical `odcli slot remove N` SHALL authorize the numbered removal intent and delegate exclusive locking, identity checks, and deletion to the shared lifecycle. Removal SHALL affect only slot `N`'s launcher, uv tool layout, manifest, lock after release, and `~/.odcli-N`, and SHALL fail closed on symlinks, identity mismatch, path escape, or a running slot.
 
 #### Scenario: List two slots
 - **WHEN** two valid numbered slots are installed
