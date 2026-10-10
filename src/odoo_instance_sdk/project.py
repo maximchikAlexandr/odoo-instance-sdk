@@ -155,7 +155,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             raise ConfigError("project.ticket_link_enabled must be a boolean")
         if self.ticket_base_url is not None and self.ticket_base_url.strip():
             try:
-                normalize_base_url(self.ticket_base_url)
+                normalize_base_url(self.ticket_base_url, allow_path=True)
             except Exception as exc:
                 raise ConfigError("invalid project.ticket_base_url") from exc
         if self.ticket_link_enabled is True and self.ticket_base_url is None:
@@ -457,7 +457,7 @@ def _ticket_url_or_none(value: str | None) -> str | None:
     if value is None or not value.strip():
         return None
     try:
-        return normalize_base_url(value)
+        return normalize_base_url(value, allow_path=True)
     except Exception as exc:
         raise ConfigError("invalid project.ticket_base_url") from exc
 

@@ -78,11 +78,11 @@ def _repo(root: Path) -> None:
     _git(root, "commit", "-qm", "base")
 
 
-def _ticket_project(root: Path) -> None:
+def _ticket_project(root: Path, base_url: str = "https://tracker.test") -> None:
     manifest = root / ".odcli"
     manifest.mkdir()
     (manifest / "project.toml").write_text(
-        '[project]\ndefault_base_ref = "main"\nticket_link_enabled = true\nticket_base_url = "https://tracker.test"\n',
+        f'[project]\ndefault_base_ref = "main"\nticket_link_enabled = true\nticket_base_url = "{base_url}"\n',
         encoding="utf-8",
     )
 
@@ -217,13 +217,14 @@ def test_commit_in_worktree_without_manifest_and_no_project_manifest_disables_li
 
 
 @pytest.mark.parametrize("owner_kind", ["environment", "project"])
+@pytest.mark.parametrize("base_url", ["https://tracker.test", "https://tracker.test/issues/"])
 def test_commit_ticket_settings_come_from_binding_repository_root(
-    tmp_path: Path, owner_kind: str
+    tmp_path: Path, owner_kind: str, base_url: str
 ) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     _repo(project_root)
-    _ticket_project(project_root)
+    _ticket_project(project_root, base_url)
 
     if owner_kind == "project":
         worktree = project_root
@@ -239,10 +240,9 @@ def test_commit_ticket_settings_come_from_binding_repository_root(
     context = GitResource(
         _bound_instance(worktree, project_root, owner_kind=owner_kind)
     ).commit_context("change", ticket="PROJ-123", tag="IMP")
-    assert context.ticket_link == "https://tracker.test/PROJ-123"
-    assert context.message == (
-        f"[IMP] {worktree.name}: PROJ-123 change\n\nhttps://tracker.test/PROJ-123"
-    )
+    expected_url = f"{base_url.rstrip('/')}/PROJ-123"
+    assert context.ticket_link == expected_url
+    assert context.message == (f"[IMP] {worktree.name}: PROJ-123 change\n\n{expected_url}")
 
 
 def test_commit_omitted_tag_freezes_add_inference_in_plan_and_execution(tmp_path: Path) -> None:

@@ -470,11 +470,16 @@ Init SHALL validate `.odcli/odoo.conf` independently of an unchanged `project.to
 - **THEN** re-init repairs only generated config and preserves source and manifest bytes
 
 ### Requirement: Git commit settings
-New project manifests SHALL explicitly write tracker-neutral `ticket_link_enabled` and `ticket_base_url` settings for Odoo commit generation; historical alpha projects with the removed vendor-specific enabled setting but no URL SHALL fail with migration guidance, project values SHALL override an already-existing global setting, and no global-config subsystem SHALL be introduced solely here. Supported config identifiers SHALL NOT name a ticket vendor. [Sources: GH#65; GH#64 §11]
+New project manifests SHALL explicitly write tracker-neutral `ticket_link_enabled` and `ticket_base_url` settings for Odoo commit generation; historical alpha projects with the removed vendor-specific enabled setting but no URL SHALL fail with migration guidance, project values SHALL override an already-existing global setting, and no global-config subsystem SHALL be introduced solely here. `ticket_base_url` SHALL allow a tracker path, normalize its trailing slash, and reject embedded credentials, query parameters, and fragments. Odoo instance base URLs SHALL retain their origin-only validation. Supported config identifiers SHALL NOT name a ticket vendor. [Sources: GH#65; GH#64 §11]
 
 #### Scenario: Initialize Git commit policy
 - **WHEN** a new project is initialized with defaults
 - **THEN** its manifest contains explicit `ticket_link_enabled` and `ticket_base_url` values consumed by Git commit planning and no vendor-specific setting
+
+#### Scenario: Configure a tracker below the site root
+- **WHEN** a project manifest sets `ticket_base_url` to `https://tracker.example/issues/`
+- **THEN** the loaded and serialized setting is `https://tracker.example/issues`
+- **AND** credentials, query parameters, and fragments remain invalid
 
 ### Requirement: Self-contained Compose init creates bootstrap database `tmp`
 
