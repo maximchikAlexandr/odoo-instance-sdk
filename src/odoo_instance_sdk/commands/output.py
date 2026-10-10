@@ -360,10 +360,29 @@ def _document_payload(
     )
 
 
+def _toon_projection(value: JsonValue) -> JsonValue:
+    if isinstance(value, dict):
+        items = [(key, _toon_projection(item)) for key, item in value.items()]
+        items.sort(
+            key=lambda item: (
+                isinstance(item[1], list) and not item[1],
+                not isinstance(item[1], (str, int, float, bool, type(None))),
+                item[0],
+            )
+        )
+        return dict(items)
+    if isinstance(value, list):
+        return [_toon_projection(item) for item in value]
+    return value
+
+
 def _encode_toon_payload(payload: JsonObject) -> str:
     """Encode one envelope while avoiding inline ``argv`` arrays in nested plans."""
 
+    payload = cast("JsonObject", _toon_projection(payload))
+
     original = toon_encoders.encode_inline_primitive_array
+    original_object = toon_encoders.encode_object_as_list_item
 
     def _encode_inline_primitive_array(
         arr: JsonArray,
@@ -377,11 +396,38 @@ def _encode_toon_payload(payload: JsonObject) -> str:
             return
         original(arr, options, writer, depth, key)
 
+    def _encode_object_as_list_item(
+        value: dict[str, JsonValue],
+        options: ResolvedEncodeOptions,
+        writer: LineWriter,
+        depth: int,
+    ) -> None:
+        items = list(value.items())
+        if not items:
+            original_object(value, options, writer, depth)
+            return
+        key, first_value = items[0]
+        if not isinstance(first_value, list):
+            original_object(value, options, writer, depth)
+            return
+        if not toon_encoders.is_array_of_primitives(first_value):
+            original_object(value, options, writer, depth)
+            return
+        encoded = toon_encoders.join_encoded_values(
+            [toon_encoders.encode_primitive(item, options.delimiter) for item in first_value],
+            options.delimiter,
+        )
+        writer.push(depth, f"- {toon_encoders.encode_key(key)}[{len(first_value)}]: {encoded}")
+        for rest_key, rest_value in items[1:]:
+            toon_encoders.encode_key_value_pair(rest_key, rest_value, options, writer, depth + 1)
+
     toon_encoders.encode_inline_primitive_array = _encode_inline_primitive_array
+    toon_encoders.encode_object_as_list_item = _encode_object_as_list_item
     try:
         return str(encode(payload))
     finally:
         toon_encoders.encode_inline_primitive_array = original
+        toon_encoders.encode_object_as_list_item = original_object
 
 
 def _document(
@@ -447,6 +493,7 @@ def emit(
     *,
     rich: Callable[[OutputDocument], str] | None = None,
     diagnostic: str | None = None,
+    raw_json: bytes | None = None,
 ) -> int:
     """Emit one immutable document and return its normal CLI exit status."""
     payload = _document_payload(
@@ -455,7 +502,10 @@ def emit(
         fields=current_field_selection() if mode is not OutputMode.RICH else None,
     )
     if mode is OutputMode.JSON:
-        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        if raw_json is None:
+            click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            click.echo(raw_json.decode("utf-8"), nl=False)
     elif mode is OutputMode.TOON:
         click.echo(_encode_toon_payload(payload))
     elif document.ok:
@@ -555,12 +605,7 @@ def run_rich_bounded(  # noqa: C901
     console: Console | None = None,
     include_elapsed: bool = True,
 ) -> _ResultT:
-    """Run one bounded command with the single shared lifecycle observer.
-
-    Redirected Rich output is deliberately sparse and deterministic.  A TTY
-    gets the same lines through one transient ``Live`` view, so renderer
-    cleanup cannot alter the command's result or exception semantics.
-    """
+    """Run one bounded command with a deterministic shared lifecycle observer."""
     console = console or Console()
     lines: list[str] = []
     started: dict[str, float] = {}

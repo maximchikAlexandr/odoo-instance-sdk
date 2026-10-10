@@ -1,0 +1,81 @@
+"""Typed, metadata-only machine operation contracts."""
+
+# The package deliberately preserves the star-export surface of both metadata
+# modules while listing all public names explicitly for strict type checkers.
+# ruff: noqa: F405
+
+from odoo_instance_sdk.operations.contracts import *  # noqa: F403
+from odoo_instance_sdk.operations.invoke import (
+    LocalInvocation,
+    OperationInvokeError,
+    build_operation_command,
+    decode_request,
+    failure_invocation,
+    invoke_local,
+    invoke_with_context,
+)
+from odoo_instance_sdk.operations.provider_loader import *  # noqa: F403
+from odoo_instance_sdk.operations.session import (
+    SessionDecision,
+    SessionEvent,
+    SessionLimits,
+    SessionOutcome,
+    SessionRequest,
+    run_approval_session,
+)
+
+__all__ = [
+    "CONTRACT_VERSION",
+    "DEFAULT_STARTUP_DEADLINE_SECONDS",
+    "ENTRY_POINT_GROUP",
+    "PUBLIC_LEAF_CASES",
+    "LoadedOperationProvider",
+    "LocalInvocation",
+    "OperationBinding",
+    "OperationDescriptor",
+    "OperationError",
+    "OperationErrorDetails",
+    "OperationFactory",
+    "OperationInvokeError",
+    "OperationParameter",
+    "OperationProvider",
+    "OperationRegistry",
+    "OperationRequest",
+    "OperationResult",
+    "OperationTransport",
+    "ProviderDiscovery",
+    "ProviderDiscoveryError",
+    "ProviderFailure",
+    "PublicLeafCase",
+    "SessionDecision",
+    "SessionEvent",
+    "SessionLimits",
+    "SessionOutcome",
+    "SessionRequest",
+    "WireCreateValue",
+    "WireDeleteValue",
+    "WireNestedValue",
+    "WireOperationDocument",
+    "assert_compatible_bundle",
+    "assert_compatible_contract",
+    "build_operation_command",
+    "build_registry",
+    "builtin_bindings",
+    "clear_provider_cache",
+    "click_leaf_commands",
+    "click_leaf_paths",
+    "contract_bundle",
+    "contract_bytes",
+    "decode_request",
+    "discover_operation_providers",
+    "discover_providers",
+    "discovered_bindings",
+    "failure_invocation",
+    "invoke_local",
+    "invoke_with_context",
+    "provider_bindings",
+    "run_approval_session",
+    "validate_public_inventory",
+    "wire_projection",
+    "wire_schema",
+]
