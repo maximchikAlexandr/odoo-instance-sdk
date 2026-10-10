@@ -1,29 +1,32 @@
 ## Why
 
-Concurrent agents can install different OdCLI revisions, but every revision currently resolves global state to `~/.odcli`. A schema migration or update from one revision can therefore corrupt or make another revision unusable; numbered, exact-SHA slots need isolated user state without changing the process `HOME` or the canonical `odcli` installation.
+Concurrent agents can install different OdCLI revisions, but ordinary, numbered, and existing hot-fix launchers currently converge on canonical `~/.odcli`. A schema migration or write from either alternate revision can therefore corrupt another agent's state; every exact-revision launcher needs isolated OdCLI user state without replacing `HOME` or weakening canonical behavior.
 
 ## What Changes
 
-- Add a single explicit SDK/CLI user-root selector whose default remains `~/.odcli` and whose numbered-slot values resolve to `~/.odcli-N`.
-- Add canonical CLI management for installing or replacing `odcli-N` from a full Git SHA in a dedicated uv tool environment, verifying installed provenance, listing slots, and safely removing only the selected slot's launcher, tool environment, and state.
-- Launch every numbered command with its selected root while preserving the real `HOME`, so Git, SSH, uv, and unrelated user configuration remain shared and unchanged.
-- Keep a new slot empty instead of copying canonical or legacy state; disable legacy-storage adoption and deletion for numbered roots.
-- Reject direct `odcli-N update`; changing a slot revision is an explicit exact-SHA replacement through the canonical slot manager and never updates ordinary `odcli`.
-- Document that slot state isolation does not isolate Odoo, PostgreSQL, databases, filestores, Docker resources, or ports, and require separate project copies or explicitly disjoint external resources for concurrent use.
-- Preserve the existing canonical `odcli`/`~/.odcli` behavior and the separate shared-state `odcli-fix-<issue>` workflow.
+- Add one explicit SDK/CLI user-root selector: ordinary `odcli` keeps `~/.odcli`, numbered `odcli-N` uses `~/.odcli-N`, and `odcli-fix-ISSUE` uses `~/.odcli-fix-ISSUE`.
+- Add canonical numbered-slot install/replace/list/remove management with exact-SHA uv environments and verified provenance.
+- Update the existing skill-local hot-fix installer, shim, compatibility review, reconciliation, and cleanup to use its deterministic isolated root and manager metadata outside canonical state.
+- Preserve real `HOME`, so Git, SSH, uv, and unrelated settings remain shared and unchanged.
+- Start every alternate root empty; never copy canonical, legacy, numbered, or neighboring hot-fix state, absolute paths, or migration history.
+- Run legacy-storage adoption only for ordinary canonical `odcli`; alternate revisions migrate only their selected root.
+- Reject direct `odcli-N update` and `odcli-fix-ISSUE update`. Numbered revision changes use the canonical slot manager; hot-fix retirement remains skill-managed and occurs only after the existing merge/ancestry/branch gates.
+- Make removal/retirement delete only the selected launcher, tool environment, manager metadata, lock, and isolated root while preserving canonical and every neighbor.
+- Document that user-root isolation does not isolate project checkouts, Odoo/PostgreSQL, databases, filestores, Docker resources, or ports.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `numbered-odcli-slots`: Exact-SHA numbered installation, invocation, provenance verification, state isolation, replacement, removal, and external-resource boundaries.
+- `numbered-odcli-slots`: Exact-revision alternate launcher identity, isolated roots, lifecycle management, cross-root safety, and external-resource boundaries for numbered and hot-fix commands.
 
 ### Modified Capabilities
 
-- `development-environment`: Global SDK-owned paths use the selected user root and numbered roots never adopt canonical or legacy storage.
-- `self-update`: Direct self-update is forbidden for numbered commands; slot replacement is owned by the canonical manager.
-- `cli-odcli`: The canonical CLI exposes bounded numbered-slot management commands while numbered launchers expose the ordinary command surface except direct update.
+- `development-environment`: Every SDK-owned global path uses the selected root; noncanonical roots never adopt canonical or legacy storage.
+- `self-update`: Direct self-update is forbidden for numbered and hot-fix launchers; canonical update stays isolated from them.
+- `cli-odcli`: Canonical CLI exposes bounded numbered-slot management; alternate launchers preserve the ordinary surface except forbidden management/update paths.
+- `bug-report`: Existing `odcli-fix-<issue>` installation, compatibility, invocation, reconciliation, and cleanup use isolated state rather than shared `~/.odcli`.
 
 ## Impact
 
-The change affects the central path provider, startup storage migration, self-update selection, CLI registration/output inventory, uv-tool installation/provenance handling, and packaging/unit tests. It adds no dependency and does not change repository-local `.odcli`, Odoo/PostgreSQL ownership, database or filestore formats, Docker naming, or port allocation.
+The change affects the central path provider, startup storage migration, self-update selection, canonical slot CLI, uv provenance handling, `.agents/skills/odcli-autonomous-work` fix-tool workflow, its tests, packaging acceptance, and documentation. It adds no dependency and does not change repository-local `.odcli`, Odoo/PostgreSQL ownership, database/filestore formats, Docker naming, or port allocation.

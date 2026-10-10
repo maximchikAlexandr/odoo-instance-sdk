@@ -5,79 +5,93 @@
 - Approved base: `origin/main` at `4a9369c3cab0f9a34bf3d3b2411f3ec0ac5bf5e6`.
 - Delivery mode: `dag`.
 - Estimate source: подтверждённые read-back properties корневой planning issue `Estimate, hours`, `Estimate min, hours`, `Estimate max, hours`; числовые totals намеренно не дублируются.
-- Estimate basis: remaining active developer effort для одного опытного разработчика, знакомого с Python, Click, uv tool layouts, SQLite migrations и pytest этого репозитория, без AI-ускорения. Unattended CI, approval queues, meetings и external blocking исключены; тесты для получения оценки не запускались.
-- Confidence: medium. Central path provider, storage migration, self-update, fix-tool analogue и packaging seams доступны в snapshot; неопределённость сосредоточена в полном inventory прямых global paths, crash-safe uv publication и двухревизионном packaging fixture.
-- Calibration: evidence-based, uncalibrated; сопоставимые исторические actuals не предоставлены.
-- Topology rule: authoritative estimate property превышает threshold. После foundation существуют два естественных независимых фронта с непересекающимися production write-зонами: lifecycle manager/CLI и runtime root/migration/update policy. Они соединяются только в integrated acceptance.
+- Estimate basis: remaining active developer effort для одного опытного разработчика, знакомого с Python, Click, uv tool layouts, SQLite migrations, skill scripts и pytest этого репозитория, без AI-ускорения. Unattended CI, approval queues, meetings и external blocking исключены; тесты для оценки не запускались.
+- Confidence: medium. Central paths, storage migration, self-update, exact-SHA fix-tool и packaging seams доступны; неопределённость сосредоточена в fail-closed legacy hot-fix handling, selector capability probe и multi-root concurrent acceptance.
+- Calibration: evidence-based, uncalibrated; сопоставимые historical actuals отсутствуют.
+- Topology rule: authoritative estimate property превышает threshold. После единого identity/root foundation существуют три независимых фронта с раздельными mutable write scopes: numbered manager/CLI, SDK runtime migration/update, existing hot-fix skill. Они соединяются только в integrated acceptance.
 
-Полное соответствие stage: `WP-MYL-445-01 -> 1`, `WP-MYL-445-02 -> 2`, `WP-MYL-445-03 -> 2`, `WP-MYL-445-04 -> 3`. Stages являются последовательными топологическими слоями без пропусков; operational WIP в DAG не кодируется.
+Stage mapping: `WP-MYL-445-01 -> 1`, `WP-MYL-445-02 -> 2`, `WP-MYL-445-03 -> 2`, `WP-MYL-445-04 -> 2`, `WP-MYL-445-05 -> 3`. Stages последовательны без пропусков; operational WIP в DAG не кодируется.
 
-## WP-MYL-445-01 — Root и slot identity foundation
+## WP-MYL-445-01 — Alternate identity и root foundation
 
 - **Stage:** `1`.
 - **Tasks:** `1.1`, `1.2`, `1.3`.
 - **Depends on:** нет.
-- **Самостоятельный deliverable:** validated slot identity/path contract и единый canonical-default global-root selector со статическим/тестовым доказательством, что все SDK-owned global providers используют его, а repository-local `.odcli` и real `HOME` не меняются.
-- **Owned responsibility scope:** central paths и новые компактные slot value/manifest types; напрямую связанные unit tests, fixtures, typing и docs, необходимые для foundation. Critical shared files: `src/odoo_instance_sdk/internal/paths.py`, новый узкий internal slot-domain module, provider inventory tests.
-- **Contract surface:** positive canonical decimal `N`; deterministic manager/tool/launcher/state paths; absent selector означает `~/.odcli`; trusted absolute selector не меняет `HOME`; никаких daemon, registry database, dependency или второго path hierarchy.
-- **DoD / evidence:** canonical и numbered provider matrices проходят; прямые global `Path.home()/.odcli` writes инвентаризированы и либо переведены на provider, либо доказано относятся к project-local/executable discovery; invalid number/path cases fail before filesystem mutation; Ruff/mypy focused gates проходят.
-- **Parallel safety:** foundation единолично владеет shared types/path contract; successors только потребляют его после завершения.
+- **Самостоятельный deliverable:** validated numbered/hot-fix identity/path contract и canonical-default global-root selector с доказательством, что все SDK-owned global providers используют выбранный root, а real `HOME` и repository-local `.odcli` неизменны.
+- **Owned responsibility scope:** central paths, compact alternate-launcher identity/manifest path types и provider inventory tests. Critical shared files: `src/odoo_instance_sdk/internal/paths.py`, новый узкий `internal/alternate_tool.py` или эквивалентный module, focused provider tests.
+- **Contract surface:** canonical positive decimal identities; deterministic state/manager/tool/launcher/manifest/lock paths; absent selector означает `~/.odcli`; trusted explicit selector не меняет `HOME`; никаких daemon, registry DB, dependency или generic manager framework.
+- **DoD / evidence:** canonical/numbered/hot-fix provider matrices проходят; direct global home writes инвентаризированы; invalid identity/path cases fail before filesystem mutation; project-local paths не redirected; focused Ruff/mypy/tests проходят.
+- **Parallel safety:** единолично владеет shared identity/path contract; stage-2 successors только потребляют его после завершения.
 
-## WP-MYL-445-02 — Exact-SHA slot lifecycle и canonical CLI
-
-- **Stage:** `2`.
-- **Tasks:** `2.1`, `2.2`, `2.3`, `2.4`, `3.2`, `3.3`.
-- **Depends on:** `WP-MYL-445-01`.
-- **Самостоятельный deliverable:** canonical `odcli slot install/list/remove` создаёт, проверяет, публикует, переназначает и безопасно удаляет numbered uv tools; generated launcher держит lifecycle lock и точно делегирует ordinary CLI; вызов management surface из `odcli-N` отвергается до чтения manifest или любого эффекта.
-- **Owned responsibility scope:** slot lifecycle command builder/coordinator, numbered-context management guard, uv exact-SHA/provenance probe, manifest/launcher rendering, CLI registration/output projection/public-leaf inventory и directly related manager tests/fixtures. Critical shared files: новый `internal/slot_*` lifecycle module, новый `commands/slot.py`, `commands/cli_parts/registration.py`, `tests/unit/test_cli_output_modes.py`, manager-focused tests.
-- **Contract surface:** fixed credential-free repository; full lowercase SHA; staged install and verified repo+commit+selector capability before atomic publish; one JSON manifest and one lock; bounded list; fail-closed exact-target remove; unchanged argv boundaries and exit status; no shell and no execution of slot code during list; `odcli-N slot ...` fails before manager discovery/planning.
-- **DoD / evidence:** install mismatch and invalid identity publish nothing; implicit overwrite is rejected; explicit idle replace is recoverable; running lock blocks replace/remove; modified/symlinked/path-escaping artifacts block deletion; removing one synthetic slot preserves canonical and neighbor sentinels; numbered-context install/list/remove prove zero manifest/tool/launcher/state reads or mutations; Rich/JSON/TOON and public-leaf tests pass.
-- **Parallel safety:** после WP-01 пишет lifecycle/CLI modules и manager test fixtures; не изменяет central path/storage migration/self-update modules, принадлежащие параллельному WP-03.
-
-## WP-MYL-445-03 — Runtime isolation, migration и update policy
+## WP-MYL-445-02 — Numbered exact-SHA lifecycle и CLI
 
 - **Stage:** `2`.
-- **Tasks:** `3.1`, `3.4`, `3.5`.
+- **Tasks:** `2.1`, `2.2`, `2.3`, `2.4`, `2.5`.
 - **Depends on:** `WP-MYL-445-01`.
-- **Самостоятельный deliverable:** explicit numbered root никогда не принимает canonical/legacy state, а все numbered self-update modes fail до planning/effects; canonical legacy migration и canonical self-update сохраняют прежний контракт.
-- **Owned responsibility scope:** startup storage-migration selection, propagation selected root through remaining global consumers, self-update/maintenance/recovery guards и directly related path/migration/update tests. Critical shared files: `internal/storage_migration.py`, `internal/self_update*.py`, `commands/update.py`, focused storage/self-update tests.
-- **Contract surface:** platformdirs discovery/copy/rewrite/cleanup только для canonical default; numbered root starts empty; every global lock/journal/catalogue write descends from selected root; `odcli-N update` directs to canonical exact-SHA replace before ref resolution, lock, snapshot, uv or migration; ordinary update neither discovers nor manages slots.
-- **DoD / evidence:** populated canonical and legacy fixtures remain byte-identical after first numbered startup; canonical migration regressions remain green; update check/dry-run/mutate/maintenance/recovery variants all reject numbered context before effects; cross-root spy/inventory proves no canonical or neighbor access.
-- **Parallel safety:** после WP-01 пишет только path consumers, migration и self-update modules/tests; management guard, slot lifecycle, CLI registration и manager fixtures целиком принадлежат WP-02 и WP-03 их не изменяет.
+- **Самостоятельный deliverable:** canonical `odcli slot install/list/remove` безопасно управляет numbered uv tools, а `odcli-N` держит lock, точно делегирует ordinary CLI и отвергает manager surface до discovery/effects.
+- **Owned responsibility scope:** numbered lifecycle coordinator, uv exact-SHA/provenance/capability probe consumption, manifest/shim rendering, CLI registration/output/public-leaf inventory и numbered-focused tests. Critical shared files: новый numbered manager module, `commands/slot.py`, `commands/cli_parts/registration.py`, `tests/unit/test_cli_output_modes.py`.
+- **Contract surface:** fixed repository/full SHA; staged verified atomic publish; one manifest/lock; bounded list; fail-closed replace/remove; exact argv/exit; no shell; no manager reads from numbered context.
+- **DoD / evidence:** mismatch publishes nothing; replace requires explicit idle ownership; running/corrupt/symlink/path-escape removal fails closed; removing one slot preserves canonical, hot-fix and numbered neighbors; output/public-leaf tests pass.
+- **Parallel safety:** пишет только numbered manager/CLI surfaces и fixtures; не изменяет central paths/storage/self-update или `.agents/skills/odcli-autonomous-work`, принадлежащие siblings.
 
-## WP-MYL-445-04 — Integrated dual-revision acceptance и publication gate
+## WP-MYL-445-03 — Runtime confinement, migration и update policy
+
+- **Stage:** `2`.
+- **Tasks:** `3.1`, `3.2`, `3.3`, `3.4`.
+- **Depends on:** `WP-MYL-445-01`.
+- **Самостоятельный deliverable:** explicit alternate roots не принимают legacy/canonical state, все global consumers остаются confined, numbered/hot-fix direct update fail до planning/effects, canonical migration/update сохраняют прежний контракт.
+- **Owned responsibility scope:** storage-migration selection, remaining global consumers, self-update/maintenance/recovery context guards и directly related path/migration/update tests. Critical shared files: `internal/storage_migration.py`, `internal/self_update*.py`, `commands/update.py`, focused tests.
+- **Contract surface:** platformdirs adoption только canonical; alternate roots start empty; launcher-specific update remediation; canonical update не discovers/manages alternate roots; no access to manager metadata.
+- **DoD / evidence:** populated canonical/legacy/neighbor fixtures remain unchanged on alternate first run; canonical migration regressions pass; every update mode rejects both alternate kinds before effects; filesystem spy proves zero cross-root access.
+- **Parallel safety:** пишет только SDK path consumers, migration, self-update modules/tests; не изменяет numbered manager/registration или hot-fix skill/scripts/tests.
+
+## WP-MYL-445-04 — Existing hot-fix workflow isolation
+
+- **Stage:** `2`.
+- **Tasks:** `4.1`, `4.2`, `4.3`, `4.4`.
+- **Depends on:** `WP-MYL-445-01`.
+- **Самостоятельный deliverable:** existing `odcli-fix-ISSUE` workflow публикует exact reviewed revision с `~/.odcli-fix-ISSUE`, не пишет canonical registry/state и selectively retires только доказанно eligible idle hot fix.
+- **Owned responsibility scope:** `.agents/skills/odcli-autonomous-work/SKILL.md`, `compatibility-prompt.md`, `scripts/fix_tool.py`, необходимые reviewer inputs и `tests/unit/test_odcli_autonomous_skill.py` plus directly related fixtures. Critical shared files ограничены этой skill-owned зоной.
+- **Contract surface:** fixed SHA/repo/PR/issue/reviewer gates; manager metadata outside state/canonical; selector capability before publish; external-resource compatibility only; full-lifetime lock; existing merge/ancestry/issue/branch gates; exact selective cleanup; old-style shared-state manifests fail closed without adoption.
+- **DoD / evidence:** two hot fixes use distinct roots; warning names SHA/root; direct update rejected through shared SDK guard; eligible retirement removes one root/tool/launcher/manifest and preserves all neighbors; active/corrupt/legacy cases retain artifacts and report remediation; skill tests pass.
+- **Parallel safety:** пишет только existing skill scripts/docs/tests and consumes WP-01 contract; не изменяет SDK runtime/self-update or numbered CLI files owned by WP-02/WP-03.
+
+## WP-MYL-445-05 — Integrated multi-root acceptance и publication gate
 
 - **Stage:** `3`.
-- **Tasks:** `4.1`, `4.2`, `4.3`, `4.4`.
-- **Depends on:** `WP-MYL-445-02`, `WP-MYL-445-03`.
-- **Самостоятельный deliverable:** один publication-ready SHA с документацией и end-to-end доказательством двух exact revisions, несовместимых SQLite migrations, safe replace/remove и неизменности canonical/neighbor state.
-- **Owned responsibility scope:** packaging acceptance fixtures, cross-component repair исключительно для verified integration findings, user documentation/help и final quality evidence. Critical shared files: `tests/packaging/`, `README.md`, architecture/output inventories и любые directly related snapshots/fixtures.
-- **Contract surface:** два slot uv layouts и два selected roots; canonical `odcli`/`~/.odcli` и `odcli-fix-<issue>` semantics unchanged; external Odoo/PostgreSQL/database/filestore/Docker/port resources не считаются изолированными; scope/design change возвращается в planning revision.
-- **DoD / evidence:** packaging test устанавливает разные exact SHAs/fixtures, одновременно выполняет несовместимые catalogue migrations и доказывает root confinement; replace сохраняет только selected state и меняет verified executable; remove одного slot сохраняет canonical и neighbor byte-for-byte; corrupted identity fails closed; docs/help перечисляют isolated/non-isolated resources; focused/packaging/standard tests, Ruff format/check, strict mypy, public-leaf/output/architecture inventories, `git diff --check` и strict OpenSpec validation проходят с записанными command/exit-code evidence.
-- **Parallel safety:** serial join после обоих stage-2 siblings; вправе делать минимальные cross-domain repairs только по фактическим integration failures.
+- **Tasks:** `5.1`, `5.2`, `5.3`, `5.4`.
+- **Depends on:** `WP-MYL-445-02`, `WP-MYL-445-03`, `WP-MYL-445-04`.
+- **Самостоятельный deliverable:** publication-ready SHA с documentation и end-to-end доказательством canonical, двух numbered и двух hot-fix revisions, incompatible migrations, update isolation и selective cleanup.
+- **Owned responsibility scope:** cross-component packaging/process fixtures, documentation/help, final inventories/evidence и минимальные repairs только по observed integration findings. Critical shared files: `tests/packaging/`, `README.md`, architecture/output inventories и directly related fixtures/snapshots.
+- **Contract surface:** five independent selected roots; canonical behavior unchanged; external project/Odoo/PostgreSQL/database/filestore/Docker/port resources explicitly disjoint; no scope expansion during repair.
+- **DoD / evidence:** concurrent incompatible migrations/writes stay confined by access spy, SQLite revision and digest evidence; alternate first-run never adopts legacy/canonical; canonical update preserves alternate roots; numbered remove and one eligible hot-fix retirement preserve every neighbor; docs cover old-style remediation and external-resource boundary; focused/skill/packaging/repository/Ruff/mypy/inventory/diff/strict OpenSpec gates pass.
+- **Parallel safety:** serial join after all stage-2 siblings; shared integration fixtures and cross-domain repairs have one owner.
 
 ## Topology and Coverage Audit
 
-Прямые edges:
+Direct edges only:
 
 - `WP-MYL-445-01 -> WP-MYL-445-02`
 - `WP-MYL-445-01 -> WP-MYL-445-03`
-- `WP-MYL-445-02 -> WP-MYL-445-04`
-- `WP-MYL-445-03 -> WP-MYL-445-04`
+- `WP-MYL-445-01 -> WP-MYL-445-04`
+- `WP-MYL-445-02 -> WP-MYL-445-05`
+- `WP-MYL-445-03 -> WP-MYL-445-05`
+- `WP-MYL-445-04 -> WP-MYL-445-05`
 
-Execution frontiers: stage 1 — foundation; stage 2 — `WP-MYL-445-02` и `WP-MYL-445-03` одновременно; stage 3 — integrated join. Stage 2 имеет две независимые production write-зоны и поэтому удовлетворяет требованию реальной параллельности.
+Execution frontiers: stage 1 — foundation; stage 2 — WP-02, WP-03, WP-04 concurrently; stage 3 — integrated join. Stage-2 siblings имеют непересекающиеся production и primary test write-зоны.
 
-Task coverage полное и однократное:
+Task coverage complete and one-time:
 
 | WP | OpenSpec tasks |
 | --- | --- |
 | `WP-MYL-445-01` | `1.1`, `1.2`, `1.3` |
-| `WP-MYL-445-02` | `2.1`, `2.2`, `2.3`, `2.4`, `3.2`, `3.3` |
-| `WP-MYL-445-03` | `3.1`, `3.4`, `3.5` |
+| `WP-MYL-445-02` | `2.1`, `2.2`, `2.3`, `2.4`, `2.5` |
+| `WP-MYL-445-03` | `3.1`, `3.2`, `3.3`, `3.4` |
 | `WP-MYL-445-04` | `4.1`, `4.2`, `4.3`, `4.4` |
+| `WP-MYL-445-05` | `5.1`, `5.2`, `5.3`, `5.4` |
 
 ## Estimation Evidence and Assumptions
 
-- Inspected implementation: `internal/paths.py`, `internal/storage_migration.py`, self-update command/coordinator/recovery path, CLI lazy registration, packaging self-update fixtures и autonomous fix-tool exact-SHA/shim/lock analogue.
-- Estimate включает implementation, unit/process/packaging verification, documentation, repository gates и likely review repairs; deployment, live Odoo/PostgreSQL provisioning и isolation external resources исключены.
-- Оценка станет недействительной, если scope расширится до cross-platform manager beyond supported uv layouts, automatic state cloning/backup, arbitrary repository origins/refs, external-resource orchestration или backward support revisions без root-selector capability.
+- Inspected: central paths/storage migration, self-update command/coordinator/recovery, CLI registration, packaging self-update fixtures, complete autonomous-work skill, `fix_tool.py`, compatibility prompt и skill tests.
+- Estimate includes implementation, focused/skill/process/packaging tests, documentation, repository gates and likely review repairs; deployment and live shared external-resource orchestration excluded.
+- Estimate invalidates if scope expands to automatic migration of old shared-state hot fixes, arbitrary repositories/refs, cross-platform manager layouts beyond existing support, external-resource orchestration, or revisions without selector capability.

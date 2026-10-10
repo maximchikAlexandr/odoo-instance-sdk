@@ -15,9 +15,9 @@ The canonical CLI SHALL expose `odcli slot install NUMBER SHA [--replace]`, `odc
 - **WHEN** a slot manager success or typed failure is rendered in JSON and TOON
 - **THEN** both formats carry semantically equal bounded data without prompts, progress, ANSI, raw subprocess output, or secrets
 
-### Requirement: Numbered launcher delegates the ordinary CLI surface
-An installed `odcli-N` launcher SHALL hold the slot lifecycle lock for the full child lifetime, set only the selected user-root, slot identity, and exact executable identity variables needed by the SDK, and delegate arguments and exit status without shell interpretation. Except for slot management and self-update, the underlying revision's ordinary CLI surface SHALL remain available.
+### Requirement: Alternate launcher delegates the ordinary CLI surface
+An installed `odcli-N` or `odcli-fix-ISSUE` launcher SHALL hold its lifecycle lock for the full child lifetime, set only the selected user-root, alternate-launcher identity, and exact executable identity variables needed by the SDK, and delegate arguments and exit status without shell interpretation. Except for numbered slot management and self-update, the underlying revision's ordinary CLI surface SHALL remain available.
 
 #### Scenario: Arguments and exit status are preserved
-- **WHEN** an operator invokes `odcli-N` with ordinary command arguments
+- **WHEN** an operator invokes `odcli-N` or `odcli-fix-ISSUE` with ordinary command arguments
 - **THEN** the exact argument boundaries and child exit status are preserved without a shell and the lifecycle lock remains held until the child exits

@@ -1,88 +1,102 @@
 ## Контекст
 
-Сейчас `internal/paths.py` жёстко вычисляет `Path.home() / ".odcli"`; все каталог, окружения, бэкапы, locks, pgAdmin и update evidence сходятся в этот root. `internal/storage_migration.py` также всегда мигрирует platformdirs-источники в `~/.odcli`, а self-update определяет uv-tool по текущему executable. Существующий `.agents/.../fix_tool.py` показывает рабочий локальный паттерн отдельных `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`, shim и lifecycle lock, но намеренно сохраняет общий `~/.odcli` и привязан к issue/PR. Для несовместимых ревизий этот паттерн переиспользовать напрямую нельзя.
+`internal/paths.py` сейчас жёстко сводит SDK-owned global state в `~/.odcli`; storage migration, catalogue, environments, backups, locks, pgAdmin, reports и update evidence следуют туда. Существующий skill-local `fix_tool.py` уже создаёт отдельный uv layout и `odcli-fix-<issue>`, но хранит registry в `~/.odcli/fix-tools`, не передаёт root selector и предупреждает, что hot fix разделяет canonical state. Следовательно, разные executable не дают изоляции данных. Новая revision распространяет один root-selection contract и на numbered slots, и на hot-fix launchers.
 
 ## Цели / Не-цели
 
 **Цели:**
 
-- один источник истины для global user root при сохранении canonical default;
-- воспроизводимый numbered slot из exact SHA, проверенный до публикации launcher;
-- полная изоляция SDK-owned user state и безопасное удаление ровно одного slot;
-- явная политика migration и update;
-- доказуемая совместная работа двух несовместимых catalogue revisions.
+- canonical `odcli`, каждый `odcli-N` и каждый `odcli-fix-ISSUE` имеют взаимоисключающий SDK-owned root;
+- exact-SHA provenance и selector capability проверяются до публикации alternate launcher;
+- новый alternate root всегда пуст, без копирования absolute paths и migration history;
+- numbered removal и hot-fix retirement удаляют только доказанно принадлежащий им root/tool/launcher/metadata;
+- несовместимые SQLite migrations и concurrent writes не пересекают roots.
 
 **Не-цели:**
 
 - менять `HOME`, XDG, Git/SSH/uv settings;
-- изолировать project-local `.odcli`, Odoo, PostgreSQL, Docker, filestore или ports;
-- заменять `odcli-fix-<issue>` либо привязывать slot number к issue/PR;
-- вводить daemon, registry database, dependency или общий version solver.
+- объединять numbered slots и issue-bound hot fixes в один пользовательский workflow;
+- изолировать repository-local `.odcli`, project checkouts, Odoo, PostgreSQL, Docker, filestore или ports;
+- добавлять daemon, registry database, dependency, generic plugin manager или automatic state copier.
 
 ## Решения
 
 ### D1. Один ранний selector global root
 
-`internal.paths.get_user_root()` станет единственной точкой выбора. По умолчанию он возвращает существующий `~/.odcli`; trusted shim передаёт абсолютный `ODCLI_USER_ROOT=~/.odcli-N` и `ODCLI_SLOT_ID=N`, не меняя `HOME`. Остальные providers продолжают строить child paths от `get_user_root()`. Прямые `Path.home() / ".odcli"` для global state переводятся на provider; project-local `.odcli` не затрагивается.
+`internal.paths.get_user_root()` остаётся единственной точкой выбора. Без selector возвращается `~/.odcli`; trusted numbered shim передаёт абсолютный `ODCLI_USER_ROOT=~/.odcli-N`, hot-fix shim — `ODCLI_USER_ROOT=~/.odcli-fix-ISSUE`. Отдельный typed launcher-kind/id selector позволяет self-update выдать правильную remediation. `HOME` не меняется. Все прямые global `Path.home() / ".odcli"` writes переводятся на provider либо классифицируются как manager/executable paths; project-local `.odcli` остаётся на месте.
 
-Альтернатива — менять `HOME` в shim. Она отклонена: вместе с OdCLI переключились бы Git, SSH, uv и другие пользовательские настройки. Альтернатива с отдельной env-переменной для каждого каталога отклонена как источник рассинхронизации.
+Подмена `HOME` отклонена, потому что переключит Git, SSH и uv. Набор env vars для каждого каталога отклонён как источник split-brain paths.
 
-### D2. Canonical CLI владеет lifecycle slot
+### D2. Общий маленький identity/path contract, разные managers
 
-Добавляется группа `odcli slot` с `install`, `list`, `remove`. Детерминированные manager paths: launcher `~/.local/bin/odcli-N`, manager root `~/.local/share/odcli-slots/N`, uv layout внутри него, manifest с exact SHA и ожидаемыми путями, lock рядом с manifest; state остаётся `~/.odcli-N`. Slot number имеет единственную canonical decimal форму.
+Typed helper валидирует canonical positive decimal identity и вычисляет deterministic state/manager/tool/bin/launcher/manifest/lock paths. Numbered manager остаётся public `odcli slot`; hot-fix manager остаётся skill-local и сохраняет PR/issue/reviewer policy. Они переиспользуют только identity/path, verified uv provenance, lifecycle lock и shim rendering primitives, но не получают generic registry/service abstraction.
 
-Install/replace сначала работает во временном sibling layout, использует fixed HTTPS Git origin и full SHA, затем читает installed `direct_url.json`/distribution metadata и сверяет repo+commit. Только после этого manifest и launcher публикуются через atomic replace. Shim — небольшой Python launcher без shell: shared-lock, фиксированные environment selectors, exec/subprocess exact argv. Replace/remove берут exclusive nonblocking lock и fail closed при активном child.
+Это минимальная общая граница: duplicating root validation создаёт риск расхождения, а объединение user workflows стирает разные ownership и retirement rules.
 
-Отдельная registry SQLite отклонена: filesystem manifest и deterministic paths уже дают нужную идентичность. Встраивание slot в `uv tool` default registry отклонено: package name одинаков, а ownership removal становится неявным.
+### D3. Детерминированные layouts
 
-### D3. Replace сохраняет state, remove удаляет его
+- canonical state: `~/.odcli`;
+- numbered state: `~/.odcli-N`, manager: `~/.local/share/odcli-slots/N`;
+- hot-fix state: `~/.odcli-fix-ISSUE`, manager/tool metadata: `~/.local/share/odcli-fix-tools/ISSUE`;
+- launchers: `~/.local/bin/odcli-N` и `~/.local/bin/odcli-fix-ISSUE`.
 
-`--replace` меняет только verified tool+launcher+manifest и сохраняет `~/.odcli-N`: это и есть явное переназначение slot на новый SHA, после которого новая ревизия мигрирует только этот root. `remove` проверяет manifest, launcher content, отсутствие symlink/path escape и exact deterministic targets, затем удаляет только выбранные tool artifacts и slot state. Неожиданный файл или identity mismatch блокирует удаление вместо рекурсивного угадывания ownership.
+Manifest и lock находятся вне state root, поэтому cleanup может проверить ownership до удаления state. Existing hot-fix registry больше не читает и не пишет canonical `~/.odcli/fix-tools`. Legacy manifests не переносятся автоматически: неизвестная старая shared-state installation остаётся fail-closed и требует явного удаления старым workflow либо ручной эскалации; молчаливое adoption могло бы удалить или переименовать чужое состояние.
 
-Альтернатива с автоматическим backup/copy state при replace отклонена: она переносит абсолютные пути и migration history, усложняет ownership и не требуется. Альтернатива очищать state при каждом replace отклонена как неожиданная потеря данных; для чистого состояния оператор сначала выполняет explicit remove, затем install.
+### D4. Staged exact-SHA publication и capability probe
 
-### D4. Legacy migration зависит от canonical selection
+Оба installers сначала создают temporary sibling uv layout, проверяют fixed repository и exact SHA по installed metadata, затем запускают bounded capability probe с disposable empty root и sentinels вокруг canonical/neighbor roots. Только revision, доказавшая selector confinement, может получить launcher. Numbered replace публикуется атомарно. Hot-fix install дополнительно сохраняет existing compatibility review, PR head и linked issue gates; review теперь оценивает shared external resources, а не schema compatibility изолированных catalogues.
 
-`ensure_storage_migrated()` сохраняет существующее поведение только когда selector не задан и root canonical. Для explicit noncanonical root он не вызывает platformdirs discovery/copy/rewrite/cleanup и возвращает отдельный no-adoption result; normal path providers лениво создают пустой slot root. Catalogue migrations конкретной revision затем применяются только к selected root.
+Копирование canonical catalogue для probe или первого запуска отклонено: оно переносит absolute paths/history и уничтожает смысл isolation.
 
-Отдельный fork storage migration для slots отклонён: slot не имеет legacy source и не должен его приобретать.
+### D5. Lifecycle locks и точный cleanup
 
-### D5. Slot update и management запрещены из numbered context
+Каждый shim держит shared lock полный child lifetime и делегирует argv без shell. Replace/remove/retire берут exclusive nonblocking lock. Перед удалением manager сверяет deterministic targets, manifest schema, recorded SHA, launcher bytes, regular-file/symlink identity и containment. Numbered remove удаляет один slot. Hot-fix retirement дополнительно требует merged PR в default branch, closed linked issue, installed canonical ancestry и safe branch/worktree deletion; затем удаляет только eligible hot fix и `~/.odcli-fix-ISSUE`.
 
-Self-update проверяет `ODCLI_SLOT_ID` до plan construction и возвращает typed actionable failure с canonical replace command. `odcli-N slot ...` также запрещён: lifecycle другого slot всегда меняет canonical manager. Ordinary `odcli update` ничего не знает о numbered slots и не очищает их.
+State сохраняется при numbered replace, поскольку это явная revision reassignment. Hot-fix revision не заменяется: новый SHA требует пересмотра и переустановки после явного удаления/retirement, иначе review evidence перестаёт быть exact.
 
-Альтернатива разрешить `odcli-N update --ref` отклонена: updater рассчитан на current uv tool identity, а implicit branch/ref update разрушает exact-SHA воспроизводимость и может затронуть не тот launcher.
+### D6. Legacy migration только canonical
 
-### D6. Verification следует границе состояния
+`ensure_storage_migrated()` вызывает platformdirs discovery/copy/rewrite/cleanup только без explicit selector и для canonical root. Alternate root не инспектирует legacy или canonical paths; обычные providers лениво создают его пустым. Catalogue migrations выбранной revision применяются только внутри selected root.
 
-Unit tests инвентаризуют все global providers и доказывают root propagation, canonical default и migration bypass. Packaging E2E создаёт два uv layouts с различными local exact SHAs/fixture revisions, запускает несовместимые catalogue migrations одновременно, сравнивает sentinels/digests canonical и соседнего root, проверяет direct-update rejection, replace и selective remove. Отдельные tests подтверждают, что `HOME` не меняется и внешние project/Odoo/PostgreSQL ресурсы не объявляются изолированными.
+### D7. Direct self-update запрещён для alternate launchers
+
+Self-update проверяет typed launcher context до plan construction. `odcli-N update` направляет к canonical slot replace. `odcli-fix-ISSUE update` направляет к skill-managed canonical update/reconcile и не предлагает replacement. Ordinary `odcli update` не обнаруживает и не меняет alternate roots. Только отдельная skill reconciliation после успешного canonical update может selectively retire eligible hot fixes.
+
+### D8. Acceptance доказывает отрицательные границы
+
+Process/packaging fixtures создают populated canonical и legacy roots, два numbered roots и два hot-fix roots с разными schema fixtures. Concurrent migrations/writes проверяются по filesystem access spy, SQLite revisions и before/after digests. Отдельно проверяются first-run no-adoption, direct updates, canonical update isolation, numbered removal, eligible hot-fix retirement, active lock и corrupt launcher/manifest. External resources в этих fixtures разделены; документация запрещает считать их изолированными автоматически.
 
 ## Ponytail Gate
 
-| Новая подсистема | Необходимость | Существующая альтернатива | Решение |
+| Новая или изменяемая часть | Необходимость | Существующая альтернатива | Решение |
 | --- | --- | --- | --- |
-| Central root selector | Нужен, иначе providers расходятся между roots | Текущий `internal.paths` | Оставить как минимальное расширение существующего provider |
-| Slot lifecycle manager | Нужен для exact-SHA install/replace/remove | Паттерны `fix_tool.py` и uv env vars | Оставить внутри CLI, переиспользовать паттерны без PR-specific policy |
-| Manifest + lock | Нужны для ownership и защиты running slot | JSON/shim/lock pattern fix-tool | Оставить один JSON и один lock, без database/service |
-| Отдельный updater | Не нужен | Canonical manager replace | Убрать; direct slot update запрещён |
-| State copier/backup | Не нужен и опасен для absolute paths/history | Explicit remove+install | Убрать |
-| Slot registry database/daemon | Не нужен | Deterministic paths + bounded manifests | Убрать |
+| Central root selector | Нужен для полного path confinement | `internal.paths` | Оставить как минимальное расширение provider |
+| Alternate identity/path helper | Нужен двум launcher видам для одинаковой валидации/containment | Разрозненные `_paths()` и literals | Оставить компактный typed helper |
+| Numbered lifecycle manager | Нужен для user-managed exact-SHA slots | Existing uv/fix-tool patterns | Оставить public CLI без registry service |
+| Hot-fix manager rewrite | Нужен, потому что существующий workflow пишет canonical state | Existing `fix_tool.py`/reviewer/skill | Изменить на isolated root, не создавать второй manager |
+| Manifest + lifecycle lock | Нужны для ownership и running protection | Existing fix-tool JSON/flock pattern | Переиспользовать один manifest и lock на launcher |
+| Отдельный updater | Не нужен | Canonical replace или skill reconciliation | Убрать; direct alternate update запрещён |
+| State copier/migrator | Не нужен и опасен | Fresh empty root | Убрать |
+| Registry DB/daemon/generic plugin layer | Не нужен | Deterministic paths + bounded manifests | Убрать |
 
 ## Риски / Компромиссы
 
-- **[Неполный inventory global paths]** → статический test/grep gate перечисляет прямые home-based global writes; implementation переводит их на central provider до acceptance.
-- **[Crash между tool install и publish]** → temporary sibling layout не считается slot; следующая management operation распознаёт и безопасно очищает только собственный temp по manifest/имени.
-- **[Повреждённый manifest или изменённый shim]** → list показывает unhealthy, replace/remove fail closed; автоматического рекурсивного repair нет.
-- **[Одна project copy использует общие PostgreSQL/Docker/ports]** → help/docs явно требуют отдельные project copies либо разнесённые external resources; manager не обещает их изоляцию.
-- **[Revision не понимает selector]** → post-install provenance недостаточна; manager выполняет bounded capability probe новой revision с isolated temporary root до публикации.
+- **[Revision не понимает selector]** → pre-publication disposable-root capability probe блокирует launcher.
+- **[Неполный inventory global paths]** → static provider inventory и cross-root filesystem spy входят в acceptance.
+- **[Существующий old-style hot fix разделяет canonical state]** → не adopt/migrate автоматически; detect and fail closed с explicit remediation.
+- **[Crash между install и publish]** → temporary sibling не считается installed launcher и удаляется только по manager-owned identity.
+- **[Повреждённый manifest/shim или symlink]** → list/cleanup fail closed; guessing и recursive repair отсутствуют.
+- **[Общие PostgreSQL/Docker/ports конфликтуют]** → compatibility review и docs требуют separate project copies или explicit disjoint resources.
+- **[Hot-fix PR merged, но process активен]** → exclusive lock не берётся, все artifacts сохраняются до следующей reconciliation.
 
 ## План миграции и отката
 
-1. Выпустить additive selector и canonical slot manager; существующий canonical root и update остаются default.
-2. Установка первого slot создаёт только manager artifacts; state появляется при первом вызове numbered command.
-3. Existing canonical/legacy data не перемещаются и не копируются.
-4. Откат production code оставляет slots как обычные локальные artifacts; до отката оператор удаляет их новой командой. Если code уже откатан, deterministic paths и manifest дают ручной bounded cleanup без удаления canonical state.
+1. Выпустить additive selector и alternate identity helpers; canonical default не меняется.
+2. Перевести numbered manager и existing hot-fix skill на deterministic isolated layouts.
+3. Existing old-style hot-fix manifests не переносить и не удалять автоматически; показать fail-closed remediation.
+4. Новые roots появляются только при первом invocation и не получают данных из canonical/legacy roots.
+5. При rollback удалить новые alternate launchers штатными managers до отката; deterministic manifests остаются bounded evidence для ручной эскалации, но canonical state не затрагивается.
 
 ## Открытые вопросы
 
-Нет. Формат number, path ownership, replace semantics, migration policy, update policy и external-resource boundary зафиксированы нормативно.
+Нет. Root naming, old-style behavior, compatibility boundary, update policy, lifecycle ownership и cleanup зафиксированы нормативно.

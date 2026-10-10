@@ -64,8 +64,45 @@ Documentation and slot command help SHALL state that numbered roots isolate only
 - **THEN** it identifies both the isolated OdCLI state classes and the non-isolated external resources, with a requirement to use separate project copies or disjoint external resources
 
 ### Requirement: Concurrent incompatible catalogues remain isolated
-Each process SHALL derive all SDK-owned global paths from its selected root for its complete lifetime. Slot migration, configuration writes, backup operations, environment operations, locks, journals, and catalogue access SHALL NOT read, write, lock, migrate, or delete canonical or neighboring slot roots.
+Each process SHALL derive all SDK-owned global paths from its selected root for its complete lifetime. Numbered and hot-fix migration, configuration writes, backup operations, environment operations, locks, journals, and catalogue access SHALL NOT read, write, lock, migrate, or delete canonical, numbered, or hot-fix neighboring roots.
 
 #### Scenario: Two revisions perform incompatible migrations
 - **WHEN** two installed slot revisions concurrently migrate incompatible SQLite schemas and write state
 - **THEN** each revision reads and writes only its own `~/.odcli-N`, and canonical `~/.odcli` plus the neighboring slot remain unchanged by the other process
+
+#### Scenario: Numbered and hot-fix revisions migrate concurrently
+- **WHEN** `odcli-1` and `odcli-fix-42` run incompatible SQLite migrations while canonical and other alternate roots contain sentinels
+- **THEN** each revision accesses only its selected root and every nonselected root remains byte-for-byte unchanged
+
+### Requirement: Hot-fix identity and isolated user root
+The existing `odcli-fix-ISSUE` workflow SHALL accept only a positive canonical decimal GitHub issue number, retain its exact reviewed SHA and PR linkage rules, and select absolute root `<real-home>/.odcli-fix-ISSUE` while preserving real `HOME`. Its uv tool, manifest, and lifecycle lock SHALL live under deterministic manager-owned paths outside canonical `~/.odcli` and outside its state root. A new hot-fix root SHALL start absent and SHALL NOT copy any canonical, legacy, numbered, or neighboring hot-fix data.
+
+#### Scenario: Fresh hot-fix starts isolated
+- **WHEN** reviewed hot fix `odcli-fix-42` is installed beside populated canonical, legacy, numbered, and hot-fix roots
+- **THEN** its launcher selects `~/.odcli-fix-42`, leaves that root absent until first use, and changes no existing state root
+
+#### Scenario: Invalid issue identity is rejected
+- **WHEN** hot-fix installation receives zero, a negative number, leading-zero text, whitespace, or non-decimal text
+- **THEN** it fails before creating a tool, launcher, manifest, lock, branch change, or state root
+
+### Requirement: Hot-fix compatibility is isolation-aware
+Hot-fix compatibility review and installation SHALL verify the full SHA, fixed repository, linked PR/issue, installed provenance, and the revision's ability to honor the explicit root selector before launcher publication. Compatibility SHALL evaluate only explicitly shared external project/Odoo/PostgreSQL/database/filestore/Docker/port resources; it SHALL NOT require catalogue-schema compatibility with canonical or neighboring isolated roots. Unknown selector capability or unsafe shared external resources SHALL block installation.
+
+#### Scenario: Incompatible catalogue is allowed behind isolation
+- **WHEN** a reviewed hot-fix revision has an incompatible catalogue schema but proves explicit-root confinement and safe external-resource use
+- **THEN** installation MAY publish its isolated launcher without reading or migrating canonical state
+
+#### Scenario: Selector capability is absent
+- **WHEN** the exact hot-fix revision cannot prove it honors the explicit user-root selector
+- **THEN** installation publishes no launcher and removes only uncommitted temporary artifacts
+
+### Requirement: Hot-fix retirement is selective and fail closed
+Skill-managed reconciliation SHALL retain the existing merged-PR, default-branch ancestry, installed-canonical revision, issue closure, and safe local-branch gates. For an eligible idle hot fix it SHALL validate deterministic paths, manifest and launcher identity, take the exclusive lifecycle lock, and remove only that hot fix's launcher, uv layout, manager metadata, lock after release, safe branch, and `~/.odcli-fix-ISSUE`. It SHALL fail closed on an active lock, symlink, corrupt identity, path escape, or unproven gate and SHALL preserve canonical, numbered, and neighboring hot-fix roots.
+
+#### Scenario: One eligible hot fix retires
+- **WHEN** two hot fixes exist and exactly one satisfies every retirement gate while idle
+- **THEN** only the eligible hot fix and its isolated root are removed and the other hot fix plus canonical and numbered roots remain byte-for-byte unchanged
+
+#### Scenario: Active hot fix blocks retirement
+- **WHEN** the selected hot-fix launcher holds its shared lifecycle lock
+- **THEN** reconciliation retains its launcher, tool, manifest, lock, state, and branch and reports that it is running
