@@ -48,14 +48,16 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 558),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 559),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 476),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 478),
+        ("src/odoo_instance_sdk/commands/operation.py", 89),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
         ("src/odoo_instance_sdk/commands/output.py", 289),
-        ("src/odoo_instance_sdk/commands/output.py", 458),
-        ("src/odoo_instance_sdk/commands/output.py", 460),
-        ("src/odoo_instance_sdk/commands/output.py", 467),
-        ("src/odoo_instance_sdk/commands/output.py", 469),
+        ("src/odoo_instance_sdk/commands/output.py", 506),
+        ("src/odoo_instance_sdk/commands/output.py", 508),
+        ("src/odoo_instance_sdk/commands/output.py", 510),
+        ("src/odoo_instance_sdk/commands/output.py", 517),
+        ("src/odoo_instance_sdk/commands/output.py", 519),
         ("src/odoo_instance_sdk/internal/self_update.py", 827),
         ("src/odoo_instance_sdk/internal/self_update.py", 828),
         ("src/odoo_instance_sdk/internal/self_update.py", 829),
@@ -72,10 +74,11 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 115): "in-memory Rich serialization boundary",
     ("src/odoo_instance_sdk/commands/output.py", 289): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 458): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 460): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 467): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 469): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 506): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 508): "raw JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 510): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 517): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 519): "shared diagnostic boundary",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
         558,
@@ -86,8 +89,9 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        476,
+        478,
     ): "documented --version metadata flag transport",
+    ("src/odoo_instance_sdk/commands/operation.py", 89): "bounded JSONL session transport",
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
@@ -116,12 +120,9 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
-
-
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/resources/test_database_resource.py", 634),
+        ("tests/unit/resources/test_database_resource.py", 848),
         ("tests/unit/test_monitor_cache_and_docker.py", 119),
         ("tests/unit/test_cluster_resources.py", 188),
         ("tests/unit/test_real_odoo_ci_components.py", 40),
@@ -133,6 +134,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_mutmut_results.py", 32),
         ("tests/unit/test_mutmut_results.py", 47),
         ("tests/unit/test_odcli_autonomous_skill.py", 178),
+        ("tests/unit/test_cli_surface.py", 63),
     }
 )
 
