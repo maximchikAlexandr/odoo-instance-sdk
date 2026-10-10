@@ -354,6 +354,16 @@ class DatabaseManagerUnavailableError(OdooInstanceSdkError):
     """Database manager endpoint unavailable or listing disabled."""
 
 
+class DatabaseReconciliationError(PlanError):
+    """A database observation is not safe to reconcile."""
+
+    code = "database_reconciliation"
+
+    def __init__(self, reason: str, message: str | None = None) -> None:
+        self.reason = reason
+        super().__init__(message or f"database reconciliation refused: {reason}")
+
+
 class RemoteDatabaseResolutionError(OdooInstanceSdkError):
     """Base for remote database name resolution failures.
 
