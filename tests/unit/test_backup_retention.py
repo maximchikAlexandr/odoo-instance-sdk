@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,23 @@ def test_retention_defaults_and_atomic_update_preserve_unrelated_toml(tmp_path: 
     assert "max_uncompressed_bytes = 42" in path.read_text()
     assert '[other]\nkeep = "yes"' in path.read_text()
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_retention_update_keeps_following_array_of_tables_outside_backup(tmp_path: Path) -> None:
+    path = tmp_path / "user.toml"
+    path.write_text('[backup]\nmax_uncompressed_bytes = 42\n\n[[profile]]\nname = "staging"\n')
+
+    assert write_retention_policy(
+        BackupRetentionPolicy(retention_days=7, auto_prune=True, path=str(path))
+    )
+
+    parsed = tomllib.loads(path.read_text())
+    assert parsed["backup"] == {
+        "max_uncompressed_bytes": 42,
+        "retention_days": 7,
+        "auto_prune": True,
+    }
+    assert parsed["profile"] == [{"name": "staging"}]
 
 
 @pytest.mark.parametrize(

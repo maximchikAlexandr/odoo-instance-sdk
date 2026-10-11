@@ -15,7 +15,7 @@ from odoo_instance_sdk.models import BackupRetentionPolicy
 
 _RETENTION_KEYS = ("retention_days", "auto_prune")
 _BACKUP_HEADER = re.compile(r"^\s*\[backup\]\s*(?:#.*)?$")
-_SECTION_HEADER = re.compile(r"^\s*\[[^\[].*\]\s*(?:#.*)?$")
+_SECTION_HEADER = re.compile(r"^\s*(?:\[\[.*\]\]|\[.*\])\s*(?:#.*)?$")
 _KEY_LINE = {key: re.compile(rf"^(\s*){key}(\s*=).*$") for key in _RETENTION_KEYS}
 
 

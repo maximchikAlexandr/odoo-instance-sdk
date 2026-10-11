@@ -28,10 +28,10 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     EnvironmentCheckoutOptions,
     _checkout_public_plan,
     _CheckoutPlan,
+    _CheckoutPlanningState,
     _CheckoutSnapshot,
-    _execution_plan,
-    _public_checkout_plan,
 )
+from odoo_instance_sdk.resources.environment.checkout_stages import normalize_checkout_projections
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -188,7 +188,7 @@ class _CheckoutApiMixin:
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
-    def adopt_command(
+    def adopt_command(  # noqa: C901
         self,
         project: ProjectConfig | Path,
         checkout_path: str | Path,
@@ -262,9 +262,28 @@ class _CheckoutApiMixin:
             adoption_input_fingerprint=fingerprint,
         )
         provenance, freshness, warnings = self._audit_checkout_plan(project_cfg, branch, options)
-        public = _public_checkout_plan(private, provenance, freshness, warnings)
-        execution = _execution_plan(private, provenance, freshness, warnings)
-        snapshot = _CheckoutSnapshot(private=private, public=public, execution_plan=execution)
+        normalized = normalize_checkout_projections(
+            _CheckoutPlanningState(
+                private=private,
+                provenance=provenance,
+                freshness=freshness,
+                warnings=warnings,
+            )
+        )
+        if normalized.error is not None:
+            raise normalized.error
+        normalized_state = normalized.state
+        if (
+            normalized_state is None
+            or normalized_state.public is None
+            or normalized_state.execution_plan is None
+        ):
+            raise ConfigError("adoption planning produced no checkout projections")
+        snapshot = _CheckoutSnapshot(
+            private=normalized_state.private,
+            public=normalized_state.public,
+            execution_plan=normalized_state.execution_plan,
+        )
         return self._command_from_snapshot(snapshot)
 
     def adopt(

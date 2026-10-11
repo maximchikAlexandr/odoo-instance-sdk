@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import uuid
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -13,6 +14,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
 )
+from odoo_instance_sdk.resources.environment.checkout_planning import _CheckoutSnapshot
 
 
 def test_adopt_command_captures_external_checkout_without_git_creation(
@@ -136,7 +138,7 @@ def _capture_adoption_command(  # noqa: C901
     *,
     restore_error: BaseException | None = None,
     name: str | None = None,
-) -> tuple[object, object, list[uuid.UUID]]:
+) -> tuple[object, dict[str, object], list[uuid.UUID]]:
     resource = env_client.environments  # type: ignore[attr-defined]
     original = type(resource)._command_from_snapshot
     captured: dict[str, object] = {}
@@ -223,7 +225,8 @@ def test_adoption_executes_copy_pipeline_without_taking_code_ownership(
 
     environment = command.run()  # type: ignore[attr-defined]
     plan = command._private_projection()  # type: ignore[attr-defined]
-    step_ids = tuple(step.step_id for step in captured["executor"].executed)  # type: ignore[index]
+    executor = cast("RecordingExecutor", captured["executor"])
+    step_ids = tuple(step.step_id for step in executor.executed)
     assert environment.state is EnvironmentState.READY
     assert environment.code_ownership.value == "caller_owned"
     assert environment.checkout_repository_root == str(checkout)
@@ -234,6 +237,25 @@ def test_adoption_executes_copy_pipeline_without_taking_code_ownership(
     assert {"checkout.validate.git.head", "checkout.validate.git.status"} <= set(step_ids)
     assert "secret" not in repr(plan)
     assert checkout.is_dir()
+
+
+def test_adoption_plan_publishes_captured_base_provenance(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
+    command, captured, _ = _capture_adoption_command(
+        env_client, project_manifest, checkout, fake_python, monkeypatch
+    )
+
+    public = command._private_projection()  # type: ignore[attr-defined]
+    snapshot = cast("_CheckoutSnapshot", captured["snapshot"])
+    assert public is not None
+    assert public.provenance.resolved_base_revision == snapshot.private.base_revision
+    assert snapshot.execution_plan is not None
 
 
 def test_matching_ready_adoption_retries_by_uuid_without_copying_again(

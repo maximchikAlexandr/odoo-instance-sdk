@@ -18,7 +18,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from importlib.metadata import entry_points
-from multiprocessing.connection import Connection
+from multiprocessing.connection import Connection, wait as wait_connections
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -234,7 +234,7 @@ def _collect_facts(
     return by_row
 
 
-def _collect_one_provider(
+def _collect_one_provider(  # noqa: C901
     provider: EnvironmentFactsProvider,
     rows: Sequence[CheckoutRow],
     *,
@@ -257,20 +257,39 @@ def _collect_one_provider(
     try:
         process.start()
     except Exception:
+        received.close()
         return {}
     finally:
         sender.close()
 
     try:
+        result: Mapping[str, EnvironmentFactsSummary] | None = None
+        while result is None and time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            ready = wait_connections((received, process.sentinel), timeout=remaining)
+            if received in ready:
+                try:
+                    status, payload = received.recv()
+                except (EOFError, OSError):
+                    break
+                if status == "ok" and isinstance(payload, Mapping):
+                    result = payload
+                break
+            if process.sentinel in ready:
+                if received.poll():
+                    try:
+                        status, payload = received.recv()
+                    except (EOFError, OSError):
+                        break
+                    if status == "ok" and isinstance(payload, Mapping):
+                        result = payload
+                break
+
         process.join(max(0.0, deadline - time.monotonic()))
         if process.is_alive():
             process.kill()
             process.join(0.2)
-        if received.poll():
-            status, result = received.recv()
-            if status == "ok" and isinstance(result, Mapping):
-                return result
-        return {}
+        return result or {}
     finally:
         received.close()
 
