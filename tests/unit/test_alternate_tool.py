@@ -72,10 +72,12 @@ class _StagedRunner:
         provenance_sha: str,
         *,
         stage_barrier: threading.Barrier | None = None,
+        uv_symlink: bool = False,
     ) -> None:
         self.interpreter = interpreter
         self.provenance_sha = provenance_sha
         self.stage_barrier = stage_barrier
+        self.uv_symlink = uv_symlink
         self.steps: list[str] = []
 
     def _stage(self, env: dict[str, str] | None) -> str:
@@ -84,8 +86,19 @@ class _StagedRunner:
         tool_bin = Path(env["UV_TOOL_BIN_DIR"])
         tool_bin.mkdir(mode=0o700, parents=True)
         binary = tool_bin / "odcli"
-        binary.write_text(f"#!{self.interpreter}\n", encoding="utf-8")
+        script_interpreter = self.interpreter
+        if self.uv_symlink:
+            package_bin = Path(env["UV_TOOL_DIR"]) / "odoo-instance-sdk" / "bin"
+            package_bin.mkdir(mode=0o700, parents=True)
+            interpreter = package_bin / "python"
+            interpreter.write_text('#!/bin/sh\nexec /usr/bin/env python3 "$@"\n', encoding="utf-8")
+            interpreter.chmod(0o700)
+            binary = package_bin / "odcli"
+            script_interpreter = interpreter
+        binary.write_text(f"#!{script_interpreter}\n", encoding="utf-8")
         binary.chmod(0o700)
+        if self.uv_symlink:
+            (tool_bin / "odcli").symlink_to(binary)
         if self.stage_barrier is not None:
             self.stage_barrier.wait(timeout=5)
         return ""
@@ -250,6 +263,28 @@ def test_install_uses_one_staged_provenance_probe_and_preserves_numbered_state(
         "alternate-provenance",
         "alternate-selector-probe",
     ]
+
+
+def test_install_materializes_uv_tool_bin_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = _StagedRunner(interpreter, "c" * 40, uv_symlink=True)
+    monkeypatch.setattr(alternate_tool, "run_captured", runner)
+
+    manifest = alternate_tool.install_alternate_tool(numbered, "c" * 40)
+
+    assert manifest.sha == "c" * 40
+    assert numbered.executable.is_file()
+    assert not numbered.executable.is_symlink()
+    expected_interpreter = numbered.tool_root / "odoo-instance-sdk" / "bin" / "python"
+    assert numbered.executable.read_text(encoding="utf-8").splitlines()[0] == (
+        f"#!{expected_interpreter}"
+    )
+    assert expected_interpreter.is_file()
+    assert inspect_alternate_tool(numbered)["healthy"] is True
 
 
 def test_hotfix_install_uses_the_shared_provenance_and_probe_lifecycle(

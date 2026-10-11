@@ -248,6 +248,50 @@ def _interpreter(executable: Path) -> Path:
     return interpreter
 
 
+def _materialize_staged_executable(executable: Path, stage_tool: Path) -> None:
+    """Accept uv's contained bin symlink, then publish a stable file."""
+    if executable.is_symlink():
+        try:
+            target = executable.resolve(strict=True)
+            tool_root = stage_tool.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AlternateToolError("installed odcli executable has an invalid uv target") from exc
+        if not target.is_file() or not target.is_relative_to(tool_root):
+            raise AlternateToolError("installed odcli executable escapes the staged tool")
+        try:
+            executable.unlink()
+            shutil.copy2(target, executable)
+        except OSError as exc:
+            raise AlternateToolError("cannot materialize the installed odcli executable") from exc
+    if not executable.is_file() or executable.is_symlink():
+        raise AlternateToolError("uv completed without publishing an odcli executable")
+
+
+def _relocate_staged_interpreter(
+    executable: Path,
+    interpreter: Path,
+    stage_tool: Path,
+    published_tool: Path,
+) -> None:
+    """Keep uv's absolute console-script interpreter valid after the atomic move."""
+    try:
+        stage_root = stage_tool.absolute()
+        staged_interpreter = interpreter.absolute()
+        relative_interpreter = staged_interpreter.relative_to(stage_root)
+    except ValueError:
+        return
+    if not staged_interpreter.is_file():
+        raise AlternateToolError("installed odcli executable has an invalid interpreter")
+    try:
+        lines = executable.read_text(encoding="utf-8").splitlines(keepends=True)
+        if not lines or not lines[0].startswith("#!"):
+            raise AlternateToolError("installed odcli executable has no interpreter line")
+        lines[0] = f"#!{published_tool / relative_interpreter}\n"
+        executable.write_text("".join(lines), encoding="utf-8")
+    except OSError as exc:
+        raise AlternateToolError("cannot relocate the installed odcli interpreter") from exc
+
+
 def _provenance(interpreter: Path, env: Mapping[str, str]) -> dict[str, str]:
     code = (
         "import importlib.metadata,json; "
@@ -676,13 +720,18 @@ def install_alternate_tool(  # noqa: C901
             step_id="alternate-tool-install",
         )
         executable = stage_bin / "odcli"
-        if not executable.is_file() or executable.is_symlink():
-            raise AlternateToolError("uv completed without publishing an odcli executable")
+        _materialize_staged_executable(executable, stage_tool)
         interpreter = _interpreter(executable)
         provenance = _provenance(interpreter, environment)
         if provenance != {"repository": REPOSITORY_URL, "sha": sha}:
             raise AlternateToolError("installed package provenance does not match requested SHA")
         _probe(identity_value, interpreter, environment)
+        _relocate_staged_interpreter(
+            executable,
+            interpreter,
+            stage_tool,
+            identity_value.tool_root,
+        )
         shim = render_launcher(
             AlternateManifest(
                 identity_value,
