@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Alternate launchers reject direct self-update
-The update SDK primitive and CLI adapter SHALL detect numbered and hot-fix contexts before check, dry-run, maintenance, recovery, or mutation planning. A numbered context SHALL direct the operator to the checked-in service/skill workflow for exact-SHA replacement; it SHALL NOT mention or require a public `odcli slot` command. A hot-fix context SHALL direct the agent to skill-managed canonical update/reconciliation and SHALL NOT offer revision replacement. Rejection SHALL NOT acquire update locks, resolve refs, snapshot metadata, run uv, execute migrations, or change any installation, checkout, or state root.
+The update SDK primitive and CLI adapter SHALL detect numbered and hot-fix contexts before check, dry-run, maintenance, recovery, or mutation planning. A numbered context SHALL direct the operator to the developer-only skill and repository-owned private service workflow for exact-SHA replacement; it SHALL NOT direct the ordinary user skill, mention, or require a public `odcli slot` command. A hot-fix context SHALL direct the agent to skill-managed canonical update/reconciliation and SHALL NOT offer revision replacement. Rejection SHALL NOT acquire update locks, resolve refs, snapshot metadata, run uv, execute migrations, or change any installation, checkout, or state root.
 
 #### Scenario: Numbered update is rejected
 - **WHEN** `odcli-N update` is invoked with any supported update arguments

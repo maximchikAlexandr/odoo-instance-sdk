@@ -12,15 +12,30 @@ Numbered and hot-fix launchers SHALL use one package-owned implementation for de
 - **THEN** they fail if any second uv installer, provenance verifier, capability probe, launcher renderer, lifecycle-lock implementation, or alternate-tool cleanup algorithm exists outside the shared module
 
 ### Requirement: Numbered management is private service tooling
-The public `odcli` Click tree and package console scripts SHALL NOT expose install, list, replace, remove, or allocation commands for numbered installations. A checked-in service/skill wrapper SHALL resolve the trusted canonical interpreter and invoke one private package coordinator. The coordinator SHALL require a full lowercase 40-character SDK SHA and SHALL return bounded machine-readable identity evidence without printing secrets.
+The public `odcli` Click tree and package console scripts SHALL NOT expose install, list, replace, remove, or allocation commands for numbered installations. An instruction-only developer skill SHALL invoke a repository-owned service wrapper outside `.agents/skills/**`; that wrapper SHALL resolve the trusted canonical interpreter and invoke one private package coordinator. The user-agent OdCLI skill SHALL NOT describe or invoke numbered management. The coordinator SHALL require a full lowercase 40-character SDK SHA and SHALL return bounded machine-readable identity evidence without printing secrets.
 
 #### Scenario: Public help has no slot manager
 - **WHEN** an operator inspects root and nested public CLI help
 - **THEN** no `slot` group or numbered lifecycle management leaf is present
 
 #### Scenario: Service wrapper invokes the trusted package
-- **WHEN** the checked-in wrapper creates, lists, inspects, or removes a numbered installation
+- **WHEN** an OdCLI developer follows the developer skill to create, list, inspect, or remove a numbered installation
 - **THEN** it validates canonical executable provenance before invoking the private package coordinator and emits one bounded result
+
+#### Scenario: User skill does not expose developer management
+- **WHEN** an agent loads the ordinary OdCLI user skill
+- **THEN** it receives no numbered-management workflow or executable entrypoint and is directed only through supported user and hot-fix operations
+
+### Requirement: Skill executable code has one repository owner
+The user and developer skill directories SHALL contain no Python executable helper, copied lifecycle implementation, or forwarding script. Every executable helper referenced by either skill SHALL live under the canonical repository-owned `scripts/odcli_agent_tools/` path, and references, tests, architecture inventories and documentation SHALL resolve to that path. Moving helpers SHALL preserve their trusted-interpreter, provenance, bounded-output and failure contracts.
+
+#### Scenario: Skill directories are instruction only
+- **WHEN** architecture checks inventory `.agents/skills/**`
+- **THEN** no Python executable exists there and both skills reference only canonical repository-owned helper paths
+
+#### Scenario: Relocated helpers preserve behavior
+- **WHEN** review, hot-fix and numbered helper tests invoke their new paths
+- **THEN** the same validated operations, redaction, exit status and failure behavior are observed without a duplicate or compatibility forwarding copy
 
 ### Requirement: Allocation uses the smallest wholly free positive number
 The private coordinator SHALL hold one global allocation lock while scanning positive canonical decimal identities from `1`. It SHALL select the first number for which the launcher, selected state root, manager/reservation path, and configured linked checkout are all absent. Any symlink, partial path, invalid marker, legacy manifest, or lone artifact in any dimension SHALL mark that number occupied and SHALL NOT be adopted, repaired, overwritten, or deleted.

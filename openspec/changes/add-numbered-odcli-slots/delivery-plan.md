@@ -1,4 +1,40 @@
-## Delivery Contract
+## Current Delivery Contract — skill separation revision
+
+- Task key: `MYL-445`.
+- OpenSpec change: `add-numbered-odcli-slots`.
+- Product merge base: `origin/main` at `4a9369c3cab0f9a34bf3d3b2411f3ec0ac5bf5e6`.
+- Planning revision base: PR #140 exact head `e0c6ab5e13cd5d88ca30d45911138e07e90f2778`; this revision changes planning artifacts only.
+- SDK implementation branch: `feat/MYL-445-numbered-odcli-slots`.
+- Delivery mode: `single_wp_no_dag`.
+- Estimate source: confirmed read-back properties `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours` on root planning issue `MYL-445`; numeric totals are intentionally not duplicated here.
+- Estimate basis: remaining active developer effort from the exact planning base to the revised acceptance criteria for one experienced developer familiar with Python, repository skills, private SDK tooling and pytest, without AI acceleration. Tests were not run for estimation; unattended CI, approvals, meetings and external waiting are excluded.
+- Confidence: high for scope and medium for duration. The private lifecycle already exists and the revision is constrained to instruction ownership, executable relocation, stale-reference removal and regression evidence; uncertainty is concentrated in path-sensitive tests and review repair.
+- Calibration: evidence-based and uncalibrated; no comparable historical actuals were available.
+- Topology rule: the authoritative estimate is within the single-package threshold, so exactly one all-covering work package owns all remaining OpenSpec tasks. Historical work packages below are evidence only and SHALL NOT be materialized, resumed, or counted toward this revision.
+
+## WP-MYL-445-R3-01 — Separate skill ownership and relocate executable tooling
+
+- **Tasks:** `5.1`, `5.2`, `5.3`, `5.4`, `6.1`, `6.2`, `6.3`.
+- **Standalone deliverable:** one SDK exact revision where the ordinary user skill and developer-only skill have distinct instruction contracts, every referenced Python helper has one repository-owned path outside `.agents/skills/**`, the obsolete fix registry has no narrative or support, numbered management remains private, and the established lifecycle behavior is regression-proven.
+- **Owned responsibility scope:** `.agents/skills/odcli-autonomous-work/**`, new `.agents/skills/odcli-developer-work/SKILL.md`, canonical `scripts/odcli_agent_tools/**`, self-update remediation text, README/execution-boundary docs, helper/skill/architecture/packaging tests, fixtures and directly related snapshots. Existing private lifecycle modules change only if a focused test proves a stale path or message owned by this revision; lifecycle algorithms and GitLab business configuration remain unchanged.
+- **Contract surface:** user skill exposes ordinary use, triage and reviewed hot-fix unblocking only; developer skill exposes private numbered management instructions only; no Python executable exists under a skill directory; canonical helper paths preserve trusted interpreter/provenance, redaction, bounded output and failure behavior; no `~/.odcli/fix-tools` discovery, adoption, migration, cleanup or prose; no public `odcli slot`, Click registration or console script.
+- **DoD / evidence:** inventories reject Python files below `.agents/skills/**`, stale helper paths, numbered instructions in the user skill, fix-registry references, duplicated/forwarding helpers and public numbered management; focused user/developer skill and helper tests pass; numbered/hot-fix/root/update behavior and GitLab wrapper contract remain green; repository and strict OpenSpec gates pass; exact revision receives independent verification and new human approval.
+- **Parallel safety:** this is the sole current work package and owns the complete remaining scope, so no sibling write-zone or contract race exists.
+
+## Current Task Coverage Audit
+
+All remaining tasks are covered exactly once by `WP-MYL-445-R3-01`: `5.1`, `5.2`, `5.3`, `5.4`, `6.1`, `6.2`, `6.3`. Checked tasks `1.1`–`4.5` and their WP records belong only to the superseded graph revision and do not satisfy this revision.
+
+## Current Estimation Evidence and Assumptions
+
+- Inspected exact SDK snapshot: `e0c6ab5e13cd5d88ca30d45911138e07e90f2778`, including the three Python helpers below `.agents/skills/odcli-autonomous-work/scripts/`, user-skill numbered instructions, self-update/docs references, and the package-private coordinator/lifecycle tests.
+- Reusable work counted once: alternate lifecycle, numbered coordinator, frozen plans, root confinement, environment adoption/removal, public-slot deletion and GitLab wrapper are already implemented and are not redesigned.
+- Estimate covers helper relocation, one new instruction skill, user-skill narrowing, stale narrative/path removal, test and inventory updates, documentation, repository gates and likely bounded review repair.
+- Estimate invalidates if scope expands to a public numbered API, a new lifecycle algorithm, migration or cleanup of historical registry data, GitLab business-policy redesign, arbitrary repositories, Windows support, or package distribution of the repository-only helper entrypoints.
+
+## Historical Delivery Contract — graph revision `7e05b4033358de7b112b3c74fde2da70e4a74848` (preserved)
+
+The material below is retained as immutable historical WP/result evidence. It is not the current delivery contract and SHALL NOT be materialized or used for current task coverage.
 
 - Task key: `MYL-445`.
 - OpenSpec change: `add-numbered-odcli-slots`.
