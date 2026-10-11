@@ -37,7 +37,6 @@ from odoo_instance_sdk.internal.checkout_cleanup import (
     DELETION_ROOT,
     BoundCleanupError,
     _CreateCommandPlan as CreateCommandPlan,
-    _CreateOptions,
     _RemoveCommandPlan as RemoveCommandPlan,
     quarantine_directory as _quarantine_checkout,
     read_recovery_reservation,
@@ -544,7 +543,10 @@ def _sha256(path: Path) -> str:
 
 
 def _reservation(
-    identity_value: AlternateIdentity, checkout: Path, options: _CreateOptions
+    identity_value: AlternateIdentity,
+    checkout: Path,
+    reference_sha: str,
+    sdk_sha: str,
 ) -> Path:
     path = identity_value.manager_root / RESERVATION_NAME
     _write_json(
@@ -554,8 +556,8 @@ def _reservation(
             "kind": "numbered",
             "identifier": identity_value.identifier,
             "checkout": str(checkout),
-            "reference_sha": options.reference_sha,
-            "sdk_sha": options.sdk_sha,
+            "reference_sha": reference_sha,
+            "sdk_sha": sdk_sha,
         },
     )
     return path
@@ -607,12 +609,22 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
     reference = reference.resolve()
     checkout_parent = checkout_parent.resolve()
     repository = _safe_source(reference, options.reference_sha, options.source_repository)
-    plan = _CreateCommandPlan(options, home, reference, checkout_parent, repository)
+    plan = _CreateCommandPlan.from_options(
+        client=options.client,
+        project=options.project,
+        environment_options=options.environment_options,
+        home=home,
+        reference=reference,
+        checkout_parent=checkout_parent,
+        repository=repository,
+        reference_sha=options.reference_sha,
+        sdk_sha=options.sdk_sha,
+    )
     with allocation_lock(plan.home):
         number, checkout = _next_number(plan.home, plan.checkout_parent)
         identity_value = AlternateIdentity("numbered", number, plan.home)
         identity_value.manager_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-        reservation = _reservation(identity_value, checkout, plan.options)
+        reservation = _reservation(identity_value, checkout, plan.reference_sha, plan.sdk_sha)
         marker: Path | None = None
         checkout_identity: _CheckoutIdentity | None = None
         environment: DevelopmentEnvironment | None = None
@@ -625,15 +637,15 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 checkout,
                 number=number,
                 repository=plan.repository,
-                sha=plan.options.reference_sha,
+                sha=plan.reference_sha,
             )
             checkout_identity = _checkout_identity(checkout)
-            install_alternate_tool(identity_value, plan.options.sdk_sha)
+            install_alternate_tool(identity_value, plan.sdk_sha)
             installed = True
-            environment = plan.options.client.environments.adopt(
-                plan.options.project,
+            environment = plan.client.environments.adopt(
+                plan.project,
                 checkout,
-                options=plan.options.environment_options,
+                options=plan.environment_options(),
             )
             environment_root = Path(environment.python_environment_path)
             recovery_interpreter = (
@@ -649,11 +661,11 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                     number,
                     checkout,
                     plan.repository,
-                    plan.options.reference_sha,
-                    plan.options.sdk_sha,
+                    plan.reference_sha,
+                    plan.sdk_sha,
                     environment,
                     recovery_interpreter,
-                    plan.options.environment_options.hash_lock_sha256 or "",
+                    plan.environment_hash_lock_sha256,
                 ),
             )
             if environment.state is not EnvironmentState.READY:
@@ -675,10 +687,7 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 raise AgentCheckoutError(  # noqa: TRY301
                     "adopted environment dependency lock is missing or unsafe"
                 )
-            if (
-                _sha256(Path(environment.dependency_lock_path))
-                != options.environment_options.hash_lock_sha256
-            ):
+            if _sha256(Path(environment.dependency_lock_path)) != plan.environment_hash_lock_sha256:
                 raise AgentCheckoutError(  # noqa: TRY301
                     "adopted environment dependency lock digest drifted"
                 )
@@ -686,18 +695,18 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 identity_value,
                 checkout_path=str(checkout),
                 checkout_repository=plan.repository,
-                checkout_sha=plan.options.reference_sha,
+                checkout_sha=plan.reference_sha,
                 environment_id=str(environment.id),
                 environment_path=environment.python_environment_path,
                 environment_lock=environment.dependency_lock_path,
                 interpreter_path=str(interpreter),
-                hash_lock_sha256=plan.options.environment_options.hash_lock_sha256 or "",
+                hash_lock_sha256=plan.environment_hash_lock_sha256,
             )
             reservation.unlink(missing_ok=True)
             return NumberedInstallation(identity_value, manifest, environment, marker)
         except BaseException:
             if environment is not None:
-                plan.options.client.environments.remove(environment)
+                plan.client.environments.remove(environment)
             if installed:
                 with contextlib.suppress(BaseException):
                     remove_alternate_tool(identity_value)
@@ -880,47 +889,48 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
     with allocation_lock(home_path), lifecycle_lock(identity_value, exclusive=True):
         manifest = read_alternate_manifest(identity_value)
         assert manifest is not None
-        plan = _RemoveCommandPlan(home_path, number, identity_value, checkout_parent, manifest)
-        manifest = plan.manifest
-        fields = (
-            manifest.checkout_path,
-            manifest.checkout_repository,
-            manifest.checkout_sha,
-            manifest.environment_id,
-            manifest.environment_path,
-            manifest.environment_lock,
-            manifest.interpreter_path,
-            manifest.hash_lock_sha256,
+        plan = _RemoveCommandPlan(
+            client, home_path, number, identity_value, checkout_parent, manifest
         )
-        reservation = identity_value.manager_root / RESERVATION_NAME
+        fields = (
+            plan.manifest.checkout_path,
+            plan.manifest.checkout_repository,
+            plan.manifest.checkout_sha,
+            plan.manifest.environment_id,
+            plan.manifest.environment_path,
+            plan.manifest.environment_lock,
+            plan.manifest.interpreter_path,
+            plan.manifest.hash_lock_sha256,
+        )
+        reservation = plan.identity.manager_root / RESERVATION_NAME
         if _lexists(reservation):
             _remove_reserved_installation(
-                number,
-                identity_value,
+                plan.number,
+                plan.identity,
                 reservation,
-                client=client,
-                checkout_parent=checkout_parent,
+                client=plan.client,
+                checkout_parent=plan.checkout_parent,
             )
             return
         if not all(fields):
             raise AgentCheckoutError("numbered manifest has incomplete checkout linkage")
-        checkout = Path(manifest.checkout_path or "").expanduser()
+        checkout = Path(plan.manifest.checkout_path or "").expanduser()
         if not checkout.is_absolute():
             raise AgentCheckoutError("linked checkout path must be absolute")
         _validate_checkout(
             checkout,
-            number=number,
-            repository=manifest.checkout_repository or "",
-            sha=manifest.checkout_sha or "",
+            number=plan.number,
+            repository=plan.manifest.checkout_repository or "",
+            sha=plan.manifest.checkout_sha or "",
             require_pushed=True,
-            checkout_parent=checkout_parent,
+            checkout_parent=plan.checkout_parent,
         )
         checkout_identity = _checkout_identity(checkout)
-        environment_id = manifest.environment_id
-        environment_path = manifest.environment_path
+        environment_id = plan.manifest.environment_id
+        environment_path = plan.manifest.environment_path
         if environment_id is None or environment_path is None:
             raise AgentCheckoutError("numbered manifest has incomplete environment identity")
-        environment = client.environments.get(environment_id)
+        environment = plan.client.environments.get(environment_id)
         if str(environment.id) != environment_id:
             raise AgentCheckoutError("environment identity does not match numbered manifest")
         checkout = checkout.resolve()
@@ -929,19 +939,19 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
         if Path(environment.python_environment_path).resolve() != Path(environment_path).resolve():
             raise AgentCheckoutError("environment Python linkage drifted")
         old_root = os.environ.get(USER_ROOT_ENV)
-        os.environ[USER_ROOT_ENV] = str(identity_value.state_root)
+        os.environ[USER_ROOT_ENV] = str(plan.identity.state_root)
         try:
             if str(environment.state) != EnvironmentState.REMOVED.value:
-                client.environments.remove(environment)
+                plan.client.environments.remove(environment)
             recovery_payload = _recovery_payload(
-                number,
+                plan.number,
                 checkout,
-                manifest.checkout_repository or "",
-                manifest.checkout_sha or "",
-                manifest.sha,
+                plan.manifest.checkout_repository or "",
+                plan.manifest.checkout_sha or "",
+                plan.manifest.sha,
                 environment,
-                Path(manifest.interpreter_path or "").resolve(),
-                manifest.hash_lock_sha256 or "",
+                Path(plan.manifest.interpreter_path or "").resolve(),
+                plan.manifest.hash_lock_sha256 or "",
             )
             _write_json(reservation, recovery_payload)
             if (
@@ -952,11 +962,11 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
                 raise AgentCheckoutError("linked checkout became unsafe before deletion")
             _validate_checkout(
                 checkout,
-                number=number,
-                repository=manifest.checkout_repository or "",
-                sha=manifest.checkout_sha or "",
+                number=plan.number,
+                repository=plan.manifest.checkout_repository or "",
+                sha=plan.manifest.checkout_sha or "",
                 require_pushed=True,
-                checkout_parent=checkout_parent,
+                checkout_parent=plan.checkout_parent,
             )
             current_identity = _checkout_identity(checkout)
             if current_identity != checkout_identity:
@@ -970,7 +980,7 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
                 recovery_payload=recovery_payload,
             )
             reservation.unlink(missing_ok=True)
-            remove_alternate_tool(identity_value, _locked=True)
+            remove_alternate_tool(plan.identity, _locked=True)
         finally:
             if old_root is None:
                 os.environ.pop(USER_ROOT_ENV, None)

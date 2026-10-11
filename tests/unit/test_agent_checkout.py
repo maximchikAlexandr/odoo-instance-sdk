@@ -5,9 +5,9 @@ import json
 import os
 import subprocess
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -342,6 +342,24 @@ def test_create_adopts_and_publishes_fixed_linkage(
     client = SimpleNamespace(environments=SimpleNamespace(adopt=adopt))
     _fake_install(monkeypatch)
     _fake_clone(monkeypatch)
+    real_plan = agent_checkout._CreateCommandPlan
+
+    def altered_plan(**kwargs: object) -> agent_checkout._CreateCommandPlan:
+        plan = cast("Callable[..., agent_checkout._CreateCommandPlan]", real_plan.from_options)(
+            **kwargs
+        )
+        return replace(
+            plan,
+            sdk_sha="c" * 40,
+            environment_hash_lock_sha256="d" * 64,
+        )
+
+    monkeypatch.setattr(
+        agent_checkout,
+        "_CreateCommandPlan",
+        SimpleNamespace(from_options=altered_plan),
+    )
+    monkeypatch.setattr(agent_checkout, "_sha256", lambda _path: "d" * 64)
 
     result = create_numbered_installation(_numbered_options(tmp_path, reference, sha, client))
 
@@ -350,6 +368,8 @@ def test_create_adopts_and_publishes_fixed_linkage(
     manifest = read_alternate_manifest(result.identity)
     assert manifest is not None
     assert manifest.checkout_path == str(tmp_path / "checkouts" / "odcli-1")
+    assert manifest.sha == "c" * 40
+    assert manifest.hash_lock_sha256 == "d" * 64
     assert manifest.environment_id == str(environment.id)
     assert not (result.identity.manager_root / "reservation.json").exists()
 
@@ -522,9 +542,25 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
         environment_remove_order.append(checkout.exists())
         environment.state = EnvironmentState.REMOVED.value
 
+    def unexpected_get(_id: object) -> object:
+        pytest.fail("remove execution used the pre-plan client")
+
+    def unexpected_remove(_environment: object) -> None:
+        pytest.fail("remove execution used the pre-plan client")
+
     client = SimpleNamespace(
+        environments=SimpleNamespace(get=unexpected_get, remove=unexpected_remove)
+    )
+    plan_client = SimpleNamespace(
         environments=SimpleNamespace(get=lambda _id: environment, remove=remove)
     )
+    real_plan = agent_checkout._RemoveCommandPlan
+
+    def altered_plan(*args: object, **kwargs: object) -> agent_checkout._RemoveCommandPlan:
+        plan = cast("Callable[..., agent_checkout._RemoveCommandPlan]", real_plan)(*args, **kwargs)
+        return replace(plan, client=cast("OdooClient", plan_client))
+
+    monkeypatch.setattr(agent_checkout, "_RemoveCommandPlan", altered_plan)
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
     real_rmdir = os.rmdir
     delete_failures = 1
@@ -563,11 +599,28 @@ def test_private_command_plans_are_frozen_and_redacted(tmp_path: Path) -> None:
     reference, sha = _reference_repo(tmp_path)
     options = _numbered_options(tmp_path, reference, sha, object())
     plan = agent_checkout._CreateCommandPlan(
-        options,
-        tmp_path,
+        options.client,
+        options.project,
+        options.home or tmp_path,
         reference,
         tmp_path / "checkouts",
         str(reference),
+        sha,
+        options.sdk_sha,
+        options.environment_options.base_ref,
+        options.environment_options.name,
+        options.environment_options.config_path,
+        options.environment_options.db_mode,
+        options.environment_options.source_database,
+        options.environment_options.target_database,
+        options.environment_options.odoo_bin,
+        options.environment_options.python,
+        options.environment_options.create_venv,
+        options.environment_options.http_port,
+        options.environment_options.hash_lock,
+        options.environment_options.hash_lock_sha256 or "",
+        options.environment_options.remote_name,
+        options.environment_options.backup_id,
     )
 
     assert plan.redacted() == {
@@ -589,7 +642,7 @@ def test_private_command_plans_are_frozen_and_redacted(tmp_path: Path) -> None:
         "",
     )
     remove_plan = agent_checkout._RemoveCommandPlan(
-        tmp_path, "1", manifest.identity, None, manifest
+        options.client, tmp_path, "1", manifest.identity, None, manifest
     )
     assert "client" not in remove_plan.redacted()
     assert "options" not in remove_plan.redacted()
