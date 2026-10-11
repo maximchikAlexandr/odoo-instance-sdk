@@ -34,25 +34,25 @@ The private coordinator SHALL hold one global allocation lock while scanning pos
 - **THEN** their completed installations have distinct numbers and neither observes a partially published identity as free
 
 ### Requirement: Numbered tool, checkout, and Python environment are one linked identity
-For number `N`, the coordinator SHALL bind launcher `odcli-N`, selected root `<real-home>/.odcli-N`, manager metadata, checkout `<configured-checkout-parent>/odcli-N`, and exactly one SDK-owned Python environment created through the existing environment lifecycle. The fixed numbered manifest SHALL record the verified checkout path, source repository/SHA, environment identity/path, audited dependency-lock digest, and resolved interpreter path; hot-fix manifests SHALL NOT contain checkout or numbered-environment fields. Real `HOME` and Git, SSH, uv, and unrelated user configuration SHALL remain unchanged.
+For number `N`, the coordinator SHALL bind launcher `odcli-N`, selected root `<real-home>/.odcli-N`, manager metadata, checkout `<configured-checkout-parent>/odcli-N`, and exactly one caller-owned-checkout environment returned by the existing SDK adoption lifecycle. The fixed numbered manifest SHALL record the verified checkout path, source repository/SHA, environment identity/path, audited dependency-lock digest, and resolved interpreter path; hot-fix manifests SHALL NOT contain checkout or numbered-environment fields. Real `HOME` and Git, SSH, uv, and unrelated user configuration SHALL remain unchanged.
 
 #### Scenario: Fresh numbered identity is published
 - **WHEN** a valid exact SDK SHA is created with a clean configured reference checkout and all required external inputs
-- **THEN** the coordinator clones and configures `odcli-N`, creates and verifies its distinct hash-locked SDK-owned Python environment, verifies checkout and tool provenance, publishes one linked manifest/launcher, and leaves every canonical or neighboring identity unchanged
+- **THEN** the coordinator clones `odcli-N`, passes it to existing environment `adopt_command()`/`adopt()` for config/port/COPY DB/catalogue/owned-venv creation, verifies the returned environment plus checkout/tool provenance, publishes one linked manifest/launcher, and leaves every canonical or neighboring identity unchanged
 
 #### Scenario: Tool provenance fails after checkout staging
 - **WHEN** the staged SDK tool does not match the requested repository and SHA
-- **THEN** no launcher or ready manifest is published and cleanup removes only checkout/tool artifacts proven to belong to that reservation
+- **THEN** no launcher or ready manifest is published; if adoption already returned ready, existing environment `remove()` cleans that environment once before the coordinator deletes only checkout/tool artifacts proven to belong to the reservation, while any cleanup failure retains linkage for retry
 
-### Requirement: Checkout mechanics are bounded and configuration-owned
-The SDK private coordinator SHALL implement only the inspected reusable mechanics: clean reference/origin verification, local no-hardlink clone, origin rewrite, bounded loopback-port selection, deterministic database/path derivation, private configuration copy, exact bounded rewrites, marker/hash creation, restore, inspection, dirty/unpushed/runtime checks, database drop, and contained deletion. It SHALL compose, not duplicate, the existing SDK-owned environment create/hash-lock/verification/cleanup path. All reference paths, backup, port bounds, database prefix, expected PostgreSQL endpoint, base Python, audited dependency-lock path/digest, Odoo bin path, and private configuration sources SHALL be supplied and owned by the GitLab wrapper. Secrets SHALL NOT be printed, returned, stored in the numbered manifest, or committed.
+### Requirement: Checkout coordination delegates the environment lifecycle
+The SDK private coordinator SHALL implement only global numbered allocation/reservation, clean reference/origin verification, local no-hardlink clone, origin rewrite, fixed marker/hash creation, external-checkout inspection, manifest linkage, and contained checkout deletion after environment cleanup. It SHALL pass the caller-owned checkout and GitLab-owned `ProjectConfig`/`EnvironmentCheckoutOptions` inputs to existing environment `adopt_command()`/`adopt()` for generated config, port, COPY database/backup restore, catalogue, owned venv, verification and recovery. It SHALL call existing environment `remove()` exactly once for DB/backup/config/lock/venv cleanup before deleting the external checkout. It SHALL NOT implement or copy config rewrite, port allocation, restore, DB drop, catalogue mutation, venv, or environment-cleanup mechanics. If a required option is proven unavailable, only the smallest typed extension of the existing environment API with a focused test is permitted. Secrets SHALL NOT be printed, returned, stored in the numbered manifest, or committed.
 
 #### Scenario: GitLab wrapper supplies concrete policy
 - **WHEN** the Binta wrapper invokes create
-- **THEN** it supplies every required environment value, the SDK coordinator validates them before mutation, and no Binta path, backup, port range, database name, or secret is guessed by an SDK default
+- **THEN** it supplies every required existing-API input, adoption validates and applies them, and no Binta path, source, database name, interpreter, lock or secret is guessed by the coordinator
 
 #### Scenario: Unsupported configuration fails closed
-- **WHEN** a required path, port bound, database prefix, source hash, PostgreSQL endpoint, base Python, dependency lock/digest, or private configuration input is missing or inconsistent
+- **WHEN** a required project/reference path, explicit base/source/COPY target, requested port, PostgreSQL endpoint, base Python, dependency lock/digest, Odoo bin, or private configuration input is missing or inconsistent
 - **THEN** creation fails before publishing a numbered identity and preserves foreign/reference data
 
 #### Scenario: A numbered checkout cannot use a shared Python environment
@@ -60,11 +60,11 @@ The SDK private coordinator SHALL implement only the inspected reusable mechanic
 - **THEN** creation fails before runtime or publication instead of adopting or writing to that environment
 
 ### Requirement: Numbered cleanup is selective and fail closed
-Removal SHALL take the global allocation lock and the selected lifecycle lock, re-read the manifest and checkout marker after locking, and reject symlinks, path escape, dirty/unpushed checkout work, running launcher or Odoo runtime, configuration/hash drift, dependency-lock drift, environment/interpreter mismatch, database mismatch, or foreign ownership. After all preconditions pass, it SHALL use the existing SDK environment cleanup to delete only the recorded owned venv, drop only the recorded disposable database, delete only the linked checkout, and delegate launcher/tool/state removal to the shared lifecycle. It SHALL preserve every other Python environment, the reference checkout, read-only Odoo source, source backup, persistent and neighboring databases/filestores, shared PostgreSQL, canonical root, and all neighboring numbered/hot-fix identities.
+Removal SHALL take the global allocation lock and selected lifecycle lock, re-read manifest/marker/linkage, and reject symlink/path escape, dirty or unpushed external checkout, origin/marker mismatch, running launcher, or foreign ownership before mutation. It SHALL then invoke existing environment `remove()` for the recorded environment; that path SHALL own runtime/config/lock/interpreter/database evidence and DB/backup/config/lock/venv cleanup while preserving the caller-owned checkout. Only after successful environment removal SHALL the coordinator delete the marked checkout and delegate launcher/tool/state removal to the shared lifecycle. It SHALL NOT independently drop a database or delete generated config, dependency lock, venv, backup, filestore, or catalogue data. A failed environment removal or checkout deletion SHALL retain linkage for bounded retry and preserve every neighbor/reference/persistent asset.
 
 #### Scenario: One clean numbered identity is removed
 - **WHEN** two numbered identities exist and one idle identity has a clean pushed checkout with matching markers/configuration
-- **THEN** only its owned Python environment, database, checkout, launcher, tool, manager metadata, lock, and selected root are removed
+- **THEN** existing environment removal deletes only its recorded DB/backup/config/lock/owned venv, then the coordinator deletes only its marked checkout, and the shared alternate lifecycle removes only its launcher/tool/manager/selected root
 
 #### Scenario: Dirty checkout blocks removal
 - **WHEN** the selected linked checkout has an uncommitted file or unpushed commit
