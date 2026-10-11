@@ -575,7 +575,14 @@ def _adopted_copy_ownership_evidence(  # noqa: C901 -- bounded external adopted-
         for step_id in (volume_step_id, container_step_id):
             if step_id is not None and context.planned(step_id) and not context.consumed(step_id):
                 context.skip(step_id)
-    if claim.environment_id == "" or claim.database != database:
+    if (
+        claim.environment_id == ""
+        or claim.database != database
+        or not claim.project_id
+        or not claim.checkout_repository_root
+        or not claim.checkout_git_common_dir
+        or not claim.adoption_input_fingerprint
+    ):
         raise ConfigError("adopted COPY database drop claim does not match target")
     from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
 
@@ -592,16 +599,18 @@ def _adopted_copy_ownership_evidence(  # noqa: C901 -- bounded external adopted-
     if (
         row is None
         or row["code_ownership"] != "caller_owned"
-        or not isinstance(row["project_id"], str)
-        or not row["project_id"]
-        or not isinstance(row["checkout_repository_root"], str)
-        or not row["checkout_repository_root"]
-        or not isinstance(row["checkout_git_common_dir"], str)
-        or not row["checkout_git_common_dir"]
-        or not isinstance(row["adoption_input_fingerprint"], str)
-        or not row["adoption_input_fingerprint"]
+        or row["project_id"] != claim.project_id
+        or row["checkout_repository_root"] != claim.checkout_repository_root
+        or row["checkout_git_common_dir"] != claim.checkout_git_common_dir
+        or row["adoption_input_fingerprint"] != claim.adoption_input_fingerprint
+        or row["checkout_repository_root"] != row["worktree_path"]
+        or row["checkout_git_common_dir"] != row["git_common_dir"]
     ):
         raise ConfigError("adopted COPY database drop requires adoption ownership evidence")
+    if row["project_id"] != f"project_{cluster._project_id}" or str(row["repository_root"]) != str(
+        cluster._repository_root
+    ):
+        raise ConfigError("adopted COPY database drop project evidence does not match")
     _validate_allowed_environment(
         catalog,
         claim.environment_id,

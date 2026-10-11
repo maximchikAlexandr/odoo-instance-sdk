@@ -287,6 +287,10 @@ class _CleanupMixin:
                     database=drop_name,
                     endpoint_host=instance.config.db_host or "127.0.0.1",
                     endpoint_port=instance.config.db_port or 5432,
+                    project_id=env.project_id or "",
+                    checkout_repository_root=env.checkout_repository_root or "",
+                    checkout_git_common_dir=env.checkout_git_common_dir or "",
+                    adoption_input_fingerprint=env.adoption_input_fingerprint or "",
                 )
             command = build_database_drop_command(
                 instance,
@@ -335,6 +339,10 @@ class _CleanupMixin:
                         database=rollback_name,
                         endpoint_host=instance.config.db_host or "127.0.0.1",
                         endpoint_port=instance.config.db_port or 5432,
+                        project_id=env.project_id or "",
+                        checkout_repository_root=env.checkout_repository_root or "",
+                        checkout_git_common_dir=env.checkout_git_common_dir or "",
+                        adoption_input_fingerprint=env.adoption_input_fingerprint or "",
                     )
                     if env.code_ownership is EnvironmentCodeOwnership.CALLER_OWNED
                     else None,

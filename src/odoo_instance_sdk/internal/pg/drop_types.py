@@ -60,6 +60,10 @@ class AdoptedCopyDatabaseClaim:
     database: str
     endpoint_host: str
     endpoint_port: int
+    project_id: str
+    checkout_repository_root: str
+    checkout_git_common_dir: str
+    adoption_input_fingerprint: str
 
 
 def assert_restore_expectation(

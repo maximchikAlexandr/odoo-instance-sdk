@@ -1079,6 +1079,8 @@ def test_drop_allows_exact_adopted_copy_on_approved_external_postgres(
         make_env(
             environment_id,
             repository_root=str(project_manifest),
+            git_common_dir=str(tmp_path / "checkout" / ".git"),
+            worktree_path=str(tmp_path / "checkout"),
             target_db_name="feature_db",
             db_mode="copy",
             backup_id=backup_id,
@@ -1103,6 +1105,10 @@ def test_drop_allows_exact_adopted_copy_on_approved_external_postgres(
             database="feature_db",
             endpoint_host=cluster.endpoint_host,
             endpoint_port=cluster.endpoint_port,
+            project_id=project_id,
+            checkout_repository_root=str(tmp_path / "checkout"),
+            checkout_git_common_dir=str(tmp_path / "checkout" / ".git"),
+            adoption_input_fingerprint="f" * 64,
         ),
         idempotent_absent=True,
     ).run()
@@ -1136,6 +1142,8 @@ def test_drop_rejects_adopted_copy_claim_drift_and_non_adopted_external_path(
         make_env(
             "adopted-negative",
             repository_root=str(project_manifest),
+            git_common_dir=str(tmp_path / "checkout" / ".git"),
+            worktree_path=str(tmp_path / "checkout"),
             target_db_name="feature_db",
             db_mode="copy",
             backup_id=backup_id,
@@ -1149,6 +1157,44 @@ def test_drop_rejects_adopted_copy_claim_drift_and_non_adopted_external_path(
     catalog.record_restore(cluster.endpoint_host, cluster.endpoint_port, "feature_db", backup_id)
     executor = _executor()
 
+    def claim(**changes: str) -> AdoptedCopyDatabaseClaim:
+        values = {
+            "environment_id": "adopted-negative",
+            "database": "feature_db",
+            "endpoint_host": cluster.endpoint_host,
+            "endpoint_port": cluster.endpoint_port,
+            "project_id": project_id,
+            "checkout_repository_root": str(tmp_path / "checkout"),
+            "checkout_git_common_dir": str(tmp_path / "checkout" / ".git"),
+            "adoption_input_fingerprint": "a" * 64,
+        }
+        values.update(changes)
+        return AdoptedCopyDatabaseClaim(**values)  # type: ignore[arg-type]
+
+    for changes, message in (
+        ({"project_id": "project-foreign"}, "adoption ownership evidence"),
+        (
+            {"checkout_repository_root": str(tmp_path / "foreign-checkout")},
+            "adoption ownership evidence",
+        ),
+        (
+            {"checkout_git_common_dir": str(tmp_path / "foreign-checkout" / ".git")},
+            "adoption ownership evidence",
+        ),
+        ({"adoption_input_fingerprint": "b" * 64}, "adoption ownership evidence"),
+        ({"endpoint_host": "foreign-postgres"}, "endpoint evidence"),
+    ):
+        with pytest.raises(ConfigError, match=message):
+            build_database_drop_command(
+                instance,
+                project_manifest,
+                "feature_db",
+                executor=_executor(),
+                allow_environment_id="adopted-negative",
+                allow_environment_backup_id=backup_id,
+                adopted_copy_claim=claim(**changes),
+            )
+
     with pytest.raises(ConfigError, match="claim does not match target"):
         build_database_drop_command(
             instance,
@@ -1156,14 +1202,64 @@ def test_drop_rejects_adopted_copy_claim_drift_and_non_adopted_external_path(
             "foreign_db",
             executor=executor,
             allow_environment_id="adopted-negative",
-            adopted_copy_claim=AdoptedCopyDatabaseClaim(
-                environment_id="adopted-negative",
-                database="feature_db",
-                endpoint_host=cluster.endpoint_host,
-                endpoint_port=cluster.endpoint_port,
-            ),
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim(),
         )
     assert executor.executed == []
+
+    with pytest.raises(ConfigError, match="ownership changed"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id="adopted-negative",
+            allow_environment_backup_id="foreign-backup",
+            adopted_copy_claim=claim(),
+        )
+
+    foreign_claim = catalog._ensure_postgres_cluster_pending(
+        "foreign-project", "foreign-compose", "foreign-volume"
+    )
+    foreign_claim = catalog._activate_postgres_cluster(
+        foreign_claim.cluster_id,
+        "foreign-project",
+        "foreign-compose",
+        "foreign-volume",
+    )
+    catalog._conn.execute(
+        "UPDATE restores SET cluster_id=? WHERE database_name='feature_db'",
+        (str(foreign_claim.cluster_id),),
+    )
+    catalog._conn.commit()
+    with pytest.raises(ConfigError, match="restore identity"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id="adopted-negative",
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim(),
+        )
+
+    catalog._conn.execute("UPDATE restores SET cluster_id=NULL WHERE database_name='feature_db'")
+    catalog._conn.execute(
+        "UPDATE database_events SET backup_id=NULL, source_kind='local_archive', source_sha256=? "
+        "WHERE database_name='feature_db' AND event_type='restored'",
+        ("f" * 64,),
+    )
+    catalog._conn.commit()
+    with pytest.raises(ConfigError, match="restore identity"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id="adopted-negative",
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim(),
+        )
 
     with pytest.raises(ConfigError, match="SDK-owned Compose cluster"):
         build_database_drop_command(
