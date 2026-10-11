@@ -15,7 +15,7 @@ from typing import cast
 import pytest
 
 from odoo_instance_sdk.client import OdooClient
-from odoo_instance_sdk.internal import agent_checkout
+from odoo_instance_sdk.internal import agent_checkout, numbered_command_plan
 from odoo_instance_sdk.internal.agent_checkout import (
     CHECKOUT_MARKER,
     AgentCheckoutError,
@@ -34,6 +34,10 @@ from odoo_instance_sdk.internal.alternate_tool import (
     publish_alternate_linkage,
     read_alternate_manifest,
     render_launcher,
+)
+from odoo_instance_sdk.internal.numbered_command_plan import (
+    _CreateCommandPlan,
+    _RemoveCommandPlan,
 )
 from odoo_instance_sdk.models import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
@@ -400,12 +404,10 @@ def test_create_adopts_and_publishes_fixed_linkage(
     client = SimpleNamespace(environments=SimpleNamespace(adopt=adopt))
     _fake_install(monkeypatch)
     _fake_clone(monkeypatch)
-    real_plan = agent_checkout._CreateCommandPlan
+    real_plan = _CreateCommandPlan
 
-    def altered_plan(**kwargs: object) -> agent_checkout._CreateCommandPlan:
-        plan = cast("Callable[..., agent_checkout._CreateCommandPlan]", real_plan.from_options)(
-            **kwargs
-        )
+    def altered_plan(**kwargs: object) -> _CreateCommandPlan:
+        plan = cast("Callable[..., _CreateCommandPlan]", real_plan.from_options)(**kwargs)
         return replace(
             plan,
             sdk_sha="c" * 40,
@@ -413,7 +415,7 @@ def test_create_adopts_and_publishes_fixed_linkage(
         )
 
     monkeypatch.setattr(
-        agent_checkout,
+        numbered_command_plan,
         "_CreateCommandPlan",
         SimpleNamespace(from_options=altered_plan),
     )
@@ -576,13 +578,13 @@ def test_remove_execution_consumes_frozen_plan(
             ),
         )
     )
-    real_plan = agent_checkout._RemoveCommandPlan
+    real_plan = _RemoveCommandPlan
 
-    def altered_plan(*args: object, **kwargs: object) -> agent_checkout._RemoveCommandPlan:
-        plan = cast("Callable[..., agent_checkout._RemoveCommandPlan]", real_plan)(*args, **kwargs)
+    def altered_plan(*args: object, **kwargs: object) -> _RemoveCommandPlan:
+        plan = cast("Callable[..., _RemoveCommandPlan]", real_plan)(*args, **kwargs)
         return replace(plan, client=cast("OdooClient", plan_client))
 
-    monkeypatch.setattr(agent_checkout, "_RemoveCommandPlan", altered_plan)
+    monkeypatch.setattr(numbered_command_plan, "_RemoveCommandPlan", altered_plan)
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
     agent_checkout.remove_numbered_installation(
         "1", client=cast("OdooClient", client), home=tmp_path
@@ -650,7 +652,7 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
 def test_private_command_plans_are_frozen_and_redacted(tmp_path: Path) -> None:
     reference, sha = _reference_repo(tmp_path)
     options = _numbered_options(tmp_path, reference, sha, object())
-    plan = agent_checkout._CreateCommandPlan.from_options(
+    plan = _CreateCommandPlan.from_options(
         client=options.client,
         project=options.project,
         environment_options=options.environment_options,
@@ -685,7 +687,7 @@ def test_private_command_plans_are_frozen_and_redacted(tmp_path: Path) -> None:
         tmp_path / "tool",
         "",
     )
-    remove_plan = agent_checkout._RemoveCommandPlan(
+    remove_plan = _RemoveCommandPlan(
         options.client, tmp_path, "1", manifest.identity, None, manifest
     )
     assert "client" not in remove_plan.redacted()
