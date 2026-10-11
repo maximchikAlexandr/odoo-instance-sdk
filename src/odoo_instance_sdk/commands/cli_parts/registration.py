@@ -36,7 +36,6 @@ from odoo_instance_sdk.commands.resource import (
     resource_group,
 )
 from odoo_instance_sdk.commands.remote import remote_group
-from odoo_instance_sdk.commands.slot import slot_group
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.models import CommandResult
 
@@ -579,7 +578,6 @@ cli.add_command(
     ),
     name="update",
 )
-cli.add_command(slot_group, name="slot")
 
 _rich_command = cast("Callable[..., click.Command]", click.RichCommand)
 _rich_group = cast("Callable[..., click.Group]", click.RichGroup)

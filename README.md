@@ -533,18 +533,14 @@ Rich tables may shorten paths beneath `HOME`, but `odcli env path` always emits
 the absolute worktree path for safe shell navigation. Do not copy a displayed
 `~` shorthand into JSON or use a project-local `.odcli/` path as global state.
 
-### Exact-revision slots and hot fixes
+### Exact-revision numbered tools and hot fixes
 
-Canonical `odcli` manages exact-revision numbered launchers through the shared
-alternate-tool lifecycle:
-
-```bash
-odcli slot install 2 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-odcli-2 env ls
-odcli slot install 2 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --replace
-odcli slot list
-odcli slot remove 2
-```
+Numbered management is deliberately private service tooling. The checked-in
+`.agents/skills/odcli-autonomous-work/scripts/numbered_tool.py` wrapper validates
+the trusted canonical interpreter and installed repository provenance before
+calling the package-owned coordinator. Its machine-readable create, list,
+inspect, and remove results contain bounded identity evidence and never secrets.
+The public `odcli` command tree has no numbered-management group.
 
 `odcli-N` and the reviewed `odcli-fix-<issue>` skill workflow use the same
 installation, provenance, selector probe, manifest, launcher lock, inspection,
@@ -561,10 +557,10 @@ provenance or selector check leaves no published launcher.
 
 User-root isolation covers OdCLI-managed SQLite catalogues, configuration,
 backups, environments, project runtime state, locks, bug reports, and
-migration/update journals only. Project checkouts, Odoo processes, PostgreSQL
-clusters and databases, filestores, Docker resources, and ports remain
-external; use separate project copies or explicitly disjoint resources before
-running revisions concurrently.
+migration/update journals. Each numbered identity is additionally bound to an
+independent checkout and SDK-owned Python environment; the caller supplies
+distinct databases, filestores, and HTTP ports. Only the PostgreSQL server,
+read-only Odoo source, and source backup may be shared.
 
 ### Module, translation, and Git workflows
 
@@ -720,9 +716,6 @@ sentence; use the entry's `--help` for exact options.
 - `odcli remote remove` — Remove one named source configuration without deleting artifacts.
 - `odcli bug-report init` — Create a local bug-report draft from explicit metadata.
 - `odcli bug-report submit` — Validate and publish one local bug-report draft.
-- `odcli slot install` — Install an exact-revision numbered OdCLI slot.
-- `odcli slot list` — List bounded numbered-slot metadata without executing revisions.
-- `odcli slot remove` — Remove one idle numbered slot after identity checks.
 - `odcli env show` — Show one environment's selected runtime and ownership metadata.
 - `odcli resource ls` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.

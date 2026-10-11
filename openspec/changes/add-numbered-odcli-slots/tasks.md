@@ -8,10 +8,10 @@
 
 ## 2. SDK service tooling and public-surface removal
 
-- [ ] 2.1 Add a thin checked-in service/skill wrapper that validates the trusted canonical interpreter/provenance and invokes private create/list/inspect/remove operations without printing secrets.
-- [ ] 2.2 Delete `commands/slot.py`, its registration, slot-only output plumbing, public-leaf/output/help/real-Odoo matrix entries, and `test_slot_commands.py`; assert no Click or console-script numbered manager remains.
-- [ ] 2.3 Retain selected-root, canonical-only legacy migration, and hot-fix isolation behavior; change numbered self-update rejection to private service-tool guidance and remove every public `odcli slot` reference.
-- [ ] 2.4 Refocus SDK docs, skill guidance, architecture inventory, alternate lifecycle tests, and integrated fixtures on auto-allocation, linked checkout plus distinct SDK-owned Python environment, one engine, orphan preservation, and explicit external-resource boundaries.
+- [x] 2.1 Add a thin checked-in service/skill wrapper that validates the trusted canonical interpreter/provenance and invokes private create/list/inspect/remove operations without printing secrets.
+- [x] 2.2 Delete `commands/slot.py`, its registration, slot-only output plumbing, public-leaf/output/help/real-Odoo matrix entries, and `test_slot_commands.py`; assert no Click or console-script numbered manager remains.
+- [x] 2.3 Retain selected-root, canonical-only legacy migration, and hot-fix isolation behavior; change numbered self-update rejection to private service-tool guidance and remove every public `odcli slot` reference.
+- [x] 2.4 Refocus SDK docs, skill guidance, architecture inventory, alternate lifecycle tests, and integrated fixtures on auto-allocation, linked checkout plus distinct SDK-owned Python environment, one engine, orphan preservation, and explicit external-resource boundaries.
 
 ## 3. GitLab thin wrapper and Binta ownership
 

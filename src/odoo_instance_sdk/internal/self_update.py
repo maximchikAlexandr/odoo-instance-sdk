@@ -216,8 +216,8 @@ def assert_direct_update_allowed() -> None:
         return
     if launcher.kind == "numbered":
         raise UpdateError(
-            f"{launcher.launcher_name} cannot self-update; run `odcli slot install "
-            f"{launcher.identifier} <40-character-lowercase-sha> --replace`"
+            f"{launcher.launcher_name} cannot self-update; use the checked-in "
+            "odcli-autonomous-work service workflow for exact-SHA replacement"
         )
     raise UpdateError(
         f"{launcher.launcher_name} cannot self-update; use skill-managed canonical "

@@ -78,8 +78,6 @@ classification is bounded and whose contract requires `--dry-run`:
 | `git sync` | mutating-or-spawning |
 | `bug-report init` | mutating-or-spawning |
 | `bug-report submit` | mutating-or-spawning |
-| `slot install` | mutating-or-spawning |
-| `slot remove` | mutating-or-spawning |
 | `update` | mutating-or-spawning (`update --check` is process-previewable-read-only) |
 | `psql` | native-passthrough |
 | `run` | native-passthrough |
@@ -94,6 +92,10 @@ is a native inherited-stream transport; its passthrough arguments are checked
 by the private grammar, but document formatting is rejected on normal runs.
 All four diagnostics and native `psql` preserve the instance-bound cluster
 identity and do not accept replacement host/user/password flags.
+
+Numbered tool allocation is outside this public leaf inventory. The checked-in
+service wrapper validates the canonical installation and delegates allocation,
+checkout linkage, and selective removal to the private package coordinator.
 
 The backup catalogue leaves (`backup ls`, `backup inspect`, and `backup validate`)
 are bounded read-only documents independent of Odoo/worktree context. They

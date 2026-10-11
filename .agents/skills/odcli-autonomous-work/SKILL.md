@@ -25,6 +25,14 @@ The former `~/.odcli/fix-tools` registry is legacy state. The shared lifecycle
 does not adopt or rewrite it; use the reviewed install/reconcile workflow for a
 new isolated hot fix and treat old manifests as explicit remediation material.
 
+Numbered tools are managed only through the checked-in
+`scripts/numbered_tool.py` service wrapper. It validates the canonical
+interpreter and repository provenance, then delegates create/list/inspect/remove
+to the private SDK coordinator. The coordinator auto-allocates the smallest
+wholly free positive number, links one independent checkout and SDK-owned Python
+environment, and returns bounded secret-free evidence. Do not add numbered
+management to the public `odcli` command tree.
+
 ## Boundaries
 
 The reviewer wrapper needs a locally authenticated `codex` executable; fix-tool management needs `uv` and authenticated `gh`. None is a new project runtime dependency. Use `--model` on the reviewer wrapper when a stronger locally available model is desired. It injects additional developer instructions, not a replacement system prompt. Review runs read-only; the wrapper alone writes the validated review verdict. Do not claim the separate session proves model independence. Do not edit canonical, numbered, or hot-fix roots except through OdCLI's supported operations and the shared lifecycle engine.

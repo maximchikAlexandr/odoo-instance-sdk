@@ -19,8 +19,8 @@ ALTERNATE_COORDINATOR_MECHANICS: Final[frozenset[str]] = frozenset(
 )
 ALTERNATE_POLICY_SURFACES: Final[frozenset[str]] = frozenset(
     {
-        "src/odoo_instance_sdk/commands/slot.py",
         ".agents/skills/odcli-autonomous-work/scripts/fix_tool.py",
+        ".agents/skills/odcli-autonomous-work/scripts/numbered_tool.py",
     }
 )
 ALTERNATE_LIFECYCLE_MECHANIC_TOKENS: Final[frozenset[str]] = frozenset(
@@ -48,7 +48,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 555),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 556),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 475),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 474),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
         ("src/odoo_instance_sdk/commands/output.py", 289),
@@ -86,7 +86,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        475,
+        474,
     ): "documented --version metadata flag transport",
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (

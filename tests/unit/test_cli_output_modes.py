@@ -832,39 +832,6 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture",
     ),
     PublicLeafCase(
-        ("slot", "install"),
-        (
-            "slot",
-            "install",
-            "2",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--dry-run",
-        ),
-        "mutating-or-spawning",
-        True,
-        cli_only_reason="CLI-only numbered-slot lifecycle projection over the shared alternate-tool engine",
-        e2e_disposition="not-applicable",
-        e2e_rationale="numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture",
-    ),
-    PublicLeafCase(
-        ("slot", "list"),
-        ("slot", "list"),
-        "bounded-read-only",
-        False,
-        cli_only_reason="CLI-only bounded numbered-slot metadata projection over the shared alternate-tool engine",
-        e2e_disposition="not-applicable",
-        e2e_rationale="numbered lifecycle inventory is covered by focused unit tests outside the disposable Odoo fixture",
-    ),
-    PublicLeafCase(
-        ("slot", "remove"),
-        ("slot", "remove", "2", "--dry-run"),
-        "mutating-or-spawning",
-        True,
-        cli_only_reason="CLI-only numbered-slot lifecycle projection over the shared alternate-tool engine",
-        e2e_disposition="not-applicable",
-        e2e_rationale="numbered lifecycle policy is covered by focused unit tests outside the disposable Odoo fixture",
-    ),
-    PublicLeafCase(
         ("update",),
         ("update", "--dry-run"),
         "mutating-or-spawning",
@@ -1366,41 +1333,6 @@ def _patch_leaf_external(  # noqa: C901
 
     path = case.path
     if path == ("init",):
-        return
-
-    if path[:1] == ("slot",):
-        manifest = SimpleNamespace(
-            to_json=lambda: {
-                "kind": "numbered",
-                "identifier": "2",
-                "sha": "a" * 40,
-                "launcher": str(tmp_path / ".local/bin/odcli-2"),
-            }
-        )
-        row = {
-            "kind": "numbered",
-            "identifier": "2",
-            "sha": "a" * 40,
-            "launcher": str(tmp_path / ".local/bin/odcli-2"),
-            "tool": str(tmp_path / ".local/share/odcli-slots/2/tool"),
-            "state": str(tmp_path / ".odcli-2"),
-            "healthy": True,
-        }
-        if path == ("slot", "install"):
-            monkeypatch.setattr(
-                "odoo_instance_sdk.commands.slot.install_alternate_tool",
-                fail_operation if failing else lambda *_args, **_kwargs: manifest,
-            )
-        elif path == ("slot", "list"):
-            monkeypatch.setattr(
-                "odoo_instance_sdk.commands.slot.list_alternate_tools",
-                fail_operation if failing else lambda *_args, **_kwargs: (row,),
-            )
-        else:
-            monkeypatch.setattr(
-                "odoo_instance_sdk.commands.slot.remove_alternate_tool",
-                fail_operation if failing else lambda *_args, **_kwargs: None,
-            )
         return
 
     if path == ("doctor",):
@@ -2353,8 +2285,7 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
                 [*args, "--format", mode],
                 input="pass\n" if case.path == ("exec",) else None,
             )
-            dry_run_is_safe = case.path in {("slot", "install"), ("slot", "remove")}
-            expected_failure = not dry_run_is_safe
+            expected_failure = True
             assert failure.exit_code == (1 if expected_failure else 0), failure.output
             assert failure.stderr == ""
             assert failure.stdout.strip()
@@ -2369,8 +2300,7 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert success_documents[0] == success_documents[1]
     assert failure_documents[0] == failure_documents[1]
     assert success_documents[0][0]["ok"] is True  # type: ignore[index]
-    dry_run_is_safe = case.path in {("slot", "install"), ("slot", "remove")}
-    expected_failure = not dry_run_is_safe
+    expected_failure = True
     assert failure_documents[0][0]["ok"] is (not expected_failure)  # type: ignore[index]
     assert success_documents[0][0]["dry_run"] is ("--dry-run" in case.args)  # type: ignore[index]
     failure_dry_run = "--dry-run" in case.args and case.path != ("init",)
