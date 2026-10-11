@@ -138,7 +138,9 @@ def _fake_clone(monkeypatch: pytest.MonkeyPatch) -> None:
         checkout.mkdir(parents=True)
         marker = checkout / ".git" / CHECKOUT_MARKER
         marker.parent.mkdir()
-        marker.write_text(json.dumps({"number": number, "repository": repository, "sha": sha}))
+        marker.write_text(
+            json.dumps(agent_checkout._marker_payload(number, repository, sha)), encoding="utf-8"
+        )
         return marker
 
     monkeypatch.setattr(agent_checkout, "_clone_checkout", clone)
@@ -376,7 +378,12 @@ def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
     identity_value = identity("numbered", "1", home=tmp_path)
     manifest = read_alternate_manifest(identity_value)
     assert manifest is not None
-    assert manifest.environment_id == str(environment.id)
+    assert manifest.checkout_path is None
+    assert manifest.environment_id is None
+    reservation = json.loads(
+        (identity_value.manager_root / "reservation.json").read_text(encoding="utf-8")
+    )
+    assert reservation["environment_id"] == str(environment.id)
     checkout = tmp_path / "checkouts" / "odcli-1"
     assert checkout.is_dir()
     assert (identity_value.manager_root / "reservation.json").is_file()
@@ -392,6 +399,42 @@ def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
     assert len(remove_calls) == 1
     assert not checkout.exists()
     assert not identity_value.manager_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "https://GitHub.com/maximchikAlexandr/odoo-instance-sdk.git",
+            "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+        ),
+        (
+            "ssh://git@GitHub.com/maximchikAlexandr/odoo-instance-sdk.git",
+            "ssh://git@github.com/maximchikAlexandr/odoo-instance-sdk.git",
+        ),
+        (
+            "git@GitHub.com:maximchikAlexandr/odoo-instance-sdk.git",
+            "ssh://git@github.com/maximchikAlexandr/odoo-instance-sdk.git",
+        ),
+    ],
+)
+def test_repository_identity_is_canonical_and_secret_free(source: str, expected: str) -> None:
+    assert agent_checkout._canonical_repository_identity(source) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://github.com/org/repo.git?token=secret",
+        "https://github.com/org/repo.git#secret",
+        "ext::sh -c 'echo secret'",
+        "alice@github.com:org/repo.git",
+        "ssh://alice:secret@github.com/org/repo.git",
+    ],
+)
+def test_repository_identity_rejects_secret_bearing_transports(source: str) -> None:
+    with pytest.raises(AgentCheckoutError):
+        agent_checkout._canonical_repository_identity(source)
 
 
 def test_successful_remove_is_ordered_once_and_preserves_neighbor(
@@ -452,6 +495,68 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
     assert environment_remove_order == [True]
     assert not checkout.exists()
     assert neighbor.is_dir()
+
+
+def test_remove_rejects_checkout_inode_swap_after_environment_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkouts" / "odcli-1"
+    checkout.mkdir(parents=True)
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    neighbor = tmp_path / "checkouts" / "odcli-2"
+    neighbor.mkdir()
+    (neighbor / "keep.txt").write_text("keep\n", encoding="utf-8")
+    identity_value = identity("numbered", "1", home=tmp_path)
+    environment = _environment(tmp_path, checkout)
+    base = AlternateManifest(
+        identity_value, "a" * 40, REPOSITORY_URL, identity_value.executable, ""
+    )
+    manifest = AlternateManifest(
+        identity_value,
+        base.sha,
+        base.repository,
+        base.executable,
+        render_launcher(base),
+        checkout_path=str(checkout),
+        checkout_repository="origin",
+        checkout_sha="b" * 40,
+        environment_id=str(environment.id),
+        environment_path=environment.python_environment_path,
+        environment_lock=environment.dependency_lock_path,
+        interpreter_path=str(Path(environment.python_environment_path) / "bin" / "python"),
+        hash_lock_sha256="c" * 64,
+    )
+    identity_value.manager_root.mkdir(parents=True, exist_ok=True)
+    identity_value.tool_root.mkdir()
+    identity_value.tool_bin.mkdir()
+    identity_value.executable.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    identity_value.executable.chmod(0o700)
+    identity_value.launcher.parent.mkdir(parents=True, exist_ok=True)
+    identity_value.launcher.write_text(manifest.shim, encoding="utf-8")
+    identity_value.launcher.chmod(0o700)
+    identity_value.lock.touch()
+    identity_value.manifest.write_text(json.dumps(manifest.to_json()), encoding="utf-8")
+
+    def swap_and_remove(_environment: object) -> None:
+        moved = checkout.with_name("odcli-1-original")
+        checkout.rename(moved)
+        checkout.mkdir()
+        (checkout / "replacement.txt").write_text("do not delete\n", encoding="utf-8")
+        environment.state = EnvironmentState.REMOVED.value
+
+    client = SimpleNamespace(
+        environments=SimpleNamespace(get=lambda _id: environment, remove=swap_and_remove)
+    )
+    monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
+
+    with pytest.raises(AgentCheckoutError, match="identity changed"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    assert (checkout / "replacement.txt").read_text(encoding="utf-8") == "do not delete\n"
+    assert (checkout.with_name("odcli-1-original") / "owned.txt").is_file()
+    assert (neighbor / "keep.txt").is_file()
 
 
 def test_numbered_manifest_round_trips_fixed_linkage(tmp_path: Path) -> None:

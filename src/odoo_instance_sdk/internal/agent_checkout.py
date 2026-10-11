@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import tempfile
+import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,117 @@ MARKER_VERSION = 1
 
 class AgentCheckoutError(RuntimeError):
     """A numbered checkout operation cannot be completed safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckoutIdentity:
+    """The filesystem identity retained across an external cleanup call."""
+
+    device: int
+    inode: int
+
+
+def _checkout_identity(checkout: Path) -> _CheckoutIdentity:
+    try:
+        stat_result = checkout.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise AgentCheckoutError("linked checkout identity is unreadable") from exc
+    if not checkout.is_dir() or checkout.is_symlink():
+        raise AgentCheckoutError("linked checkout is missing or a symlink")
+    return _CheckoutIdentity(stat_result.st_dev, stat_result.st_ino)
+
+
+def _canonical_repository_identity(source: str) -> str:  # noqa: C901 -- strict transport allowlist
+    """Return only a credential-free repository identity safe for evidence."""
+    if not source or any(char.isspace() or ord(char) < 32 for char in source):
+        raise AgentCheckoutError("repository origin contains unsafe characters")
+    if "?" in source or "#" in source or source.startswith(("!", "ext::", "git+")):
+        raise AgentCheckoutError("repository origin contains unsafe transport syntax")
+
+    scp_match = re.fullmatch(r"(?P<user>[^@/:]+)@(?P<host>[^:/]+):(?P<path>[^?#]+)", source)
+    if scp_match is not None:
+        if scp_match.group("user") != "git":
+            raise AgentCheckoutError("repository origin contains scp credentials")
+        return f"ssh://git@{scp_match.group('host').lower()}/{scp_match.group('path').lstrip('/')}"
+
+    parsed = urlsplit(source)
+    if parsed.scheme:
+        scheme = parsed.scheme.lower()
+        if scheme not in {"https", "ssh"} or not parsed.path:
+            raise AgentCheckoutError("repository origin uses an unsupported transport")
+        if (
+            parsed.username is not None
+            and (scheme != "ssh" or parsed.username != "git" or parsed.password is not None)
+        ) or (parsed.password is not None and parsed.username is None):
+            raise AgentCheckoutError("repository origin contains credentials")
+        if parsed.query or parsed.fragment:
+            raise AgentCheckoutError("repository origin contains query or fragment data")
+        try:
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            raise AgentCheckoutError("repository origin has an invalid authority") from exc
+        if hostname is None:
+            raise AgentCheckoutError("repository origin has no host")
+        host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
+        authority = host if port is None else f"{host}:{port}"
+        user = "git@" if scheme == "ssh" and parsed.username == "git" else ""
+        return f"{scheme}://{user}{authority}/{parsed.path.lstrip('/')}"
+
+    path = Path(source)
+    if path.is_absolute():
+        return str(path.resolve())
+    raise AgentCheckoutError("repository origin is not a canonical supported identity")
+
+
+def _quarantine_checkout(checkout: Path, expected: _CheckoutIdentity) -> Path:
+    """Atomically detach the exact validated directory from its parent."""
+    parent = checkout.parent
+    _ensure_no_symlink_components(
+        parent,
+        stop=(parent.anchor and Path(parent.anchor)) or parent,
+    )
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        parent_fd = os.open(parent, flags)
+    except OSError as exc:
+        raise AgentCheckoutError("cannot safely open checkout parent") from exc
+    quarantine_name = f".{checkout.name}.deleting-{uuid.uuid4().hex}"
+    try:
+        try:
+            current = os.stat(checkout.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise AgentCheckoutError("linked checkout disappeared before deletion") from exc
+        if (current.st_dev, current.st_ino) != (expected.device, expected.inode):
+            raise AgentCheckoutError("linked checkout identity changed before deletion")
+        os.rename(
+            checkout.name,
+            quarantine_name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        moved = os.stat(quarantine_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (moved.st_dev, moved.st_ino) != (expected.device, expected.inode):
+            os.rename(
+                quarantine_name,
+                checkout.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            raise AgentCheckoutError("linked checkout identity changed during quarantine")
+        return parent / quarantine_name
+    finally:
+        os.close(parent_fd)
+
+
+def _remove_owned_checkout(checkout: Path, expected: _CheckoutIdentity) -> None:
+    quarantine = _quarantine_checkout(checkout, expected)
+    try:
+        shutil.rmtree(quarantine)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.rename(quarantine, checkout)
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,14 +354,15 @@ def _safe_source(reference: Path, reference_sha: str, expected_remote: str | Non
         raise AgentCheckoutError("reference checkout is a symlink")
     if not reference.is_dir() or rev_parse_toplevel(reference) != reference.resolve():
         raise AgentCheckoutError("reference checkout is not its canonical Git root")
-    source = remote_url(reference)
-    if source is None:
+    raw_source = remote_url(reference)
+    if raw_source is None:
         raise AgentCheckoutError("reference checkout has no origin")
-    if expected_remote is not None and source != expected_remote:
+    source = _canonical_repository_identity(raw_source)
+    expected = (
+        _canonical_repository_identity(expected_remote) if expected_remote is not None else None
+    )
+    if expected is not None and source != expected:
         raise AgentCheckoutError("reference checkout origin does not match configured source")
-    parsed = urlsplit(source)
-    if parsed.username is not None or parsed.password is not None:
-        raise AgentCheckoutError("source origin contains credentials")
     resolved = _git(
         ("rev-parse", "--verify", f"{reference_sha}^{{commit}}"),
         cwd=reference,
@@ -315,13 +428,15 @@ def _clone_checkout(
     if not _contained(checkout, checkout.parent) or _lexists(checkout):
         raise AgentCheckoutError("checkout target is occupied or escapes its parent")
     checkout.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _git(
-        ("clone", "--local", "--no-hardlinks", str(reference), str(checkout)),
-        cwd=reference,
-        step_id="checkout-clone",
-        mutating=True,
-    )
+    owned_identity: _CheckoutIdentity | None = None
     try:
+        _git(
+            ("clone", "--local", "--no-hardlinks", str(reference), str(checkout)),
+            cwd=reference,
+            step_id="checkout-clone",
+            mutating=True,
+        )
+        owned_identity = _checkout_identity(checkout)
         branch = rev_parse_branch(checkout)
         _git(("checkout", "-B", branch, sha), cwd=checkout, step_id="checkout-pin", mutating=True)
         _git(
@@ -343,8 +458,9 @@ def _clone_checkout(
             raise AgentCheckoutError("cloned checkout is unexpectedly dirty")  # noqa: TRY301
         return marker  # noqa: TRY300
     except BaseException:
-        with contextlib.suppress(OSError):
-            shutil.rmtree(checkout)
+        if owned_identity is not None:
+            with contextlib.suppress(AgentCheckoutError):
+                _remove_owned_checkout(checkout, owned_identity)
         raise
 
 
@@ -373,10 +489,12 @@ def _validate_checkout(  # noqa: C901 -- fixed external Git guard sequence
         raise AgentCheckoutError("linked checkout is missing or a symlink")
     if rev_parse_toplevel(checkout) != checkout.resolve():
         raise AgentCheckoutError("linked checkout is not its canonical Git root")
+    canonical_repository = _canonical_repository_identity(repository)
     marker = _read_marker(checkout)
-    if marker != _marker_payload(number, repository, sha):
+    if marker != _marker_payload(number, canonical_repository, sha):
         raise AgentCheckoutError("linked checkout marker does not match manifest")
-    if remote_url(checkout) != repository:
+    raw_origin = remote_url(checkout)
+    if raw_origin is None or _canonical_repository_identity(raw_origin) != canonical_repository:
         raise AgentCheckoutError("linked checkout origin does not match manifest")
     if _git(("rev-parse", "HEAD"), cwd=checkout, step_id="checkout-verify-head") != sha:
         raise AgentCheckoutError("linked checkout HEAD does not match manifest")
@@ -473,6 +591,7 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
         identity_value.manager_root.mkdir(mode=0o700, parents=True, exist_ok=False)
         reservation = _reservation(identity_value, checkout, options)
         marker: Path | None = None
+        checkout_identity: _CheckoutIdentity | None = None
         environment: DevelopmentEnvironment | None = None
         installed = False
         old_root = os.environ.get(USER_ROOT_ENV)
@@ -485,6 +604,7 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 repository=repository,
                 sha=options.reference_sha,
             )
+            checkout_identity = _checkout_identity(checkout)
             install_alternate_tool(identity_value, options.sdk_sha)
             installed = True
             environment = options.client.environments.adopt(
@@ -492,7 +612,7 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 checkout,
                 options=options.environment_options,
             )
-            # Publish recovery evidence before any post-adopt guard can fail.
+            # Keep recovery evidence separate from the ready linkage manifest.
             # The SDK environment remover remains the only environment lifecycle.
             environment_root = Path(environment.python_environment_path)
             recovery_interpreter = (
@@ -511,26 +631,20 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                     "kind": "numbered",
                     "identifier": number,
                     "checkout": str(checkout),
+                    "repository": repository,
+                    "checkout_sha": options.reference_sha,
                     "reference_sha": options.reference_sha,
                     "sdk_sha": options.sdk_sha,
                     "environment_id": str(environment.id),
                     "environment_path": environment.python_environment_path,
+                    "interpreter_path": str(recovery_interpreter),
+                    "environment_lock": environment.dependency_lock_path,
+                    "hash_lock_sha256": options.environment_options.hash_lock_sha256 or "",
                 },
-            )
-            manifest = publish_alternate_linkage(
-                identity_value,
-                checkout_path=str(checkout),
-                checkout_repository=repository,
-                checkout_sha=options.reference_sha,
-                environment_id=str(environment.id),
-                environment_path=environment.python_environment_path,
-                environment_lock=environment.dependency_lock_path,
-                interpreter_path=str(recovery_interpreter),
-                hash_lock_sha256=options.environment_options.hash_lock_sha256 or "",
             )
             if environment.state is not EnvironmentState.READY:
                 raise AgentCheckoutError("adoption did not return a ready environment")  # noqa: TRY301
-            _environment_interpreter(environment)
+            interpreter = _environment_interpreter(environment)
             if Path(environment.worktree_path).resolve() != checkout.resolve():
                 raise AgentCheckoutError(  # noqa: TRY301
                     "adopted environment is not bound to the reserved checkout"
@@ -554,6 +668,17 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 raise AgentCheckoutError(  # noqa: TRY301
                     "adopted environment dependency lock digest drifted"
                 )
+            manifest = publish_alternate_linkage(
+                identity_value,
+                checkout_path=str(checkout),
+                checkout_repository=repository,
+                checkout_sha=options.reference_sha,
+                environment_id=str(environment.id),
+                environment_path=environment.python_environment_path,
+                environment_lock=environment.dependency_lock_path,
+                interpreter_path=str(interpreter),
+                hash_lock_sha256=options.environment_options.hash_lock_sha256 or "",
+            )
             reservation.unlink(missing_ok=True)
             return NumberedInstallation(identity_value, manifest, environment, marker)
         except BaseException:
@@ -563,9 +688,9 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
             if installed:
                 with contextlib.suppress(BaseException):
                     remove_alternate_tool(identity_value)
-            if marker is not None:
-                with contextlib.suppress(OSError):
-                    shutil.rmtree(checkout)
+            if marker is not None and checkout_identity is not None:
+                with contextlib.suppress(AgentCheckoutError):
+                    _remove_owned_checkout(checkout, checkout_identity)
             with contextlib.suppress(OSError):
                 reservation.unlink()
             with contextlib.suppress(OSError):
@@ -612,7 +737,70 @@ def list_numbered_installations(
     return tuple(list_alternate_tools("numbered", home=home, limit=limit))
 
 
-def remove_numbered_installation(
+def _remove_reserved_installation(
+    number: str,
+    identity_value: AlternateIdentity,
+    reservation: Path,
+    *,
+    client: OdooClient,
+    checkout_parent: Path | None,
+) -> None:
+    try:
+        payload = json.loads(reservation.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AgentCheckoutError("numbered recovery reservation is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise AgentCheckoutError("numbered recovery reservation is invalid")
+    checkout_value = payload.get("checkout")
+    environment_id = payload.get("environment_id")
+    if not isinstance(checkout_value, str) or not isinstance(environment_id, str):
+        raise AgentCheckoutError("numbered recovery reservation is incomplete")
+    checkout = Path(checkout_value).expanduser()
+    marker = _read_marker(checkout)
+    repository = marker.get("repository")
+    sha = marker.get("sha")
+    if not isinstance(repository, str) or not isinstance(sha, str):
+        raise AgentCheckoutError("numbered recovery marker is incomplete")
+    _validate_checkout(
+        checkout,
+        number=number,
+        repository=repository,
+        sha=sha,
+        require_pushed=False,
+        checkout_parent=checkout_parent,
+    )
+    checkout_identity = _checkout_identity(checkout)
+    environment = client.environments.get(environment_id)
+    if str(environment.id) != environment_id:
+        raise AgentCheckoutError("recovery environment identity does not match reservation")
+    if Path(environment.worktree_path).resolve() != checkout.resolve():
+        raise AgentCheckoutError("recovery checkout linkage drifted")
+    old_root = os.environ.get(USER_ROOT_ENV)
+    os.environ[USER_ROOT_ENV] = str(identity_value.state_root)
+    try:
+        if str(environment.state) != EnvironmentState.REMOVED.value:
+            client.environments.remove(environment)
+        _validate_checkout(
+            checkout,
+            number=number,
+            repository=repository,
+            sha=sha,
+            require_pushed=False,
+            checkout_parent=checkout_parent,
+        )
+        if _checkout_identity(checkout) != checkout_identity:
+            raise AgentCheckoutError("recovery checkout identity changed after cleanup")
+        _remove_owned_checkout(checkout, checkout_identity)
+        reservation.unlink(missing_ok=True)
+        remove_alternate_tool(identity_value, _locked=True)
+    finally:
+        if old_root is None:
+            os.environ.pop(USER_ROOT_ENV, None)
+        else:
+            os.environ[USER_ROOT_ENV] = old_root
+
+
+def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and recovery sequence
     number: str,
     *,
     client: OdooClient,
@@ -635,6 +823,16 @@ def remove_numbered_installation(
             manifest.interpreter_path,
             manifest.hash_lock_sha256,
         )
+        reservation = identity_value.manager_root / RESERVATION_NAME
+        if not all(fields) and reservation.is_file():
+            _remove_reserved_installation(
+                number,
+                identity_value,
+                reservation,
+                client=client,
+                checkout_parent=checkout_parent,
+            )
+            return
         if not all(fields):
             raise AgentCheckoutError("numbered manifest has incomplete checkout linkage")
         checkout = Path(manifest.checkout_path or "").expanduser()
@@ -648,6 +846,7 @@ def remove_numbered_installation(
             require_pushed=True,
             checkout_parent=checkout_parent,
         )
+        checkout_identity = _checkout_identity(checkout)
         environment_id = manifest.environment_id
         environment_path = manifest.environment_path
         if environment_id is None or environment_path is None:
@@ -671,7 +870,20 @@ def remove_numbered_installation(
                 or not _contained(checkout, checkout.parent)
             ):
                 raise AgentCheckoutError("linked checkout became unsafe before deletion")
-            shutil.rmtree(checkout)
+            _validate_checkout(
+                checkout,
+                number=number,
+                repository=manifest.checkout_repository or "",
+                sha=manifest.checkout_sha or "",
+                require_pushed=True,
+                checkout_parent=checkout_parent,
+            )
+            current_identity = _checkout_identity(checkout)
+            if current_identity != checkout_identity:
+                raise AgentCheckoutError(
+                    "linked checkout identity changed after environment cleanup"
+                )
+            _remove_owned_checkout(checkout, checkout_identity)
             reservation = identity_value.manager_root / RESERVATION_NAME
             reservation.unlink(missing_ok=True)
             remove_alternate_tool(identity_value, _locked=True)
