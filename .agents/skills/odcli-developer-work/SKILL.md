@@ -25,10 +25,6 @@ delete orphaned or foreign numbered paths. Removal is selective and
 fail-closed: dirty, unpushed, running, mismatched, escaped, or otherwise
 unverified resources remain for retry.
 
-The private service is not a public `odcli slot` command. Do not add a Click
-registration, console-script entry point, compatibility forwarding script, or
-second alternate-tool lifecycle.
-
 ## Repository development
 
 Use the repository's tests, lint, typing, packaging, documentation, and

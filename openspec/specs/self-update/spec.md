@@ -2,9 +2,7 @@
 
 ## Purpose
 Define a provenance-aware, recoverable self-upgrade flow for OdCLI uv-tool installations, including immutable revision resolution, migration, verification, and rollback contracts.
-
 ## Requirements
-
 ### Requirement: `odcli update` supported scope
 
 `odcli update` SHALL support only OdCLI installed as a `uv tool` from `maximchikAlexandr/odoo-instance-sdk`. The SDK SHALL expose `update_command()` returning `Command[UpdateResult]`; `PUBLIC_LEAF_CASES` SHALL set `sdk_primitive=update_command` (`cli_only_reason` forbidden). Expression SHALL NOT appear in this flow. Default `--ref` SHALL be `main`. `--dry-run` SHALL emit the frozen redacted plan and SHALL NOT launch a process, prompt, or mutate. CLI convenience SHALL delegate and SHALL NOT rebuild argv, cwd, environment, stdin, or actions. Unsupported provenance SHALL return `unsupported_install`. Source SHALL come from PEP 610 / uv-tool metadata, not cwd or the Odoo project remote.
@@ -169,3 +167,18 @@ Interactive confirmation SHALL be required before changing the install and data.
 
 - **WHEN** any phase of `odcli update` runs
 - **THEN** no GitHub credentials, environment secrets, project passwords, or private config contents are logged
+
+### Requirement: Alternate launchers reject direct self-update
+The update SDK primitive and CLI adapter SHALL detect numbered and hot-fix contexts before check, dry-run, maintenance, recovery, or mutation planning. A numbered context SHALL direct the operator to the developer-only skill and repository-owned private service workflow for exact-SHA replacement; it SHALL NOT direct the ordinary user skill, mention, or require a public numbered-management surface. A hot-fix context SHALL direct the agent to skill-managed canonical update/reconciliation and SHALL NOT offer revision replacement. Rejection SHALL NOT acquire update locks, resolve refs, snapshot metadata, run uv, execute migrations, or change any installation, checkout, or state root.
+
+#### Scenario: Numbered update is rejected
+- **WHEN** `odcli-N update` is invoked with any supported update arguments
+- **THEN** it exits nonzero with private service-tool guidance and changes neither numbered nor canonical tool, checkout, database, filestore, port, or state
+
+#### Scenario: Hot-fix update is rejected
+- **WHEN** `odcli-fix-ISSUE update` is invoked
+- **THEN** it exits nonzero with skill-managed reconciliation guidance and changes no canonical, numbered, or hot-fix installation or state
+
+#### Scenario: Canonical update remains available
+- **WHEN** ordinary `odcli update` runs without an alternate context
+ - **THEN** the existing self-update/recovery contract remains unchanged and it does not discover, replace, or remove alternate launchers, roots, or linked checkouts

@@ -97,7 +97,8 @@ Numbered tool allocation is outside this public leaf inventory. The checked-in
 developer-only `scripts/odcli_agent_tools/numbered_tool.py` wrapper validates
 the canonical installation and delegates allocation, checkout linkage, and
 selective removal to the private package coordinator. Ordinary user guidance
-does not expose this workflow, and there is no public `odcli slot` command.
+does not expose this workflow, and numbered management is not a public CLI
+surface.
 
 The backup catalogue leaves (`backup ls`, `backup inspect`, and `backup validate`)
 are bounded read-only documents independent of Odoo/worktree context. They
