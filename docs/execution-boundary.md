@@ -94,8 +94,10 @@ All four diagnostics and native `psql` preserve the instance-bound cluster
 identity and do not accept replacement host/user/password flags.
 
 Numbered tool allocation is outside this public leaf inventory. The checked-in
-service wrapper validates the canonical installation and delegates allocation,
-checkout linkage, and selective removal to the private package coordinator.
+developer-only `scripts/odcli_agent_tools/numbered_tool.py` wrapper validates
+the canonical installation and delegates allocation, checkout linkage, and
+selective removal to the private package coordinator. Ordinary user guidance
+does not expose this workflow, and there is no public `odcli slot` command.
 
 The backup catalogue leaves (`backup ls`, `backup inspect`, and `backup validate`)
 are bounded read-only documents independent of Odoo/worktree context. They

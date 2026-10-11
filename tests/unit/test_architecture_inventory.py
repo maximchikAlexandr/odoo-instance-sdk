@@ -482,7 +482,7 @@ def test_alternate_lifecycle_mechanics_have_one_owner() -> None:
         token in coordinator
         for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS - ALTERNATE_COORDINATOR_MECHANICS
     )
-    bootstrap_path = ".agents/skills/odcli-autonomous-work/scripts/fix_tool.py"
+    bootstrap_path = "scripts/odcli_agent_tools/fix_tool.py"
     bootstrap = (_REPO_ROOT / bootstrap_path).read_text(encoding="utf-8")
     duplicate_locations = {
         f"{path}:{token}"

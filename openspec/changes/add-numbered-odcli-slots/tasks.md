@@ -32,13 +32,13 @@ The checked tasks above are immutable evidence for superseded graph revision `7e
 
 ## 5. Separate user and developer skill ownership
 
-- [ ] 5.1 Narrow `.agents/skills/odcli-autonomous-work` to ordinary OdCLI use, triage, reviewed hot-fix unblocking and reconciliation; remove numbered create/list/inspect/remove instructions and every obsolete `~/.odcli/fix-tools` registry reference.
-- [ ] 5.2 Add `.agents/skills/odcli-developer-work/SKILL.md` for OdCLI repository development and private numbered create/list/inspect/remove operations; state that the workflow is developer-only and has no public `odcli slot` command.
-- [ ] 5.3 Move `fix_tool.py`, `reviewer.py` and `numbered_tool.py` from the user skill tree into canonical repository-owned `scripts/odcli_agent_tools/` entrypoints without forwarding copies, duplicated lifecycle code, new dependencies, or changed trust/redaction/failure behavior.
-- [ ] 5.4 Update both skills, prompts, self-update remediation, README and execution-boundary documentation to reference only the separated instruction surfaces and canonical helper paths; remove all fix-registry narrative without changing canonical storage migration.
+- [x] 5.1 Narrow `.agents/skills/odcli-autonomous-work` to ordinary OdCLI use, triage, reviewed hot-fix unblocking and reconciliation; remove numbered create/list/inspect/remove instructions and every obsolete `~/.odcli/fix-tools` registry reference.
+- [x] 5.2 Add `.agents/skills/odcli-developer-work/SKILL.md` for OdCLI repository development and private numbered create/list/inspect/remove operations; state that the workflow is developer-only and has no public `odcli slot` command.
+- [x] 5.3 Move `fix_tool.py`, `reviewer.py` and `numbered_tool.py` from the user skill tree into canonical repository-owned `scripts/odcli_agent_tools/` entrypoints without forwarding copies, duplicated lifecycle code, new dependencies, or changed trust/redaction/failure behavior.
+- [x] 5.4 Update both skills, prompts, self-update remediation, README and execution-boundary documentation to reference only the separated instruction surfaces and canonical helper paths; remove all fix-registry narrative without changing canonical storage migration.
 
 ## 6. Skill-boundary acceptance and publication gates
 
-- [ ] 6.1 Refocus helper, skill, self-update, packaging and architecture tests on the relocated paths; prove no Python executable remains under `.agents/skills/**`, no user-skill numbered workflow exists, and no public Click or console-script numbered manager appears.
-- [ ] 6.2 Run focused numbered/hot-fix/root/update regressions and verify private create/list/inspect/remove, trusted-interpreter provenance, bounded secret-free output, selective cleanup and existing GitLab wrapper behavior remain unchanged.
-- [ ] 6.3 Run repository formatting/lint, strict typing, packaging, documentation, `git diff --check`, strict OpenSpec validation and exact-SHA evidence gates; confirm historical WP/results remain unmodified, complete independent verification and verified publication, then apply property-driven automatic `human_review=approved` and `todo` routing without another human gate.
+- [x] 6.1 Refocus helper, skill, self-update, packaging and architecture tests on the relocated paths; prove no Python executable remains under `.agents/skills/**`, no user-skill numbered workflow exists, and no public Click or console-script numbered manager appears.
+- [x] 6.2 Run focused numbered/hot-fix/root/update regressions and verify private create/list/inspect/remove, trusted-interpreter provenance, bounded secret-free output, selective cleanup and existing GitLab wrapper behavior remain unchanged.
+- [x] 6.3 Run repository formatting/lint, strict typing, packaging, documentation, `git diff --check`, strict OpenSpec validation and exact-SHA evidence gates; confirm historical WP/results remain unmodified, complete independent verification and verified publication, then apply property-driven automatic `human_review=approved` and `todo` routing without another human gate.

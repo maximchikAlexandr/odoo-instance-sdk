@@ -16,7 +16,7 @@ REPOSITORY = "maximchikAlexandr/odoo-instance-sdk"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ISSUE_RE = re.compile(r"^[1-9][0-9]*$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROVENANCE_PROBE = (
     "import importlib.metadata,json; "
     "d=importlib.metadata.distribution('odoo-instance-sdk'); "

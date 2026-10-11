@@ -535,12 +535,15 @@ the absolute worktree path for safe shell navigation. Do not copy a displayed
 
 ### Exact-revision numbered tools and hot fixes
 
-Numbered management is deliberately private service tooling. The checked-in
-`.agents/skills/odcli-autonomous-work/scripts/numbered_tool.py` wrapper validates
-the trusted canonical interpreter and installed repository provenance before
+Numbered management is deliberately private developer service tooling. The
+checked-in `scripts/odcli_agent_tools/numbered_tool.py` wrapper validates the
+trusted canonical interpreter and installed repository provenance before
 calling the package-owned coordinator. Its machine-readable create, list,
 inspect, and remove results contain bounded identity evidence and never secrets.
-The public `odcli` command tree has no numbered-management group.
+The public `odcli` command tree has no numbered-management group. Ordinary
+OdCLI use and reviewed hot-fix unblocking stay in
+`.agents/skills/odcli-autonomous-work`; repository developers use the separate
+`.agents/skills/odcli-developer-work` instructions.
 
 `odcli-N` and the reviewed `odcli-fix-<issue>` skill workflow use the same
 installation, provenance, selector probe, manifest, launcher lock, inspection,
@@ -550,10 +553,7 @@ retirement gates. A fresh alternate root is absent until first use and never
 copies canonical, legacy, numbered, or neighboring state. The process `HOME`
 is unchanged, so Git, SSH, uv, and unrelated user configuration remain shared.
 
-Old-style records under `~/.odcli/fix-tools` are not adopted or migrated by
-the shared lifecycle. Keep them for explicit remediation or retire them through
-the reviewed skill workflow; do not edit manifests or state by hand. A failed
-provenance or selector check leaves no published launcher.
+A failed provenance or selector check leaves no published launcher.
 
 User-root isolation covers OdCLI-managed SQLite catalogues, configuration,
 backups, environments, project runtime state, locks, bug reports, and

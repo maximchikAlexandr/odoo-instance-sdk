@@ -10,10 +10,11 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal, cast
 
-SKILL_DIR = Path(__file__).resolve().parents[1]
-REPORT_SKILL = SKILL_DIR.parent / "odcli-bug-report"
-REPO_ROOT = SKILL_DIR.parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+USER_SKILL = REPO_ROOT / ".agents" / "skills" / "odcli-autonomous-work"
+REPORT_SKILL = REPO_ROOT / ".agents" / "skills" / "odcli-bug-report"
 
 
 def _schema(kind: str) -> dict[str, object]:
@@ -52,8 +53,9 @@ def _session_from_events(events: str, fallback: str | None) -> str:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
-            return event["thread_id"]
+        thread_id = event.get("thread_id")
+        if event.get("type") == "thread.started" and isinstance(thread_id, str):
+            return thread_id
     if fallback:
         return fallback
     raise RuntimeError("Codex did not report a session ID; no review was recorded")
@@ -114,7 +116,7 @@ def _emit(value: dict[str, object], output: Path | None) -> None:
 
 
 def _triage(case_file: Path, model: str | None, output: Path | None) -> None:
-    instructions = (SKILL_DIR / "triage-prompt.md").read_text(encoding="utf-8")
+    instructions = (USER_SKILL / "triage-prompt.md").read_text(encoding="utf-8")
     case = case_file.read_text(encoding="utf-8")
     session, result = _run_codex(
         prompt=f"Evaluate this OdCLI case. Read the repository as needed.\n\n{case}",
@@ -154,10 +156,11 @@ def _review(report_id: str, model: str | None, output: Path | None) -> None:
     fresh = bug_report_submit_preview(report_id)
     if fresh.payload_sha256 != preview.payload_sha256:
         raise RuntimeError("Report changed during review; no verdict was recorded")
+    verdict = cast("Literal['approved', 'changes_requested']", result["verdict"])
     write_review_entry(
         report_id,
         round_number=round_number,
-        verdict=result["verdict"],
+        verdict=verdict,
         reviewed_payload_sha256=preview.payload_sha256,
         reviewer_session_ref=session,
         findings=str(result.get("findings", "")),
@@ -176,7 +179,7 @@ def _compatibility(sha: str, model: str | None, output: Path | None) -> None:
     )
     if present.returncode:
         raise RuntimeError("fix commit is not available in the local repository")
-    instructions = (SKILL_DIR / "compatibility-prompt.md").read_text(encoding="utf-8")
+    instructions = (USER_SKILL / "compatibility-prompt.md").read_text(encoding="utf-8")
     session, result = _run_codex(
         prompt=f"Review exact OdCLI fix commit {sha} against installed canonical OdCLI and "
         "registered fix tools. Check explicit-root selector confinement and all shared "

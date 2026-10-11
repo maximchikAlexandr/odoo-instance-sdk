@@ -160,7 +160,7 @@ _UPDATE_COORDINATOR_MATRIX = (
 @pytest.mark.parametrize(
     ("kind", "identifier", "remediation"),
     (
-        ("numbered", "2", "checked-in odcli-autonomous-work service workflow"),
+        ("numbered", "2", "odcli-developer-work service workflow"),
         ("hotfix", "42", "skill-managed canonical"),
     ),
 )
@@ -186,7 +186,7 @@ def test_alternate_launcher_rejects_direct_self_update_before_provenance(
 @pytest.mark.parametrize(
     ("kind", "identifier", "remediation"),
     (
-        ("numbered", "3", "checked-in odcli-autonomous-work service workflow"),
+        ("numbered", "3", "odcli-developer-work service workflow"),
         ("hotfix", "43", "skill-managed canonical"),
     ),
 )
@@ -240,7 +240,7 @@ def test_cli_alternate_update_rejects_before_maintenance(
 @pytest.mark.parametrize(
     ("kind", "identifier", "remediation"),
     (
-        ("numbered", "4", "checked-in odcli-autonomous-work service workflow"),
+        ("numbered", "4", "odcli-developer-work service workflow"),
         ("hotfix", "44", "skill-managed canonical"),
     ),
 )

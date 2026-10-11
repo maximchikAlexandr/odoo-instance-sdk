@@ -19,8 +19,8 @@ ALTERNATE_COORDINATOR_MECHANICS: Final[frozenset[str]] = frozenset(
 )
 ALTERNATE_POLICY_SURFACES: Final[frozenset[str]] = frozenset(
     {
-        ".agents/skills/odcli-autonomous-work/scripts/fix_tool.py",
-        ".agents/skills/odcli-autonomous-work/scripts/numbered_tool.py",
+        "scripts/odcli_agent_tools/fix_tool.py",
+        "scripts/odcli_agent_tools/numbered_tool.py",
     }
 )
 ALTERNATE_LIFECYCLE_MECHANIC_TOKENS: Final[frozenset[str]] = frozenset(
@@ -132,7 +132,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_real_odoo_foundation.py", 375),
         ("tests/unit/test_mutmut_results.py", 32),
         ("tests/unit/test_mutmut_results.py", 47),
-        ("tests/unit/test_odcli_autonomous_skill.py", 148),
+        ("tests/unit/test_odcli_autonomous_skill.py", 163),
     }
 )
 

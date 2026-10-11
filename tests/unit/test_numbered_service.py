@@ -9,9 +9,7 @@ from typing import cast
 
 import pytest
 
-_SCRIPT = (
-    Path(__file__).parents[2] / ".agents/skills/odcli-autonomous-work/scripts/numbered_tool.py"
-)
+_SCRIPT = Path(__file__).parents[2] / "scripts/odcli_agent_tools/numbered_tool.py"
 _SCRIPTS = _SCRIPT.parent
 
 

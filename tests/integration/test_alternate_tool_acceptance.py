@@ -387,7 +387,7 @@ def test_canonical_migration_update_guard_and_selective_removal_preserve_neighbo
 
     monkeypatch.setenv("ODCLI_LAUNCHER_KIND", "numbered")
     monkeypatch.setenv("ODCLI_LAUNCHER_ID", "2")
-    with pytest.raises(UpdateError, match="checked-in odcli-autonomous-work service workflow"):
+    with pytest.raises(UpdateError, match="odcli-developer-work service workflow"):
         assert_direct_update_allowed()
 
     remove_alternate_tool(numbered_one)

@@ -106,11 +106,26 @@ def _configure_foreign(
 
 
 def _module(name: str) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, SKILL / "scripts" / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(
+        name, SKILL.parents[2] / "scripts" / "odcli_agent_tools" / f"{name}.py"
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_user_and_developer_skill_surfaces_keep_executable_helpers_canonical() -> None:
+    developer = SKILL.parents[0] / "odcli-developer-work"
+    assert not list(SKILL.rglob("*.py"))
+    assert not list(developer.rglob("*.py"))
+    user_text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    developer_text = (developer / "SKILL.md").read_text(encoding="utf-8")
+    assert "numbered_tool.py" not in user_text
+    assert "fix-tools" not in user_text
+    assert "scripts/odcli_agent_tools/numbered_tool.py" in developer_text
+    for helper in ("fix_tool.py", "reviewer.py", "numbered_tool.py"):
+        assert (SKILL.parents[2] / "scripts" / "odcli_agent_tools" / helper).is_file()
 
 
 def test_codex_wrapper_uses_read_only_session_and_can_resume(
