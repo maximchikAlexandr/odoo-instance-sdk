@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import stat
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.internal.alternate_tool import AlternateIdentity, AlternateManifest
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
 
 type CheckoutIdentity = tuple[int, int]
 type QuarantinedCheckout = tuple[int, str, CheckoutIdentity]
@@ -15,6 +25,61 @@ DELETION_ROOT = ".odcli-deleting"
 
 class BoundCleanupError(RuntimeError):
     """Cleanup could not prove that the owned directory remained bound."""
+
+
+class _CreateOptions(Protocol):
+    @property
+    def client(self) -> OdooClient: ...
+
+    @property
+    def project(self) -> ProjectConfig | Path: ...
+
+    @property
+    def environment_options(self) -> EnvironmentCheckoutOptions: ...
+
+    @property
+    def reference_sha(self) -> str: ...
+
+    @property
+    def sdk_sha(self) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _CreateCommandPlan:
+    options: _CreateOptions
+    home: Path
+    reference: Path
+    checkout_parent: Path
+    repository: str
+
+    def redacted(self) -> dict[str, str]:
+        return {
+            "operation": "numbered.create",
+            "reference": str(self.reference),
+            "checkout_parent": str(self.checkout_parent),
+            "repository": self.repository,
+            "reference_sha": self.options.reference_sha,
+            "sdk_sha": self.options.sdk_sha,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _RemoveCommandPlan:
+    home: Path
+    number: str
+    identity: AlternateIdentity
+    checkout_parent: Path | None
+    manifest: AlternateManifest
+
+    def redacted(self) -> dict[str, str]:
+        return {
+            "operation": "numbered.remove",
+            "number": self.number,
+            "home": str(self.home),
+            "checkout": self.manifest.checkout_path or "",
+            "checkout_sha": self.manifest.checkout_sha or "",
+            "environment_id": self.manifest.environment_id or "",
+        }
 
 
 def validate_recovery_payload(  # noqa: C901 -- exact recovery evidence schema
@@ -71,6 +136,62 @@ def validate_recovery_payload(  # noqa: C901 -- exact recovery evidence schema
     ):
         raise BoundCleanupError("numbered recovery quarantine identity is invalid")
     return typed
+
+
+def read_recovery_reservation(
+    reservation: Path,
+    *,
+    number: str,
+    home: Path,
+    fields: frozenset[str],
+    canonical_repository: Callable[[str], str],
+    sha_re: re.Pattern[str],
+    hash_re: re.Pattern[str],
+) -> dict[str, str | int]:
+    parent = reservation.parent
+    current = parent
+    stop = home.resolve()
+    while True:
+        if current.is_symlink():
+            raise BoundCleanupError(f"refusing symlinked path: {current}")
+        if current == stop or current.parent == current:
+            break
+        current = current.parent
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        parent_fd = os.open(parent, flags)
+    except OSError as exc:
+        raise BoundCleanupError("cannot safely open recovery reservation parent") from exc
+    try:
+        try:
+            reservation_fd = os.open(
+                reservation.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise BoundCleanupError("recovery reservation is missing or symlinked") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(reservation_fd).st_mode):
+                raise BoundCleanupError("recovery reservation is not a regular file")
+            with os.fdopen(reservation_fd, encoding="utf-8") as stream:
+                reservation_fd = -1
+                payload = json.load(stream)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BoundCleanupError("numbered recovery reservation is unreadable") from exc
+        finally:
+            if reservation_fd >= 0:
+                os.close(reservation_fd)
+    finally:
+        os.close(parent_fd)
+    return validate_recovery_payload(
+        payload,
+        fields=fields,
+        number=number,
+        canonical_repository=canonical_repository,
+        sha_re=sha_re,
+        hash_re=hash_re,
+    )
 
 
 def quarantine_directory(

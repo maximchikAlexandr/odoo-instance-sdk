@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -37,9 +36,12 @@ from odoo_instance_sdk.internal.alternate_tool import (
 from odoo_instance_sdk.internal.checkout_cleanup import (
     DELETION_ROOT,
     BoundCleanupError,
+    _CreateCommandPlan as CreateCommandPlan,
+    _CreateOptions,
+    _RemoveCommandPlan as RemoveCommandPlan,
     quarantine_directory as _quarantine_checkout,
+    read_recovery_reservation,
     remove_bound_directory,
-    validate_recovery_payload,
 )
 from odoo_instance_sdk.internal.git_worktree import remote_url, rev_parse_branch, rev_parse_toplevel
 from odoo_instance_sdk.internal.paths import USER_ROOT_ENV
@@ -54,6 +56,9 @@ from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+
+_CreateCommandPlan = CreateCommandPlan
+_RemoveCommandPlan = RemoveCommandPlan
 
 CHECKOUT_MARKER = ".odcli-checkout.json"
 RESERVATION_NAME = "reservation.json"
@@ -539,7 +544,7 @@ def _sha256(path: Path) -> str:
 
 
 def _reservation(
-    identity_value: AlternateIdentity, checkout: Path, options: NumberedCheckoutOptions
+    identity_value: AlternateIdentity, checkout: Path, options: _CreateOptions
 ) -> Path:
     path = identity_value.manager_root / RESERVATION_NAME
     _write_json(
@@ -556,50 +561,33 @@ def _reservation(
     return path
 
 
-def _read_recovery_reservation(
-    reservation: Path, *, number: str, home: Path
+def _recovery_payload(
+    number: str,
+    checkout: Path,
+    repository: str,
+    checkout_sha: str,
+    sdk_sha: str,
+    environment: DevelopmentEnvironment,
+    interpreter: Path,
+    hash_lock_sha256: str,
 ) -> dict[str, str | int]:
-    parent = reservation.parent
-    _ensure_no_symlink_components(parent, stop=home)
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        parent_fd = os.open(parent, flags)
-    except OSError as exc:
-        raise AgentCheckoutError("cannot safely open recovery reservation parent") from exc
-    try:
-        try:
-            reservation_fd = os.open(
-                reservation.name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=parent_fd,
-            )
-        except OSError as exc:
-            raise AgentCheckoutError("recovery reservation is missing or symlinked") from exc
-        try:
-            if not stat.S_ISREG(os.fstat(reservation_fd).st_mode):
-                raise AgentCheckoutError("recovery reservation is not a regular file")
-            with os.fdopen(reservation_fd, encoding="utf-8") as stream:
-                reservation_fd = -1
-                payload = json.load(stream)
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise AgentCheckoutError("numbered recovery reservation is unreadable") from exc
-        finally:
-            if reservation_fd >= 0:
-                os.close(reservation_fd)
-    finally:
-        os.close(parent_fd)
-
-    try:
-        return validate_recovery_payload(
-            payload,
-            fields=RECOVERY_RESERVATION_FIELDS,
-            number=number,
-            canonical_repository=_canonical_repository_identity,
-            sha_re=SHA_RE,
-            hash_re=HASH_RE,
-        )
-    except BoundCleanupError as exc:
-        raise AgentCheckoutError(str(exc)) from exc
+    return {
+        "version": 1,
+        "kind": "numbered",
+        "identifier": number,
+        "checkout": str(checkout),
+        "repository": repository,
+        "checkout_sha": checkout_sha,
+        "reference_sha": checkout_sha,
+        "sdk_sha": sdk_sha,
+        "environment_id": str(environment.id),
+        "environment_path": environment.python_environment_path,
+        "interpreter_path": str(interpreter),
+        "environment_lock": environment.dependency_lock_path,
+        "hash_lock_sha256": hash_lock_sha256,
+        "quarantine": "",
+        "quarantine_identity": "",
+    }
 
 
 def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption transaction
@@ -619,11 +607,12 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
     reference = reference.resolve()
     checkout_parent = checkout_parent.resolve()
     repository = _safe_source(reference, options.reference_sha, options.source_repository)
-    with allocation_lock(home):
-        number, checkout = _next_number(home, checkout_parent)
-        identity_value = AlternateIdentity("numbered", number, home)
+    plan = _CreateCommandPlan(options, home, reference, checkout_parent, repository)
+    with allocation_lock(plan.home):
+        number, checkout = _next_number(plan.home, plan.checkout_parent)
+        identity_value = AlternateIdentity("numbered", number, plan.home)
         identity_value.manager_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-        reservation = _reservation(identity_value, checkout, options)
+        reservation = _reservation(identity_value, checkout, plan.options)
         marker: Path | None = None
         checkout_identity: _CheckoutIdentity | None = None
         environment: DevelopmentEnvironment | None = None
@@ -632,19 +621,19 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
         os.environ[USER_ROOT_ENV] = str(identity_value.state_root)
         try:
             marker = _clone_checkout(
-                reference,
+                plan.reference,
                 checkout,
                 number=number,
-                repository=repository,
-                sha=options.reference_sha,
+                repository=plan.repository,
+                sha=plan.options.reference_sha,
             )
             checkout_identity = _checkout_identity(checkout)
-            install_alternate_tool(identity_value, options.sdk_sha)
+            install_alternate_tool(identity_value, plan.options.sdk_sha)
             installed = True
-            environment = options.client.environments.adopt(
-                options.project,
+            environment = plan.options.client.environments.adopt(
+                plan.options.project,
                 checkout,
-                options=options.environment_options,
+                options=plan.options.environment_options,
             )
             environment_root = Path(environment.python_environment_path)
             recovery_interpreter = (
@@ -656,23 +645,16 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 recovery_interpreter = _environment_interpreter(environment)
             _write_json(
                 reservation,
-                {
-                    "version": 1,
-                    "kind": "numbered",
-                    "identifier": number,
-                    "checkout": str(checkout),
-                    "repository": repository,
-                    "checkout_sha": options.reference_sha,
-                    "reference_sha": options.reference_sha,
-                    "sdk_sha": options.sdk_sha,
-                    "environment_id": str(environment.id),
-                    "environment_path": environment.python_environment_path,
-                    "interpreter_path": str(recovery_interpreter),
-                    "environment_lock": environment.dependency_lock_path,
-                    "hash_lock_sha256": options.environment_options.hash_lock_sha256 or "",
-                    "quarantine": "",
-                    "quarantine_identity": "",
-                },
+                _recovery_payload(
+                    number,
+                    checkout,
+                    plan.repository,
+                    plan.options.reference_sha,
+                    plan.options.sdk_sha,
+                    environment,
+                    recovery_interpreter,
+                    plan.options.environment_options.hash_lock_sha256 or "",
+                ),
             )
             if environment.state is not EnvironmentState.READY:
                 raise AgentCheckoutError("adoption did not return a ready environment")  # noqa: TRY301
@@ -703,19 +685,19 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
             manifest = publish_alternate_linkage(
                 identity_value,
                 checkout_path=str(checkout),
-                checkout_repository=repository,
-                checkout_sha=options.reference_sha,
+                checkout_repository=plan.repository,
+                checkout_sha=plan.options.reference_sha,
                 environment_id=str(environment.id),
                 environment_path=environment.python_environment_path,
                 environment_lock=environment.dependency_lock_path,
                 interpreter_path=str(interpreter),
-                hash_lock_sha256=options.environment_options.hash_lock_sha256 or "",
+                hash_lock_sha256=plan.options.environment_options.hash_lock_sha256 or "",
             )
             reservation.unlink(missing_ok=True)
             return NumberedInstallation(identity_value, manifest, environment, marker)
         except BaseException:
             if environment is not None:
-                options.client.environments.remove(environment)
+                plan.options.client.environments.remove(environment)
             if installed:
                 with contextlib.suppress(BaseException):
                     remove_alternate_tool(identity_value)
@@ -776,11 +758,18 @@ def _remove_reserved_installation(  # noqa: C901 -- fixed reservation recovery s
     client: OdooClient,
     checkout_parent: Path | None,
 ) -> None:
-    payload = _read_recovery_reservation(
-        reservation,
-        number=number,
-        home=identity_value.home,
-    )
+    try:
+        payload = read_recovery_reservation(
+            reservation,
+            number=number,
+            home=identity_value.home,
+            fields=RECOVERY_RESERVATION_FIELDS,
+            canonical_repository=_canonical_repository_identity,
+            sha_re=SHA_RE,
+            hash_re=HASH_RE,
+        )
+    except BoundCleanupError as exc:
+        raise AgentCheckoutError(str(exc)) from exc
     checkout_value = str(payload["checkout"])
     repository_value = str(payload["repository"])
     sha_value = str(payload["checkout_sha"])
@@ -794,8 +783,10 @@ def _remove_reserved_installation(  # noqa: C901 -- fixed reservation recovery s
     quarantine_identity = str(payload["quarantine_identity"])
     expected_recovery: _CheckoutIdentity | None = None
     recovery_quarantine: Path | None = None
-    if quarantine_value and Path(quarantine_value).is_dir():
+    if quarantine_value:
         recovery_quarantine = Path(quarantine_value)
+        if recovery_quarantine.is_symlink() or not recovery_quarantine.is_dir():
+            raise AgentCheckoutError("numbered recovery quarantine evidence is unavailable")
         checkout = linked_checkout
         try:
             device_text, inode_text = quarantine_identity.split(":")
@@ -807,6 +798,8 @@ def _remove_reserved_installation(  # noqa: C901 -- fixed reservation recovery s
             or recovery_quarantine.parent.parent.resolve() != linked_checkout.parent.resolve()
         ):
             raise AgentCheckoutError("numbered recovery quarantine path drifted")
+    elif quarantine_identity:
+        raise AgentCheckoutError("numbered recovery quarantine evidence is incomplete")
     else:
         checkout = linked_checkout
     repository = repository_value
@@ -887,6 +880,8 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
     with allocation_lock(home_path), lifecycle_lock(identity_value, exclusive=True):
         manifest = read_alternate_manifest(identity_value)
         assert manifest is not None
+        plan = _RemoveCommandPlan(home_path, number, identity_value, checkout_parent, manifest)
+        manifest = plan.manifest
         fields = (
             manifest.checkout_path,
             manifest.checkout_repository,
@@ -898,7 +893,7 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
             manifest.hash_lock_sha256,
         )
         reservation = identity_value.manager_root / RESERVATION_NAME
-        if not all(fields) and _lexists(reservation):
+        if _lexists(reservation):
             _remove_reserved_installation(
                 number,
                 identity_value,
@@ -938,6 +933,17 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
         try:
             if str(environment.state) != EnvironmentState.REMOVED.value:
                 client.environments.remove(environment)
+            recovery_payload = _recovery_payload(
+                number,
+                checkout,
+                manifest.checkout_repository or "",
+                manifest.checkout_sha or "",
+                manifest.sha,
+                environment,
+                Path(manifest.interpreter_path or "").resolve(),
+                manifest.hash_lock_sha256 or "",
+            )
+            _write_json(reservation, recovery_payload)
             if (
                 checkout.is_symlink()
                 or not checkout.is_dir()
@@ -957,8 +963,12 @@ def remove_numbered_installation(  # noqa: C901 -- fixed validation, cleanup and
                 raise AgentCheckoutError(
                     "linked checkout identity changed after environment cleanup"
                 )
-            _remove_owned_checkout(checkout, checkout_identity)
-            reservation = identity_value.manager_root / RESERVATION_NAME
+            _remove_owned_checkout(
+                checkout,
+                checkout_identity,
+                recovery_reservation=reservation,
+                recovery_payload=recovery_payload,
+            )
             reservation.unlink(missing_ok=True)
             remove_alternate_tool(identity_value, _locked=True)
         finally:

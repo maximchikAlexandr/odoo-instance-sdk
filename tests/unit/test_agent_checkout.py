@@ -7,6 +7,7 @@ import subprocess
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -476,6 +477,7 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
 ) -> None:
     checkout = tmp_path / "checkouts" / "odcli-1"
     checkout.mkdir(parents=True)
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
     neighbor = tmp_path / "checkouts" / "odcli-2"
     neighbor.mkdir()
     identity_value = identity("numbered", "1", home=tmp_path)
@@ -494,13 +496,15 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
         base.executable,
         render_launcher(base),
         checkout_path=str(checkout),
-        checkout_repository="origin",
+        checkout_repository=REPOSITORY_URL,
         checkout_sha="b" * 40,
         environment_id=str(environment.id),
         environment_path=environment.python_environment_path,
         environment_lock=environment.dependency_lock_path,
         interpreter_path=str(Path(environment.python_environment_path) / "bin" / "python"),
-        hash_lock_sha256="c" * 64,
+        hash_lock_sha256=hashlib.sha256(
+            Path(environment.dependency_lock_path).read_bytes()
+        ).hexdigest(),
     )
     identity_value.manager_root.mkdir(parents=True, exist_ok=True)
     identity_value.tool_root.mkdir()
@@ -522,13 +526,73 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
         environments=SimpleNamespace(get=lambda _id: environment, remove=remove)
     )
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
+    real_rmdir = os.rmdir
+    delete_failures = 1
+
+    def fail_once(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal delete_failures
+        if path == "target" and delete_failures:
+            delete_failures -= 1
+            checkout.mkdir()
+            (checkout / "replacement.txt").write_text("keep\n", encoding="utf-8")
+            raise OSError("recursive deletion failed")
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "rmdir", fail_once)
+    with pytest.raises(OSError, match="recursive deletion failed"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    reservation = identity_value.manager_root / "reservation.json"
+    recovery = json.loads(reservation.read_text(encoding="utf-8"))
+    assert Path(recovery["quarantine"]).is_dir()
+    assert len(environment_remove_order) == 1
+    assert (checkout / "replacement.txt").read_text(encoding="utf-8") == "keep\n"
+
     agent_checkout.remove_numbered_installation(
         "1", client=cast("OdooClient", client), home=tmp_path
     )
 
     assert environment_remove_order == [True]
-    assert not checkout.exists()
+    assert (checkout / "replacement.txt").is_file()
     assert neighbor.is_dir()
+
+
+def test_private_command_plans_are_frozen_and_redacted(tmp_path: Path) -> None:
+    reference, sha = _reference_repo(tmp_path)
+    options = _numbered_options(tmp_path, reference, sha, object())
+    plan = agent_checkout._CreateCommandPlan(
+        options,
+        tmp_path,
+        reference,
+        tmp_path / "checkouts",
+        str(reference),
+    )
+
+    assert plan.redacted() == {
+        "operation": "numbered.create",
+        "reference": str(reference),
+        "checkout_parent": str(tmp_path / "checkouts"),
+        "repository": str(reference),
+        "reference_sha": sha,
+        "sdk_sha": "b" * 40,
+    }
+    with pytest.raises(FrozenInstanceError):
+        plan.home = tmp_path / "other"  # type: ignore[misc]
+
+    manifest = AlternateManifest(
+        identity("numbered", "1", home=tmp_path),
+        "a" * 40,
+        REPOSITORY_URL,
+        tmp_path / "tool",
+        "",
+    )
+    remove_plan = agent_checkout._RemoveCommandPlan(
+        tmp_path, "1", manifest.identity, None, manifest
+    )
+    assert "client" not in remove_plan.redacted()
+    assert "options" not in remove_plan.redacted()
 
 
 def test_remove_rejects_checkout_inode_swap_after_environment_cleanup(
