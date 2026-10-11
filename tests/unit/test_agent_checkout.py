@@ -7,7 +7,7 @@ import subprocess
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -28,6 +28,7 @@ from odoo_instance_sdk.internal.agent_checkout import (
 )
 from odoo_instance_sdk.internal.alternate_tool import (
     REPOSITORY_URL,
+    AlternateIdentity,
     AlternateManifest,
     identity,
     publish_alternate_linkage,
@@ -165,6 +166,63 @@ def _numbered_options(
         environment_options=_environment_options(tmp_path),
         home=tmp_path,
     )
+
+
+@dataclass
+class _OneShotFault:
+    target: str
+    real: Callable[..., None]
+    before_error: Callable[[], None]
+    message: str
+    fired: bool = False
+
+    def __call__(self, path: str, *, dir_fd: int | None = None) -> None:
+        if path == self.target and not self.fired:
+            self.fired = True
+            self.before_error()
+            raise OSError(self.message)
+        self.real(path, dir_fd=dir_fd)
+
+
+def _published_identity(
+    tmp_path: Path, checkout: Path, environment: SimpleNamespace
+) -> AlternateIdentity:
+    identity_value = identity("numbered", "1", home=tmp_path)
+    base = AlternateManifest(
+        identity_value,
+        "a" * 40,
+        REPOSITORY_URL,
+        identity_value.executable,
+        "",
+    )
+    manifest = AlternateManifest(
+        identity_value,
+        base.sha,
+        base.repository,
+        base.executable,
+        render_launcher(base),
+        checkout_path=str(checkout),
+        checkout_repository=REPOSITORY_URL,
+        checkout_sha="b" * 40,
+        environment_id=str(environment.id),
+        environment_path=environment.python_environment_path,
+        environment_lock=environment.dependency_lock_path,
+        interpreter_path=str(Path(environment.python_environment_path) / "bin" / "python"),
+        hash_lock_sha256=hashlib.sha256(
+            Path(environment.dependency_lock_path).read_bytes()
+        ).hexdigest(),
+    )
+    identity_value.manager_root.mkdir(parents=True, exist_ok=True)
+    identity_value.tool_root.mkdir()
+    identity_value.tool_bin.mkdir()
+    identity_value.executable.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    identity_value.executable.chmod(0o700)
+    identity_value.launcher.parent.mkdir(parents=True, exist_ok=True)
+    identity_value.launcher.write_text(manifest.shim, encoding="utf-8")
+    identity_value.launcher.chmod(0o700)
+    identity_value.lock.touch()
+    identity_value.manifest.write_text(json.dumps(manifest.to_json()), encoding="utf-8")
+    return identity_value
 
 
 def test_allocator_skips_every_occupied_dimension(tmp_path: Path) -> None:
@@ -492,55 +550,14 @@ def test_repository_identity_rejects_secret_bearing_transports(source: str) -> N
         agent_checkout._canonical_repository_identity(source)
 
 
-def test_successful_remove_is_ordered_once_and_preserves_neighbor(
+def test_remove_execution_consumes_frozen_plan(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     checkout = tmp_path / "checkouts" / "odcli-1"
     checkout.mkdir(parents=True)
     (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
-    neighbor = tmp_path / "checkouts" / "odcli-2"
-    neighbor.mkdir()
-    identity_value = identity("numbered", "1", home=tmp_path)
     environment = _environment(tmp_path, checkout)
-    base = AlternateManifest(
-        identity_value,
-        "a" * 40,
-        REPOSITORY_URL,
-        identity_value.executable,
-        "",
-    )
-    manifest = AlternateManifest(
-        identity_value,
-        base.sha,
-        base.repository,
-        base.executable,
-        render_launcher(base),
-        checkout_path=str(checkout),
-        checkout_repository=REPOSITORY_URL,
-        checkout_sha="b" * 40,
-        environment_id=str(environment.id),
-        environment_path=environment.python_environment_path,
-        environment_lock=environment.dependency_lock_path,
-        interpreter_path=str(Path(environment.python_environment_path) / "bin" / "python"),
-        hash_lock_sha256=hashlib.sha256(
-            Path(environment.dependency_lock_path).read_bytes()
-        ).hexdigest(),
-    )
-    identity_value.manager_root.mkdir(parents=True, exist_ok=True)
-    identity_value.tool_root.mkdir()
-    identity_value.tool_bin.mkdir()
-    identity_value.executable.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-    identity_value.executable.chmod(0o700)
-    identity_value.launcher.parent.mkdir(parents=True, exist_ok=True)
-    identity_value.launcher.write_text(manifest.shim, encoding="utf-8")
-    identity_value.launcher.chmod(0o700)
-    identity_value.lock.touch()
-    identity_value.manifest.write_text(json.dumps(manifest.to_json()), encoding="utf-8")
-    environment_remove_order: list[bool] = []
-
-    def remove(_environment: object) -> None:
-        environment_remove_order.append(checkout.exists())
-        environment.state = EnvironmentState.REMOVED.value
+    identity_value = _published_identity(tmp_path, checkout, environment)
 
     def unexpected_get(_id: object) -> object:
         pytest.fail("remove execution used the pre-plan client")
@@ -552,7 +569,12 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
         environments=SimpleNamespace(get=unexpected_get, remove=unexpected_remove)
     )
     plan_client = SimpleNamespace(
-        environments=SimpleNamespace(get=lambda _id: environment, remove=remove)
+        environments=SimpleNamespace(
+            get=lambda _id: environment,
+            remove=lambda _environment: setattr(
+                environment, "state", EnvironmentState.REMOVED.value
+            ),
+        )
     )
     real_plan = agent_checkout._RemoveCommandPlan
 
@@ -562,19 +584,48 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
 
     monkeypatch.setattr(agent_checkout, "_RemoveCommandPlan", altered_plan)
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
+    agent_checkout.remove_numbered_installation(
+        "1", client=cast("OdooClient", client), home=tmp_path
+    )
+
+    assert environment.state == EnvironmentState.REMOVED.value
+    assert not identity_value.manager_root.exists()
+
+
+def test_successful_remove_is_ordered_once_and_preserves_neighbor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkouts" / "odcli-1"
+    checkout.mkdir(parents=True)
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    neighbor = tmp_path / "checkouts" / "odcli-2"
+    neighbor.mkdir()
+    environment = _environment(tmp_path, checkout)
+    identity_value = _published_identity(tmp_path, checkout, environment)
+    environment_remove_order: list[bool] = []
+
+    def remove(value: object) -> None:
+        del value
+        environment_remove_order.append(checkout.exists())
+        environment.state = EnvironmentState.REMOVED.value
+
+    client = SimpleNamespace(
+        environments=SimpleNamespace(get=lambda _id: environment, remove=remove)
+    )
+    monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
     real_rmdir = os.rmdir
-    delete_failures = 1
 
-    def fail_once(path: str, *, dir_fd: int | None = None) -> None:
-        nonlocal delete_failures
-        if path == "target" and delete_failures:
-            delete_failures -= 1
-            checkout.mkdir()
-            (checkout / "replacement.txt").write_text("keep\n", encoding="utf-8")
-            raise OSError("recursive deletion failed")
-        real_rmdir(path, dir_fd=dir_fd)
+    def replace_checkout() -> None:
+        checkout.mkdir()
+        (checkout / "replacement.txt").write_text("keep\n", encoding="utf-8")
 
-    monkeypatch.setattr(os, "rmdir", fail_once)
+    fault = _OneShotFault(
+        target="target",
+        real=real_rmdir,
+        before_error=replace_checkout,
+        message="recursive deletion failed",
+    )
+    monkeypatch.setattr(os, "rmdir", fault)
     with pytest.raises(OSError, match="recursive deletion failed"):
         agent_checkout.remove_numbered_installation(
             "1", client=cast("OdooClient", client), home=tmp_path
@@ -582,8 +633,9 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
 
     reservation = identity_value.manager_root / "reservation.json"
     recovery = json.loads(reservation.read_text(encoding="utf-8"))
+    assert fault.fired
     assert Path(recovery["quarantine"]).is_dir()
-    assert len(environment_remove_order) == 1
+    assert environment_remove_order == [True]
     assert (checkout / "replacement.txt").read_text(encoding="utf-8") == "keep\n"
 
     agent_checkout.remove_numbered_installation(
@@ -598,33 +650,25 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
 def test_private_command_plans_are_frozen_and_redacted(tmp_path: Path) -> None:
     reference, sha = _reference_repo(tmp_path)
     options = _numbered_options(tmp_path, reference, sha, object())
-    plan = agent_checkout._CreateCommandPlan(
-        options.client,
-        options.project,
-        options.home or tmp_path,
-        reference,
-        tmp_path / "checkouts",
-        str(reference),
-        sha,
-        options.sdk_sha,
-        options.environment_options.base_ref,
-        options.environment_options.name,
-        options.environment_options.config_path,
-        options.environment_options.db_mode,
-        options.environment_options.source_database,
-        options.environment_options.target_database,
-        options.environment_options.odoo_bin,
-        options.environment_options.python,
-        options.environment_options.create_venv,
-        options.environment_options.http_port,
-        options.environment_options.hash_lock,
-        options.environment_options.hash_lock_sha256 or "",
-        options.environment_options.remote_name,
-        options.environment_options.backup_id,
+    plan = agent_checkout._CreateCommandPlan.from_options(
+        client=options.client,
+        project=options.project,
+        environment_options=options.environment_options,
+        home=tmp_path,
+        number="1",
+        identity=identity("numbered", "1", home=tmp_path),
+        checkout=tmp_path / "checkouts" / "odcli-1",
+        reference=reference,
+        checkout_parent=tmp_path / "checkouts",
+        repository=str(reference),
+        reference_sha=sha,
+        sdk_sha=options.sdk_sha,
     )
 
     assert plan.redacted() == {
         "operation": "numbered.create",
+        "number": "1",
+        "checkout": str(tmp_path / "checkouts" / "odcli-1"),
         "reference": str(reference),
         "checkout_parent": str(tmp_path / "checkouts"),
         "repository": str(reference),
@@ -669,7 +713,7 @@ def test_remove_rejects_checkout_inode_swap_after_environment_cleanup(
         base.executable,
         render_launcher(base),
         checkout_path=str(checkout),
-        checkout_repository="origin",
+        checkout_repository=REPOSITORY_URL,
         checkout_sha="b" * 40,
         environment_id=str(environment.id),
         environment_path=environment.python_environment_path,
@@ -688,15 +732,29 @@ def test_remove_rejects_checkout_inode_swap_after_environment_cleanup(
     identity_value.lock.touch()
     identity_value.manifest.write_text(json.dumps(manifest.to_json()), encoding="utf-8")
 
-    def swap_and_remove(_environment: object) -> None:
+    remove_calls: list[object] = []
+
+    def swap_and_remove(value: object) -> None:
+        remove_calls.append(value)
         moved = checkout.with_name("odcli-1-original")
         checkout.rename(moved)
         checkout.mkdir()
-        (checkout / "replacement.txt").write_text("do not delete\n", encoding="utf-8")
+        marker = checkout / ".git" / CHECKOUT_MARKER
+        marker.parent.mkdir()
+        marker.write_text(
+            json.dumps(agent_checkout._marker_payload("1", REPOSITORY_URL, "b" * 40)),
+            encoding="utf-8",
+        )
         environment.state = EnvironmentState.REMOVED.value
 
+    get_calls: list[object] = []
+
+    def get_environment(_id: object) -> SimpleNamespace:
+        get_calls.append(_id)
+        return environment
+
     client = SimpleNamespace(
-        environments=SimpleNamespace(get=lambda _id: environment, remove=swap_and_remove)
+        environments=SimpleNamespace(get=get_environment, remove=swap_and_remove)
     )
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
 
@@ -705,9 +763,76 @@ def test_remove_rejects_checkout_inode_swap_after_environment_cleanup(
             "1", client=cast("OdooClient", client), home=tmp_path
         )
 
-    assert (checkout / "replacement.txt").read_text(encoding="utf-8") == "do not delete\n"
+    assert (checkout / ".git" / CHECKOUT_MARKER).is_file()
     assert (checkout.with_name("odcli-1-original") / "owned.txt").is_file()
     assert (neighbor / "keep.txt").is_file()
+    recovery = json.loads(
+        (identity_value.manager_root / "reservation.json").read_text(encoding="utf-8")
+    )
+    assert recovery["checkout_identity"] != ":".join(
+        str(value) for value in agent_checkout._checkout_identity(checkout)
+    )
+
+    with pytest.raises(AgentCheckoutError, match="identity changed before cleanup"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    assert len(remove_calls) == 1
+    assert len(get_calls) == 1
+    assert (checkout / ".git" / CHECKOUT_MARKER).is_file()
+    assert (checkout.with_name("odcli-1-original") / "owned.txt").is_file()
+
+
+def test_recovery_keeps_published_require_pushed_policy_after_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkouts" / "odcli-1"
+    checkout.mkdir(parents=True)
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    environment = _environment(tmp_path, checkout)
+    identity_value = _published_identity(tmp_path, checkout, environment)
+    remove_calls: list[object] = []
+    validation_calls: list[bool] = []
+
+    def remove(value: object) -> None:
+        remove_calls.append(value)
+        environment.state = EnvironmentState.REMOVED.value
+
+    def validate(
+        _checkout: Path,
+        *,
+        require_pushed: bool,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        validation_calls.append(require_pushed)
+        if len(validation_calls) >= 2:
+            raise AgentCheckoutError("unpushed checkout")
+        return {}
+
+    client = SimpleNamespace(
+        environments=SimpleNamespace(get=lambda _id: environment, remove=remove)
+    )
+    monkeypatch.setattr(agent_checkout, "_validate_checkout", validate)
+
+    with pytest.raises(AgentCheckoutError, match="unpushed checkout"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    with pytest.raises(AgentCheckoutError, match="unpushed checkout"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    recovery = json.loads(
+        (identity_value.manager_root / "reservation.json").read_text(encoding="utf-8")
+    )
+    assert recovery["require_pushed"] is True
+    assert validation_calls == [True, True, True]
+    assert len(remove_calls) == 1
+    assert checkout.is_dir()
+    assert (checkout / "owned.txt").is_file()
 
 
 def test_quarantine_rejects_post_quarantine_entry_swap(
@@ -801,6 +926,10 @@ def test_recovery_rejects_marker_drift_before_environment_cleanup(
                 ).hexdigest(),
                 "quarantine": "",
                 "quarantine_identity": "",
+                "checkout_identity": ":".join(
+                    str(value) for value in agent_checkout._checkout_identity(checkout)
+                ),
+                "require_pushed": False,
             }
         ),
         encoding="utf-8",
