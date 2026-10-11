@@ -492,9 +492,45 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 checkout,
                 options=options.environment_options,
             )
+            # Publish recovery evidence before any post-adopt guard can fail.
+            # The SDK environment remover remains the only environment lifecycle.
+            environment_root = Path(environment.python_environment_path)
+            recovery_interpreter = (
+                environment_root
+                if environment_root.name == "python"
+                else environment_root / "bin" / "python"
+            )
+            # Keep enough deterministic evidence for retry when this guard
+            # itself is the post-adopt failure.
+            with contextlib.suppress(AgentCheckoutError):
+                recovery_interpreter = _environment_interpreter(environment)
+            _write_json(
+                reservation,
+                {
+                    "version": 1,
+                    "kind": "numbered",
+                    "identifier": number,
+                    "checkout": str(checkout),
+                    "reference_sha": options.reference_sha,
+                    "sdk_sha": options.sdk_sha,
+                    "environment_id": str(environment.id),
+                    "environment_path": environment.python_environment_path,
+                },
+            )
+            manifest = publish_alternate_linkage(
+                identity_value,
+                checkout_path=str(checkout),
+                checkout_repository=repository,
+                checkout_sha=options.reference_sha,
+                environment_id=str(environment.id),
+                environment_path=environment.python_environment_path,
+                environment_lock=environment.dependency_lock_path,
+                interpreter_path=str(recovery_interpreter),
+                hash_lock_sha256=options.environment_options.hash_lock_sha256 or "",
+            )
             if environment.state is not EnvironmentState.READY:
                 raise AgentCheckoutError("adoption did not return a ready environment")  # noqa: TRY301
-            interpreter = _environment_interpreter(environment)
+            _environment_interpreter(environment)
             if Path(environment.worktree_path).resolve() != checkout.resolve():
                 raise AgentCheckoutError(  # noqa: TRY301
                     "adopted environment is not bound to the reserved checkout"
@@ -518,30 +554,6 @@ def create_numbered_installation(  # noqa: C901 -- fixed allocation/adoption tra
                 raise AgentCheckoutError(  # noqa: TRY301
                     "adopted environment dependency lock digest drifted"
                 )
-            _write_json(
-                reservation,
-                {
-                    "version": 1,
-                    "kind": "numbered",
-                    "identifier": number,
-                    "checkout": str(checkout),
-                    "reference_sha": options.reference_sha,
-                    "sdk_sha": options.sdk_sha,
-                    "environment_id": str(environment.id),
-                    "environment_path": environment.python_environment_path,
-                },
-            )
-            manifest = publish_alternate_linkage(
-                identity_value,
-                checkout_path=str(checkout),
-                checkout_repository=repository,
-                checkout_sha=options.reference_sha,
-                environment_id=str(environment.id),
-                environment_path=environment.python_environment_path,
-                environment_lock=str(environment.dependency_lock_path),
-                interpreter_path=str(interpreter),
-                hash_lock_sha256=options.environment_options.hash_lock_sha256 or "",
-            )
             reservation.unlink(missing_ok=True)
             return NumberedInstallation(identity_value, manifest, environment, marker)
         except BaseException:

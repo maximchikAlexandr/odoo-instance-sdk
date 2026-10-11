@@ -865,10 +865,10 @@ def remove_alternate_tool(  # noqa: C901 -- fixed selective cleanup sequence
         for directory in (identity_value.tool_root, identity_value.tool_bin):
             if directory.exists():
                 shutil.rmtree(directory)
-        with contextlib.suppress(OSError):
-            identity_value.manager_root.rmdir()
         with contextlib.suppress(FileNotFoundError):
             identity_value.lock.unlink()
+        with contextlib.suppress(OSError):
+            identity_value.manager_root.rmdir()
 
     if _locked:
         remove_locked()
