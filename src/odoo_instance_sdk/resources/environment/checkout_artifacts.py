@@ -269,6 +269,7 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         checkout_commit_sha=_opt("checkout_commit_sha"),
         code_ownership=EnvironmentCodeOwnership(_opt("code_ownership") or "unknown"),
         artifact_root=artifact_value,
+        adoption_input_fingerprint=_opt("adoption_input_fingerprint"),
     )
 
 

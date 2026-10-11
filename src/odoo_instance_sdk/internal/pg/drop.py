@@ -6,9 +6,8 @@ import shutil
 import stat
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING
 
 import msgspec
 
@@ -16,8 +15,6 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import (
     Command,
     ExecutionPlan,
-    JsonValue,
-    PlanPrecondition,
     SemanticPlanObservation,
     _PlanObservation,
 )
@@ -26,7 +23,25 @@ from odoo_instance_sdk.internal.files import open_directory_path_without_symlink
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.pg.context import DatabaseContext, resolve_database_context
+from odoo_instance_sdk.internal.pg.drop_inspection import (
+    DatabaseDropSession,
+    DropInspection as _DropInspection,
+    decode_inspection,
+    decode_verify,
+    drop_sql,
+    inspection_sql,
+    process_result,
+    quoted_identifier,
+    safe_session_value,
+    safety_preconditions,
+    session_advice,
+    session_projection,
+    sql_literal,
+    terminate_sql,
+    verify_sql,
+)
 from odoo_instance_sdk.internal.pg.drop_types import (
+    AdoptedCopyDatabaseClaim,
     DatabaseDropExecutionContext,
     DatabaseDropRestoreExpectation,
     DatabaseDropRestoreExpectationHolder,
@@ -43,9 +58,20 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
     prepared_command,
 )
-from odoo_instance_sdk.internal.proc.redaction import redacted_projection
-from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 
+_sql_literal = sql_literal
+_quoted_identifier = quoted_identifier
+_safe_session_value = safe_session_value
+_decode_inspection = decode_inspection
+_decode_verify = decode_verify
+_drop_sql = drop_sql
+_inspection_sql = inspection_sql
+_process_result = process_result
+_safety_preconditions = safety_preconditions
+_session_advice = session_advice
+_session_projection = session_projection
+_terminate_sql = terminate_sql
+_verify_sql = verify_sql
 _catalog_database_in_use = catalog_database_in_use
 
 if TYPE_CHECKING:
@@ -65,17 +91,7 @@ _TERMINATE_STEP = "database.drop.terminate"
 _REVALIDATE_DROP_STEP = "database.drop.revalidate-drop"
 _DROP_STEP = "database.drop.execute"
 _VERIFY_STEP = "database.drop.verify"
-_ContextT = TypeVar("_ContextT")
 _RMTREE_AVOIDS_SYMLINK_ATTACKS = bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
-
-
-class DatabaseDropSession(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    """Sanitized identity for one active target-database session."""
-
-    pid: int
-    user: str
-    client: str | None = None
-    application: str | None = None
 
 
 class DatabaseDropResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -129,13 +145,6 @@ class DatabaseDropPartialError(ConfigError):
         self.__cause__ = error
 
 
-@dataclass(frozen=True, slots=True)
-class _DropInspection:
-    exists: bool
-    is_template: bool
-    sessions: tuple[DatabaseDropSession, ...]
-
-
 def _validate_allowed_environment(
     catalog: BackupCatalog,
     environment_id: str,
@@ -177,184 +186,6 @@ def _validate_allowed_environment(
             raise ConfigError("retained rollback ownership evidence changed")
 
 
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _quoted_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
-
-
-def _inspection_sql(database: str) -> str:
-    literal = _sql_literal(database)
-    return (
-        "SELECT json_build_object("
-        f"'exists', EXISTS (SELECT 1 FROM pg_database WHERE datname={literal}),"
-        f"'is_template', COALESCE((SELECT datistemplate FROM pg_database WHERE datname={literal}), false),"
-        "'sessions', COALESCE((SELECT json_agg(json_build_object("
-        "'pid', pid, 'user', usename, 'client', client_addr::text, "
-        "'application', application_name)) FROM pg_stat_activity "
-        f"WHERE datname={literal} AND pid <> pg_backend_pid()), '[]'::json)"
-        ");"
-    )
-
-
-def _terminate_sql(database: str) -> str:
-    literal = _sql_literal(database)
-    return (
-        "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) "
-        "FROM pg_stat_activity "
-        f"WHERE datname={literal} AND pid <> pg_backend_pid()) AS terminated;"
-    )
-
-
-def _drop_sql(database: str) -> str:
-    return f"DROP DATABASE {_quoted_identifier(database)};"
-
-
-def _verify_sql(database: str) -> str:
-    literal = _sql_literal(database)
-    return f"SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname={literal});"
-
-
-def _safe_session_value(value: JsonValue) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ConfigError("database safety inspection returned invalid session identity")
-    projected = redacted_projection(value, field="error")
-    if not isinstance(projected, str):
-        raise ConfigError("database safety inspection returned invalid session identity")
-    return sanitize_last_error(projected) or None
-
-
-def _session_projection(session: DatabaseDropSession) -> dict[str, JsonValue]:
-    return cast("dict[str, JsonValue]", msgspec.to_builtins(session))
-
-
-def _decode_inspection(result: ProcessResult, database: str) -> _DropInspection:
-    if result.returncode != 0:
-        raise ConfigError(f"database safety inspection failed for {database!r}")
-    stdout = (
-        result.stdout.decode(errors="replace")
-        if isinstance(result.stdout, bytes)
-        else result.stdout
-    )
-    try:
-        payload = json.loads(stdout or "")
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ConfigError("database safety inspection returned invalid data") from exc
-    if not isinstance(payload, dict):
-        raise ConfigError("database safety inspection returned invalid data")
-    raw_sessions = payload.get("sessions", [])
-    if not isinstance(raw_sessions, list):
-        raise ConfigError("database safety inspection returned invalid sessions")
-    sessions: list[DatabaseDropSession] = []
-    for raw in raw_sessions:
-        if (
-            not isinstance(raw, dict)
-            or not isinstance(raw.get("pid"), int)
-            or isinstance(raw.get("pid"), bool)
-            or raw["pid"] <= 0
-        ):
-            raise ConfigError("database safety inspection returned invalid session identity")
-        sessions.append(
-            DatabaseDropSession(
-                pid=raw["pid"],
-                user=_safe_session_value(raw.get("user")) or "unknown",
-                client=_safe_session_value(raw.get("client")),
-                application=_safe_session_value(raw.get("application")),
-            )
-        )
-    exists = payload.get("exists")
-    is_template = payload.get("is_template")
-    if not isinstance(exists, bool) or not isinstance(is_template, bool):
-        raise ConfigError("database safety inspection returned invalid preconditions")
-    return _DropInspection(exists, is_template, tuple(sessions))
-
-
-def _decode_verify(result: ProcessResult, database: str) -> bool:
-    if result.returncode != 0:
-        raise ConfigError(f"database absence verification failed for {database!r}")
-    stdout = (
-        result.stdout.decode(errors="replace")
-        if isinstance(result.stdout, bytes)
-        else result.stdout
-    )
-    return (stdout or "").strip().lower() in {"t", "true", "1"}
-
-
-def _process_result(context: RunContext[_ContextT], step_id: str) -> ProcessResult:
-    result = context.process(step_id)
-    if not isinstance(result, ProcessResult):
-        raise ConfigError(f"database drop step {step_id!r} returned no process result")
-    return result
-
-
-def _session_advice(*, command_origin: str | None, force_connections: bool) -> str:
-    if force_connections:
-        return "will be terminated"
-    if command_origin == "env-remove":
-        return (
-            "require --force-connections (or stop the environment with `odcli stop`) "
-            "to terminate only target sessions"
-        )
-    return "require --force-connections to terminate only target sessions"
-
-
-def _safety_preconditions(
-    inspection: _DropInspection,
-    *,
-    database: str,
-    project_default: str | None,
-    force_default: bool,
-    force_connections: bool,
-    command_origin: str | None = None,
-) -> tuple[PlanPrecondition, ...]:
-    default_target = project_default == database
-    return (
-        PlanPrecondition(
-            name="target exists",
-            status="passed" if inspection.exists else "failed",
-            detail=("target database exists" if inspection.exists else "target database is absent"),
-        ),
-        PlanPrecondition(
-            name="target is not a template",
-            status="failed" if inspection.is_template else "passed",
-            detail=(
-                "pg_database.datistemplate is true"
-                if inspection.is_template
-                else "target is not a template"
-            ),
-        ),
-        PlanPrecondition(
-            name="configured default protection",
-            status="passed" if not default_target or force_default else "failed",
-            detail=(
-                "target is configured project default and --force-default is required"
-                if default_target and not force_default
-                else "target is not the configured project default"
-                if not default_target
-                else "configured project default is explicitly forced"
-            ),
-        ),
-        PlanPrecondition(
-            name="active target sessions",
-            status="passed" if not inspection.sessions or force_connections else "failed",
-            detail=(
-                "no active target sessions"
-                if not inspection.sessions
-                else (
-                    f"{len(inspection.sessions)} active target session(s) "
-                    + _session_advice(
-                        command_origin=command_origin, force_connections=force_connections
-                    )
-                )
-            ),
-        ),
-    )
-
-
 def _assert_safe(
     inspection: _DropInspection,
     *,
@@ -392,6 +223,7 @@ def _drop_ownership_evidence(  # noqa: C901
     allow_environment_id: str | None = None,
     allow_environment_backup_id: str | None = None,
     allow_environment_rollback_database: str | None = None,
+    adopted_copy_claim: AdoptedCopyDatabaseClaim | None = None,
 ) -> _DropOwnershipEvidence | None:
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -401,7 +233,23 @@ def _drop_ownership_evidence(  # noqa: C901
     if not isinstance(catalog, BackupCatalog):
         # Existing transport-focused command doubles do not model catalogue
         # ownership. Real CLI catalogues always take the fail-closed path.
+        if adopted_copy_claim is not None:
+            raise ConfigError("adopted COPY database drop ownership evidence is unavailable")
         return None
+    if adopted_copy_claim is not None:
+        if allow_environment_id != adopted_copy_claim.environment_id:
+            raise ConfigError("adopted COPY database drop claim does not match environment")
+        return _adopted_copy_ownership_evidence(
+            catalog,
+            instance,
+            cluster,
+            database,
+            adopted_copy_claim,
+            expected_backup_id=allow_environment_backup_id,
+            expected_rollback_database=allow_environment_rollback_database,
+            volume_step_id=volume_step_id,
+            container_step_id=container_step_id,
+        )
     if not isinstance(cluster, PostgresCluster) or cluster.mode != "compose":
         raise ConfigError("database drop requires an SDK-owned Compose cluster")
     claim = catalog._get_postgres_cluster(cluster._project_id)
@@ -533,6 +381,135 @@ def _drop_ownership_evidence(  # noqa: C901
     )
 
 
+def _adopted_copy_ownership_evidence(  # noqa: C901 -- bounded external adopted-copy evidence gate
+    catalog: BackupCatalog,
+    instance: OdooInstance,
+    cluster: PostgresCluster,
+    database: str,
+    claim: AdoptedCopyDatabaseClaim,
+    *,
+    expected_backup_id: str | None,
+    expected_rollback_database: str | None,
+    volume_step_id: str | None,
+    container_step_id: str | None,
+) -> _DropOwnershipEvidence:
+    """Validate one adopted COPY target on the project's approved external endpoint."""
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    if not isinstance(cluster, PostgresCluster) or cluster.mode != "external":
+        raise ConfigError("adopted COPY database drop requires approved shared PostgreSQL")
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is not None:
+        for step_id in (volume_step_id, container_step_id):
+            if step_id is not None and context.planned(step_id) and not context.consumed(step_id):
+                context.skip(step_id)
+    if (
+        claim.environment_id == ""
+        or claim.database != database
+        or not claim.project_id
+        or not claim.checkout_repository_root
+        or not claim.checkout_git_common_dir
+        or not claim.adoption_input_fingerprint
+    ):
+        raise ConfigError("adopted COPY database drop claim does not match target")
+    from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
+
+    if (
+        normalize_db_host(claim.endpoint_host) != normalize_db_host(cluster.endpoint_host)
+        or claim.endpoint_port != cluster.endpoint_port
+        or normalize_db_host(claim.endpoint_host)
+        != normalize_db_host(instance.config.db_host or "127.0.0.1")
+        or claim.endpoint_port != (instance.config.db_port or 5432)
+    ):
+        raise ConfigError("adopted COPY database drop endpoint evidence does not match")
+
+    row = catalog.get_environment(claim.environment_id)
+    if (
+        row is None
+        or row["code_ownership"] != "caller_owned"
+        or row["project_id"] != claim.project_id
+        or row["checkout_repository_root"] != claim.checkout_repository_root
+        or row["checkout_git_common_dir"] != claim.checkout_git_common_dir
+        or row["adoption_input_fingerprint"] != claim.adoption_input_fingerprint
+        or row["checkout_repository_root"] != row["worktree_path"]
+        or row["checkout_git_common_dir"] != row["git_common_dir"]
+    ):
+        raise ConfigError("adopted COPY database drop requires adoption ownership evidence")
+    if row["project_id"] != f"project_{cluster._project_id}" or str(row["repository_root"]) != str(
+        cluster._repository_root
+    ):
+        raise ConfigError("adopted COPY database drop project evidence does not match")
+    _validate_allowed_environment(
+        catalog,
+        claim.environment_id,
+        database,
+        expected_backup_id,
+        expected_rollback_database,
+    )
+    if _catalog_database_in_use(catalog, database, allow_environment_id=claim.environment_id):
+        raise ConfigError("database is bound to an active environment or process")
+
+    binding_database = (
+        database if expected_rollback_database is None else str(row["target_db_name"])
+    )
+    event = catalog._latest_database_event(
+        cluster.endpoint_host, cluster.endpoint_port, binding_database
+    )
+    if event is None or event["event_type"] != "restored":
+        raise ConfigError("adopted COPY database drop requires an exact current lifecycle event")
+    binding = catalog._latest_restore_binding(
+        cluster.endpoint_host, cluster.endpoint_port, binding_database
+    )
+    if (
+        binding is None
+        or binding["cluster_id"] is not None
+        or binding["state"] not in {"complete", "incomplete"}
+        or event["cluster_id"] is not None
+        or event["database_name"] != binding_database
+        or event["backup_id"] != binding["backup_id"]
+        or event["source_kind"] != binding["source_kind"]
+        or event["source_sha256"] != binding["source_sha256"]
+        or event["data_directory"] != binding["data_directory"]
+    ):
+        raise ConfigError("adopted COPY database drop restore identity does not match")
+    source_kind = binding["source_kind"]
+    source_sha256 = binding["source_sha256"]
+    backup_id = binding["backup_id"]
+    if source_kind not in {"catalogue", "local_archive"}:
+        raise ConfigError("adopted COPY database drop restore provenance is invalid")
+    if source_kind == "catalogue":
+        if not isinstance(backup_id, str) or not backup_id or source_sha256 is not None:
+            raise ConfigError("adopted COPY database drop restore provenance is invalid")
+    elif (
+        backup_id is not None
+        or not isinstance(source_sha256, str)
+        or len(source_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in source_sha256)
+    ):
+        raise ConfigError("adopted COPY database drop restore provenance is invalid")
+    if expected_backup_id is not None and backup_id != expected_backup_id:
+        raise ConfigError("adopted COPY database drop backup ownership changed")
+    data_directory = binding["data_directory"]
+    if source_kind == "local_archive" and not _safe_proven_filestore(
+        data_directory if isinstance(data_directory, str) else None, binding_database
+    ):
+        raise ConfigError("adopted COPY local archive lacks contained data-directory evidence")
+    return _DropOwnershipEvidence(
+        event_type="restored",
+        event_sequence=int(event["sequence"]),
+        cluster_id=f"external:{cluster.endpoint}",
+        compose_project="",
+        volume_name="",
+        backup_id=backup_id,
+        source_kind=source_kind,
+        source_sha256=source_sha256,
+        data_directory=data_directory if isinstance(data_directory, str) else None,
+        restore_state=str(binding["state"]),
+    )
+
+
 def _safe_proven_filestore(data_directory: str | None, database: str) -> bool:
     if data_directory is None:
         return False
@@ -630,6 +607,7 @@ def build_database_drop_command(  # noqa: C901
     allow_environment_id: str | None = None,
     allow_environment_backup_id: str | None = None,
     allow_environment_rollback_database: str | None = None,
+    adopted_copy_claim: AdoptedCopyDatabaseClaim | None = None,
     idempotent_absent: bool = False,
     step_prefix: str = "",
     command_origin: str | None = None,
@@ -685,6 +663,7 @@ def build_database_drop_command(  # noqa: C901
             allow_environment_id=allow_environment_id,
             allow_environment_backup_id=allow_environment_backup_id,
             allow_environment_rollback_database=allow_environment_rollback_database,
+            adopted_copy_claim=adopted_copy_claim,
         )
         planning_result = process_executor.execute(planning_step)
         if not isinstance(planning_result, ProcessResult):
@@ -823,6 +802,7 @@ def build_database_drop_command(  # noqa: C901
             allow_environment_id=allow_environment_id,
             allow_environment_backup_id=allow_environment_backup_id,
             allow_environment_rollback_database=allow_environment_rollback_database,
+            adopted_copy_claim=adopted_copy_claim,
         )
         expected = expected_restore() if expected_restore is not None else None
         if command_origin == "database-restore-retry":
