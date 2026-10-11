@@ -18,6 +18,7 @@
 - [x] 3.3 Extend the existing sync plan and Multica extension routing to use the same HTTPS credential snapshot while retaining current SSH, rebase, check, branch-protection, and exact-lease behavior.
 - [x] 3.4 Add concrete GitLab `httpx` calls and `gitlab mr publish` to `odcli-multica` for exact project/source/target lookup, bounded file-backed description, issue link, assignee resolution, and create-or-update.
 - [x] 3.5 Add focused native-Git and fake-GitLab checks for local/remote passthrough, HTTPS sync, stale lease, two users, MR zero/one/many matching, provider failure, dry-run, and secret canaries.
+- [ ] 3.6 In `WP-03-git-gitlab`, extend the existing `offline-tests` CI job to run `uv run pytest -q -o addopts='' packages/odcli-multica/tests`; reuse the workspace lock and runner, add no private credentials or new test framework, and keep the core `make test` command unchanged.
 
 ## 4. Repository-Aware Module Context
 
@@ -40,10 +41,11 @@
 - [x] 6.2 Add explicit trusted-proxy mode to the existing FastAPI server with exact peer/Host/forwarded-origin checks, secure external CSRF, local-mode compatibility, and external pgAdmin disablement.
 - [x] 6.3 Register the completed top-level `publish` and `unpublish` Click objects in the central core CLI registry, regenerate OpenAPI and the TypeScript SDK once from the canonical snapshot change, and keep relative API/assets under the external origin.
 - [x] 6.4 Restyle the existing Mantine views into compact Odoo-like project/environment navigation and tables; use only the server-supplied available external URL for `Open Odoo`.
-- [x] 6.5 Add focused monitor/HTTP/UI checks for project/environment publication states, spoofed forwarding, same-origin mutation, disabled actions, relative URLs, generated-type use, accessibility, and responsive layout.
+- [x] 6.5 Add focused monitor/HTTP/UI checks for project/environment publication states, spoofed forwarding, local same-origin mutation, disabled actions, relative URLs, generated-type use, accessibility, and responsive layout.
+- [ ] 6.6 In `WP-06-monitor-panel-verification`, add `tests/unit/test_http_contract.py::test_external_same_origin_mutation_accepts_secure_csrf` to the existing `dashboard-tests` job: mount `build_pgadmin_router(..., external_origin=("https", ("panel.example.test",)))` only on the external-mode test app, use an HTTPS `TestClient` origin, bootstrap its secure CSRF cookie through trusted forwarded headers, submit the authenticated same-origin POST, and assert `200` plus exactly one delegated call while the production external app still omits the loopback pgAdmin route.
 
 ## 7. Documentation and One Verification Pass
 
 - [x] 7.1 Document the independent project, root-creator credential, module, Multica Git/GitLab, publication, external-panel, ownership, prerequisite, and recovery flows without secret values.
 - [x] 7.2 Run the existing format, Ruff, strict mypy, unit/integration/dashboard, OpenAPI/codegen, packaging, and architecture/security gates once on the integrated branch; fix only failures caused by this change.
-- [x] 7.3 When existing disposable Odoo/Caddy prerequisites are available, run one focused smoke for HTTPS/Auth/login/assets/attachments/bus, panel origin, failed reload preservation, stop/restart, and removal; report unavailable prerequisites without adding a new harness.
+- [x] 7.3 Persist a three-case E2E coverage matrix for module/GitLab automation, HTTPS Odoo/panel publication, and failed-reload lifecycle recovery, including independent walkthroughs, existing-CI dispositions, reproducible test-project code/fixtures and functional outputs, plus Multica-only run evidence and revision-bound visual deltas without a new harness.
