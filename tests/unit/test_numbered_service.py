@@ -37,12 +37,17 @@ def test_service_bootstrap_revalidates_canonical_interpreter_and_provenance(
     calls: list[list[str]] = []
 
     monkeypatch.setattr(service, "_canonical_interpreter", lambda: canonical)
-    monkeypatch.setattr(service, "_canonical_source", lambda value: calls.append([str(value)]))
-    monkeypatch.setattr(
-        service,
-        "_run",
-        lambda argv, **_kwargs: calls.append(argv) or '{"ok": true}\n',
-    )
+
+    def record_source(value: Path) -> None:
+        calls.append([str(value)])
+
+    monkeypatch.setattr(service, "_canonical_source", record_source)
+
+    def run(argv: list[str], **_kwargs: object) -> str:
+        calls.append(argv)
+        return '{"ok": true}\n'
+
+    monkeypatch.setattr(service, "_run", run)
 
     assert service.main(["list"]) == 0
     assert calls[0] == [str(canonical)]
