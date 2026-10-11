@@ -93,6 +93,12 @@ by the private grammar, but document formatting is rejected on normal runs.
 All four diagnostics and native `psql` preserve the instance-bound cluster
 identity and do not accept replacement host/user/password flags.
 
+Numbered tool allocation is outside this public leaf inventory. The checked-in
+developer-only `scripts/odcli_agent_tools/numbered_tool.py` wrapper validates
+the canonical installation and delegates allocation, checkout linkage, and
+selective removal to the private package coordinator. Ordinary user guidance
+does not expose this workflow, and there is no public `odcli slot` command.
+
 The backup catalogue leaves (`backup ls`, `backup inspect`, and `backup validate`)
 are bounded read-only documents independent of Odoo/worktree context. They
 resolve complete UUIDs through the state-aware catalogue projection; `backup
@@ -250,12 +256,24 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:469` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/internal/self_update.py:801-803` — maintenance child
+- `src/odoo_instance_sdk/internal/self_update.py:827-829` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement
   centralized emitter.
 - `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
+- `src/odoo_instance_sdk/internal/alternate_tool.py:964` — shared
+  alternate-tool JSON transport used by the canonical-interpreter bootstrap.
+- `src/odoo_instance_sdk/internal/alternate_tool.py:966` — shared
+  alternate-tool JSON transport used by the canonical-interpreter bootstrap.
+- `src/odoo_instance_sdk/internal/alternate_tool.py:968` — shared
+  alternate-tool JSON transport used by the canonical-interpreter bootstrap.
+- `src/odoo_instance_sdk/internal/alternate_tool.py:974` — shared
+  alternate-tool JSON transport used by the canonical-interpreter bootstrap.
+- `src/odoo_instance_sdk/internal/alternate_tool.py:977` — shared
+  alternate-tool JSON transport used by the canonical-interpreter bootstrap;
+  remove these entries only when lifecycle delegation has a centralized
+  machine-output adapter.
 
 ### Production type annotations
 

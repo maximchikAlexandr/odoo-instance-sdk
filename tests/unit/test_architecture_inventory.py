@@ -16,6 +16,11 @@ from pathlib import Path
 
 from odoo_instance_sdk.internal.proc import run as process_executor
 from tests.fixtures.architecture_inventory import (
+    ALTERNATE_COORDINATOR_MECHANICS,
+    ALTERNATE_COORDINATOR_MODULE,
+    ALTERNATE_LIFECYCLE_MECHANIC_TOKENS,
+    ALTERNATE_LIFECYCLE_MODULE,
+    ALTERNATE_POLICY_SURFACES,
     DIRECT_HTTPX_USAGE,
     DIRECT_OUTPUT_WRITES,
     DIRECT_SUBPROCESS_LAUNCHES,
@@ -466,6 +471,34 @@ def test_inventory_entries_are_line_specific_and_exist() -> None:
     for relative_path, line in DIRECT_SUBPROCESS_LAUNCHES | DIRECT_OUTPUT_WRITES:
         source_lines = (_REPO_ROOT / relative_path).read_text(encoding="utf-8").splitlines()
         assert 0 < line <= len(source_lines), f"invalid inventory location: {relative_path}:{line}"
+
+
+def test_alternate_lifecycle_mechanics_have_one_owner() -> None:
+    shared = (_REPO_ROOT / ALTERNATE_LIFECYCLE_MODULE).read_text(encoding="utf-8")
+    assert all(token in shared for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS)
+    coordinator = (_REPO_ROOT / ALTERNATE_COORDINATOR_MODULE).read_text(encoding="utf-8")
+    assert all(token in coordinator for token in ALTERNATE_COORDINATOR_MECHANICS)
+    assert not any(
+        token in coordinator
+        for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS - ALTERNATE_COORDINATOR_MECHANICS
+    )
+    bootstrap_path = "scripts/odcli_agent_tools/fix_tool.py"
+    bootstrap = (_REPO_ROOT / bootstrap_path).read_text(encoding="utf-8")
+    duplicate_locations = {
+        f"{path}:{token}"
+        for path in ALTERNATE_POLICY_SURFACES
+        for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS
+        if token in (_REPO_ROOT / path).read_text(encoding="utf-8")
+    }
+    bootstrap_probe = f"{bootstrap_path}:direct_url.json"
+    assert duplicate_locations <= {bootstrap_probe}, (
+        "alternate lifecycle mechanics escaped the shared module: "
+        + ", ".join(sorted(duplicate_locations - {bootstrap_probe}))
+    )
+    assert bootstrap.count("direct_url.json") == 1
+    assert "import importlib.metadata,json;" in bootstrap
+    assert "distribution('odoo-instance-sdk')" in bootstrap
+    assert '"-I"' in bootstrap and '"-c"' in bootstrap
 
 
 def test_repository_rules_enforce_the_post_35_gate() -> None:

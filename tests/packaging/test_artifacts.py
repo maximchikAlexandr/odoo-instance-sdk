@@ -44,6 +44,8 @@ def test_wheel_contains_package_typed_marker_and_odcli() -> None:
         names = zf.namelist()
         entry = zf.read(next(n for n in names if n.endswith("entry_points.txt"))).decode()
     assert any(n.endswith("odoo_instance_sdk/__init__.py") for n in names)
+    assert any(n.endswith("odoo_instance_sdk/internal/alternate_tool.py") for n in names)
+    assert any(n.endswith("odoo_instance_sdk/internal/agent_checkout.py") for n in names)
     assert any(n.endswith("odoo_instance_sdk/py.typed") for n in names)
     assert any(n.endswith("odoo_instance_sdk/web/dist/index.html") for n in names)
     assert any("odoo_instance_sdk/web/dist/assets/" in n for n in names)

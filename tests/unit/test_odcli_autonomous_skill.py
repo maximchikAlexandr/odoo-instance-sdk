@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -13,12 +16,131 @@ SHA = "a" * 40
 MERGE_SHA = "b" * 40
 
 
+class _BootstrapRunner:
+    def __init__(self, provenance: str, engine: str) -> None:
+        self.provenance = provenance
+        self.engine = engine
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(argv)
+        responses: dict[tuple[str, ...], str] = {("-I", "-c"): self.provenance}
+        return responses.get(tuple(argv[1:3]), self.engine)
+
+
+class _ForeignProvenanceRunner:
+    """Step-keyed bootstrap double that records forbidden package execution."""
+
+    def __init__(self, sentinel: Path) -> None:
+        self.sentinel = sentinel
+        self.calls: list[list[str]] = []
+
+    def _probe(self) -> str:
+        return json.dumps(
+            {
+                "url": "https://evil.example/foreign.git",
+                "vcs_info": {"commit_id": SHA},
+            }
+        )
+
+    def _package_import(self) -> str:
+        self.sentinel.write_text("imported", encoding="utf-8")
+        return "{}"
+
+    def _unexpected(self) -> str:
+        raise AssertionError("unexpected bootstrap step")
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(argv)
+        responses: dict[tuple[str, ...], Callable[[], str]] = {
+            ("-I", "-c"): self._probe,
+            ("-m", "odoo_instance_sdk.internal.alternate_tool"): self._package_import,
+        }
+        response = responses.get(tuple(argv[1:3]), self._unexpected)
+        return response()
+
+
+@dataclass(frozen=True)
+class _BootstrapCase:
+    name: str
+    expected: str
+    configure: Callable[[ModuleType, pytest.MonkeyPatch, Path, Path, Path], None]
+
+
+def _configure_shadowed(
+    fix_tool: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    canonical: Path,
+    trusted: Path,
+) -> None:
+    shadow = tmp_path / "shadowed-odcli"
+    shadow.write_text(f"#!{trusted}\n", encoding="utf-8")
+    shadow.chmod(0o700)
+    monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(shadow))
+
+
+def _configure_symlink(
+    fix_tool: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    canonical: Path,
+    _trusted: Path,
+) -> None:
+    link = tmp_path / "symlink-odcli"
+    link.symlink_to(canonical)
+    monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(link))
+
+
+def _configure_foreign(
+    fix_tool: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    _tmp_path: Path,
+    canonical: Path,
+    _trusted: Path,
+) -> None:
+    foreign = canonical.parent.parent.parent.parent / "foreign-python"
+    foreign.write_text("#!/bin/sh\n", encoding="utf-8")
+    foreign.chmod(0o700)
+    canonical.write_text(f"#!{foreign}\n", encoding="utf-8")
+    monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(canonical))
+
+
 def _module(name: str) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, SKILL / "scripts" / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(
+        name, SKILL.parents[2] / "scripts" / "odcli_agent_tools" / f"{name}.py"
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _shadow_package(tmp_path: Path) -> tuple[Path, Path]:
+    package = tmp_path / "shadow" / "odoo_instance_sdk"
+    internal = package / "internal"
+    internal.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (internal / "__init__.py").write_text("", encoding="utf-8")
+    sentinel = tmp_path / "foreign-package-imported"
+    (internal / "alternate_tool.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('imported')\n",
+        encoding="utf-8",
+    )
+    return package.parent, sentinel
+
+
+def test_user_and_developer_skill_surfaces_keep_executable_helpers_canonical() -> None:
+    developer = SKILL.parents[0] / "odcli-developer-work"
+    assert not list(SKILL.rglob("*.py"))
+    assert not list(developer.rglob("*.py"))
+    user_text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    developer_text = (developer / "SKILL.md").read_text(encoding="utf-8")
+    assert "numbered_tool.py" not in user_text
+    assert "fix-tools" not in user_text
+    assert "scripts/odcli_agent_tools/numbered_tool.py" in developer_text
+    for helper in ("fix_tool.py", "reviewer.py", "numbered_tool.py"):
+        assert (SKILL.parents[2] / "scripts" / "odcli_agent_tools" / helper).is_file()
 
 
 def test_codex_wrapper_uses_read_only_session_and_can_resume(
@@ -75,55 +197,215 @@ def test_fix_tool_requires_exact_compatibility_and_retires_only_merged_fix(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     fix_tool = _module("fix_tool")
-    monkeypatch.setattr(fix_tool.Path, "home", lambda: tmp_path)
     review_path = tmp_path / "review.json"
     review_path.write_text(
         json.dumps({"session_id": "session-1", "review": {"sha": SHA, "compatible": True}}),
         encoding="utf-8",
     )
-    commands: list[list[str]] = []
+    engine_calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], **_kwargs: Any) -> str:
-        commands.append(argv)
-        if argv[:3] == ["uv", "tool", "install"]:
-            (tmp_path / ".local/share/odcli-fix-tools/118/bin/odcli").touch()
-        return ""
+    engine_responses: dict[str, dict[str, object] | list[object]] = {
+        "install": {"launcher": str(tmp_path / ".local/bin/odcli-fix-118")},
+        "list": [{"identifier": "118", "healthy": True}],
+        "inspect": {"identifier": "118", "healthy": True, "pr": 119, "branch": None},
+        "remove": {"removed": True},
+    }
+
+    def fake_engine(argv: list[str]) -> dict[str, object] | list[object]:
+        engine_calls.append(argv)
+        return engine_responses[argv[0]]
+
+    gh_responses: dict[tuple[str, str], dict[str, object]] = {
+        ("pr", "view"): {
+            "headRefOid": SHA,
+            "state": "MERGED",
+            "mergedAt": "2026-10-05T00:00:00Z",
+            "baseRefName": "main",
+            "mergeCommit": {"oid": MERGE_SHA},
+            "closingIssuesReferences": [
+                {
+                    "number": 118,
+                    "repository": {
+                        "name": "odoo-instance-sdk",
+                        "owner": {"login": "maximchikAlexandr"},
+                    },
+                }
+            ],
+        },
+        ("issue", "view"): {"state": "CLOSED"},
+    }
 
     def fake_gh(argv: list[str]) -> dict[str, object]:
-        if argv[:2] == ["pr", "view"]:
-            return {
-                "headRefOid": SHA,
-                "state": "MERGED",
-                "mergedAt": "2026-10-05T00:00:00Z",
-                "baseRefName": "main",
-                "mergeCommit": {"oid": MERGE_SHA},
-                "closingIssuesReferences": [
-                    {
-                        "number": 118,
-                        "repository": {
-                            "name": "odoo-instance-sdk",
-                            "owner": {"login": "maximchikAlexandr"},
-                        },
-                    }
-                ],
-            }
-        if argv[:2] == ["issue", "view"]:
-            return {"state": "CLOSED"}
-        return {"status": "ahead"}
+        key = cast("tuple[str, str]", tuple(argv[:2]))
+        return gh_responses.get(key, {"status": "ahead"})
 
-    monkeypatch.setattr(fix_tool, "_run", fake_run)
     monkeypatch.setattr(fix_tool, "_gh_json", fake_gh)
+    monkeypatch.setattr(fix_tool, "_engine_json", fake_engine)
     with pytest.raises(RuntimeError, match="compatibility"):
         fix_tool._install(118, "c" * 40, 119, review_path, None)
     fix_tool._install(118, SHA, 119, review_path, None)
-    shim = tmp_path / ".local/bin/odcli-fix-118"
-    assert "WARNING:" in shim.read_text(encoding="utf-8")
-    assert "shares ~/.odcli" in shim.read_text(encoding="utf-8")
-    compile(shim.read_text(encoding="utf-8"), str(shim), "exec")
+    assert engine_calls[0][:4] == ["install", "--kind", "hotfix", "--identifier"]
     fix_tool._reconcile("c" * 40)
-    assert not shim.exists()
-    assert not (tmp_path / ".odcli/fix-tools/118.json").exists()
-    assert ["uv", "tool", "uninstall", "odoo-instance-sdk"] in commands
+    assert ["remove", "--kind", "hotfix", "--identifier", "118"] in engine_calls
+
+
+def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fix_tool = _module("fix_tool")
+    home = tmp_path / "home"
+    tool_root = home / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    tool_root.mkdir(mode=0o700, parents=True)
+    interpreter = tool_root / "bin" / "python"
+    interpreter.parent.mkdir(mode=0o700)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+    odcli = home / ".local" / "bin" / "odcli"
+    odcli.parent.mkdir(mode=0o700, parents=True)
+    odcli.write_text(f"#!{interpreter} -s\n", encoding="utf-8")
+    odcli.chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(odcli))
+    runner = _BootstrapRunner(
+        json.dumps(
+            {
+                "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                "vcs_info": {"commit_id": SHA},
+            }
+        ),
+        json.dumps({"launcher": str(tmp_path / "launcher")}),
+    )
+    monkeypatch.setattr(fix_tool, "_run", runner)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(
+        json.dumps({"session_id": "session", "review": {"sha": SHA, "compatible": True}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        fix_tool,
+        "_gh_json",
+        lambda _argv: {
+            "headRefOid": SHA,
+            "closingIssuesReferences": [
+                {
+                    "number": 42,
+                    "repository": {
+                        "name": "odoo-instance-sdk",
+                        "owner": {"login": "maximchikAlexandr"},
+                    },
+                }
+            ],
+        },
+    )
+
+    assert fix_tool._canonical_interpreter() == interpreter
+    fix_tool._install(42, SHA, 119, review_path, None)
+    assert runner.calls == [
+        [
+            str(interpreter),
+            "-I",
+            "-c",
+            fix_tool._PROVENANCE_PROBE,
+        ],
+        [
+            str(interpreter),
+            "-I",
+            "-m",
+            "odoo_instance_sdk.internal.alternate_tool",
+            "install",
+            "--kind",
+            "hotfix",
+            "--identifier",
+            "42",
+            "--sha",
+            SHA,
+            "--pr",
+            "119",
+            "--review-sha",
+            SHA,
+            "--review-session",
+            "session",
+        ],
+    ]
+
+
+def test_fix_tool_engine_ignores_pythonpath_package_shadow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fix_tool = _module("fix_tool")
+    shadow, sentinel = _shadow_package(tmp_path)
+    monkeypatch.setattr(fix_tool, "_canonical_interpreter", lambda: Path(sys.executable))
+    monkeypatch.setattr(fix_tool, "_canonical_source", lambda _interpreter: None)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PYTHONPATH", str(shadow))
+
+    assert fix_tool._engine_json(["list", "--kind", "hotfix"]) == []
+    assert not sentinel.exists()
+
+
+def test_fix_tool_rejects_foreign_provenance_before_package_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fix_tool = _module("fix_tool")
+    home = tmp_path / "home"
+    tool_root = home / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    tool_root.mkdir(mode=0o700, parents=True)
+    interpreter = tool_root / "bin" / "python"
+    interpreter.parent.mkdir(mode=0o700)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+    odcli = home / ".local" / "bin" / "odcli"
+    odcli.parent.mkdir(mode=0o700, parents=True)
+    odcli.write_text(f"#!{interpreter}\n", encoding="utf-8")
+    odcli.chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(odcli))
+    sentinel = tmp_path / "foreign-module-imported"
+    runner = _ForeignProvenanceRunner(sentinel)
+    monkeypatch.setattr(fix_tool, "_run", runner)
+    with pytest.raises(RuntimeError, match="trusted repository"):
+        fix_tool._engine_json(["list"])
+    assert not sentinel.exists()
+    assert runner.calls == [[str(interpreter), "-I", "-c", fix_tool._PROVENANCE_PROBE]]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            _BootstrapCase("shadowed", r"trusted user installation", _configure_shadowed),
+            id="shadowed",
+        ),
+        pytest.param(
+            _BootstrapCase("symlink", r"trusted user installation", _configure_symlink),
+            id="symlink",
+        ),
+        pytest.param(
+            _BootstrapCase("foreign-interpreter", r"absolute executable", _configure_foreign),
+            id="foreign-interpreter",
+        ),
+    ],
+)
+def test_fix_tool_bootstrap_rejects_untrusted_canonical_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: _BootstrapCase
+) -> None:
+    fix_tool = _module("fix_tool")
+    home = tmp_path / "home"
+    trusted_root = home / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    trusted_root.mkdir(mode=0o700, parents=True)
+    trusted_python = trusted_root / "bin" / "python"
+    trusted_python.parent.mkdir(mode=0o700)
+    trusted_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    trusted_python.chmod(0o700)
+    canonical = home / ".local" / "bin" / "odcli"
+    canonical.parent.mkdir(mode=0o700, parents=True)
+    canonical.write_text(f"#!{trusted_python}\n", encoding="utf-8")
+    canonical.chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+
+    case.configure(fix_tool, monkeypatch, tmp_path, canonical, trusted_python)
+    with pytest.raises(RuntimeError, match=case.expected):
+        fix_tool._canonical_interpreter()
 
 
 def test_closed_issue_alone_does_not_retire_tool(monkeypatch: pytest.MonkeyPatch) -> None:
