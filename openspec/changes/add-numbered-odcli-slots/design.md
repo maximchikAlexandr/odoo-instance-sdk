@@ -12,6 +12,7 @@ The inspected GitLab `binta-test-repo` snapshot `d21521c985263a097e6bcf042d132db
 - one lifecycle engine for `odcli-N` and `odcli-fix-ISSUE`;
 - atomic smallest-free-number selection across launcher, state, manifest/manager root, and linked checkout;
 - one private SDK coordinator for numbered tool plus independent checkout creation/inspection/removal;
+- one verified SDK-owned Python environment per numbered checkout, using the existing owned-environment path rather than a second environment manager;
 - a thin GitLab wrapper that supplies Binta configuration without copying reusable mechanics;
 - explicit keep/remove mapping for PR #140 and repository ownership for every cross-repo concern;
 - fail-closed rollback and cleanup that never overwrites or deletes orphaned/foreign data.
@@ -49,12 +50,13 @@ The alternative of letting GitLab choose a number races with launcher/state crea
 
 ### D3. Extract only the existing reusable checkout mechanics
 
-The private coordinator receives a fixed, validated environment contract for the concrete workflow: reference checkout, checkout parent, backup, port bounds, database prefix, expected PostgreSQL endpoint, Odoo Python/bin paths, and source private-config paths. It reuses the existing algorithm for:
+The private coordinator receives a fixed, validated environment contract for the concrete workflow: reference checkout, checkout parent, backup, port bounds, database prefix, expected PostgreSQL endpoint, base Python, audited requirements lock and digest, Odoo bin path, and source private-config paths. It reuses the existing algorithm for:
 
 - clean reference branch and `origin` equality;
 - `git clone --local --no-hardlinks` and origin rewrite;
 - lowest unreserved loopback port within the configured range;
 - deterministic database/name/path derivation from `N`;
+- the SDK's existing owned-environment creation, hash-locked dependency synchronization, interpreter validation, runtime linkage, and cleanup, yielding a distinct venv below the selected numbered root for each linked checkout;
 - private `.env`/Odoo config copy with mode `0600`, bounded project/config rewrites, marker and content hashes;
 - source backup restore, bounded list/inspection, dirty/unpushed/runtime checks, database drop, and contained checkout deletion.
 
@@ -64,9 +66,9 @@ GitLab keeps a short `scripts/agent_checkout.py` wrapper that supplies those env
 
 ### D4. Creation and removal are one fail-closed service workflow
 
-Creation stages the checkout and tool under deterministic reservation ownership, configures/restores the checkout, verifies both the checkout marker and alternate-tool provenance, then atomically publishes the launcher/manifest linkage. On failure it removes only artifacts whose reservation/markers prove they were created by that attempt; foreign or ambiguous data is retained and reported.
+Creation stages the checkout and tool under deterministic reservation ownership, configures/restores the checkout, creates the checkout's SDK-owned venv through the existing environment path, and verifies the checkout marker, environment ID/path/lock digest and alternate-tool provenance before atomically publishing the launcher/manifest linkage. A numbered manifest records the environment identity and resolved interpreter linkage; a hot-fix manifest does not. On failure it removes only artifacts whose reservation/markers prove they were created by that attempt; foreign or ambiguous data is retained and reported.
 
-Removal acquires the allocation and identity locks, revalidates manifest/linkage after locking, rejects symlinks/path escapes/dirty or unpushed checkout work/running launcher/runtime/config drift, drops only the recorded disposable database, removes only the linked checkout, and delegates tool/state removal to the shared lifecycle. Canonical, other numbered/hot-fix roots, reference checkout, source backup, persistent database/filestore, shared PostgreSQL, and neighboring ports remain untouched.
+Removal acquires the allocation and identity locks, revalidates manifest/linkage after locking, and rejects symlinks/path escapes/dirty or unpushed checkout work/running launcher or Odoo runtime/config, lock-digest, environment-ID, interpreter-path, database, or foreign-ownership drift. It first invokes the existing SDK environment cleanup for the recorded owned venv, then drops only the recorded disposable database, removes only the linked checkout, and delegates tool/state removal to the shared lifecycle. Canonical and neighboring numbered/hot-fix environments, reference checkout, read-only Odoo source, source backup, persistent database/filestore, shared PostgreSQL, and neighboring ports remain untouched.
 
 A two-phase public API and arbitrary rollback callbacks are rejected. The only supported entry is the private coordinator plus its fixed GitLab configuration wrapper.
 
@@ -78,7 +80,8 @@ The current central `ODCLI_USER_ROOT` provider, canonical-only legacy migration,
 
 | PR #140 surface | Decision | Final owner / evidence |
 | --- | --- | --- |
-| `internal/alternate_tool.py`, packaging assertion, shared-engine tests | **Keep and narrow** | SDK; one lifecycle for both identities, fixed numbered checkout linkage only |
+| `internal/alternate_tool.py`, packaging assertion, shared-engine tests | **Keep and narrow** | SDK; one lifecycle for both identities, fixed numbered checkout/environment linkage only |
+| existing owned-environment checkout, hash-lock and cleanup modules | **Reuse unchanged where possible** | SDK; one distinct verified venv per numbered checkout, no new environment framework |
 | `internal/paths.py`, `storage_migration.py`, `self_update.py`, `commands/update.py` and focused tests | **Keep and adapt** | SDK; root confinement and update guidance without public slot references |
 | `.agents/skills/odcli-autonomous-work/**` | **Keep and adapt** | SDK skill; hot-fix policy stays thin, numbered/checkout wrapper invokes private coordinator |
 | `tests/integration/test_alternate_tool_acceptance.py`, `test_alternate_tool.py`, migration/update tests | **Keep and refocus** | SDK; reuse for private service and cross-root evidence |
@@ -94,13 +97,13 @@ The current central `ODCLI_USER_ROOT` provider, canonical-only legacy migration,
 
 ### D7. Repository ownership and delivery split
 
-The SDK PR owns package-private coordinator code, shared lifecycle linkage, trusted bootstrap, root/update behavior, tests, packaging, SDK skill/docs, and removal of public CLI changes. The GitLab MR owns concrete environment values, reference/backup/port/database/private-config choices, Binta scenarios and stand docs. SDK acceptance uses fakes/temp directories for external commands; GitLab acceptance proves the real wrapper contract without committing secrets.
+The SDK PR owns package-private coordinator code, composition with the existing owned-environment lifecycle, shared alternate-tool linkage, trusted bootstrap, root/update behavior, tests, packaging, SDK skill/docs, and removal of public CLI changes. The GitLab MR owns concrete environment values, reference/backup/port/database/private-config choices, base Python, audited dependency lock/digest, Binta scenarios and stand docs. SDK acceptance uses fakes/temp directories for external commands; GitLab acceptance proves the real wrapper contract without committing secrets.
 
 Neither repository change may merge as a claim of complete delivery until exact SDK and GitLab revisions are cross-referenced in evidence. A missing GitLab write path is an explicit external blocker, not permission to fold Binta policy into the SDK.
 
 ### D8. Acceptance targets mechanism and negative boundaries
 
-Tests cover concurrent allocator calls, orphaned artifacts in each dimension, exact-SHA provenance, reservation rollback, manifest/checkout linkage, dirty/unpushed/running/config-drift removal blocks, and neighbor preservation. Integrated acceptance runs canonical, two numbered and two hot-fix roots with incompatible catalogue revisions, plus distinct checkout/database/filestore/port identities. Architecture checks prove there is no public `slot` leaf and no second installer/probe/renderer/lock/cleanup.
+Tests cover concurrent allocator calls, orphaned artifacts in each dimension, exact-SHA provenance, reservation rollback, manifest/checkout/environment linkage, dirty/unpushed/running/config/lock/interpreter-drift removal blocks, and neighbor preservation. Integrated acceptance runs canonical, two numbered and two hot-fix roots with incompatible catalogue revisions, plus distinct checkout/database/filestore/port/venv identities. It proves that numbered runtimes resolve different `sys.executable` and site-package roots while sharing only the read-only Odoo source and PostgreSQL server. Architecture checks prove there is no public `slot` leaf, no second installer/probe/renderer/lock/cleanup, and no second Python-environment manager.
 
 ## Ponytail Gate
 
@@ -110,6 +113,7 @@ Tests cover concurrent allocator calls, orphaned artifacts in each dimension, ex
 | Public numbered CLI | Skill/service workflow is sufficient | Delete `commands/slot.py` and all public surface |
 | Number allocator | No race-safe allocator exists | Keep one small allocator inside private coordinator |
 | Checkout manager | Existing GitLab `agent_checkout.py` | Move only proven reusable mechanics; retain concrete config in GitLab |
+| Python-environment manager | Existing SDK owned-environment create/hash-lock/cleanup path | Reuse it per numbered checkout; reject a new venv builder or shared venv |
 | Generic provider/plugin/callback layer | No second consumer or requirement | Reject |
 | Registry DB/daemon | Deterministic paths, marker and `flock` suffice | Reject |
 | Automatic orphan repair/migration | Could overwrite foreign state | Reject; occupied and fail closed |
@@ -121,17 +125,18 @@ Tests cover concurrent allocator calls, orphaned artifacts in each dimension, ex
 - **[Long create operation holds allocation lock]** → correctness wins over allocation throughput; bounded local clone/restore is a rare service operation and avoids reservation state machinery.
 - **[GitLab snapshot or environment differs]** → wrapper validates every required value and keeps the MR blocked on mismatch; no SDK default guesses Binta paths.
 - **[External DB restore succeeds before later failure]** → marker records the attempt before restore and cleanup drops only its deterministic database; ambiguous cleanup retains evidence and reports manual remediation.
+- **[Per-checkout venv creation is slow or its lock drifts]** → reuse the existing hash-locked SDK environment path, record environment/lock identity, hold the allocation reservation until verification, and fail closed without adopting a shared venv.
 - **[PR #140 removal accidentally weakens hot-fix isolation]** → retain shared-engine/root/update tests and add a keep/delete architecture audit.
 - **[Private module becomes de facto public]** → no Click/console registration, no compatibility promise beyond the checked-in skill/GitLab wrappers, and docs call it service tooling.
 - **[Cross-repo delivery drifts]** → acceptance records exact SDK/GitLab SHAs and wrapper contract version; mismatch blocks completion.
 
 ## Migration Plan
 
-1. On top of current PR #140, land the private coordinator and fixed config/linkage contract while retaining the shared engine.
+1. On top of current PR #140, land the private coordinator and fixed checkout/environment linkage contract while retaining the shared engine and reusing existing owned-environment mechanics.
 2. Move numbered management to the checked-in service/skill wrapper and delete the public slot command, registration, output inventory and docs.
 3. Adapt self-update guidance and refocus existing tests/architecture guards.
 4. In a separate GitLab MR, reduce `scripts/agent_checkout.py` to environment/configuration plus invocation; keep Binta-only assets untouched.
-5. Run SDK fake/external-boundary acceptance and GitLab real-wrapper acceptance; record both exact SHAs.
+5. Run SDK fake/external-boundary acceptance and GitLab real-wrapper acceptance, including distinct interpreter/site-package evidence for concurrent numbered checkouts; record both exact SHAs.
 6. Rollback by using the verified private removal workflow for created numbered identities, reverting the GitLab wrapper MR, then reverting SDK changes. Never delete orphaned data as part of rollback.
 
 ## Open Questions

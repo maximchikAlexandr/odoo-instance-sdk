@@ -7,8 +7,8 @@ PR #140 already proves isolated exact-SHA `odcli-N` and `odcli-fix-ISSUE` launch
 - **BREAKING** Remove the public `odcli slot install/list/remove` group and all public help, output-mode, inventory, and real-Odoo matrix entries for it.
 - Keep one package-owned alternate-tool lifecycle for numbered and hot-fix launchers: exact-SHA provenance, root selection, manifest, shim, locking, inspection, and selective cleanup remain shared.
 - Add one private SDK service-tool path that atomically selects the smallest free positive number under a global allocation lock, treating any existing launcher, state root, manager metadata, or linked checkout as occupied and never overwriting orphaned data.
-- Bind each numbered installation to one independently cloned project checkout and record deterministic, verified linkage without changing real `HOME`.
-- Extract only reusable checkout create/inspect/remove mechanics from GitLab `agent_checkout.py` into that private SDK path. GitLab retains environment configuration for the reference checkout, backup, port range, database naming, private `.env`, Odoo binaries, and Binta-specific scenarios.
+- Bind each numbered installation to one independently cloned project checkout and one SDK-owned Python environment created from an audited hash lock; record deterministic, verified linkage without changing real `HOME`.
+- Extract only reusable checkout create/inspect/remove mechanics from GitLab `agent_checkout.py` into that private SDK path. Reuse the SDK's existing owned-environment create/verify/cleanup path for the per-checkout venv. GitLab retains environment configuration for the reference checkout, backup, port range, database naming, private `.env`, base Python, audited dependency lock, Odoo binaries, and Binta-specific scenarios.
 - Keep `seed_odoo.py`, database diagnostics, administrator-password setup, persistent-stand policy, and secrets in GitLab; do not create a generic checkout framework or public SDK API.
 - Preserve canonical-only legacy migration, fail-closed provenance, alternate self-update guards, cross-root isolation, and selective removal.
 - Replace PR #140's public-command tests/docs with private-tool, allocation, linked-checkout, cross-resource, cleanup, packaging, and architecture acceptance.
@@ -18,15 +18,15 @@ PR #140 already proves isolated exact-SHA `odcli-N` and `odcli-fix-ISSUE` launch
 
 ### New Capabilities
 
-- `numbered-odcli-slots`: Private exact-SHA numbered-tool allocation, one shared numbered/hot-fix lifecycle, linked independent checkout management, cross-root/resource safety, and selective cleanup.
+- `numbered-odcli-slots`: Private exact-SHA numbered-tool allocation, one shared numbered/hot-fix lifecycle, linked independent checkout plus isolated Python-environment management, cross-root/resource safety, and selective cleanup.
 
 ### Modified Capabilities
 
-- `development-environment`: Selected global roots remain isolated while numbered tooling binds each root to a separately configured checkout.
+- `development-environment`: Selected global roots remain isolated while numbered tooling binds each root to a separately configured checkout and SDK-owned Python environment.
 - `self-update`: Alternate launchers remain unable to self-update, and numbered remediation points to service tooling rather than a public CLI group.
 - `cli-odcli`: The public CLI explicitly has no numbered-installation management group; alternate launchers expose only the ordinary supported surface.
 - `bug-report`: Existing hot-fix management continues through the same shared lifecycle without inheriting numbered checkout policy.
 
 ## Impact
 
-In the SDK repository, the change retains and narrows `internal/alternate_tool.py`, adds one private package-owned checkout coordinator, updates the autonomous-work skill wrapper, removes `commands/slot.py` and its registration/output inventory, adjusts self-update guidance, and replaces affected tests/docs. In GitLab `binta-test-repo`, `scripts/agent_checkout.py` becomes a thin environment/configuration wrapper over the private SDK coordinator while Binta-specific seed, diagnostics, password, backup, database, filestore, and port policy stay local. No new dependency, daemon, registry database, public console command, or secret-in-Git flow is introduced.
+In the SDK repository, the change retains and narrows `internal/alternate_tool.py`, adds one private package-owned checkout coordinator that composes the existing owned-environment lifecycle, updates the autonomous-work skill wrapper, removes `commands/slot.py` and its registration/output inventory, adjusts self-update guidance, and replaces affected tests/docs. In GitLab `binta-test-repo`, `scripts/agent_checkout.py` becomes a thin environment/configuration wrapper over the private SDK coordinator while Binta-specific seed, diagnostics, password, backup, database, filestore, port, base-Python, and audited-lock policy stay local. No new dependency, environment framework, daemon, registry database, public console command, or secret-in-Git flow is introduced.
