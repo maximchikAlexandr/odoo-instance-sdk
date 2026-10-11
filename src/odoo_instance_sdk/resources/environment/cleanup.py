@@ -264,6 +264,7 @@ class _CleanupMixin:
             return None
         try:
             from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
+            from odoo_instance_sdk.internal.pg.drop_types import AdoptedCopyDatabaseClaim
 
             cfg = parse_odoo_config(config_path)
             password = get_admin_passwd(cfg)
@@ -279,6 +280,14 @@ class _CleanupMixin:
                 rollback_name = retained.get("rollback_database")
                 if isinstance(rollback_name, str) and rollback_name:
                     drop_name = rollback_name
+            adopted_copy_claim = None
+            if env.code_ownership is EnvironmentCodeOwnership.CALLER_OWNED:
+                adopted_copy_claim = AdoptedCopyDatabaseClaim(
+                    environment_id=str(env.id),
+                    database=drop_name,
+                    endpoint_host=instance.config.db_host or "127.0.0.1",
+                    endpoint_port=instance.config.db_port or 5432,
+                )
             command = build_database_drop_command(
                 instance,
                 env.repository_root,
@@ -293,6 +302,7 @@ class _CleanupMixin:
                 allow_environment_rollback_database=(
                     drop_name if drop_name != env.target_db_name else None
                 ),
+                adopted_copy_claim=adopted_copy_claim,
                 idempotent_absent=True,
             )
             prepared = cast("PreparedCommand[None]", command._prepared())
@@ -320,6 +330,14 @@ class _CleanupMixin:
                         str(env.backup_id) if env.backup_id is not None else None
                     ),
                     allow_environment_rollback_database=rollback_name,
+                    adopted_copy_claim=AdoptedCopyDatabaseClaim(
+                        environment_id=str(env.id),
+                        database=rollback_name,
+                        endpoint_host=instance.config.db_host or "127.0.0.1",
+                        endpoint_port=instance.config.db_port or 5432,
+                    )
+                    if env.code_ownership is EnvironmentCodeOwnership.CALLER_OWNED
+                    else None,
                     idempotent_absent=True,
                     step_prefix="environment.remove.rollback.",
                 )

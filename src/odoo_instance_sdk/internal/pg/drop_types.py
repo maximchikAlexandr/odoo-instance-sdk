@@ -52,6 +52,16 @@ class DropOwnershipEvidence:
     restore_state: str
 
 
+@dataclass(frozen=True, slots=True)
+class AdoptedCopyDatabaseClaim:
+    """Exact private proof supplied by an adopted COPY environment cleanup."""
+
+    environment_id: str
+    database: str
+    endpoint_host: str
+    endpoint_port: int
+
+
 def assert_restore_expectation(
     current: DropOwnershipEvidence,
     expected: DatabaseDropRestoreExpectation,
