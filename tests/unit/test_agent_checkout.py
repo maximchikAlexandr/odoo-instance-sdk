@@ -7,7 +7,7 @@ import subprocess
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError, dataclass, replace
+from dataclasses import FrozenInstanceError, dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -186,6 +186,46 @@ class _OneShotFault:
             self.before_error()
             raise OSError(self.message)
         self.real(path, dir_fd=dir_fd)
+
+
+@dataclass
+class _StepValidation:
+    failures: dict[int, str]
+    calls: list[bool] = field(default_factory=list)
+
+    def __call__(
+        self,
+        _checkout: Path,
+        *,
+        require_pushed: bool,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        step = len(self.calls)
+        self.calls.append(require_pushed)
+        message = self.failures.get(step)
+        if message is not None:
+            raise AgentCheckoutError(message)
+        return {}
+
+
+@dataclass
+class _EnvironmentCleanupFault:
+    checkout: Path
+    environment: SimpleNamespace
+    calls: list[object] = field(default_factory=list)
+
+    def __call__(self, value: object) -> None:
+        self.calls.append(value)
+        original = self.checkout.with_name("odcli-1-original")
+        self.checkout.rename(original)
+        marker = self.checkout / ".git" / CHECKOUT_MARKER
+        marker.parent.mkdir(parents=True)
+        marker.write_text(
+            json.dumps(agent_checkout._marker_payload("1", REPOSITORY_URL, "b" * 40)),
+            encoding="utf-8",
+        )
+        self.environment.state = EnvironmentState.REMOVED.value
+        raise RuntimeError("environment cleanup interrupted")
 
 
 def _published_identity(
@@ -795,27 +835,16 @@ def test_recovery_keeps_published_require_pushed_policy_after_cleanup_failure(
     environment = _environment(tmp_path, checkout)
     identity_value = _published_identity(tmp_path, checkout, environment)
     remove_calls: list[object] = []
-    validation_calls: list[bool] = []
 
     def remove(value: object) -> None:
         remove_calls.append(value)
         environment.state = EnvironmentState.REMOVED.value
 
-    def validate(
-        _checkout: Path,
-        *,
-        require_pushed: bool,
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        validation_calls.append(require_pushed)
-        if len(validation_calls) >= 2:
-            raise AgentCheckoutError("unpushed checkout")
-        return {}
-
+    validation = _StepValidation({1: "unpushed checkout", 2: "unpushed checkout"})
     client = SimpleNamespace(
         environments=SimpleNamespace(get=lambda _id: environment, remove=remove)
     )
-    monkeypatch.setattr(agent_checkout, "_validate_checkout", validate)
+    monkeypatch.setattr(agent_checkout, "_validate_checkout", validation)
 
     with pytest.raises(AgentCheckoutError, match="unpushed checkout"):
         agent_checkout.remove_numbered_installation(
@@ -831,10 +860,52 @@ def test_recovery_keeps_published_require_pushed_policy_after_cleanup_failure(
         (identity_value.manager_root / "reservation.json").read_text(encoding="utf-8")
     )
     assert recovery["require_pushed"] is True
-    assert validation_calls == [True, True, True]
+    assert validation.calls == [True, True, True]
     assert len(remove_calls) == 1
     assert checkout.is_dir()
     assert (checkout / "owned.txt").is_file()
+
+
+def test_recovery_rejects_replacement_after_environment_callback_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkouts" / "odcli-1"
+    checkout.mkdir(parents=True)
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    environment = _environment(tmp_path, checkout)
+    identity_value = _published_identity(tmp_path, checkout, environment)
+    original_identity = agent_checkout._checkout_identity(checkout)
+    fault = _EnvironmentCleanupFault(checkout, environment)
+    get_calls: list[object] = []
+
+    def get_environment(value: object) -> SimpleNamespace:
+        get_calls.append(value)
+        return environment
+
+    client = SimpleNamespace(environments=SimpleNamespace(get=get_environment, remove=fault))
+    monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
+
+    with pytest.raises(RuntimeError, match="environment cleanup interrupted"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    recovery = json.loads(
+        (identity_value.manager_root / "reservation.json").read_text(encoding="utf-8")
+    )
+    assert recovery["require_pushed"] is True
+    assert recovery["checkout_identity"] == f"{original_identity[0]}:{original_identity[1]}"
+
+    with pytest.raises(AgentCheckoutError, match="identity changed before cleanup"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    assert len(fault.calls) == 1
+    assert len(get_calls) == 1
+    assert environment.state == EnvironmentState.REMOVED.value
+    assert (checkout / ".git" / CHECKOUT_MARKER).is_file()
+    assert (checkout.with_name("odcli-1-original") / "owned.txt").is_file()
 
 
 def test_quarantine_rejects_post_quarantine_entry_swap(
@@ -1085,6 +1156,7 @@ def test_remove_order_keeps_linkage_when_environment_cleanup_fails(
     checkout = tmp_path / "checkouts" / "odcli-1"
     checkout.mkdir(parents=True)
     manifest = SimpleNamespace(
+        sha="c" * 40,
         checkout_path=str(checkout),
         checkout_repository="origin",
         checkout_sha="a" * 40,
@@ -1099,6 +1171,7 @@ def test_remove_order_keeps_linkage_when_environment_cleanup_fails(
         state="ready",
         worktree_path=str(checkout),
         python_environment_path=str(tmp_path / "venv"),
+        dependency_lock_path=str(tmp_path / "requirements.lock"),
     )
     client = SimpleNamespace(
         environments=SimpleNamespace(

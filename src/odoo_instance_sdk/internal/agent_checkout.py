@@ -707,7 +707,7 @@ def create_numbered_installation(options: NumberedCheckoutOptions) -> NumberedIn
             reference_sha=options.reference_sha,
             sdk_sha=options.sdk_sha,
         )
-        return plan.execute(_execute_create_plan)
+        return _execute_create_plan(plan)
 
 
 def inspect_numbered_installation(
@@ -919,24 +919,24 @@ def _execute_remove_plan(  # noqa: C901 -- fixed validation, cleanup and recover
         raise AgentCheckoutError("environment checkout linkage drifted")
     if Path(environment.python_environment_path).resolve() != Path(environment_path).resolve():
         raise AgentCheckoutError("environment Python linkage drifted")
+    recovery_payload = _recovery_payload(
+        plan.number,
+        checkout,
+        plan.manifest.checkout_repository or "",
+        plan.manifest.checkout_sha or "",
+        plan.manifest.sha,
+        environment,
+        Path(plan.manifest.interpreter_path or "").resolve(),
+        plan.manifest.hash_lock_sha256 or "",
+        checkout_identity,
+        True,
+    )
+    _write_json(reservation, recovery_payload)
     old_root = os.environ.get(USER_ROOT_ENV)
     os.environ[USER_ROOT_ENV] = str(plan.identity.state_root)
     try:
         if str(environment.state) != EnvironmentState.REMOVED.value:
             plan.client.environments.remove(environment)
-        recovery_payload = _recovery_payload(
-            plan.number,
-            checkout,
-            plan.manifest.checkout_repository or "",
-            plan.manifest.checkout_sha or "",
-            plan.manifest.sha,
-            environment,
-            Path(plan.manifest.interpreter_path or "").resolve(),
-            plan.manifest.hash_lock_sha256 or "",
-            checkout_identity,
-            True,
-        )
-        _write_json(reservation, recovery_payload)
         if (
             checkout.is_symlink()
             or not checkout.is_dir()
@@ -984,7 +984,7 @@ def remove_numbered_installation(
         plan = _command_plan._RemoveCommandPlan(
             client, home_path, number, identity_value, checkout_parent, manifest
         )
-        plan.execute(_execute_remove_plan)
+        _execute_remove_plan(plan)
 
 
 # Short private aliases used by service wrappers while keeping one implementation.

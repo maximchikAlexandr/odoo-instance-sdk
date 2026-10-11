@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.internal.agent_checkout import NumberedInstallation
     from odoo_instance_sdk.internal.alternate_tool import AlternateIdentity, AlternateManifest
     from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentDatabaseMode
     from odoo_instance_sdk.project import ProjectConfig
@@ -110,11 +108,6 @@ class _CreateCommandPlan:
             backup_id=self.environment_backup_id,
         )
 
-    def execute(
-        self, callback: Callable[[_CreateCommandPlan], NumberedInstallation]
-    ) -> NumberedInstallation:
-        return callback(self)
-
     def redacted(self) -> dict[str, str]:
         return {
             "operation": "numbered.create",
@@ -136,9 +129,6 @@ class _RemoveCommandPlan:
     identity: AlternateIdentity
     checkout_parent: Path | None
     manifest: AlternateManifest
-
-    def execute(self, callback: Callable[[_RemoveCommandPlan], None]) -> None:
-        callback(self)
 
     def redacted(self) -> dict[str, str]:
         return {
