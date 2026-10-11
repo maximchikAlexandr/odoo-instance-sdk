@@ -1,23 +1,19 @@
 ## ADDED Requirements
 
-### Requirement: Canonical numbered-slot management surface
-The canonical CLI SHALL expose `odcli slot install NUMBER SHA [--replace]`, `odcli slot list`, and `odcli slot remove NUMBER`. These leaves SHALL be thin policy/output adapters over the shared alternate-tool lifecycle, SHALL use the existing immutable command/process boundary and bounded Rich/JSON/TOON result pipeline, SHALL record concrete public leaf classifications, and SHALL keep machine stdout to exactly one semantic document. They SHALL NOT implement uv installation, provenance, capability probing, manifest/shim serialization, lifecycle locking, or cleanup. Slot management SHALL be rejected when invoked through `odcli-N`.
+### Requirement: Public CLI excludes numbered lifecycle management
+The public `odcli` command tree SHALL NOT register a `slot` group or any numbered-installation create, list, inspect, replace, allocate, or remove leaf. Public help, characterization, output-format inventories, execution-boundary documentation, and real-Odoo command matrices SHALL describe only the supported product CLI and SHALL NOT advertise the private coordinator.
 
-#### Scenario: Help exposes bounded manager commands
-- **WHEN** canonical CLI help is requested for `slot`
-- **THEN** it lists install, list, and remove with exact-SHA, replacement, destructive-removal, and isolation-boundary guidance
+#### Scenario: Root help is unchanged by numbered tooling
+- **WHEN** root help and the canonical public-leaf inventory are generated
+- **THEN** they contain no `slot` command and their counts and documentation match the non-slot public surface
 
-#### Scenario: Numbered launcher cannot manage slots
-- **WHEN** `odcli-N slot list`, install, or remove is invoked
-- **THEN** it fails before reading or mutating manager manifests, uv tool layouts, launchers, or state roots
+#### Scenario: Private coordinator is not a console script
+- **WHEN** wheel entry points and package command registration are inspected
+- **THEN** numbered management has no Click registration or package console-script entry point
 
-#### Scenario: Machine formats preserve parity
-- **WHEN** a slot manager success or typed failure is rendered in JSON and TOON
-- **THEN** both formats carry semantically equal bounded data without prompts, progress, ANSI, raw subprocess output, or secrets
-
-### Requirement: Alternate launcher delegates the ordinary CLI surface
-The single shared launcher renderer SHALL produce both `odcli-N` and `odcli-fix-ISSUE`. Each rendered launcher SHALL hold its lifecycle lock for the full child lifetime, set only the selected user-root, alternate-launcher identity, and exact executable identity variables needed by the SDK, and delegate arguments and exit status without shell interpretation. Except for numbered slot management and self-update, the underlying revision's ordinary CLI surface SHALL remain available.
+### Requirement: Alternate launchers delegate the ordinary CLI surface
+The single shared launcher renderer SHALL produce both `odcli-N` and `odcli-fix-ISSUE`. Each launcher SHALL hold its lifecycle lock for the full child lifetime, set only selected-root and alternate-identity values required by the SDK, and delegate arguments and exit status without shell interpretation. Except for direct self-update, the installed revision's ordinary public CLI surface SHALL remain available.
 
 #### Scenario: Arguments and exit status are preserved
-- **WHEN** an operator invokes `odcli-N` or `odcli-fix-ISSUE` with ordinary command arguments
-- **THEN** the exact argument boundaries and child exit status are preserved without a shell and the lifecycle lock remains held until the child exits
+- **WHEN** an operator invokes `odcli-N` or `odcli-fix-ISSUE` with an ordinary supported command
+- **THEN** exact argument boundaries and child exit status are preserved and the lifecycle lock remains held until the child exits

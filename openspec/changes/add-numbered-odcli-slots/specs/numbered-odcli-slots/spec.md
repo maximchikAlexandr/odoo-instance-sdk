@@ -1,119 +1,81 @@
 ## ADDED Requirements
 
 ### Requirement: One shared alternate-tool lifecycle
-Numbered and hot-fix launchers SHALL use one package-owned implementation for deterministic identity paths, uv installation, exact provenance, selector-capability probing, manifest serialization, shim rendering, lifecycle locking, bounded inspection, and fail-closed removal. Numbered command code and the hot-fix skill wrapper SHALL contain only their distinct policy and presentation logic and SHALL NOT implement or copy those lifecycle mechanics.
+Numbered and hot-fix launchers SHALL use one package-owned implementation for deterministic identity paths, uv installation, exact provenance, selector-capability probing, manifest serialization, shim rendering, lifecycle locking, bounded inspection, and fail-closed tool/state removal. The private numbered coordinator and hot-fix skill wrapper SHALL contain only their distinct policy and SHALL NOT implement or copy those mechanics.
 
 #### Scenario: Both launcher kinds use one lifecycle implementation
-- **WHEN** a numbered slot and a reviewed hot fix are installed, invoked, inspected, and removed
-- **THEN** both operations pass through the same install/probe/manifest/shim/lock/remove implementation while their adapters apply only numbered replace policy or hot-fix PR/reviewer/retirement policy
+- **WHEN** a numbered installation and a reviewed hot fix are installed, invoked, inspected, and removed
+- **THEN** both pass through the same install/probe/manifest/shim/lock/remove implementation while their adapters apply only checkout/allocation policy or PR/reviewer/retirement policy
 
 #### Scenario: Duplicate lifecycle mechanics are rejected
-- **WHEN** architecture checks inspect the numbered command and hot-fix skill surfaces
-- **THEN** they fail if either surface contains its own uv installer, provenance verifier, capability probe, shim renderer, lifecycle-lock implementation, or cleanup algorithm outside the shared module
+- **WHEN** architecture checks inspect private numbered tooling, public CLI modules, and hot-fix skill surfaces
+- **THEN** they fail if any second uv installer, provenance verifier, capability probe, launcher renderer, lifecycle-lock implementation, or alternate-tool cleanup algorithm exists outside the shared module
 
-### Requirement: Numbered slot identity and isolated user root
-The system SHALL accept only a positive decimal slot number without signs, leading zeroes, whitespace, or suffixes. Slot `N` SHALL expose launcher `odcli-N`, select the absolute root `<real-home>/.odcli-N`, and preserve the process `HOME` and all Git, SSH, uv, and unrelated user configuration. Ordinary `odcli` SHALL continue to select `<real-home>/.odcli` when no explicit root is present.
+### Requirement: Numbered management is private service tooling
+The public `odcli` Click tree and package console scripts SHALL NOT expose install, list, replace, remove, or allocation commands for numbered installations. A checked-in service/skill wrapper SHALL resolve the trusted canonical interpreter and invoke one private package coordinator. The coordinator SHALL require a full lowercase 40-character SDK SHA and SHALL return bounded machine-readable identity evidence without printing secrets.
 
-#### Scenario: Canonical command remains unchanged
-- **WHEN** ordinary `odcli` starts without a selected user root
-- **THEN** every SDK-owned global path remains below `~/.odcli` and `HOME` remains unchanged
+#### Scenario: Public help has no slot manager
+- **WHEN** an operator inspects root and nested public CLI help
+- **THEN** no `slot` group or numbered lifecycle management leaf is present
 
-#### Scenario: Numbered launcher selects one root
-- **WHEN** `odcli-2` invokes an ordinary command
-- **THEN** every SDK-owned global path is below `~/.odcli-2` while the child receives the caller's unchanged `HOME`
+#### Scenario: Service wrapper invokes the trusted package
+- **WHEN** the checked-in wrapper creates, lists, inspects, or removes a numbered installation
+- **THEN** it validates canonical executable provenance before invoking the private package coordinator and emits one bounded result
 
-#### Scenario: Invalid slot identity is rejected
-- **WHEN** slot management receives `0`, a negative value, a leading-zero value, whitespace, or non-decimal text
-- **THEN** it fails before creating, replacing, or deleting a launcher, tool environment, manifest, or state root
+### Requirement: Allocation uses the smallest wholly free positive number
+The private coordinator SHALL hold one global allocation lock while scanning positive canonical decimal identities from `1`. It SHALL select the first number for which the launcher, selected state root, manager/reservation path, and configured linked checkout are all absent. Any symlink, partial path, invalid marker, legacy manifest, or lone artifact in any dimension SHALL mark that number occupied and SHALL NOT be adopted, repaired, overwritten, or deleted.
 
-### Requirement: Exact-SHA slot installation and provenance
-Canonical `odcli slot install N SHA` SHALL require a full lowercase 40-character Git SHA and delegate fixed-repository installation, installed provenance, root-selector capability, manifest, launcher publication, and cleanup to the shared alternate-tool lifecycle. A newly installed slot SHALL start with no `~/.odcli-N` directory or contents. An existing slot SHALL fail closed unless explicit replacement is requested.
+#### Scenario: Gaps and orphans are skipped
+- **WHEN** number `1` has only an orphaned state root, number `2` has a valid installation, and every path for number `3` is absent
+- **THEN** creation reserves number `3`, reports the occupied earlier identities, and changes nothing under numbers `1` and `2`
 
-#### Scenario: Fresh exact revision is installed
-- **WHEN** a valid unused number and repository commit SHA are supplied
-- **THEN** the manager installs a dedicated uv tool, verifies the exact repository and SHA, atomically publishes `odcli-N`, records bounded manager metadata outside the slot state, and leaves `~/.odcli-N` absent
+#### Scenario: Concurrent creators cannot claim one number
+- **WHEN** two service processes allocate concurrently against the same home and checkout parent
+- **THEN** their completed installations have distinct numbers and neither observes a partially published identity as free
 
-#### Scenario: Install provenance differs
-- **WHEN** uv completes but installed provenance does not match the fixed repository and requested full SHA
-- **THEN** the manager publishes no launcher and removes only its uncommitted temporary install artifacts
+### Requirement: Numbered tool and checkout are one linked identity
+For number `N`, the coordinator SHALL bind launcher `odcli-N`, selected root `<real-home>/.odcli-N`, manager metadata, and checkout `<configured-checkout-parent>/odcli-N`. The fixed numbered manifest SHALL record the verified checkout path, source repository and source SHA; hot-fix manifests SHALL NOT contain checkout fields. Real `HOME` and Git, SSH, uv, and unrelated user configuration SHALL remain unchanged.
 
-#### Scenario: Existing slot is not implicitly overwritten
-- **WHEN** installation targets an existing slot without explicit replacement
-- **THEN** the command fails without changing that slot, canonical `odcli`, or any other slot
+#### Scenario: Fresh numbered identity is published
+- **WHEN** a valid exact SDK SHA is created with a clean configured reference checkout and all required external inputs
+- **THEN** the coordinator clones and configures `odcli-N`, verifies checkout and tool provenance, publishes one linked manifest/launcher, and leaves every canonical or neighboring identity unchanged
 
-### Requirement: Explicit slot replacement
-Canonical `odcli slot install N SHA --replace` SHALL be the only supported revision-changing path for a numbered slot. The numbered adapter SHALL authorize explicit replacement, then delegate exclusive locking, temporary verification, recoverable publication, and manifest/shim changes to the shared lifecycle. It SHALL preserve `~/.odcli-N` for the replacement revision to migrate only when next invoked and SHALL NOT invoke or modify canonical `odcli update`.
+#### Scenario: Tool provenance fails after checkout staging
+- **WHEN** the staged SDK tool does not match the requested repository and SHA
+- **THEN** no launcher or ready manifest is published and cleanup removes only checkout/tool artifacts proven to belong to that reservation
 
-#### Scenario: Replace an idle slot
-- **WHEN** an existing idle slot is explicitly replaced with a different valid SHA
-- **THEN** `odcli-N` subsequently executes the verified new SHA against the same `~/.odcli-N` and canonical `odcli` is unchanged
+### Requirement: Checkout mechanics are bounded and configuration-owned
+The SDK private coordinator SHALL implement only the inspected reusable mechanics: clean reference/origin verification, local no-hardlink clone, origin rewrite, bounded loopback-port selection, deterministic database/path derivation, private configuration copy, exact bounded rewrites, marker/hash creation, restore, inspection, dirty/unpushed/runtime checks, database drop, and contained deletion. All reference paths, backup, port bounds, database prefix, expected PostgreSQL endpoint, Odoo interpreter/bin paths, and private configuration sources SHALL be supplied and owned by the GitLab wrapper. Secrets SHALL NOT be printed, returned, stored in the numbered manifest, or committed.
 
-#### Scenario: Running slot blocks replacement
-- **WHEN** `odcli-N` holds the shared lifecycle lock
-- **THEN** replacement fails before changing its launcher, manifest, uv environment, or state
+#### Scenario: GitLab wrapper supplies concrete policy
+- **WHEN** the Binta wrapper invokes create
+- **THEN** it supplies every required environment value, the SDK coordinator validates them before mutation, and no Binta path, backup, port range, database name, or secret is guessed by an SDK default
 
-### Requirement: Bounded slot discovery and safe removal
-Canonical `odcli slot list` SHALL project the shared lifecycle's bounded inspection of valid manifests with slot number, verified requested SHA, launcher path, tool path, state path, and structural health; it SHALL NOT execute installed slot code or scan arbitrary home directories. Canonical `odcli slot remove N` SHALL authorize the numbered removal intent and delegate exclusive locking, identity checks, and deletion to the shared lifecycle. Removal SHALL affect only slot `N`'s launcher, uv tool layout, manifest, lock after release, and `~/.odcli-N`, and SHALL fail closed on symlinks, identity mismatch, path escape, or a running slot.
+#### Scenario: Unsupported configuration fails closed
+- **WHEN** a required path, port bound, database prefix, source hash, PostgreSQL endpoint, or private configuration input is missing or inconsistent
+- **THEN** creation fails before publishing a numbered identity and preserves foreign/reference data
 
-#### Scenario: List two slots
-- **WHEN** two valid numbered slots are installed
-- **THEN** listing returns two deterministic records without reading or changing either SQLite catalogue
+### Requirement: Numbered cleanup is selective and fail closed
+Removal SHALL take the global allocation lock and the selected lifecycle lock, re-read the manifest and checkout marker after locking, and reject symlinks, path escape, dirty/unpushed checkout work, running launcher or Odoo runtime, configuration/hash drift, database mismatch, or foreign ownership. After all preconditions pass, it SHALL drop only the recorded disposable database, delete only the linked checkout, and delegate launcher/tool/state removal to the shared lifecycle. It SHALL preserve the reference checkout, source backup, persistent and neighboring databases/filestores, shared PostgreSQL, canonical root, and all neighboring numbered/hot-fix identities.
 
-#### Scenario: Remove one of two slots
-- **WHEN** slots `1` and `2` exist and idle slot `1` is removed
-- **THEN** only `odcli-1`, its tool layout, manager metadata, lock, and `~/.odcli-1` are removed while `odcli`, `~/.odcli`, `odcli-2`, and `~/.odcli-2` remain byte-for-byte unchanged
+#### Scenario: One clean numbered identity is removed
+- **WHEN** two numbered identities exist and one idle identity has a clean pushed checkout with matching markers/configuration
+- **THEN** only its database, checkout, launcher, tool, manager metadata, lock, and selected root are removed
 
-#### Scenario: Modified launcher blocks removal
-- **WHEN** the selected launcher's content or path does not match the recorded manager identity
-- **THEN** removal fails without deleting the launcher, tool layout, state, canonical installation, or neighboring slots
+#### Scenario: Dirty checkout blocks removal
+- **WHEN** the selected linked checkout has an uncommitted file or unpushed commit
+- **THEN** removal changes no database, checkout, launcher, tool, manifest, lock, state root, or neighbor
 
-### Requirement: Slot isolation boundary is explicit
-Documentation and slot command help SHALL state that numbered roots isolate only OdCLI-managed user state: SQLite catalogue, configuration, backups, environment artifacts, project runtime state, locks, bug reports, and migration/update journals. They SHALL state that project checkouts, Odoo processes, PostgreSQL clusters and databases, filestores, Docker resources, and ports are external and SHALL be separated by independent project copies or explicit resource configuration before concurrent use.
+### Requirement: Hot-fix identity remains isolated without checkout policy
+The existing `odcli-fix-ISSUE` workflow SHALL retain its positive issue identity, exact reviewed SHA, PR linkage, isolated `~/.odcli-fix-ISSUE`, shared lifecycle, and merge/ancestry/issue/branch retirement gates. It SHALL NOT allocate or manage numbered checkouts, ports, databases, or filestores.
 
-#### Scenario: Operator inspects concurrency guidance
-- **WHEN** an operator reads slot help or installation documentation
-- **THEN** it identifies both the isolated OdCLI state classes and the non-isolated external resources, with a requirement to use separate project copies or disjoint external resources
+#### Scenario: Hot-fix creation remains thin
+- **WHEN** a reviewed hot-fix revision is installed
+- **THEN** the skill applies GitHub/reviewer policy and delegates lifecycle mechanics to the shared engine without invoking numbered checkout allocation
 
-### Requirement: Concurrent incompatible catalogues remain isolated
-Each process SHALL derive all SDK-owned global paths from its selected root for its complete lifetime. Numbered and hot-fix migration, configuration writes, backup operations, environment operations, locks, journals, and catalogue access SHALL NOT read, write, lock, migrate, or delete canonical, numbered, or hot-fix neighboring roots.
+### Requirement: Concurrent roots and external resources remain isolated
+Each launcher SHALL derive all SDK-owned global paths from its selected root for its full process lifetime. Each numbered checkout SHALL also have its own project checkout, database, filestore, and HTTP port as supplied by the wrapper. Shared PostgreSQL, Odoo source/venv, and source backup SHALL be documented shared dependencies and SHALL NOT be stopped or deleted by numbered cleanup.
 
-#### Scenario: Two revisions perform incompatible migrations
-- **WHEN** two installed slot revisions concurrently migrate incompatible SQLite schemas and write state
-- **THEN** each revision reads and writes only its own `~/.odcli-N`, and canonical `~/.odcli` plus the neighboring slot remain unchanged by the other process
-
-#### Scenario: Numbered and hot-fix revisions migrate concurrently
-- **WHEN** `odcli-1` and `odcli-fix-42` run incompatible SQLite migrations while canonical and other alternate roots contain sentinels
-- **THEN** each revision accesses only its selected root and every nonselected root remains byte-for-byte unchanged
-
-### Requirement: Hot-fix identity and isolated user root
-The existing `odcli-fix-ISSUE` workflow SHALL accept only a positive canonical decimal GitHub issue number, retain its exact reviewed SHA and PR linkage rules, and select absolute root `<real-home>/.odcli-fix-ISSUE` while preserving real `HOME`. Its uv tool, manifest, and lifecycle lock SHALL live under deterministic manager-owned paths outside canonical `~/.odcli` and outside its state root. A new hot-fix root SHALL start absent and SHALL NOT copy any canonical, legacy, numbered, or neighboring hot-fix data.
-
-#### Scenario: Fresh hot-fix starts isolated
-- **WHEN** reviewed hot fix `odcli-fix-42` is installed beside populated canonical, legacy, numbered, and hot-fix roots
-- **THEN** its launcher selects `~/.odcli-fix-42`, leaves that root absent until first use, and changes no existing state root
-
-#### Scenario: Invalid issue identity is rejected
-- **WHEN** hot-fix installation receives zero, a negative number, leading-zero text, whitespace, or non-decimal text
-- **THEN** it fails before creating a tool, launcher, manifest, lock, branch change, or state root
-
-### Requirement: Hot-fix compatibility is isolation-aware
-Hot-fix compatibility review and installation SHALL verify the full SHA, fixed repository, linked PR/issue, installed provenance, and the revision's ability to honor the explicit root selector before launcher publication. Compatibility SHALL evaluate only explicitly shared external project/Odoo/PostgreSQL/database/filestore/Docker/port resources; it SHALL NOT require catalogue-schema compatibility with canonical or neighboring isolated roots. Unknown selector capability or unsafe shared external resources SHALL block installation.
-
-#### Scenario: Incompatible catalogue is allowed behind isolation
-- **WHEN** a reviewed hot-fix revision has an incompatible catalogue schema but proves explicit-root confinement and safe external-resource use
-- **THEN** installation MAY publish its isolated launcher without reading or migrating canonical state
-
-#### Scenario: Selector capability is absent
-- **WHEN** the exact hot-fix revision cannot prove it honors the explicit user-root selector
-- **THEN** installation publishes no launcher and removes only uncommitted temporary artifacts
-
-### Requirement: Hot-fix retirement is selective and fail closed
-Skill-managed reconciliation SHALL retain the existing merged-PR, default-branch ancestry, installed-canonical revision, issue closure, and safe local-branch gates. For an eligible idle hot fix it SHALL validate deterministic paths, manifest and launcher identity, take the exclusive lifecycle lock, and remove only that hot fix's launcher, uv layout, manager metadata, lock after release, safe branch, and `~/.odcli-fix-ISSUE`. It SHALL fail closed on an active lock, symlink, corrupt identity, path escape, or unproven gate and SHALL preserve canonical, numbered, and neighboring hot-fix roots.
-
-#### Scenario: One eligible hot fix retires
-- **WHEN** two hot fixes exist and exactly one satisfies every retirement gate while idle
-- **THEN** only the eligible hot fix and its isolated root are removed and the other hot fix plus canonical and numbered roots remain byte-for-byte unchanged
-
-#### Scenario: Active hot fix blocks retirement
-- **WHEN** the selected hot-fix launcher holds its shared lifecycle lock
-- **THEN** reconciliation retains its launcher, tool, manifest, lock, state, and branch and reports that it is running
+#### Scenario: Two numbered and two hot-fix revisions coexist
+- **WHEN** canonical, two numbered and two hot-fix revisions perform incompatible catalogue migrations while the numbered checkouts run on distinct databases, filestores, and ports
+- **THEN** each launcher accesses only its selected global root, each numbered runtime accesses only its linked project resources, and all nonselected roots/resources retain their before-run digests

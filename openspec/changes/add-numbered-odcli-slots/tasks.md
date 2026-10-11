@@ -1,28 +1,29 @@
-## 1. Shared alternate-tool foundation
+## 1. Shared private foundation and bounded extraction
 
-- [x] 1.1 Add validated numbered/hot-fix identities, deterministic state/tool/launcher/manifest/lock paths, and canonical-default trusted user-root selection without changing real `HOME` or project-local `.odcli`.
-- [x] 1.2 Extract the existing fix-tool installation path into one package-owned pipeline for temporary uv staging, exact installed provenance, selector-capability probing, atomic publication, and numbered-state preservation on explicit replace.
-- [x] 1.3 Extract one discriminated manifest, shim renderer, full-lifetime lifecycle lock, bounded inspect/list, and fail-closed removal path that deletes only a structurally verified idle identity plus its state.
-- [x] 1.4 Reduce `fix_tool.py` to canonical-interpreter bootstrap and PR/reviewer/issue/merge/ancestry/branch policy that delegates install/inspect/remove to the shared module; update compatibility review to shared external resources only.
-- [x] 1.5 Add shared-engine, packaging-bootstrap, and thin hot-fix-policy tests proving both launcher kinds use the same probe, renderer, lock, manifest, and cleanup implementation.
+- [ ] 1.1 Inventory the current PR #140 and GitLab `agent_checkout.py` boundaries; lock the keep/remove map and classify reference/backup/ports/database/private-config/seed/diagnostic/password ownership without adding a generic provider layer.
+- [ ] 1.2 Retain and narrow the package-owned alternate-tool engine so numbered and hot-fix identities continue to share one exact-SHA provenance, selector probe, manifest/shim, lifecycle lock, inspection, and tool/state cleanup implementation.
+- [ ] 1.3 Add one private package coordinator for validated environment configuration, clean reference/origin checks, local no-hardlink clone, bounded port selection, deterministic checkout/database paths, private config copying/rewrites, marker hashes, restore, inspection, and contained removal.
+- [ ] 1.4 Add global allocation locking, smallest-wholly-free positive-number selection across launcher/state/manager/checkout, fixed checkout linkage in numbered manifests, attempt-owned rollback, and fail-closed orphan/foreign-data handling.
+- [ ] 1.5 Add focused unit, concurrency, packaging, marker/hash, dirty/unpushed, symlink/containment, rollback, and architecture tests proving one lifecycle engine and one private checkout coordinator.
 
-## 2. Numbered command adapter
+## 2. SDK service tooling and public-surface removal
 
-- [x] 2.1 Add canonical `slot install NUMBER SHA [--replace]`, `slot list`, and `slot remove NUMBER` as a thin adapter over shared lifecycle operations with no uv, manifest, shim, lock, or cleanup implementation in the command layer.
-- [x] 2.2 Register the slot group through existing command/output boundaries, public-leaf inventory, and Rich/JSON/TOON parity.
-- [x] 2.3 Reject numbered-context slot management before shared-engine discovery or effects and preserve exact argv/exit behavior for ordinary numbered commands.
-- [x] 2.4 Add numbered policy/output tests for invalid identity, existing-vs-replace intent, bounded list, running/corrupt removal, and neighbor preservation using shared-engine fixtures.
+- [ ] 2.1 Add a thin checked-in service/skill wrapper that validates the trusted canonical interpreter/provenance and invokes private create/list/inspect/remove operations without printing secrets.
+- [ ] 2.2 Delete `commands/slot.py`, its registration, slot-only output plumbing, public-leaf/output/help/real-Odoo matrix entries, and `test_slot_commands.py`; assert no Click or console-script numbered manager remains.
+- [ ] 2.3 Retain selected-root, canonical-only legacy migration, and hot-fix isolation behavior; change numbered self-update rejection to private service-tool guidance and remove every public `odcli slot` reference.
+- [ ] 2.4 Refocus SDK docs, skill guidance, architecture inventory, alternate lifecycle tests, and integrated fixtures on auto-allocation, linked checkouts, one engine, orphan preservation, and explicit external-resource boundaries.
 
-## 3. Runtime confinement and update policy
+## 3. GitLab thin wrapper and Binta ownership
 
-- [x] 3.1 Gate legacy platformdirs adoption so only canonical startup performs discovery/copy/rewrite/cleanup and every explicit alternate root starts independently.
-- [x] 3.2 Propagate selected-root identity through remaining SDK-owned global consumers, catalogues, locks, reports, storage/update journals, and migration paths.
-- [x] 3.3 Reject numbered and hot-fix self-update before planning/effects with launcher-specific canonical remediation while preserving isolated ordinary `odcli update`.
-- [x] 3.4 Add path, migration, update, and process-boundary regressions proving canonical compatibility, empty alternate roots, and zero cross-root access.
+- [ ] 3.1 Replace GitLab `scripts/agent_checkout.py` lifecycle mechanics with a thin wrapper that supplies the fixed reference checkout, checkout parent, backup, port bounds, database prefix, PostgreSQL endpoint, Odoo paths, and private configuration inputs to the installed SDK coordinator.
+- [ ] 3.2 Keep `seed_odoo.py`, database diagnostics, administrator-password setup, persistent-stand policy, secrets, fixture data, and Binta-specific scenarios in GitLab; add a guard that these do not enter SDK package/tool metadata.
+- [ ] 3.3 Add GitLab wrapper tests for create/list/remove, missing or drifted environment, occupied/orphaned number dimensions, secret-free output, failed restore rollback, dirty/unpushed/running removal blocks, and exact database/checkout targeting.
+- [ ] 3.4 Update GitLab stand documentation and prepare separate-MR evidence binding its exact revision and wrapper contract to the SDK revision; block completion rather than copying policy when GitLab write/access assumptions fail.
 
-## 4. Integrated acceptance and documentation
+## 4. Cross-repository acceptance and delivery gates
 
-- [x] 4.1 Add acceptance with canonical `odcli`, two numbered revisions, and two hot-fix revisions using incompatible SQLite migrations concurrently; prove each process accesses only its selected root.
-- [x] 4.2 Add migration/update/removal acceptance proving no alternate adopts legacy/canonical state, canonical update preserves alternates, and shared removal of one numbered or policy-eligible hot fix preserves every neighbor.
-- [x] 4.3 Document the single shared lifecycle, thin numbered/hot-fix policy split, setup/use/revision/retirement, no-copy rule, old-style remediation, and non-isolated external resources.
-- [x] 4.4 Add an architecture guard against duplicate uv/provenance/probe/shim/lock/remove mechanics and run focused, skill, packaging, output/inventory, Ruff, strict mypy, repository, diff, and strict OpenSpec gates.
+- [ ] 4.1 Run process acceptance for canonical, two numbered, and two hot-fix revisions with incompatible catalogues; prove per-root confinement, exact argv/exit behavior, shared-lock lifetime, and one lifecycle implementation.
+- [ ] 4.2 Run linked-resource acceptance for concurrent numbered creation/use with distinct checkout, database, filestore, and HTTP port plus shared PostgreSQL/Odoo source/venv/backup preservation.
+- [ ] 4.3 Run selective-cleanup acceptance covering one numbered and one eligible hot fix, before/after filesystem/resource digests, orphan preservation, dirty/unpushed/running/config-drift failures, and zero neighbor/reference/persistent deletion.
+- [ ] 4.4 Audit every PR #140 file against the keep/adapt/delete map and enforce architecture guards against public slot registration, duplicated lifecycle mechanics, arbitrary hooks/extensions, Binta-specific SDK defaults, or committed secrets.
+- [ ] 4.5 Run focused SDK and GitLab suites, packaging, output/inventory, Ruff, strict mypy, repository checks, `git diff --check`, strict OpenSpec validation, documentation checks, and record exact cross-repository evidence for review.

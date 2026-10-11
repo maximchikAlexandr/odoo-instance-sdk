@@ -1,114 +1,139 @@
-## Контекст
+## Context
 
-`internal/paths.py` сейчас жёстко сводит SDK-owned global state в `~/.odcli`. Существующий standalone `.agents/skills/odcli-autonomous-work/scripts/fix_tool.py` уже содержит минимальный lifecycle exact-SHA tool: проверяет hot-fix policy, ставит uv tool, пишет manifest/shim с `flock`, а после merge gates удаляет tool. Но он хранит registry в canonical root, не выбирает отдельный user root и не входит в wheel. Предыдущая revision ошибочно планировала вторую копию этих mechanics для numbered manager.
+PR #140 is currently at `92406fa537eacf048479162197fe30faab718e6c` on base `4a9369c3cab0f9a34bf3d3b2411f3ec0ac5bf5e6`. It already contains the useful core: `internal/alternate_tool.py` owns exact-SHA uv installation, provenance, selector probing, manifest/shim rendering, lifecycle locks, inspection and cleanup for both numbered and hot-fix identities; `internal/paths.py`, storage migration and self-update enforce root confinement. The overreach is `commands/slot.py` plus public CLI registration/output/docs/tests.
 
-Текущие execution boundaries подтверждены: product CLI поставляется только из `src/odoo_instance_sdk`; skill script запускается системным Python и не может быть импортируемой product dependency. Значит, повторное использование возможно только если existing lifecycle mechanics один раз перейти в package-owned module, а skill script станет тонким policy/bootstrap caller этого module.
+The inspected GitLab `binta-test-repo` snapshot `d21521c985263a097e6bcf042d132db4d80e137c` has a 209-line `scripts/agent_checkout.py`. Reusable mechanics are local clone creation, reference-SHA/origin checks, bounded port reservation, marker/hash verification, dirty/unpushed guards, and contained deletion. Binta-owned policy is the fixed reference checkout, backup, port range, database prefix, external PostgreSQL/Odoo paths, private `.env`, project configuration values, restore/drop sequence, and stand documentation. `seed_odoo.py`, diagnostics, and administrator-password setup are separate and must remain there.
 
-## Цели / Не-цели
+## Goals / Non-Goals
 
-**Цели:**
+**Goals:**
 
-- один implementation install/provenance/capability/manifest/lock/shim/list/remove для `odcli-N` и `odcli-fix-ISSUE`;
-- canonical `odcli`, каждый numbered launcher и каждый hot-fix launcher имеют взаимоисключающий SDK-owned root;
-- numbered surface отличается только identity, replace policy и CLI rendering;
-- hot-fix surface отличается только PR/reviewer/issue/merge/branch policy;
-- новый alternate root всегда пуст, а cleanup удаляет только доказанно принадлежащие launcher artifacts.
+- no public `odcli slot` command;
+- one lifecycle engine for `odcli-N` and `odcli-fix-ISSUE`;
+- atomic smallest-free-number selection across launcher, state, manifest/manager root, and linked checkout;
+- one private SDK coordinator for numbered tool plus independent checkout creation/inspection/removal;
+- a thin GitLab wrapper that supplies Binta configuration without copying reusable mechanics;
+- explicit keep/remove mapping for PR #140 and repository ownership for every cross-repo concern;
+- fail-closed rollback and cleanup that never overwrites or deletes orphaned/foreign data.
 
-**Не-цели:**
+**Non-Goals:**
 
-- generic plugin framework, registry database, daemon, dependency или automatic state copier;
-- два lifecycle managers, два capability probes, два shim renderers или две cleanup implementations;
-- менять `HOME`, XDG, Git/SSH/uv settings;
-- изолировать repository-local `.odcli`, project checkout, Odoo, PostgreSQL, Docker, filestore или ports.
+- a public SDK/Click API, generic plugin/callback framework, daemon, registry database, arbitrary repository manager, or Windows lifecycle port;
+- a second uv/provenance/manifest/shim/lock/remove implementation;
+- automatic adoption of old hot-fix state or orphaned numbered/checkouts;
+- moving `seed_odoo.py`, DB diagnostics, admin-password setup, secrets, persistent service policy, or Binta fixtures into the SDK;
+- making `~/.odcli-N` substitute for separate database, filestore, port, venv, or checkout isolation.
 
-## Решения
+## Decisions
 
-### D1. Один ранний selector global root
+### D1. Preserve the proven shared lifecycle; delete only the public adapter
 
-`internal.paths.get_user_root()` остаётся единственной точкой выбора. Без trusted selector возвращается `~/.odcli`; shared launcher передаёт абсолютный `ODCLI_USER_ROOT` и typed launcher kind/id. Numbered identity даёт `~/.odcli-N`, hot-fix identity — `~/.odcli-fix-ISSUE`. `HOME` не меняется. Все SDK-owned global paths следуют provider; repository-local `.odcli` остаётся project-local.
+`src/odoo_instance_sdk/internal/alternate_tool.py` remains the only owner of alternate identity, exact-SHA uv install, installed provenance, selector capability, manifest/shim, full-lifetime lock, inspection, and tool/state cleanup. `fix_tool.py` remains a thin canonical-interpreter plus GitHub PR/reviewer/retirement policy adapter. The new numbered service calls the same private module; it does not reimplement lifecycle mechanics.
 
-Подмена `HOME` отклонена, потому что перенаправит Git, SSH и uv. Много отдельных env vars отклонено как источник split-brain paths.
+The alternative—reverting the whole PR—would discard working root isolation and hot-fix convergence. Keeping `commands/slot.py` is rejected because the user explicitly does not want a public product surface.
 
-### D2. Existing fix-tool lifecycle становится единственным shared engine
+### D2. One private package coordinator owns numbered allocation and checkout linkage
 
-Existing `fix_tool.py` mechanics переносятся, а не переписываются рядом, в узкий `internal/alternate_tool.py` (или эквивалентный package-owned module). Он владеет ровно общей частью:
+Add a narrow private module `src/odoo_instance_sdk/internal/agent_checkout.py`, invoked only through a thin service/skill script using the trusted canonical interpreter. It is not registered in Click or package console scripts.
 
-- canonical positive decimal identity и deterministic state/tool/launcher/manifest/lock paths;
-- temporary uv install из fixed repository, exact-SHA installed provenance и root-selector capability probe;
-- один manifest format, один shim renderer, full-lifetime shared lock и atomic publication;
-- bounded list/inspect и fail-closed exclusive-lock removal с containment, symlink, launcher-content и neighbor checks.
+For create, the coordinator takes the requested full SDK SHA plus an explicit environment configuration supplied by the calling repository. Under `~/.local/share/odcli-slots/allocation.lock`, it scans positive integers from 1 and selects the first identity for which all four dimensions are absent:
 
-Module принимает только launcher kind/id, requested SHA и фиксированные typed manifest fields: common lifecycle identity плюс hot-fix PR/review/branch fields только для hot-fix kind. Он не решает PR eligibility, merge ancestry или numbered replace policy. Numbered CLI импортирует этот API напрямую.
+1. `~/.local/bin/odcli-N`;
+2. `~/.odcli-N`;
+3. `~/.local/share/odcli-slots/N` including manifest/reservation;
+4. configured checkout `<checkout-parent>/odcli-N`.
 
-Standalone `fix_tool.py` сохраняет существующий entrypoint и stdlib bootstrap. Он находит canonical `odcli`, проверяет абсолютный executable shebang/interpreter и запускает `python -m odoo_instance_sdk.internal.alternate_tool` из canonical uv environment. Так skill использует тот же installed module без копирования package code и без добавления private/public Click surface. Невозможность доказать canonical interpreter блокирует mutation.
+Any symlink, partial directory, invalid marker, legacy manifest, or lone artifact marks that number occupied and is reported; it is never repaired, adopted, or overwritten. The coordinator writes an exclusive reservation before releasing selection, retains the allocation lock through publication, and records the verified checkout path/source SHA in the fixed numbered manifest. Hot-fix manifests never gain checkout fields.
 
-Альтернативы отклонены: импорт `.agents` из wheel невозможен; копирование mechanics в numbered manager создаёт подтверждённый дубль; новый generic service/console script расширяет public/runtime surface без необходимости.
+The alternative of letting GitLab choose a number races with launcher/state creation. A generic registry or extensible metadata map is unnecessary; deterministic paths and fixed fields are sufficient.
 
-### D3. Два тонких policy adapters
+### D3. Extract only the existing reusable checkout mechanics
 
-Canonical `odcli slot` валидирует numbered intent: unused vs explicit replace, canonical-only invocation и Rich/JSON/TOON output. Затем он вызывает shared install/list/remove. Он не реализует uv, provenance, manifest, shim или cleanup.
+The private coordinator receives a fixed, validated environment contract for the concrete workflow: reference checkout, checkout parent, backup, port bounds, database prefix, expected PostgreSQL endpoint, Odoo Python/bin paths, and source private-config paths. It reuses the existing algorithm for:
 
-`fix_tool.py` валидирует только hot-fix intent: review bound to exact SHA, PR head and linked issue, external-resource compatibility, merge/default-branch/issue/ancestry/branch eligibility. Install/inspect/remove делегируются shared engine. Compatibility reviewer больше не сравнивает isolated catalogue schemas; selector capability доказывает shared engine, reviewer оценивает только действительно общие external resources.
+- clean reference branch and `origin` equality;
+- `git clone --local --no-hardlinks` and origin rewrite;
+- lowest unreserved loopback port within the configured range;
+- deterministic database/name/path derivation from `N`;
+- private `.env`/Odoo config copy with mode `0600`, bounded project/config rewrites, marker and content hashes;
+- source backup restore, bounded list/inspection, dirty/unpushed/runtime checks, database drop, and contained checkout deletion.
 
-Один discriminated shared manifest хранит lifecycle identity и только заранее определённые kind-specific fields. Shared engine проверяет structural fields; hot-fix adapter интерпретирует только фиксированные PR/review/branch fields. Arbitrary metadata/extensions отсутствуют. Unknown old shared-state manifest не принимается и не мигрируется.
+Inputs are explicit and validated; secrets are copied locally but never printed, returned, committed, or embedded in the numbered manifest. There is no arbitrary hook, schema, provider interface, or repository plug-in point.
 
-### D4. Детерминированные layouts
+GitLab keeps a short `scripts/agent_checkout.py` wrapper that supplies those environment values and invokes the installed private module. If the inspected mechanics cannot be extracted without weakening marker, Git, database, or containment guards, the GitLab MR remains blocked and the SDK does not grow a speculative abstraction.
 
-- canonical state: `~/.odcli`;
-- numbered state: `~/.odcli-N`, manager/tool: `~/.local/share/odcli-slots/N`;
-- hot-fix state: `~/.odcli-fix-ISSUE`, manager/tool: `~/.local/share/odcli-fix-tools/ISSUE`;
-- launchers: `~/.local/bin/odcli-N` и `~/.local/bin/odcli-fix-ISSUE`.
+### D4. Creation and removal are one fail-closed service workflow
 
-Manifest и lock живут в manager path вне state root. Existing `~/.odcli/fix-tools` больше не читается и не пишется новым workflow. Old-style manifests остаются fail-closed с explicit remediation; silent adoption могло бы удалить чужое состояние.
+Creation stages the checkout and tool under deterministic reservation ownership, configures/restores the checkout, verifies both the checkout marker and alternate-tool provenance, then atomically publishes the launcher/manifest linkage. On failure it removes only artifacts whose reservation/markers prove they were created by that attempt; foreign or ambiguous data is retained and reported.
 
-### D5. Один staged publication и один cleanup algorithm
+Removal acquires the allocation and identity locks, revalidates manifest/linkage after locking, rejects symlinks/path escapes/dirty or unpushed checkout work/running launcher/runtime/config drift, drops only the recorded disposable database, removes only the linked checkout, and delegates tool/state removal to the shared lifecycle. Canonical, other numbered/hot-fix roots, reference checkout, source backup, persistent database/filestore, shared PostgreSQL, and neighboring ports remain untouched.
 
-Shared install создаёт temporary sibling uv layout, проверяет fixed repository/exact SHA, затем запускает bounded capability probe с disposable empty root и sentinels вокруг canonical/neighbor roots. Только после этого один renderer публикует launcher и manifest. Numbered replace использует тот же staged transition; hot-fix install добавляет policy gates до вызова engine.
+A two-phase public API and arbitrary rollback callbacks are rejected. The only supported entry is the private coordinator plus its fixed GitLab configuration wrapper.
 
-Каждый rendered shim держит shared lock полный child lifetime, передаёт только root/kind/id/executable selectors и делегирует argv без shell. Shared remove берёт exclusive nonblocking lock и проверяет deterministic targets, manifest, SHA, launcher bytes, regular-file/symlink identity и containment. Numbered policy разрешает explicit replace/remove. Hot-fix policy вызывает remove только после retirement gates. Сам алгоритм удаления один.
+### D5. Runtime root and update contracts stay narrow
 
-### D6. Legacy migration только canonical
+The current central `ODCLI_USER_ROOT` provider, canonical-only legacy migration, hot-fix/numbered launcher context, and self-update guards are retained. The numbered rejection message points to the service/skill workflow, not `odcli slot`. Canonical `odcli update` still neither discovers nor changes alternates. `HOME` stays unchanged.
 
-`ensure_storage_migrated()` выполняет platformdirs discovery/copy/rewrite/cleanup только без explicit selector. Alternate root не инспектирует canonical/legacy paths и создаётся пустым обычными providers. Catalogue migrations выбранной revision применяются только внутри selected root.
+### D6. PR #140 keep/remove map
 
-### D7. Direct self-update запрещён для alternate launchers
+| PR #140 surface | Decision | Final owner / evidence |
+| --- | --- | --- |
+| `internal/alternate_tool.py`, packaging assertion, shared-engine tests | **Keep and narrow** | SDK; one lifecycle for both identities, fixed numbered checkout linkage only |
+| `internal/paths.py`, `storage_migration.py`, `self_update.py`, `commands/update.py` and focused tests | **Keep and adapt** | SDK; root confinement and update guidance without public slot references |
+| `.agents/skills/odcli-autonomous-work/**` | **Keep and adapt** | SDK skill; hot-fix policy stays thin, numbered/checkout wrapper invokes private coordinator |
+| `tests/integration/test_alternate_tool_acceptance.py`, `test_alternate_tool.py`, migration/update tests | **Keep and refocus** | SDK; reuse for private service and cross-root evidence |
+| `src/odoo_instance_sdk/commands/slot.py`, `tests/unit/test_slot_commands.py` | **Delete** | No replacement public command; private coordinator tests cover management |
+| slot import/registration in `commands/cli_parts/registration.py` | **Delete** | Root help proves `slot` absent |
+| slot-only `commands/output.py` details changes | **Delete unless another existing caller proves need** | SDK; no speculative retention |
+| slot additions in CLI characterization/surface/output inventories and real-Odoo command matrix/contracts | **Delete** | Public leaf count and matrix return to the non-slot surface |
+| README and `docs/execution-boundary.md` public slot sections | **Replace** | SDK docs describe service/skill workflow and explicit isolation boundary |
+| architecture inventory/guard | **Keep and update** | SDK; allows one shared engine plus one private checkout coordinator, forbids duplicate lifecycle mechanics |
+| OpenSpec artifacts | **Replace with this revision** | Planning-only commit |
+| GitLab `scripts/agent_checkout.py` | **Reduce to thin wrapper/config** | Separate GitLab MR |
+| GitLab `seed_odoo.py`, diagnostics, `set_admin_password.py`, secrets/stand policy | **Keep unchanged** | GitLab only |
 
-Self-update проверяет launcher context до plan construction. `odcli-N update` направляет к canonical slot replace; `odcli-fix-ISSUE update` — к skill-managed canonical update/reconcile. Ordinary `odcli update` не обнаруживает и не меняет alternate roots. После успешного canonical update skill wrapper может проверить hot-fix policy и делегировать eligible removal shared engine.
+### D7. Repository ownership and delivery split
 
-### D8. Acceptance доказывает reuse и отрицательные границы
+The SDK PR owns package-private coordinator code, shared lifecycle linkage, trusted bootstrap, root/update behavior, tests, packaging, SDK skill/docs, and removal of public CLI changes. The GitLab MR owns concrete environment values, reference/backup/port/database/private-config choices, Binta scenarios and stand docs. SDK acceptance uses fakes/temp directories for external commands; GitLab acceptance proves the real wrapper contract without committing secrets.
 
-Unit tests импортируют shared engine один раз и проверяют обе identities через одинаковые install/render/lock/remove cases; adapter tests доказывают только policy differences. Architecture test запрещает uv-install, shim-rendering, flock/remove implementations вне shared module. Process/packaging acceptance запускает canonical, два numbered и два hot-fix roots с incompatible SQLite migrations и before/after digests.
+Neither repository change may merge as a claim of complete delivery until exact SDK and GitLab revisions are cross-referenced in evidence. A missing GitLab write path is an explicit external blocker, not permission to fold Binta policy into the SDK.
+
+### D8. Acceptance targets mechanism and negative boundaries
+
+Tests cover concurrent allocator calls, orphaned artifacts in each dimension, exact-SHA provenance, reservation rollback, manifest/checkout linkage, dirty/unpushed/running/config-drift removal blocks, and neighbor preservation. Integrated acceptance runs canonical, two numbered and two hot-fix roots with incompatible catalogue revisions, plus distinct checkout/database/filestore/port identities. Architecture checks prove there is no public `slot` leaf and no second installer/probe/renderer/lock/cleanup.
 
 ## Ponytail Gate
 
-| Часть | Что уже есть | Решение |
+| Candidate subsystem | Existing alternative | Decision |
 | --- | --- | --- |
-| uv install/provenance | `fix_tool.py` | Перенести один раз в shared engine; удалить из wrapper |
-| manifest/shim/flock/remove | `fix_tool.py` | Перенести один раз; обе identities используют один API/renderer/cleanup |
-| user-root selector | `internal.paths` | Минимально расширить один provider |
-| numbered commands | отсутствуют | Добавить тонкий adapter к shared engine |
-| hot-fix PR/reviewer/retirement policy | `fix_tool.py`/`reviewer.py` | Оставить тонким skill-specific слоем |
-| второй manager/capability probe/renderer | не нужен | Удалить из plan |
-| registry DB/daemon/plugin abstraction | не нужен | Не создавать; deterministic paths + manifest достаточно |
-| state copier/migrator | опасен | Не создавать; alternate root starts empty |
+| Alternate lifecycle | Implemented `internal/alternate_tool.py` in PR #140 | Keep; do not create another engine |
+| Public numbered CLI | Skill/service workflow is sufficient | Delete `commands/slot.py` and all public surface |
+| Number allocator | No race-safe allocator exists | Keep one small allocator inside private coordinator |
+| Checkout manager | Existing GitLab `agent_checkout.py` | Move only proven reusable mechanics; retain concrete config in GitLab |
+| Generic provider/plugin/callback layer | No second consumer or requirement | Reject |
+| Registry DB/daemon | Deterministic paths, marker and `flock` suffice | Reject |
+| Automatic orphan repair/migration | Could overwrite foreign state | Reject; occupied and fail closed |
+| Seed/diagnostics/admin-password helpers | Already GitLab-specific and separate | Leave in GitLab |
+| New dependency | Stdlib and existing SDK process boundary suffice | Reject |
 
-## Риски / Компромиссы
+## Risks / Trade-offs
 
-- **[Standalone skill не находит canonical package interpreter]** → validate resolved `odcli` entrypoint/shebang and fail before mutation; packaging acceptance covers uv installation.
-- **[Shared engine получает policy logic]** → manifest допускает только фиксированные kind-specific fields, но engine не интерпретирует PR/replace eligibility; adapter tests enforce boundary.
-- **[Revision не понимает selector]** → единственный pre-publication capability probe блокирует launcher.
-- **[Неполный inventory global paths]** → provider inventory и cross-root filesystem spy входят в acceptance.
-- **[Old hot fix использует shared state]** → no adoption/migration; fail closed with explicit remediation.
-- **[Общие PostgreSQL/Docker/ports конфликтуют]** → reviewer/docs требуют separate project copies или disjoint resources.
+- **[Long create operation holds allocation lock]** → correctness wins over allocation throughput; bounded local clone/restore is a rare service operation and avoids reservation state machinery.
+- **[GitLab snapshot or environment differs]** → wrapper validates every required value and keeps the MR blocked on mismatch; no SDK default guesses Binta paths.
+- **[External DB restore succeeds before later failure]** → marker records the attempt before restore and cleanup drops only its deterministic database; ambiguous cleanup retains evidence and reports manual remediation.
+- **[PR #140 removal accidentally weakens hot-fix isolation]** → retain shared-engine/root/update tests and add a keep/delete architecture audit.
+- **[Private module becomes de facto public]** → no Click/console registration, no compatibility promise beyond the checked-in skill/GitLab wrappers, and docs call it service tooling.
+- **[Cross-repo delivery drifts]** → acceptance records exact SDK/GitLab SHAs and wrapper contract version; mismatch blocks completion.
 
-## План миграции и отката
+## Migration Plan
 
-1. Выпустить selector и shared lifecycle module, полученный refactor existing fix-tool mechanics.
-2. Перевести `fix_tool.py` на policy/bootstrap delegation и isolated hot-fix root.
-3. Добавить numbered CLI как второй thin adapter к уже проверенному engine.
-4. Не переносить и не удалять old shared-state manifests автоматически.
-5. При rollback удалить новые alternate launchers штатными adapters до отката; canonical state не затрагивается.
+1. On top of current PR #140, land the private coordinator and fixed config/linkage contract while retaining the shared engine.
+2. Move numbered management to the checked-in service/skill wrapper and delete the public slot command, registration, output inventory and docs.
+3. Adapt self-update guidance and refocus existing tests/architecture guards.
+4. In a separate GitLab MR, reduce `scripts/agent_checkout.py` to environment/configuration plus invocation; keep Binta-only assets untouched.
+5. Run SDK fake/external-boundary acceptance and GitLab real-wrapper acceptance; record both exact SHAs.
+6. Rollback by using the verified private removal workflow for created numbered identities, reverting the GitLab wrapper MR, then reverting SDK changes. Never delete orphaned data as part of rollback.
 
-## Открытые вопросы
+## Open Questions
 
-Нет. Shared-code placement, bootstrap boundary, policy split, layouts, migration, update и cleanup ownership зафиксированы.
+None. If GitLab write access or the inspected environment contract is unavailable during implementation, the GitLab MR is a declared blocker; the SDK design does not expand to compensate.

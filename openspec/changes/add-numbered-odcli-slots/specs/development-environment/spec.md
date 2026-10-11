@@ -1,23 +1,23 @@
 ## ADDED Requirements
 
 ### Requirement: Selected global user root
-The SDK SHALL resolve its global user root exactly once through the central path provider. An absent selector SHALL mean canonical `~/.odcli`; an explicit absolute selector supplied by a trusted launcher SHALL be normalized without consulting or replacing `HOME`, and every global configuration, catalogue, backup, environment, project, lock, pgAdmin, bug-report, storage-migration, and update path SHALL descend from that root. Repository-local `<project>/.odcli` SHALL remain project-local and unchanged.
+The SDK SHALL resolve its global user root through the central path provider. An absent selector SHALL mean canonical `~/.odcli`; a trusted launcher's explicit absolute selector SHALL be normalized without consulting or replacing `HOME`, and every global configuration, catalogue, backup, environment, project, lock, pgAdmin, bug-report, storage-migration, and update path SHALL descend from that root. Repository-local `<checkout>/.odcli` SHALL remain beneath the linked checkout and SHALL NOT move into the global root.
 
 #### Scenario: Alternate root reaches all global providers
-- **WHEN** a numbered launcher selects `~/.odcli-3` or a hot-fix launcher selects `~/.odcli-fix-42`
-- **THEN** global path providers for catalogue, configuration, backups, environments, projects, locks, pgAdmin, reports, and journals return descendants only of that selected root
+- **WHEN** `odcli-3` selects `~/.odcli-3` or `odcli-fix-42` selects `~/.odcli-fix-42`
+- **THEN** every SDK-owned global provider returns a descendant only of that selected root while `HOME` remains unchanged
 
-#### Scenario: Repository-local state is not redirected
-- **WHEN** a numbered command operates on a project containing `.odcli/project.toml`, `.odcli/.env`, `.odcli/odoo.conf`, or `.odcli/filestore`
-- **THEN** those paths remain beneath the selected project checkout rather than the numbered user root
+#### Scenario: Numbered project state stays in its linked checkout
+- **WHEN** `odcli-N` operates in its recorded independent checkout
+- **THEN** `.odcli/project.toml`, private environment/configuration, filestore, logs, and runtime files remain under that checkout
 
 ### Requirement: Noncanonical roots do not adopt legacy storage
-Startup storage migration SHALL run legacy platformdirs discovery, copy, path rewriting, and source cleanup only for the canonical default root. When an explicit noncanonical root is selected, startup SHALL create or use that root as independent state and SHALL NOT inspect, copy, rewrite, lock, or delete canonical `~/.odcli` or any legacy platformdirs root.
+Startup storage migration SHALL run legacy platformdirs discovery, copy, path rewriting, and source cleanup only for canonical default state. With an explicit noncanonical selector, startup SHALL create or use that root independently and SHALL NOT inspect, copy, rewrite, lock, or delete canonical `~/.odcli`, any legacy root, or a neighboring alternate root.
 
 #### Scenario: Empty alternate root starts beside populated legacy storage
 - **WHEN** a numbered or hot-fix command first starts while canonical and legacy storage contain data
-- **THEN** its root begins independently without copied catalogue, configuration, paths, or migration history, and all canonical and legacy bytes remain unchanged
+- **THEN** its root begins independently without copied catalogue, configuration, paths, or migration history and all pre-existing roots remain unchanged
 
 #### Scenario: Canonical migration remains compatible
-- **WHEN** ordinary `odcli` starts with legacy storage and no explicit root selector
+- **WHEN** ordinary `odcli` starts with legacy storage and no explicit selector
 - **THEN** the existing canonical legacy migration contract remains in force

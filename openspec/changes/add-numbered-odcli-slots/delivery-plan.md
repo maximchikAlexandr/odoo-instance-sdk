@@ -2,59 +2,61 @@
 
 - Task key: `MYL-445`.
 - OpenSpec change: `add-numbered-odcli-slots`.
-- Approved base: `origin/main` at `4a9369c3cab0f9a34bf3d3b2411f3ec0ac5bf5e6`.
+- Product merge base: `origin/main` at `4a9369c3cab0f9a34bf3d3b2411f3ec0ac5bf5e6`.
+- Planning revision base: current PR #140 head `92406fa537eacf048479162197fe30faab718e6c`; this revision changes planning artifacts only.
+- SDK implementation branch: `feat/MYL-445-numbered-odcli-slots`; GitLab implementation requires a separate MR in `binta-test-repo`.
 - Delivery mode: `dag`.
-- Estimate source: подтверждённые read-back properties корневой planning issue `Estimate, hours`, `Estimate min, hours`, `Estimate max, hours`; числовые totals намеренно не дублируются.
-- Estimate basis: remaining active developer effort для одного опытного разработчика, знакомого с Python, Click, uv tool layouts, POSIX `flock`, SQLite migrations, skill scripts и pytest этого репозитория, без AI-ускорения. Unattended CI, approval queues, meetings и external blocking исключены; тесты для оценки не запускались.
-- Confidence: medium. Existing `fix_tool.py` даёт работающую основу uv/manifest/shim/lock/remove, package/CLI/path seams доступны; основная неопределённость — безопасный canonical-interpreter bootstrap, selector capability probe и multi-root packaging acceptance.
-- Calibration: evidence-based, uncalibrated; сопоставимые historical actuals отсутствуют.
-- Topology rule: новая authoritative estimate property превышает threshold. После единого shared lifecycle foundation существуют два независимых фронта: thin numbered CLI adapter и SDK runtime confinement/update. Они соединяются только в integrated acceptance.
+- Estimate source: confirmed read-back properties `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours` on the root planning issue; numeric totals are intentionally not duplicated here.
+- Estimate basis: remaining active developer effort from the two inspected snapshots to the revised acceptance criteria for one experienced developer familiar with Python, Click, uv tools, POSIX `flock`, Git, Odoo configuration/database tooling, and pytest, without AI acceleration. Tests were not run for estimation; unattended CI, approvals, meetings, and external waiting are excluded.
+- Confidence: medium. Current shared lifecycle/root confinement is implemented and inspectable; uncertainty is concentrated in fail-closed multi-resource rollback, concrete GitLab environment drift, and cross-repository acceptance.
+- Calibration: evidence-based and uncalibrated; no comparable historical actuals were available.
+- Topology rule: authoritative estimate exceeds the DAG threshold. After one SDK-owned private contract, the SDK public-surface/skill revision and GitLab wrapper revision have disjoint mutable write scopes and form a real parallel frontier; integrated acceptance is their serial fan-in.
 
-Stage mapping: `WP-MYL-445-01 -> 1`, `WP-MYL-445-02 -> 2`, `WP-MYL-445-03 -> 2`, `WP-MYL-445-04 -> 3`. Stages последовательны без пропусков; operational WIP в DAG не кодируется.
+Stage mapping: `WP-MYL-445-01 -> 1`, `WP-MYL-445-02 -> 2`, `WP-MYL-445-03 -> 2`, `WP-MYL-445-04 -> 3`. Stages are consecutive; stage is a topological layer, not WIP policy.
 
-## WP-MYL-445-01 — Shared lifecycle и thin hot-fix policy
+## WP-MYL-445-01 — Shared private lifecycle and checkout foundation
 
 - **Stage:** `1`.
 - **Tasks:** `1.1`, `1.2`, `1.3`, `1.4`, `1.5`.
-- **Depends on:** нет.
-- **Самостоятельный deliverable:** existing hot-fix lifecycle refactored into one package-owned alternate-tool engine; `odcli-fix-ISSUE` uses an isolated root through that engine while its skill wrapper contains only bootstrap and PR/reviewer/retirement policy.
-- **Owned responsibility scope:** central user-root/identity paths, shared alternate-tool lifecycle implementation and tests, existing autonomous-work skill wrapper/reviewer/docs/tests, canonical-interpreter packaging bootstrap. Critical shared files: `src/odoo_instance_sdk/internal/paths.py`, new narrow `internal/alternate_tool.py` or equivalent, `.agents/skills/odcli-autonomous-work/**`, `tests/unit/test_odcli_autonomous_skill.py`, directly related shared-engine/packaging tests.
-- **Contract surface:** one deterministic identity/path model; one uv install/provenance/capability probe; one discriminated manifest/shim/lock/list/remove implementation; manifest permits only fixed common fields and hot-fix PR/review/branch fields, with no arbitrary extension map; old shared-state manifests fail closed; no public/private Click manager surface, registry DB, daemon, dependency or plugin framework.
-- **DoD / evidence:** shared-engine tests exercise numbered and hot-fix identities through the same functions; hot-fix install/reconcile retains exact PR/issue/reviewer/merge/branch gates but delegates mechanics; canonical interpreter is proven before mutation; package-installed bootstrap works; duplicate-mechanics architecture guard fixture is ready; focused Ruff/mypy/tests pass.
-- **Parallel safety:** единственный owner shared engine, root selector и skill refactor. Stage-2 successors consume its stable APIs after completion and do not modify these files.
+- **Depends on:** none.
+- **Standalone deliverable:** one fixed SDK-private contract that preserves the existing alternate-tool engine, adds bounded checkout mechanics and atomically binds the smallest wholly free numbered identity to its checkout without exposing a product command.
+- **Owned responsibility scope:** SDK internal alternate identity/manifest and user-root contract, new private checkout coordinator, allocation/reservation/rollback, process/config validation, package inclusion, focused foundation tests, and the read-only boundary inventory of GitLab `agent_checkout.py`. Critical files: `src/odoo_instance_sdk/internal/alternate_tool.py`, new `src/odoo_instance_sdk/internal/agent_checkout.py` or the equivalent single private module, `internal/paths.py` only when the fixed contract requires it, `tests/unit/test_alternate_tool.py`, new private-coordinator tests, packaging and architecture fixtures directly tied to this foundation.
+- **Contract surface:** one installer/provenance/probe/manifest/shim/lifecycle-lock/tool-state cleanup; one global allocation lock; four-dimension occupancy check; fixed numbered-only checkout linkage; explicit validated environment inputs; no Click/console registration, arbitrary hooks/extensions, generic providers, daemon, registry DB, Binta defaults, or secret output.
+- **DoD / evidence:** concurrent allocation yields distinct identities; each orphan dimension is occupied and untouched; trusted reference/origin, marker/hash, symlink/containment, dirty/unpushed, restore/drop and rollback cases fail closed; hot-fix manifests have no checkout fields; packaging imports the private modules; architecture guard finds no duplicated lifecycle mechanics.
+- **Parallel safety:** sole owner of shared package-private contracts. Stage-2 successors start only after its API/manifest/environment contract is fixed and do not edit these critical modules or foundation tests.
 
-## WP-MYL-445-02 — Thin numbered command adapter
+## WP-MYL-445-02 — SDK service wrapper and public-slot removal
 
 - **Stage:** `2`.
 - **Tasks:** `2.1`, `2.2`, `2.3`, `2.4`.
 - **Depends on:** `WP-MYL-445-01`.
-- **Самостоятельный deliverable:** canonical `odcli slot install/list/remove` adds only numbered identity/replace policy and bounded output over the shared engine; `odcli-N` delegates ordinary commands and cannot manage slots.
-- **Owned responsibility scope:** numbered Click adapter, command registration, typed result/output/public-leaf inventory and numbered policy tests. Critical files: new `commands/slot.py`, `commands/cli_parts/registration.py`, command models only if required, `tests/unit/test_cli_output_modes.py`, directly related adapter fixtures.
-- **Contract surface:** positive canonical number; exact SHA; unused vs explicit replace intent; bounded list projection; canonical-only manager invocation; Rich/JSON/TOON parity; no uv/provenance/probe/manifest/shim/lock/remove implementation outside shared engine.
-- **DoD / evidence:** adapter delegates every lifecycle effect; invalid/existing/running/corrupt cases fail through typed output; exact argv/exit survives; management rejects numbered context before engine discovery; public-leaf and machine parity tests pass.
-- **Parallel safety:** пишет только command/registration/output/policy tests after WP-01; не изменяет shared engine/skill files или runtime migration/self-update files owned by WP-03.
+- **Standalone deliverable:** the SDK repository exposes numbered management only through checked-in private service/skill tooling, has no public `odcli slot` leaf, and retains alternate root/update/hot-fix guarantees with revised documentation and tests.
+- **Owned responsibility scope:** SDK `.agents/skills/odcli-autonomous-work/**`, trusted canonical-interpreter wrapper, deletion of `commands/slot.py`, removal from command registration/output/public inventories, self-update remediation wording, SDK README/execution-boundary docs, and related CLI/skill/migration/update tests. It may adapt architecture fixtures owned as consumers but SHALL NOT change the foundation implementation or fixed manifest/environment contract.
+- **Contract surface:** private create/list/inspect/remove wrapper with one bounded machine result; no secret output; zero Click or console-script management surface; alternate self-update rejects before effects and points to service tooling; canonical update remains unaware of alternates.
+- **DoD / evidence:** root help and public-leaf/matrix counts contain no slot entries; slot module/test and slot-only output plumbing are absent; service wrapper proves canonical interpreter/repository before private invocation; retained migration/update/hot-fix tests pass; docs state checkout/database/filestore/port boundaries and the PR #140 keep/delete result.
+- **Parallel safety:** writes SDK skill/public CLI/docs and their direct tests only. It does not touch GitLab files owned by WP-03 or shared private modules/foundation tests owned by WP-01.
 
-## WP-MYL-445-03 — Runtime confinement, migration и update guards
+## WP-MYL-445-03 — GitLab thin wrapper and Binta configuration
 
 - **Stage:** `2`.
 - **Tasks:** `3.1`, `3.2`, `3.3`, `3.4`.
 - **Depends on:** `WP-MYL-445-01`.
-- **Самостоятельный deliverable:** every selected root confines SDK-owned state; only canonical startup adopts legacy storage; direct numbered/hot-fix update fails before planning/effects and canonical update ignores alternates.
-- **Owned responsibility scope:** storage-migration selection, remaining global path consumers, self-update/maintenance/recovery context guards and focused path/migration/update tests. Critical files: `internal/storage_migration.py`, `internal/self_update*.py`, `commands/update.py`, related consumer/tests.
-- **Contract surface:** canonical-only platformdirs adoption; explicit alternate roots start empty; launcher-specific remediation; canonical update never discovers/manages alternate tools; no lifecycle mechanics or manager metadata interpretation.
-- **DoD / evidence:** provider inventory is complete; canonical migration regressions pass; populated canonical/legacy/neighbors remain unchanged on alternate first run; all alternate update modes reject before effects; filesystem spy proves zero cross-root access.
-- **Parallel safety:** writes runtime consumers/migration/update only; не изменяет shared engine/skill files or numbered command/registration/output files owned by WP-02.
+- **Standalone deliverable:** a separate GitLab MR where `binta-test-repo/scripts/agent_checkout.py` supplies concrete environment/configuration to the fixed SDK coordinator and no longer duplicates reusable clone/allocation/marker/removal mechanics.
+- **Owned responsibility scope:** GitLab `scripts/agent_checkout.py`, wrapper-focused tests, `README.md`, `docs/stand.md`, and directly related fixtures/configuration docs. It owns concrete reference checkout, checkout parent, backup, port bounds, database prefix, PostgreSQL endpoint, Odoo Python/bin, source private `.env`/config, Binta scenarios, and exact-MR evidence. `seed_odoo.py`, DB diagnostics, admin-password setup, secrets and persistent-stand assets remain GitLab-owned and unchanged except for a necessary reference update.
+- **Contract surface:** fixed environment keys consumed by the SDK coordinator; no lifecycle algorithm, arbitrary callback/plugin schema, secret serialization, SDK path guesses, or code copy. Missing SDK revision/access/environment values block rather than fall back.
+- **DoD / evidence:** wrapper create/list/remove and drift/failure tests pass; output and manifests exclude secret values; Binta-owned assets do not enter the SDK; real stand evidence covers unique checkout/database/filestore/port and safe cleanup; MR records its exact revision and expected SDK contract.
+- **Parallel safety:** all mutable production/test/docs scope is in the GitLab repository, disjoint from WP-02's SDK work. It consumes but does not edit WP-01's frozen SDK contract.
 
-## WP-MYL-445-04 — Integrated reuse/isolation acceptance и publication gate
+## WP-MYL-445-04 — Cross-repository acceptance and publication gate
 
 - **Stage:** `3`.
-- **Tasks:** `4.1`, `4.2`, `4.3`, `4.4`.
+- **Tasks:** `4.1`, `4.2`, `4.3`, `4.4`, `4.5`.
 - **Depends on:** `WP-MYL-445-02`, `WP-MYL-445-03`.
-- **Самостоятельный deliverable:** publication-ready SHA with documentation and end-to-end proof that canonical, two numbered and two hot-fix revisions use one lifecycle implementation, isolated roots and selective cleanup.
-- **Owned responsibility scope:** cross-component process/packaging fixtures, duplicate-mechanics architecture guard, documentation/help, final inventories/evidence and minimal repairs only for observed integration findings. Critical files: `tests/packaging/`, architecture inventory/guard, `README.md`, directly related fixtures/snapshots.
-- **Contract surface:** one engine/two thin policies; five independent roots; canonical behavior unchanged; shared external project/Odoo/PostgreSQL/database/filestore/Docker/port resources explicitly disjoint; no scope expansion during repair.
-- **DoD / evidence:** architecture guard finds lifecycle mechanics only in shared module; concurrent incompatible migrations stay confined by access spy, SQLite revision and digest evidence; canonical update preserves alternates; shared removal of one numbered or eligible hot fix preserves every neighbor; docs explain reuse, old-style remediation and external-resource boundary; focused/skill/packaging/repository/Ruff/mypy/inventory/diff/strict OpenSpec gates pass.
-- **Parallel safety:** serial fan-in after both stage-2 siblings; shared integration fixtures and cross-domain repairs have one owner.
+- **Standalone deliverable:** publication-ready SDK and GitLab exact revisions with end-to-end proof of one alternate lifecycle, no public slot surface, isolated roots and project resources, selective cleanup, complete PR #140 disposition, and cross-repository ownership.
+- **Owned responsibility scope:** cross-component SDK/GitLab acceptance fixtures, before/after digest evidence, final architecture/packaging/docs audits, exact-SHA cross-reference, and minimal repairs only for observed integration failures. Critical surfaces include SDK process acceptance/architecture inventory and GitLab wrapper stand evidence; repairs stay in the original WP owner's responsibility area but are coordinated serially here.
+- **Contract surface:** canonical plus two numbered plus two hot-fix roots; two numbered linked checkouts with distinct database/filestore/port; shared PostgreSQL/Odoo source/venv/backup preserved; no public slot registration; no duplicate lifecycle/checkout mechanics; exact SDK/GitLab revision binding.
+- **DoD / evidence:** incompatible catalogue processes remain root-confined; numbered resources remain checkout-confined; dirty/unpushed/running/config-drift/orphan cases preserve everything; removing one numbered and one eligible hot fix preserves all neighbors/reference/persistent assets; every PR #140 path matches keep/adapt/delete map; focused/full tests, packaging, output/inventory, Ruff, strict mypy, repository checks, diff check, strict OpenSpec and docs gates pass.
+- **Parallel safety:** serial fan-in after both stage-2 siblings. One owner coordinates shared fixtures and cross-repository repair evidence, so parallel siblings never write the same mutable surface.
 
 ## Topology and Coverage Audit
 
@@ -65,20 +67,21 @@ Direct edges only:
 - `WP-MYL-445-02 -> WP-MYL-445-04`
 - `WP-MYL-445-03 -> WP-MYL-445-04`
 
-Execution frontiers: stage 1 — shared lifecycle/hot-fix baseline; stage 2 — numbered adapter and runtime confinement concurrently; stage 3 — integrated join. Stage-2 siblings have non-overlapping production and primary-test write zones.
+Execution frontiers: stage 1 fixes the shared SDK-private contract; stage 2 independently revises the SDK service/public surface and the GitLab wrapper/configuration; stage 3 joins them for acceptance. No transitive edge is repeated.
 
-Task coverage complete and one-time:
+Task coverage is complete and one-time:
 
 | WP | OpenSpec tasks |
 | --- | --- |
 | `WP-MYL-445-01` | `1.1`, `1.2`, `1.3`, `1.4`, `1.5` |
 | `WP-MYL-445-02` | `2.1`, `2.2`, `2.3`, `2.4` |
 | `WP-MYL-445-03` | `3.1`, `3.2`, `3.3`, `3.4` |
-| `WP-MYL-445-04` | `4.1`, `4.2`, `4.3`, `4.4` |
+| `WP-MYL-445-04` | `4.1`, `4.2`, `4.3`, `4.4`, `4.5` |
 
 ## Estimation Evidence and Assumptions
 
-- Inspected: complete OpenSpec package; existing 254-line `fix_tool.py`; its sole skill caller and unit tests; reviewer compatibility path; `pyproject.toml` wheel/script boundary; central paths/storage migration; self-update provenance/maintenance paths; CLI registration/output/public-leaf tests; packaging and architecture inventories.
-- Existing reusable work counted once: exact-SHA uv install, PR/issue linkage, manifest/shim generation, `flock`, reconciliation gates and uv uninstall in `fix_tool.py` are refactored, not reimplemented.
-- Estimate includes implementation, focused/shared-engine/skill/process/packaging tests, documentation, repository gates and likely review repairs; deployment and live shared external-resource orchestration excluded.
-- Estimate invalidates if scope expands to automatic migration of old shared-state fixes, arbitrary repositories/refs, Windows lifecycle support despite current POSIX `fcntl`, external-resource orchestration, or a new service/plugin API.
+- Inspected SDK/OpenSpec snapshot: PR #140 head `92406fa537eacf048479162197fe30faab718e6c`, complete revised package, shared engine, public slot adapter, path/migration/update guards, autonomous skill, packaging/architecture/output tests and PR diff.
+- Inspected GitLab snapshot: `d21521c985263a097e6bcf042d132db4d80e137c`, full `scripts/agent_checkout.py`, its README/stand callers, private-config behavior, cleanup guards and Binta-only helper boundaries.
+- Reusable work counted once: current shared alternate lifecycle, root confinement, migration/update guards, hot-fix policy and their tests are retained/adapted rather than reimplemented.
+- Estimate covers remaining implementation in both repositories, focused/concurrency/process/resource tests, separate GitLab MR work, documentation, repository gates and likely review repairs. Deployment, human approval time, unattended CI and unrelated stand maintenance are excluded.
+- Estimate invalidates if scope expands to arbitrary repositories/config schemas, Windows support, automatic orphan/legacy adoption, shared-service orchestration, a public numbered API, migration of Binta-only seed/diagnostic/password logic, or additional external environments.

@@ -1,33 +1,32 @@
 ## Why
 
-Concurrent agents can install different OdCLI revisions, but ordinary, numbered, and existing hot-fix launchers currently converge on canonical `~/.odcli`. A schema migration or write from either alternate revision can therefore corrupt another agent's state; every exact-revision launcher needs isolated OdCLI user state without replacing `HOME` or weakening canonical behavior.
+PR #140 already proves isolated exact-SHA `odcli-N` and `odcli-fix-ISSUE` launchers, but its public `odcli slot` surface is broader than the operator workflow requires and does not bind a numbered tool to the independent project checkout and external resources needed for safe concurrent Odoo work. The revision must keep the proven one-engine isolation while moving numbered management into bounded service tooling and reusing the safe parts of GitLab `binta-test-repo/scripts/agent_checkout.py`.
 
 ## What Changes
 
-- Add one explicit SDK/CLI user-root selector: ordinary `odcli` keeps `~/.odcli`, numbered `odcli-N` uses `~/.odcli-N`, and `odcli-fix-ISSUE` uses `~/.odcli-fix-ISSUE`.
-- Extract the existing hot-fix install/provenance/manifest/lock/shim/remove mechanics into one package-owned alternate-tool lifecycle module and reuse it for both launcher kinds.
-- Add canonical numbered-slot install/replace/list/remove as a thin identity/policy adapter over that shared lifecycle.
-- Reduce the existing skill-local hot-fix script to PR/reviewer/merge-retirement policy plus delegation to the shared lifecycle, with its deterministic isolated root and manager metadata outside canonical state.
-- Preserve real `HOME`, so Git, SSH, uv, and unrelated settings remain shared and unchanged.
-- Start every alternate root empty; never copy canonical, legacy, numbered, or neighboring hot-fix state, absolute paths, or migration history.
-- Run legacy-storage adoption only for ordinary canonical `odcli`; alternate revisions migrate only their selected root.
-- Reject direct `odcli-N update` and `odcli-fix-ISSUE update`. Numbered revision changes use the canonical slot manager; hot-fix retirement remains skill-managed and occurs only after the existing merge/ancestry/branch gates.
-- Make removal/retirement delete only the selected launcher, tool environment, manager metadata, lock, and isolated root while preserving canonical and every neighbor.
-- Document that user-root isolation does not isolate project checkouts, Odoo/PostgreSQL, databases, filestores, Docker resources, or ports.
+- **BREAKING** Remove the public `odcli slot install/list/remove` group and all public help, output-mode, inventory, and real-Odoo matrix entries for it.
+- Keep one package-owned alternate-tool lifecycle for numbered and hot-fix launchers: exact-SHA provenance, root selection, manifest, shim, locking, inspection, and selective cleanup remain shared.
+- Add one private SDK service-tool path that atomically selects the smallest free positive number under a global allocation lock, treating any existing launcher, state root, manager metadata, or linked checkout as occupied and never overwriting orphaned data.
+- Bind each numbered installation to one independently cloned project checkout and record deterministic, verified linkage without changing real `HOME`.
+- Extract only reusable checkout create/inspect/remove mechanics from GitLab `agent_checkout.py` into that private SDK path. GitLab retains environment configuration for the reference checkout, backup, port range, database naming, private `.env`, Odoo binaries, and Binta-specific scenarios.
+- Keep `seed_odoo.py`, database diagnostics, administrator-password setup, persistent-stand policy, and secrets in GitLab; do not create a generic checkout framework or public SDK API.
+- Preserve canonical-only legacy migration, fail-closed provenance, alternate self-update guards, cross-root isolation, and selective removal.
+- Replace PR #140's public-command tests/docs with private-tool, allocation, linked-checkout, cross-resource, cleanup, packaging, and architecture acceptance.
+- Deliver SDK changes in PR #140 and GitLab-owned wrapper/configuration changes in a separate GitLab MR; neither repository silently owns the other's configuration.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `numbered-odcli-slots`: Exact-revision alternate launcher identity, isolated roots, lifecycle management, cross-root safety, and external-resource boundaries for numbered and hot-fix commands.
+- `numbered-odcli-slots`: Private exact-SHA numbered-tool allocation, one shared numbered/hot-fix lifecycle, linked independent checkout management, cross-root/resource safety, and selective cleanup.
 
 ### Modified Capabilities
 
-- `development-environment`: Every SDK-owned global path uses the selected root; noncanonical roots never adopt canonical or legacy storage.
-- `self-update`: Direct self-update is forbidden for numbered and hot-fix launchers; canonical update stays isolated from them.
-- `cli-odcli`: Canonical CLI exposes bounded numbered-slot management; alternate launchers preserve the ordinary surface except forbidden management/update paths.
-- `bug-report`: Existing `odcli-fix-<issue>` installation, compatibility, invocation, reconciliation, and cleanup use isolated state rather than shared `~/.odcli`.
+- `development-environment`: Selected global roots remain isolated while numbered tooling binds each root to a separately configured checkout.
+- `self-update`: Alternate launchers remain unable to self-update, and numbered remediation points to service tooling rather than a public CLI group.
+- `cli-odcli`: The public CLI explicitly has no numbered-installation management group; alternate launchers expose only the ordinary supported surface.
+- `bug-report`: Existing hot-fix management continues through the same shared lifecycle without inheriting numbered checkout policy.
 
 ## Impact
 
-The change affects the central path provider, one shared alternate-tool lifecycle module, startup storage migration, self-update selection, canonical slot CLI, `.agents/skills/odcli-autonomous-work` as a thin policy wrapper, its tests, packaging acceptance, and documentation. It adds no dependency and does not change repository-local `.odcli`, Odoo/PostgreSQL ownership, database/filestore formats, Docker naming, or port allocation.
+In the SDK repository, the change retains and narrows `internal/alternate_tool.py`, adds one private package-owned checkout coordinator, updates the autonomous-work skill wrapper, removes `commands/slot.py` and its registration/output inventory, adjusts self-update guidance, and replaces affected tests/docs. In GitLab `binta-test-repo`, `scripts/agent_checkout.py` becomes a thin environment/configuration wrapper over the private SDK coordinator while Binta-specific seed, diagnostics, password, backup, database, filestore, and port policy stay local. No new dependency, daemon, registry database, public console command, or secret-in-Git flow is introduced.
