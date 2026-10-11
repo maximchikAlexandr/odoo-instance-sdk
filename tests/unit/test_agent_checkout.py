@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -393,7 +393,28 @@ def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
     environment.worktree_path = str(checkout)
     environment.checkout_repository_root = str(checkout)
     environment.state = EnvironmentState.REMOVED.value
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    real_unlink = os.unlink
+    delete_failures = 1
+
+    def fail_once(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal delete_failures
+        if path == "owned.txt" and delete_failures:
+            delete_failures -= 1
+            raise OSError("recursive deletion failed")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", fail_once)
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
+    with pytest.raises(OSError, match="recursive deletion failed"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    assert len(remove_calls) == 1
+    assert checkout.is_dir()
+    assert (identity_value.manager_root / "reservation.json").is_file()
+
     agent_checkout.remove_numbered_installation(
         "1", client=cast("OdooClient", client), home=tmp_path
     )
@@ -568,22 +589,36 @@ def test_quarantine_rejects_post_quarantine_entry_swap(
     checkout.mkdir(parents=True)
     (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
     expected = agent_checkout._checkout_identity(checkout)
-    real_rmtree = shutil.rmtree
+    real_stat = os.stat
+    swapped = False
+    quarantine_stats = 0
     replacement: list[Path] = []
 
-    def swap_entry(name: str, *, dir_fd: int) -> None:
-        os.rename(name, "moved-original", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        os.mkdir(name, dir_fd=dir_fd)
-        replacement.append(checkout.parent / name)
-        real_rmtree("moved-original", dir_fd=dir_fd)
+    def swap_before_final_stat(
+        path: str | Path, *, dir_fd: int | None = None, follow_symlinks: bool = True
+    ) -> os.stat_result:
+        nonlocal quarantine_stats, swapped
+        if isinstance(path, str) and path.startswith(".odcli-1.deleting-"):
+            quarantine_stats += 1
+        if quarantine_stats == 2 and not swapped:
+            swapped = True
+            assert dir_fd is not None
+            os.rename(path, "moved-original", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.mkdir(path, dir_fd=dir_fd)
+            replacement_path = checkout.parent / path
+            replacement.append(replacement_path)
+            (replacement_path / "replacement.txt").write_text("keep\n", encoding="utf-8")
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(shutil, "rmtree", swap_entry)
+    monkeypatch.setattr(os, "stat", swap_before_final_stat)
 
-    with pytest.raises(AgentCheckoutError, match="replaced during deletion"):
+    with pytest.raises(AgentCheckoutError, match="identity changed before final deletion"):
         agent_checkout._remove_owned_checkout(checkout, expected)
 
-    assert not checkout.exists()
-    assert replacement and replacement[0].is_dir()
+    assert (
+        replacement and (replacement[0] / "replacement.txt").read_text(encoding="utf-8") == "keep\n"
+    )
+    assert (checkout.with_name("moved-original")).is_dir()
 
 
 def test_quarantine_parent_swap_stays_bound_to_original_parent(
@@ -594,16 +629,18 @@ def test_quarantine_parent_swap_stays_bound_to_original_parent(
     checkout.mkdir(parents=True)
     (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
     expected = agent_checkout._checkout_identity(checkout)
-    real_rmtree = shutil.rmtree
+    real_fwalk = os.fwalk
     swapped_parent = tmp_path / "checkouts-original"
 
-    def swap_parent(name: str, *, dir_fd: int) -> None:
+    def swap_parent(
+        top: str, *, topdown: bool, dir_fd: int, follow_symlinks: bool
+    ) -> Iterator[tuple[str, list[str], list[str], int]]:
         parent.rename(swapped_parent)
         parent.mkdir()
         (parent / "neighbor.txt").write_text("keep\n", encoding="utf-8")
-        real_rmtree(name, dir_fd=dir_fd)
+        return real_fwalk(top, topdown=topdown, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(shutil, "rmtree", swap_parent)
+    monkeypatch.setattr(os, "fwalk", swap_parent)
 
     agent_checkout._remove_owned_checkout(checkout, expected)
 

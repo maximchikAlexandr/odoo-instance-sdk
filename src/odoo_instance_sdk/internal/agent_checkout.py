@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import tempfile
 import uuid
@@ -36,6 +35,7 @@ from odoo_instance_sdk.internal.alternate_tool import (
     read_alternate_manifest,
     remove_alternate_tool,
 )
+from odoo_instance_sdk.internal.checkout_cleanup import BoundCleanupError, remove_bound_directory
 from odoo_instance_sdk.internal.git_worktree import remote_url, rev_parse_branch, rev_parse_toplevel
 from odoo_instance_sdk.internal.paths import USER_ROOT_ENV
 from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
@@ -169,15 +169,15 @@ def _remove_owned_checkout(checkout: Path, expected: _CheckoutIdentity) -> None:
     quarantine = _quarantine_checkout(checkout, expected)
     parent_fd, quarantine_name, quarantine_expected = quarantine
     try:
-        current = os.stat(quarantine_name, dir_fd=parent_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != quarantine_expected:
-            raise AgentCheckoutError("quarantined checkout identity changed before deletion")
-        shutil.rmtree(quarantine_name, dir_fd=parent_fd)
-        with contextlib.suppress(FileNotFoundError):
-            remaining = os.stat(quarantine_name, dir_fd=parent_fd, follow_symlinks=False)
-            if (remaining.st_dev, remaining.st_ino) != quarantine_expected:
-                raise AgentCheckoutError("quarantined checkout was replaced during deletion")
-            raise AgentCheckoutError("quarantined checkout remains after deletion")
+        # The bound helper replaces pathname-based shutil.rmtree(...).
+        remove_bound_directory(
+            parent_fd,
+            quarantine_name,
+            checkout.name,
+            quarantine_expected,
+        )
+    except BoundCleanupError as exc:
+        raise AgentCheckoutError(str(exc)) from exc
     finally:
         os.close(parent_fd)
 
