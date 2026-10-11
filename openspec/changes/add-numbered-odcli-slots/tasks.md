@@ -1,10 +1,10 @@
 ## 1. Shared private foundation and bounded extraction
 
-- [ ] 1.1 Inventory the current PR #140 and GitLab `agent_checkout.py` boundaries; lock the keep/remove map and classify reference/backup/ports/database/private-config/seed/diagnostic/password ownership without adding a generic provider layer.
-- [ ] 1.2 Retain and narrow the package-owned alternate-tool engine so numbered and hot-fix identities continue to share one exact-SHA provenance, selector probe, manifest/shim, lifecycle lock, inspection, and tool/state cleanup implementation.
-- [ ] 1.3 Add one private package coordinator limited to clean reference/origin checks, local no-hardlink clone, marker/hash, external-checkout inspection and contained post-cleanup deletion; invoke existing environment `adopt_command()`/`adopt()` and `remove()` for all config/port/COPY DB/catalogue/owned-venv lifecycle work.
-- [ ] 1.4 Add global allocation locking, smallest-wholly-free positive-number selection across launcher/state/manager/checkout, fixed checkout plus adopted-environment identity/path/lock/interpreter linkage in numbered manifests, attempt-owned reservation/checkout rollback, and fail-closed orphan/foreign-data handling.
-- [ ] 1.5 Add focused unit, concurrency, packaging, marker/hash, adoption/removal ordering, linkage/drift, dirty/unpushed, symlink/containment, retry and architecture tests proving one alternate lifecycle, one existing environment lifecycle, and an allocation/external-checkout-only coordinator.
+- [x] 1.1 Inventory the current PR #140 and GitLab `agent_checkout.py` boundaries; lock the keep/remove map and classify reference/backup/ports/database/private-config/seed/diagnostic/password ownership without adding a generic provider layer.
+- [x] 1.2 Retain and narrow the package-owned alternate-tool engine so numbered and hot-fix identities continue to share one exact-SHA provenance, selector probe, manifest/shim, lifecycle lock, inspection, and tool/state cleanup implementation.
+- [x] 1.3 Add one private package coordinator limited to clean reference/origin checks, local no-hardlink clone, marker/hash, external-checkout inspection and contained post-cleanup deletion; invoke existing environment `adopt_command()`/`adopt()` and `remove()` for all config/port/COPY DB/catalogue/owned-venv lifecycle work.
+- [x] 1.4 Add global allocation locking, smallest-wholly-free positive-number selection across launcher/state/manager/checkout, fixed checkout plus adopted-environment identity/path/lock/interpreter linkage in numbered manifests, attempt-owned reservation/checkout rollback, and fail-closed orphan/foreign-data handling.
+- [x] 1.5 Add focused unit, concurrency, packaging, marker/hash, adoption/removal ordering, linkage/drift, dirty/unpushed, symlink/containment, retry and architecture tests proving one alternate lifecycle, one existing environment lifecycle, and an allocation/external-checkout-only coordinator.
 
 ## 2. SDK service tooling and public-surface removal
 

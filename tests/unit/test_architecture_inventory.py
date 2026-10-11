@@ -16,6 +16,8 @@ from pathlib import Path
 
 from odoo_instance_sdk.internal.proc import run as process_executor
 from tests.fixtures.architecture_inventory import (
+    ALTERNATE_COORDINATOR_MECHANICS,
+    ALTERNATE_COORDINATOR_MODULE,
     ALTERNATE_LIFECYCLE_MECHANIC_TOKENS,
     ALTERNATE_LIFECYCLE_MODULE,
     ALTERNATE_POLICY_SURFACES,
@@ -474,6 +476,12 @@ def test_inventory_entries_are_line_specific_and_exist() -> None:
 def test_alternate_lifecycle_mechanics_have_one_owner() -> None:
     shared = (_REPO_ROOT / ALTERNATE_LIFECYCLE_MODULE).read_text(encoding="utf-8")
     assert all(token in shared for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS)
+    coordinator = (_REPO_ROOT / ALTERNATE_COORDINATOR_MODULE).read_text(encoding="utf-8")
+    assert all(token in coordinator for token in ALTERNATE_COORDINATOR_MECHANICS)
+    assert not any(
+        token in coordinator
+        for token in ALTERNATE_LIFECYCLE_MECHANIC_TOKENS - ALTERNATE_COORDINATOR_MECHANICS
+    )
     bootstrap_path = ".agents/skills/odcli-autonomous-work/scripts/fix_tool.py"
     bootstrap = (_REPO_ROOT / bootstrap_path).read_text(encoding="utf-8")
     duplicate_locations = {

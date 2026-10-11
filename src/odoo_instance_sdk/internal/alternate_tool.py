@@ -18,7 +18,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
 
@@ -106,6 +106,14 @@ class AlternateManifest:
     review_sha: str | None = None
     review_session: str | None = None
     branch: str | None = None
+    checkout_path: str | None = None
+    checkout_repository: str | None = None
+    checkout_sha: str | None = None
+    environment_id: str | None = None
+    environment_path: str | None = None
+    environment_lock: str | None = None
+    interpreter_path: str | None = None
+    hash_lock_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not SHA_RE.fullmatch(self.sha):
@@ -117,15 +125,29 @@ class AlternateManifest:
             for value in (self.pr, self.review_sha, self.review_session, self.branch)
         ):
             raise ValueError("numbered manifests cannot contain hot-fix fields")
+        linkage = (
+            self.checkout_path,
+            self.checkout_repository,
+            self.checkout_sha,
+            self.environment_id,
+            self.environment_path,
+            self.environment_lock,
+            self.interpreter_path,
+            self.hash_lock_sha256,
+        )
+        if self.identity.kind == "numbered" and any(linkage) and not all(linkage):
+            raise ValueError("numbered manifests require complete checkout linkage")
         if self.identity.kind == "hotfix":
             if self.pr is None or self.pr <= 0:
                 raise ValueError("hot-fix manifests require a positive PR number")
             if self.review_sha != self.sha or not self.review_session:
                 raise ValueError("hot-fix manifests require exact review provenance")
+            if any(linkage):
+                raise ValueError("hot-fix manifests cannot contain checkout linkage")
 
     def to_json(self) -> dict[str, str | int | None]:
         identity = self.identity
-        return {
+        payload: dict[str, str | int | None] = {
             "version": MANIFEST_VERSION,
             "kind": identity.kind,
             "identifier": identity.identifier,
@@ -145,6 +167,20 @@ class AlternateManifest:
             "review_session": self.review_session,
             "branch": self.branch,
         }
+        if identity.kind == "numbered" and self.checkout_path is not None:
+            payload.update(
+                {
+                    "checkout_path": self.checkout_path,
+                    "checkout_repository": self.checkout_repository,
+                    "checkout_sha": self.checkout_sha,
+                    "environment_id": self.environment_id,
+                    "environment_path": self.environment_path,
+                    "environment_lock": self.environment_lock,
+                    "interpreter_path": self.interpreter_path,
+                    "hash_lock_sha256": self.hash_lock_sha256,
+                }
+            )
+        return payload
 
 
 def _validate_identity(identifier: str) -> None:
@@ -373,7 +409,7 @@ def _under(path: Path, root: Path) -> bool:
         return False
 
 
-def _manifest_from_payload(
+def _manifest_from_payload(  # noqa: C901 -- strict discriminated manifest parsing
     payload: Mapping[str, str | int | None], *, home: Path | None = None
 ) -> AlternateManifest:
     expected = {
@@ -396,9 +432,24 @@ def _manifest_from_payload(
         "review_session",
         "branch",
     }
+    kind = payload.get("kind")
+    if kind == "numbered":
+        linkage_fields = {
+            "checkout_path",
+            "checkout_repository",
+            "checkout_sha",
+            "environment_id",
+            "environment_path",
+            "environment_lock",
+            "interpreter_path",
+            "hash_lock_sha256",
+        }
+        if linkage_fields <= set(payload):
+            expected |= linkage_fields
+        elif set(payload) & linkage_fields:
+            raise AlternateToolError("incomplete numbered checkout linkage")
     if set(payload) != expected or payload.get("version") != MANIFEST_VERSION:
         raise AlternateToolError("unsupported or incomplete alternate-tool manifest")
-    kind = payload.get("kind")
     identifier = payload.get("identifier")
     if kind not in ("numbered", "hotfix") or not isinstance(identifier, str):
         raise AlternateToolError("invalid alternate-tool identity")
@@ -438,6 +489,21 @@ def _manifest_from_payload(
     review_sha_value = cast("str | None", review_sha)
     review_session_value = cast("str | None", review_session)
     branch_value = cast("str | None", branch)
+    linkage = {
+        field: payload.get(field)
+        for field in (
+            "checkout_path",
+            "checkout_repository",
+            "checkout_sha",
+            "environment_id",
+            "environment_path",
+            "environment_lock",
+            "interpreter_path",
+            "hash_lock_sha256",
+        )
+    }
+    if not all(value is None or isinstance(value, str) for value in linkage.values()):
+        raise AlternateToolError("invalid numbered checkout linkage")
     return AlternateManifest(
         identity_value,
         sha,
@@ -448,6 +514,7 @@ def _manifest_from_payload(
         review_sha=review_sha_value,
         review_session=review_session_value,
         branch=branch_value,
+        **cast("dict[str, str | None]", linkage),
     )
 
 
@@ -459,6 +526,59 @@ def _read_manifest(path: Path, *, home: Path | None = None) -> AlternateManifest
     if not isinstance(payload, dict):
         raise AlternateToolError("alternate-tool manifest is not an object")
     return _manifest_from_payload(payload, home=home)
+
+
+def read_alternate_manifest(
+    identity_value: AlternateIdentity, *, strict: bool = True
+) -> AlternateManifest | None:
+    """Read one verified manifest for private policy adapters."""
+    try:
+        manifest = _read_manifest(identity_value.manifest, home=identity_value.home)
+        if manifest.identity != identity_value:
+            raise AlternateToolError("alternate manifest identity mismatch")  # noqa: TRY301
+        _verify_structure(manifest)
+    except AlternateToolError:
+        if strict:
+            raise
+        return None
+    return manifest
+
+
+def publish_alternate_linkage(
+    identity_value: AlternateIdentity,
+    *,
+    checkout_path: str,
+    checkout_repository: str,
+    checkout_sha: str,
+    environment_id: str,
+    environment_path: str,
+    environment_lock: str,
+    interpreter_path: str,
+    hash_lock_sha256: str,
+) -> AlternateManifest:
+    """Publish the fixed numbered checkout/environment linkage under its lock."""
+    if identity_value.kind != "numbered":
+        raise AlternateToolError("only numbered identities can publish checkout linkage")
+    with lifecycle_lock(identity_value, exclusive=True):
+        current = read_alternate_manifest(identity_value)
+        assert current is not None
+        linked = replace(
+            current,
+            checkout_path=checkout_path,
+            checkout_repository=checkout_repository,
+            checkout_sha=checkout_sha,
+            environment_id=environment_id,
+            environment_path=environment_path,
+            environment_lock=environment_lock,
+            interpreter_path=interpreter_path,
+            hash_lock_sha256=hash_lock_sha256,
+        )
+        _atomic_text(
+            identity_value.manifest,
+            json.dumps(linked.to_json(), indent=2, sort_keys=True) + "\n",
+            mode=0o600,
+        )
+        return linked
 
 
 def _verify_structure(manifest: AlternateManifest) -> None:
@@ -525,6 +645,14 @@ def install_alternate_tool(  # noqa: C901
     review_sha: str | None = None,
     review_session: str | None = None,
     branch: str | None = None,
+    checkout_path: str | None = None,
+    checkout_repository: str | None = None,
+    checkout_sha: str | None = None,
+    environment_id: str | None = None,
+    environment_path: str | None = None,
+    environment_lock: str | None = None,
+    interpreter_path: str | None = None,
+    hash_lock_sha256: str | None = None,
     repository: str = REPOSITORY_URL,
 ) -> AlternateManifest:
     """Install, verify, probe, and publish one alternate launcher atomically."""
@@ -566,6 +694,14 @@ def install_alternate_tool(  # noqa: C901
                 review_sha=review_sha,
                 review_session=review_session,
                 branch=branch,
+                checkout_path=checkout_path,
+                checkout_repository=checkout_repository,
+                checkout_sha=checkout_sha,
+                environment_id=environment_id,
+                environment_path=environment_path,
+                environment_lock=environment_lock,
+                interpreter_path=interpreter_path,
+                hash_lock_sha256=hash_lock_sha256,
             )
         )
         manifest = AlternateManifest(
@@ -578,6 +714,14 @@ def install_alternate_tool(  # noqa: C901
             review_sha=review_sha,
             review_session=review_session,
             branch=branch,
+            checkout_path=checkout_path,
+            checkout_repository=checkout_repository,
+            checkout_sha=checkout_sha,
+            environment_id=environment_id,
+            environment_path=environment_path,
+            environment_lock=environment_lock,
+            interpreter_path=interpreter_path,
+            hash_lock_sha256=hash_lock_sha256,
         )
         with lifecycle_lock(identity_value, exclusive=True):
             _check_install_target(identity_value, replace=replace)
@@ -663,6 +807,14 @@ def inspect_alternate_tool(
         "pr": manifest.pr,
         "review_sha": manifest.review_sha,
         "branch": manifest.branch,
+        "checkout_path": manifest.checkout_path,
+        "checkout_repository": manifest.checkout_repository,
+        "checkout_sha": manifest.checkout_sha,
+        "environment_id": manifest.environment_id,
+        "environment_path": manifest.environment_path,
+        "environment_lock": manifest.environment_lock,
+        "interpreter_path": manifest.interpreter_path,
+        "hash_lock_sha256": manifest.hash_lock_sha256,
     }
 
 
@@ -687,13 +839,16 @@ def list_alternate_tools(
     return tuple(result)
 
 
-def remove_alternate_tool(identity_value: AlternateIdentity) -> None:
+def remove_alternate_tool(  # noqa: C901 -- fixed selective cleanup sequence
+    identity_value: AlternateIdentity, *, _locked: bool = False
+) -> None:
     """Remove only a verified, idle identity and its deterministic artifacts."""
     manifest = _read_manifest(identity_value.manifest, home=identity_value.home)
     if manifest.identity != identity_value:
         raise AlternateToolError("alternate manifest identity mismatch")
     _verify_structure(manifest)
-    with lifecycle_lock(identity_value, exclusive=True):
+
+    def remove_locked() -> None:
         locked_manifest = _read_manifest(identity_value.manifest, home=identity_value.home)
         if locked_manifest.identity != identity_value:
             raise AlternateToolError("alternate manifest identity mismatch")
@@ -714,6 +869,12 @@ def remove_alternate_tool(identity_value: AlternateIdentity) -> None:
             identity_value.manager_root.rmdir()
         with contextlib.suppress(FileNotFoundError):
             identity_value.lock.unlink()
+
+    if _locked:
+        remove_locked()
+    else:
+        with lifecycle_lock(identity_value, exclusive=True):
+            remove_locked()
 
 
 def _cli_manifest(args: argparse.Namespace) -> AlternateManifest:
