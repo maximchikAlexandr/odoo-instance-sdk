@@ -237,7 +237,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:555-556` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:475` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:474` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
@@ -260,15 +260,15 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:754` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:964` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:756` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:966` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:758` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:968` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:764` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:974` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:767` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:977` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap;
   remove these entries only when lifecycle delegation has a centralized
   machine-output adapter.

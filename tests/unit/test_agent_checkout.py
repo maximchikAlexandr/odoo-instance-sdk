@@ -7,9 +7,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
+from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.internal import agent_checkout
 from odoo_instance_sdk.internal.agent_checkout import (
     CHECKOUT_MARKER,
@@ -383,7 +385,9 @@ def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
     environment.checkout_repository_root = str(checkout)
     environment.state = EnvironmentState.REMOVED.value
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
-    agent_checkout.remove_numbered_installation("1", client=client, home=tmp_path)
+    agent_checkout.remove_numbered_installation(
+        "1", client=cast("OdooClient", client), home=tmp_path
+    )
 
     assert len(remove_calls) == 1
     assert not checkout.exists()
@@ -441,7 +445,9 @@ def test_successful_remove_is_ordered_once_and_preserves_neighbor(
         environments=SimpleNamespace(get=lambda _id: environment, remove=remove)
     )
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
-    agent_checkout.remove_numbered_installation("1", client=client, home=tmp_path)
+    agent_checkout.remove_numbered_installation(
+        "1", client=cast("OdooClient", client), home=tmp_path
+    )
 
     assert environment_remove_order == [True]
     assert not checkout.exists()
@@ -528,7 +534,9 @@ def test_remove_order_keeps_linkage_when_environment_cleanup_fails(
     monkeypatch.setattr(agent_checkout, "_validate_checkout", lambda *args, **kwargs: {})
 
     with pytest.raises(RuntimeError, match="retain"):
-        agent_checkout.remove_numbered_installation("1", client=client, home=tmp_path)
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
 
     assert checkout.is_dir()
     assert identity_value.manager_root.is_dir()
