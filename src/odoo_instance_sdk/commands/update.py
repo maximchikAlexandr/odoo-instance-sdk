@@ -26,6 +26,7 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.exceptions import UpdateError
 from odoo_instance_sdk.internal.self_update import (
+    assert_direct_update_allowed,
     is_maintenance_mode,
     preflight_update_command,
     prepare_maintenance_environment,
@@ -223,6 +224,16 @@ def update_command_cli(
 ) -> None:
     """Adapter that delegates to ``update_command()`` and emits one document."""
     mode = resolve_output_mode(output_format, json_output)
+    try:
+        assert_direct_update_allowed()
+    except UpdateError as exc:
+        fail(
+            mode,
+            "update",
+            str(exc),
+            dry_run=False,
+            error_code="alternate_update_forbidden",
+        )
     if check and dry_run:
         fail(
             mode,
