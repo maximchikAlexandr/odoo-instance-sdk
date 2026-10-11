@@ -199,18 +199,20 @@ def test_run_port_preflight_recognizes_persisted_environment_runtime(
     env_client: OdooClient,
     project_manifest: Path,
     fake_python: Path,
+    free_tcp_port: int,
 ) -> None:
+    isolated_port = free_tcp_port
     env_id, _canonical = _seed_environment(
         env_client,
         project_manifest,
         fake_python,
         branch="feat/canonical-port",
-        http_port=18072,
+        http_port=isolated_port,
         legacy_paths=False,
     )
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 18072))
+        sock.bind(("127.0.0.1", isolated_port))
         catalog = env_client.get_catalog()
         catalog._upsert_runtime(
             "environment",
@@ -220,8 +222,8 @@ def test_run_port_preflight_recognizes_persisted_environment_runtime(
             started_at="2026-01-01T00:00:00+00:00",
             checkout_branch="feat/canonical-port",
             commit_sha="abc1234",
-            http_url="http://127.0.0.1:18072",
-            http_port=18072,
+            http_url=f"http://127.0.0.1:{isolated_port}",
+            http_port=isolated_port,
             database_name="comerta",
         )
 

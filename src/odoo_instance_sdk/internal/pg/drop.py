@@ -6,9 +6,8 @@ import shutil
 import stat
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING
 
 import msgspec
 
@@ -16,8 +15,6 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import (
     Command,
     ExecutionPlan,
-    JsonValue,
-    PlanPrecondition,
     SemanticPlanObservation,
     _PlanObservation,
 )
@@ -26,6 +23,23 @@ from odoo_instance_sdk.internal.files import open_directory_path_without_symlink
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.pg.context import DatabaseContext, resolve_database_context
+from odoo_instance_sdk.internal.pg.drop_inspection import (
+    DatabaseDropSession,
+    DropInspection as _DropInspection,
+    decode_inspection,
+    decode_verify,
+    drop_sql,
+    inspection_sql,
+    process_result,
+    quoted_identifier,
+    safe_session_value,
+    safety_preconditions,
+    session_advice,
+    session_projection,
+    sql_literal,
+    terminate_sql,
+    verify_sql,
+)
 from odoo_instance_sdk.internal.pg.drop_types import (
     AdoptedCopyDatabaseClaim,
     DatabaseDropExecutionContext,
@@ -44,9 +58,20 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
     prepared_command,
 )
-from odoo_instance_sdk.internal.proc.redaction import redacted_projection
-from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 
+_sql_literal = sql_literal
+_quoted_identifier = quoted_identifier
+_safe_session_value = safe_session_value
+_decode_inspection = decode_inspection
+_decode_verify = decode_verify
+_drop_sql = drop_sql
+_inspection_sql = inspection_sql
+_process_result = process_result
+_safety_preconditions = safety_preconditions
+_session_advice = session_advice
+_session_projection = session_projection
+_terminate_sql = terminate_sql
+_verify_sql = verify_sql
 _catalog_database_in_use = catalog_database_in_use
 
 if TYPE_CHECKING:
@@ -66,17 +91,7 @@ _TERMINATE_STEP = "database.drop.terminate"
 _REVALIDATE_DROP_STEP = "database.drop.revalidate-drop"
 _DROP_STEP = "database.drop.execute"
 _VERIFY_STEP = "database.drop.verify"
-_ContextT = TypeVar("_ContextT")
 _RMTREE_AVOIDS_SYMLINK_ATTACKS = bool(getattr(shutil.rmtree, "avoids_symlink_attacks", False))
-
-
-class DatabaseDropSession(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    """Sanitized identity for one active target-database session."""
-
-    pid: int
-    user: str
-    client: str | None = None
-    application: str | None = None
 
 
 class DatabaseDropResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -130,13 +145,6 @@ class DatabaseDropPartialError(ConfigError):
         self.__cause__ = error
 
 
-@dataclass(frozen=True, slots=True)
-class _DropInspection:
-    exists: bool
-    is_template: bool
-    sessions: tuple[DatabaseDropSession, ...]
-
-
 def _validate_allowed_environment(
     catalog: BackupCatalog,
     environment_id: str,
@@ -176,184 +184,6 @@ def _validate_allowed_environment(
             or retained.get("rollback_present") is not True
         ):
             raise ConfigError("retained rollback ownership evidence changed")
-
-
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _quoted_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
-
-
-def _inspection_sql(database: str) -> str:
-    literal = _sql_literal(database)
-    return (
-        "SELECT json_build_object("
-        f"'exists', EXISTS (SELECT 1 FROM pg_database WHERE datname={literal}),"
-        f"'is_template', COALESCE((SELECT datistemplate FROM pg_database WHERE datname={literal}), false),"
-        "'sessions', COALESCE((SELECT json_agg(json_build_object("
-        "'pid', pid, 'user', usename, 'client', client_addr::text, "
-        "'application', application_name)) FROM pg_stat_activity "
-        f"WHERE datname={literal} AND pid <> pg_backend_pid()), '[]'::json)"
-        ");"
-    )
-
-
-def _terminate_sql(database: str) -> str:
-    literal = _sql_literal(database)
-    return (
-        "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) "
-        "FROM pg_stat_activity "
-        f"WHERE datname={literal} AND pid <> pg_backend_pid()) AS terminated;"
-    )
-
-
-def _drop_sql(database: str) -> str:
-    return f"DROP DATABASE {_quoted_identifier(database)};"
-
-
-def _verify_sql(database: str) -> str:
-    literal = _sql_literal(database)
-    return f"SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname={literal});"
-
-
-def _safe_session_value(value: JsonValue) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ConfigError("database safety inspection returned invalid session identity")
-    projected = redacted_projection(value, field="error")
-    if not isinstance(projected, str):
-        raise ConfigError("database safety inspection returned invalid session identity")
-    return sanitize_last_error(projected) or None
-
-
-def _session_projection(session: DatabaseDropSession) -> dict[str, JsonValue]:
-    return cast("dict[str, JsonValue]", msgspec.to_builtins(session))
-
-
-def _decode_inspection(result: ProcessResult, database: str) -> _DropInspection:
-    if result.returncode != 0:
-        raise ConfigError(f"database safety inspection failed for {database!r}")
-    stdout = (
-        result.stdout.decode(errors="replace")
-        if isinstance(result.stdout, bytes)
-        else result.stdout
-    )
-    try:
-        payload = json.loads(stdout or "")
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ConfigError("database safety inspection returned invalid data") from exc
-    if not isinstance(payload, dict):
-        raise ConfigError("database safety inspection returned invalid data")
-    raw_sessions = payload.get("sessions", [])
-    if not isinstance(raw_sessions, list):
-        raise ConfigError("database safety inspection returned invalid sessions")
-    sessions: list[DatabaseDropSession] = []
-    for raw in raw_sessions:
-        if (
-            not isinstance(raw, dict)
-            or not isinstance(raw.get("pid"), int)
-            or isinstance(raw.get("pid"), bool)
-            or raw["pid"] <= 0
-        ):
-            raise ConfigError("database safety inspection returned invalid session identity")
-        sessions.append(
-            DatabaseDropSession(
-                pid=raw["pid"],
-                user=_safe_session_value(raw.get("user")) or "unknown",
-                client=_safe_session_value(raw.get("client")),
-                application=_safe_session_value(raw.get("application")),
-            )
-        )
-    exists = payload.get("exists")
-    is_template = payload.get("is_template")
-    if not isinstance(exists, bool) or not isinstance(is_template, bool):
-        raise ConfigError("database safety inspection returned invalid preconditions")
-    return _DropInspection(exists, is_template, tuple(sessions))
-
-
-def _decode_verify(result: ProcessResult, database: str) -> bool:
-    if result.returncode != 0:
-        raise ConfigError(f"database absence verification failed for {database!r}")
-    stdout = (
-        result.stdout.decode(errors="replace")
-        if isinstance(result.stdout, bytes)
-        else result.stdout
-    )
-    return (stdout or "").strip().lower() in {"t", "true", "1"}
-
-
-def _process_result(context: RunContext[_ContextT], step_id: str) -> ProcessResult:
-    result = context.process(step_id)
-    if not isinstance(result, ProcessResult):
-        raise ConfigError(f"database drop step {step_id!r} returned no process result")
-    return result
-
-
-def _session_advice(*, command_origin: str | None, force_connections: bool) -> str:
-    if force_connections:
-        return "will be terminated"
-    if command_origin == "env-remove":
-        return (
-            "require --force-connections (or stop the environment with `odcli stop`) "
-            "to terminate only target sessions"
-        )
-    return "require --force-connections to terminate only target sessions"
-
-
-def _safety_preconditions(
-    inspection: _DropInspection,
-    *,
-    database: str,
-    project_default: str | None,
-    force_default: bool,
-    force_connections: bool,
-    command_origin: str | None = None,
-) -> tuple[PlanPrecondition, ...]:
-    default_target = project_default == database
-    return (
-        PlanPrecondition(
-            name="target exists",
-            status="passed" if inspection.exists else "failed",
-            detail=("target database exists" if inspection.exists else "target database is absent"),
-        ),
-        PlanPrecondition(
-            name="target is not a template",
-            status="failed" if inspection.is_template else "passed",
-            detail=(
-                "pg_database.datistemplate is true"
-                if inspection.is_template
-                else "target is not a template"
-            ),
-        ),
-        PlanPrecondition(
-            name="configured default protection",
-            status="passed" if not default_target or force_default else "failed",
-            detail=(
-                "target is configured project default and --force-default is required"
-                if default_target and not force_default
-                else "target is not the configured project default"
-                if not default_target
-                else "configured project default is explicitly forced"
-            ),
-        ),
-        PlanPrecondition(
-            name="active target sessions",
-            status="passed" if not inspection.sessions or force_connections else "failed",
-            detail=(
-                "no active target sessions"
-                if not inspection.sessions
-                else (
-                    f"{len(inspection.sessions)} active target session(s) "
-                    + _session_advice(
-                        command_origin=command_origin, force_connections=force_connections
-                    )
-                )
-            ),
-        ),
-    )
 
 
 def _assert_safe(
