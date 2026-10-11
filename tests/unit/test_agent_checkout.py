@@ -353,7 +353,7 @@ def test_create_adopts_and_publishes_fixed_linkage(
     assert not (result.identity.manager_root / "reservation.json").exists()
 
 
-def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
+def test_delete_failure_with_occupied_original_is_retryable_without_environment_repeat(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     reference, sha = _reference_repo(tmp_path)
@@ -394,6 +394,7 @@ def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
     environment.checkout_repository_root = str(checkout)
     environment.state = EnvironmentState.REMOVED.value
     (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    owned_identity = agent_checkout._checkout_identity(checkout)
     real_unlink = os.unlink
     delete_failures = 1
 
@@ -401,6 +402,8 @@ def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
         nonlocal delete_failures
         if path == "owned.txt" and delete_failures:
             delete_failures -= 1
+            checkout.mkdir()
+            (checkout / "replacement.txt").write_text("keep\n", encoding="utf-8")
             raise OSError("recursive deletion failed")
         real_unlink(path, dir_fd=dir_fd)
 
@@ -413,14 +416,22 @@ def test_post_adopt_failure_retains_linkage_for_retry_after_cleanup_failure(
 
     assert len(remove_calls) == 1
     assert checkout.is_dir()
-    assert (identity_value.manager_root / "reservation.json").is_file()
+    assert (checkout / "replacement.txt").is_file()
+    recovery = json.loads(
+        (identity_value.manager_root / "reservation.json").read_text(encoding="utf-8")
+    )
+    quarantine = Path(recovery["quarantine"])
+    assert quarantine == checkout.parent / ".odcli-deleting" / ".odcli-1.deleting"
+    assert quarantine.is_dir()
+    assert agent_checkout._checkout_identity(quarantine / "target") == owned_identity
+    assert recovery["quarantine_identity"] == f"{owned_identity[0]}:{owned_identity[1]}"
 
     agent_checkout.remove_numbered_installation(
         "1", client=cast("OdooClient", client), home=tmp_path
     )
 
     assert len(remove_calls) == 1
-    assert not checkout.exists()
+    assert (checkout / "replacement.txt").is_file()
     assert not identity_value.manager_root.exists()
 
 
@@ -589,36 +600,24 @@ def test_quarantine_rejects_post_quarantine_entry_swap(
     checkout.mkdir(parents=True)
     (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
     expected = agent_checkout._checkout_identity(checkout)
-    real_stat = os.stat
     swapped = False
-    quarantine_stats = 0
-    replacement: list[Path] = []
+    real_rmdir = os.rmdir
 
-    def swap_before_final_stat(
-        path: str | Path, *, dir_fd: int | None = None, follow_symlinks: bool = True
-    ) -> os.stat_result:
-        nonlocal quarantine_stats, swapped
-        if isinstance(path, str) and path.startswith(".odcli-1.deleting-"):
-            quarantine_stats += 1
-        if quarantine_stats == 2 and not swapped:
+    def swap_after_final_identity_check(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal swapped
+        if path == "target" and not swapped:
             swapped = True
-            assert dir_fd is not None
-            os.rename(path, "moved-original", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-            os.mkdir(path, dir_fd=dir_fd)
-            replacement_path = checkout.parent / path
-            replacement.append(replacement_path)
-            (replacement_path / "replacement.txt").write_text("keep\n", encoding="utf-8")
-        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            checkout.mkdir()
+        real_rmdir(path, dir_fd=dir_fd)
 
-    monkeypatch.setattr(os, "stat", swap_before_final_stat)
+    monkeypatch.setattr(os, "rmdir", swap_after_final_identity_check)
 
-    with pytest.raises(AgentCheckoutError, match="identity changed before final deletion"):
-        agent_checkout._remove_owned_checkout(checkout, expected)
+    agent_checkout._remove_owned_checkout(checkout, expected)
 
-    assert (
-        replacement and (replacement[0] / "replacement.txt").read_text(encoding="utf-8") == "keep\n"
-    )
-    assert (checkout.with_name("moved-original")).is_dir()
+    assert swapped
+    assert checkout.is_dir()
+    assert not (checkout / "owned.txt").exists()
+    assert not (checkout.parent / ".odcli-deleting" / ".odcli-1.deleting").exists()
 
 
 def test_quarantine_parent_swap_stays_bound_to_original_parent(
@@ -683,6 +682,8 @@ def test_recovery_rejects_marker_drift_before_environment_cleanup(
                 "hash_lock_sha256": hashlib.sha256(
                     Path(environment.dependency_lock_path).read_bytes()
                 ).hexdigest(),
+                "quarantine": "",
+                "quarantine_identity": "",
             }
         ),
         encoding="utf-8",
