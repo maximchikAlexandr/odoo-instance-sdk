@@ -116,6 +116,14 @@ The historical `~/.odcli/fix-tools` registry was never adopted by the current is
 
 The alternative of documenting an unsupported legacy state is rejected because it creates implied compatibility work and user expectations without a current consumer.
 
+### D11. The current revision is one indivisible implementation package
+
+The current skill-separation revision SHALL use `delivery_mode=single_wp_no_dag` with exactly one all-covering implementation subtask, independently of the estimate. Its current delivery contract SHALL NOT contain `depends_on`, `stage`, a parallel frontier, or DAG orchestration. All remaining task IDs belong to that one work package exactly once.
+
+The previously executed graph, its work packages and recorded results remain immutable historical evidence. They SHALL NOT be rewritten, resumed, materialized, or counted toward coverage of the current revision.
+
+Splitting the bounded relocation across multiple implementation issues is rejected because the user/developer skill boundary, canonical helper paths, stale-reference cleanup and their architecture tests form one atomic repository contract.
+
 ## Ponytail Gate
 
 | Candidate subsystem | Existing alternative | Decision |

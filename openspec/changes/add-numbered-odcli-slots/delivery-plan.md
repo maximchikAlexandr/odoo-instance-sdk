@@ -10,7 +10,7 @@
 - Estimate basis: remaining active developer effort from the exact planning base to the revised acceptance criteria for one experienced developer familiar with Python, repository skills, private SDK tooling and pytest, without AI acceleration. Tests were not run for estimation; unattended CI, approvals, meetings and external waiting are excluded.
 - Confidence: high for scope and medium for duration. The private lifecycle already exists and the revision is constrained to instruction ownership, executable relocation, stale-reference removal and regression evidence; uncertainty is concentrated in path-sensitive tests and review repair.
 - Calibration: evidence-based and uncalibrated; no comparable historical actuals were available.
-- Topology rule: the authoritative estimate is within the single-package threshold, so exactly one all-covering work package owns all remaining OpenSpec tasks. Historical work packages below are evidence only and SHALL NOT be materialized, resumed, or counted toward this revision.
+- Authoritative topology rule: independently of the estimate, this revision SHALL use `single_wp_no_dag` with exactly one all-covering implementation work package. The current contract SHALL NOT define `depends_on`, `stage`, a parallel frontier, or DAG orchestration. Historical work packages below are evidence only and SHALL NOT be materialized, resumed, or counted toward this revision.
 
 ## WP-MYL-445-R3-01 — Separate skill ownership and relocate executable tooling
 
@@ -19,7 +19,6 @@
 - **Owned responsibility scope:** `.agents/skills/odcli-autonomous-work/**`, new `.agents/skills/odcli-developer-work/SKILL.md`, canonical `scripts/odcli_agent_tools/**`, self-update remediation text, README/execution-boundary docs, helper/skill/architecture/packaging tests, fixtures and directly related snapshots. Existing private lifecycle modules change only if a focused test proves a stale path or message owned by this revision; lifecycle algorithms and GitLab business configuration remain unchanged.
 - **Contract surface:** user skill exposes ordinary use, triage and reviewed hot-fix unblocking only; developer skill exposes private numbered management instructions only; no Python executable exists under a skill directory; canonical helper paths preserve trusted interpreter/provenance, redaction, bounded output and failure behavior; no `~/.odcli/fix-tools` discovery, adoption, migration, cleanup or prose; no public `odcli slot`, Click registration or console script.
 - **DoD / evidence:** inventories reject Python files below `.agents/skills/**`, stale helper paths, numbered instructions in the user skill, fix-registry references, duplicated/forwarding helpers and public numbered management; focused user/developer skill and helper tests pass; numbered/hot-fix/root/update behavior and GitLab wrapper contract remain green; repository and strict OpenSpec gates pass; exact revision receives independent verification and new human approval.
-- **Parallel safety:** this is the sole current work package and owns the complete remaining scope, so no sibling write-zone or contract race exists.
 
 ## Current Task Coverage Audit
 
