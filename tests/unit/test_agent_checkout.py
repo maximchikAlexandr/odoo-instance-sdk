@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -557,6 +559,189 @@ def test_remove_rejects_checkout_inode_swap_after_environment_cleanup(
     assert (checkout / "replacement.txt").read_text(encoding="utf-8") == "do not delete\n"
     assert (checkout.with_name("odcli-1-original") / "owned.txt").is_file()
     assert (neighbor / "keep.txt").is_file()
+
+
+def test_quarantine_rejects_post_quarantine_entry_swap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkout = tmp_path / "checkouts" / "odcli-1"
+    checkout.mkdir(parents=True)
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    expected = agent_checkout._checkout_identity(checkout)
+    real_rmtree = shutil.rmtree
+    replacement: list[Path] = []
+
+    def swap_entry(name: str, *, dir_fd: int) -> None:
+        os.rename(name, "moved-original", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        os.mkdir(name, dir_fd=dir_fd)
+        replacement.append(checkout.parent / name)
+        real_rmtree("moved-original", dir_fd=dir_fd)
+
+    monkeypatch.setattr(shutil, "rmtree", swap_entry)
+
+    with pytest.raises(AgentCheckoutError, match="replaced during deletion"):
+        agent_checkout._remove_owned_checkout(checkout, expected)
+
+    assert not checkout.exists()
+    assert replacement and replacement[0].is_dir()
+
+
+def test_quarantine_parent_swap_stays_bound_to_original_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parent = tmp_path / "checkouts"
+    checkout = parent / "odcli-1"
+    checkout.mkdir(parents=True)
+    (checkout / "owned.txt").write_text("owned\n", encoding="utf-8")
+    expected = agent_checkout._checkout_identity(checkout)
+    real_rmtree = shutil.rmtree
+    swapped_parent = tmp_path / "checkouts-original"
+
+    def swap_parent(name: str, *, dir_fd: int) -> None:
+        parent.rename(swapped_parent)
+        parent.mkdir()
+        (parent / "neighbor.txt").write_text("keep\n", encoding="utf-8")
+        real_rmtree(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(shutil, "rmtree", swap_parent)
+
+    agent_checkout._remove_owned_checkout(checkout, expected)
+
+    assert (parent / "neighbor.txt").read_text(encoding="utf-8") == "keep\n"
+    assert not (swapped_parent / "odcli-1").exists()
+
+
+def test_recovery_rejects_marker_drift_before_environment_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    reference, sha = _reference_repo(tmp_path)
+    checkout = tmp_path / "checkouts" / "odcli-1"
+    repository = str(reference.resolve())
+    _clone_checkout(reference, checkout, number="1", repository=repository, sha=sha)
+    environment = _environment(tmp_path, checkout)
+    numbered = identity("numbered", "1", home=tmp_path)
+    numbered.manager_root.mkdir(parents=True)
+    numbered.lock.touch()
+    base = AlternateManifest(numbered, "a" * 40, REPOSITORY_URL, numbered.executable, "")
+    numbered.manifest.parent.mkdir(parents=True, exist_ok=True)
+    numbered.manifest.write_text(json.dumps(base.to_json()), encoding="utf-8")
+    reservation = numbered.manager_root / "reservation.json"
+    reservation.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "numbered",
+                "identifier": "1",
+                "checkout": str(checkout),
+                "repository": repository,
+                "checkout_sha": sha,
+                "reference_sha": sha,
+                "sdk_sha": "b" * 40,
+                "environment_id": str(environment.id),
+                "environment_path": environment.python_environment_path,
+                "environment_lock": environment.dependency_lock_path,
+                "interpreter_path": str(
+                    Path(environment.python_environment_path) / "bin" / "python"
+                ),
+                "hash_lock_sha256": hashlib.sha256(
+                    Path(environment.dependency_lock_path).read_bytes()
+                ).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    marker = checkout / ".git" / CHECKOUT_MARKER
+    marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+    marker_payload["sha"] = "f" * 40
+    marker.write_text(json.dumps(marker_payload), encoding="utf-8")
+    get_calls: list[str] = []
+
+    def get_environment(value: str) -> None:
+        get_calls.append(value)
+
+    def refuse_cleanup(_environment: object) -> None:
+        pytest.fail("cleanup must not run")
+
+    client = SimpleNamespace(
+        environments=SimpleNamespace(get=get_environment, remove=refuse_cleanup)
+    )
+    monkeypatch.setattr(agent_checkout, "read_alternate_manifest", lambda _identity: base)
+
+    with pytest.raises(AgentCheckoutError, match="marker"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    assert get_calls == []
+    assert checkout.is_dir()
+
+
+def test_recovery_rejects_symlinked_reservation_without_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    numbered.manager_root.mkdir(parents=True)
+    numbered.lock.touch()
+    base = AlternateManifest(numbered, "a" * 40, REPOSITORY_URL, numbered.executable, "")
+    numbered.manifest.parent.mkdir(parents=True, exist_ok=True)
+    numbered.manifest.write_text(json.dumps(base.to_json()), encoding="utf-8")
+    target = tmp_path / "reservation-target.json"
+    target.write_text("{}", encoding="utf-8")
+    reservation = numbered.manager_root / "reservation.json"
+    reservation.symlink_to(target)
+    get_calls: list[str] = []
+
+    def get_environment(value: str) -> None:
+        get_calls.append(value)
+
+    def refuse_cleanup(_environment: object) -> None:
+        pytest.fail("cleanup must not run")
+
+    client = SimpleNamespace(
+        environments=SimpleNamespace(get=get_environment, remove=refuse_cleanup)
+    )
+    monkeypatch.setattr(agent_checkout, "read_alternate_manifest", lambda _identity: base)
+
+    with pytest.raises(AgentCheckoutError, match="symlinked"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    assert get_calls == []
+
+
+def test_recovery_rejects_reservation_schema_drift_without_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    numbered.manager_root.mkdir(parents=True)
+    numbered.lock.touch()
+    base = AlternateManifest(numbered, "a" * 40, REPOSITORY_URL, numbered.executable, "")
+    numbered.manifest.parent.mkdir(parents=True, exist_ok=True)
+    numbered.manifest.write_text(json.dumps(base.to_json()), encoding="utf-8")
+    (numbered.manager_root / "reservation.json").write_text(
+        json.dumps({"version": 1, "kind": "numbered", "identifier": "1"}),
+        encoding="utf-8",
+    )
+    get_calls: list[str] = []
+
+    def get_environment(value: str) -> None:
+        get_calls.append(value)
+
+    def refuse_cleanup(_environment: object) -> None:
+        pytest.fail("cleanup must not run")
+
+    client = SimpleNamespace(
+        environments=SimpleNamespace(get=get_environment, remove=refuse_cleanup)
+    )
+    monkeypatch.setattr(agent_checkout, "read_alternate_manifest", lambda _identity: base)
+
+    with pytest.raises(AgentCheckoutError, match="schema drifted"):
+        agent_checkout.remove_numbered_installation(
+            "1", client=cast("OdooClient", client), home=tmp_path
+        )
+
+    assert get_calls == []
 
 
 def test_numbered_manifest_round_trips_fixed_linkage(tmp_path: Path) -> None:
