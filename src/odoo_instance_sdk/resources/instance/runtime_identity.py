@@ -155,6 +155,33 @@ def _runtime_process_matches(
     )
 
 
+def _runtime_owner_matches(
+    binding: _RuntimeBinding,
+    runtime: Mapping[str, JsonValue],
+    environment: Mapping[str, JsonValue] | None,
+) -> bool:
+    owner_kind = str(runtime["owner_kind"])
+    if binding.owner_kind == "environment":
+        return (
+            owner_kind == "environment"
+            and str(runtime["owner_id"]) == binding.owner_id
+            and environment is not None
+            and str(environment["project_id"]) == binding.project_id
+            and _canonical_runtime_path(str(environment["repository_root"]))
+            == _canonical_runtime_path(str(binding.repository_root))
+        )
+    if owner_kind == "project":
+        return str(runtime["owner_id"]) == binding.owner_id
+    return (
+        owner_kind == "environment"
+        and environment is not None
+        and _canonical_runtime_path(str(environment["repository_root"]))
+        == _canonical_runtime_path(str(binding.repository_root))
+        and _canonical_runtime_path(str(environment["git_common_dir"]))
+        == _canonical_runtime_path(str(binding.git_common_dir))
+    )
+
+
 def _runtime_row_matches(
     instance: OdooInstance,
     config: StartConfig,
@@ -166,18 +193,8 @@ def _runtime_row_matches(
     expected_argv: Sequence[str] | None = None,
     expected_cwd: str | Path | None = None,
 ) -> int | None:
-    owner_kind = str(runtime["owner_kind"])
-    if owner_kind == "project" and str(runtime["owner_id"]) != binding.owner_id:
+    if not _runtime_owner_matches(binding, runtime, environment):
         return None
-    if owner_kind == "environment":
-        if environment is None:
-            return None
-        if _canonical_runtime_path(str(environment["repository_root"])) != _canonical_runtime_path(
-            str(binding.repository_root)
-        ) or _canonical_runtime_path(str(environment["git_common_dir"])) != _canonical_runtime_path(
-            str(binding.git_common_dir)
-        ):
-            return None
     if int(str(runtime["http_port"])) != config.http_port or str(runtime["http_url"]).rstrip(
         "/"
     ) != instance.config.base_url.rstrip("/"):
@@ -212,7 +229,7 @@ def _recorded_runtime_pid(
 ) -> int | None:
     """Return a matching persisted runtime PID, failing closed on drift."""
     binding = instance._runtime_binding
-    if binding is None or binding.owner_kind != "project":
+    if binding is None:
         return None
     catalog = cast("_RuntimeCatalog", instance._client.get_catalog())
     snapshot_reader = getattr(catalog, "_monitor_snapshot_rows", None)

@@ -407,7 +407,12 @@ def _reject_symlink_components(path: Path, *, stop: Path) -> None:
         current = current.parent
 
 
-def _check_install_target(identity_value: AlternateIdentity, *, replace: bool) -> None:
+def _check_install_target(
+    identity_value: AlternateIdentity,
+    *,
+    replace: bool,
+    allow_existing_state_root: bool = False,
+) -> None:
     """Recheck all install policy and containment facts at the publication boundary."""
     _reject_symlink_components(identity_value.manager_root.parent, stop=identity_value.home)
     for target in (
@@ -423,6 +428,10 @@ def _check_install_target(identity_value: AlternateIdentity, *, replace: bool) -
             raise AlternateToolError(f"refusing to replace symlink: {target}")
         if not _under(target, identity_value.home):
             raise AlternateToolError(f"alternate target escapes home: {target}")
+    if allow_existing_state_root and (
+        identity_value.kind != "numbered" or not identity_value.state_root.is_dir()
+    ):
+        raise AlternateToolError("numbered environment state root is unavailable")
     existing = any(
         target.exists()
         for target in (
@@ -430,7 +439,7 @@ def _check_install_target(identity_value: AlternateIdentity, *, replace: bool) -
             identity_value.launcher,
             identity_value.tool_root,
             identity_value.tool_bin,
-            identity_value.state_root,
+            *(() if allow_existing_state_root else (identity_value.state_root,)),
         )
     )
     if existing and not replace:
@@ -697,6 +706,7 @@ def install_alternate_tool(  # noqa: C901
     environment_lock: str | None = None,
     interpreter_path: str | None = None,
     hash_lock_sha256: str | None = None,
+    allow_existing_state_root: bool = False,
     repository: str = REPOSITORY_URL,
 ) -> AlternateManifest:
     """Install, verify, probe, and publish one alternate launcher atomically."""
@@ -704,7 +714,9 @@ def install_alternate_tool(  # noqa: C901
         raise ValueError("revision must be a complete lowercase SHA")
     if repository != REPOSITORY_URL:
         raise ValueError("unsupported source repository")
-    _check_install_target(identity_value, replace=replace)
+    _check_install_target(
+        identity_value, replace=replace, allow_existing_state_root=allow_existing_state_root
+    )
     manager_parent = identity_value.manager_root.parent
     manager_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{identity_value.identifier}.", dir=manager_parent))
@@ -773,7 +785,9 @@ def install_alternate_tool(  # noqa: C901
             hash_lock_sha256=hash_lock_sha256,
         )
         with lifecycle_lock(identity_value, exclusive=True):
-            _check_install_target(identity_value, replace=replace)
+            _check_install_target(
+                identity_value, replace=replace, allow_existing_state_root=allow_existing_state_root
+            )
             identity_value.manager_root.mkdir(mode=0o700, parents=True, exist_ok=True)
             backup = (
                 identity_value.manager_root.parent

@@ -607,6 +607,7 @@ def _execute_create_plan(  # noqa: C901 -- fixed allocation/adoption transaction
         manifest = install_alternate_tool(
             plan.identity,
             plan.sdk_sha,
+            allow_existing_state_root=True,
             checkout_path=str(plan.checkout),
             checkout_repository=plan.repository,
             checkout_sha=plan.reference_sha,
@@ -948,16 +949,24 @@ def remove_numbered_installation(
 ) -> None:
     home_path = (home or Path.home()).expanduser().resolve()
     identity_value = AlternateIdentity("numbered", number, home_path)
-    with allocation_lock(home_path), lifecycle_lock(identity_value, exclusive=True):
-        reservation = identity_value.manager_root / RESERVATION_NAME
-        if (manifest := read_alternate_manifest(identity_value, strict=False)) is None:
-            if not _lexists(reservation):
-                raise AgentCheckoutError("numbered manifest is missing")
-            _remove_reserved_installation(
-                number, identity_value, reservation, client, checkout_parent
+    old_root = os.environ.get(USER_ROOT_ENV)
+    os.environ[USER_ROOT_ENV] = str(identity_value.state_root)
+    try:
+        with allocation_lock(home_path), lifecycle_lock(identity_value, exclusive=True):
+            reservation = identity_value.manager_root / RESERVATION_NAME
+            if (manifest := read_alternate_manifest(identity_value, strict=False)) is None:
+                if not _lexists(reservation):
+                    raise AgentCheckoutError("numbered manifest is missing")
+                _remove_reserved_installation(
+                    number, identity_value, reservation, client, checkout_parent
+                )
+                return
+            plan = _command_plan._RemoveCommandPlan(
+                client, home_path, number, identity_value, checkout_parent, manifest
             )
-            return
-        plan = _command_plan._RemoveCommandPlan(
-            client, home_path, number, identity_value, checkout_parent, manifest
-        )
-        _execute_remove_plan(plan)
+            _execute_remove_plan(plan)
+    finally:
+        if old_root is None:
+            os.environ.pop(USER_ROOT_ENV, None)
+        else:
+            os.environ[USER_ROOT_ENV] = old_root

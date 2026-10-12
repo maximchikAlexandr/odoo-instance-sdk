@@ -239,17 +239,20 @@ def _drop_ownership_evidence(  # noqa: C901
     if adopted_copy_claim is not None:
         if allow_environment_id != adopted_copy_claim.environment_id:
             raise ConfigError("adopted COPY database drop claim does not match environment")
-        return _adopted_copy_ownership_evidence(
-            catalog,
-            instance,
-            cluster,
-            database,
-            adopted_copy_claim,
-            expected_backup_id=allow_environment_backup_id,
-            expected_rollback_database=allow_environment_rollback_database,
-            volume_step_id=volume_step_id,
-            container_step_id=container_step_id,
-        )
+        if isinstance(cluster, PostgresCluster) and cluster.mode == "compose":
+            _validate_adopted_copy_claim(catalog, instance, cluster, database, adopted_copy_claim)
+        else:
+            return _adopted_copy_ownership_evidence(
+                catalog,
+                instance,
+                cluster,
+                database,
+                adopted_copy_claim,
+                expected_backup_id=allow_environment_backup_id,
+                expected_rollback_database=allow_environment_rollback_database,
+                volume_step_id=volume_step_id,
+                container_step_id=container_step_id,
+            )
     if not isinstance(cluster, PostgresCluster) or cluster.mode != "compose":
         raise ConfigError("database drop requires an SDK-owned Compose cluster")
     claim = catalog._get_postgres_cluster(cluster._project_id)
@@ -381,30 +384,14 @@ def _drop_ownership_evidence(  # noqa: C901
     )
 
 
-def _adopted_copy_ownership_evidence(  # noqa: C901 -- bounded external adopted-copy evidence gate
+def _validate_adopted_copy_claim(
     catalog: BackupCatalog,
     instance: OdooInstance,
     cluster: PostgresCluster,
     database: str,
     claim: AdoptedCopyDatabaseClaim,
-    *,
-    expected_backup_id: str | None,
-    expected_rollback_database: str | None,
-    volume_step_id: str | None,
-    container_step_id: str | None,
-) -> _DropOwnershipEvidence:
-    """Validate one adopted COPY target on the project's approved external endpoint."""
-    from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-    if not isinstance(cluster, PostgresCluster) or cluster.mode != "external":
-        raise ConfigError("adopted COPY database drop requires approved shared PostgreSQL")
-    from odoo_instance_sdk.internal.proc import active_context
-
-    context = active_context()
-    if context is not None:
-        for step_id in (volume_step_id, container_step_id):
-            if step_id is not None and context.planned(step_id) and not context.consumed(step_id):
-                context.skip(step_id)
+) -> None:
+    """Require exact adoption and endpoint identity before either drop path."""
     if (
         claim.environment_id == ""
         or claim.database != database
@@ -441,6 +428,36 @@ def _adopted_copy_ownership_evidence(  # noqa: C901 -- bounded external adopted-
         cluster._repository_root
     ):
         raise ConfigError("adopted COPY database drop project evidence does not match")
+
+
+def _adopted_copy_ownership_evidence(  # noqa: C901 -- bounded external adopted-copy evidence gate
+    catalog: BackupCatalog,
+    instance: OdooInstance,
+    cluster: PostgresCluster,
+    database: str,
+    claim: AdoptedCopyDatabaseClaim,
+    *,
+    expected_backup_id: str | None,
+    expected_rollback_database: str | None,
+    volume_step_id: str | None,
+    container_step_id: str | None,
+) -> _DropOwnershipEvidence:
+    """Validate one adopted COPY target on the project's approved external endpoint."""
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    if not isinstance(cluster, PostgresCluster) or cluster.mode != "external":
+        raise ConfigError("adopted COPY database drop requires approved shared PostgreSQL")
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is not None:
+        for step_id in (volume_step_id, container_step_id):
+            if step_id is not None and context.planned(step_id) and not context.consumed(step_id):
+                context.skip(step_id)
+    _validate_adopted_copy_claim(catalog, instance, cluster, database, claim)
+    row = catalog.get_environment(claim.environment_id)
+    if row is None:
+        raise ConfigError("adopted COPY database drop requires adoption ownership evidence")
     _validate_allowed_environment(
         catalog,
         claim.environment_id,
