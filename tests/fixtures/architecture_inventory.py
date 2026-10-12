@@ -12,6 +12,34 @@ from typing import Final
 
 SourceLocation = tuple[str, int]
 
+ALTERNATE_LIFECYCLE_MODULE: Final = "src/odoo_instance_sdk/internal/alternate_tool.py"
+ALTERNATE_COORDINATOR_MODULE: Final = "src/odoo_instance_sdk/internal/agent_checkout.py"
+ALTERNATE_COORDINATOR_MECHANICS: Final[frozenset[str]] = frozenset(
+    {"fcntl.flock(", "lifecycle_lock(", "os.replace(", "shutil.rmtree(", "tempfile."}
+)
+ALTERNATE_POLICY_SURFACES: Final[frozenset[str]] = frozenset(
+    {
+        "scripts/odcli_agent_tools/fix_tool.py",
+        "scripts/odcli_agent_tools/numbered_tool.py",
+    }
+)
+ALTERNATE_LIFECYCLE_MECHANIC_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "UV_TOOL_DIR",
+        "UV_TOOL_BIN_DIR",
+        "direct_url.json",
+        "lifecycle.lock",
+        "render_launcher(",
+        "_provenance(",
+        "_probe(",
+        "lifecycle_lock(",
+        "fcntl.flock(",
+        "shutil.rmtree(",
+        "os.replace(",
+        "tempfile.",
+    }
+)
+
 
 DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
@@ -28,10 +56,15 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 460),
         ("src/odoo_instance_sdk/commands/output.py", 467),
         ("src/odoo_instance_sdk/commands/output.py", 469),
-        ("src/odoo_instance_sdk/internal/self_update.py", 801),
-        ("src/odoo_instance_sdk/internal/self_update.py", 802),
-        ("src/odoo_instance_sdk/internal/self_update.py", 803),
+        ("src/odoo_instance_sdk/internal/self_update.py", 827),
+        ("src/odoo_instance_sdk/internal/self_update.py", 828),
+        ("src/odoo_instance_sdk/internal/self_update.py", 829),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 511),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 964),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 966),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 968),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 974),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 977),
     }
 )
 
@@ -58,20 +91,25 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        801,
+        827,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        802,
+        828,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        803,
+        829,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
         511,
     ): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 964): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 966): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 968): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 974): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 977): "alternate lifecycle JSON transport",
 }
 
 
@@ -94,7 +132,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_real_odoo_foundation.py", 375),
         ("tests/unit/test_mutmut_results.py", 32),
         ("tests/unit/test_mutmut_results.py", 47),
-        ("tests/unit/test_odcli_autonomous_skill.py", 56),
+        ("tests/unit/test_odcli_autonomous_skill.py", 178),
     }
 )
 

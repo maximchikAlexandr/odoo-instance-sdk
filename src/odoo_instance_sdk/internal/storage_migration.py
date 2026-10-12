@@ -43,6 +43,27 @@ class StorageMigrationResult:
     conflicts: tuple[Path, ...] = ()
 
 
+def _selected_user_root() -> Path | None:
+    """Return an explicit launcher root without inspecting legacy storage."""
+    selected = os.environ.get("ODCLI_USER_ROOT")
+    if not selected:
+        return None
+    root = Path(selected).expanduser()
+    if not root.is_absolute():
+        raise StorageMigrationError("ODCLI_USER_ROOT must be an absolute path")
+    return root.resolve()
+
+
+def _skip_alternate_migration() -> StorageMigrationResult | None:
+    """Keep alternate launchers independent of canonical and legacy storage."""
+    root = _selected_user_root()
+    if root is None:
+        return None
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    return StorageMigrationResult("complete")
+
+
 def _canonical_root(home: Path | None = None) -> Path:
     return (home or Path.home()).expanduser().resolve() / ".odcli"
 
@@ -337,6 +358,10 @@ def migrate_storage(  # noqa: C901
     The callback exists for focused interruption tests and is deliberately
     called only after each durable stage marker has been written.
     """
+    if home is None:
+        independent = _skip_alternate_migration()
+        if independent is not None:
+            return independent
     root = _canonical_root(home)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(root, 0o700)

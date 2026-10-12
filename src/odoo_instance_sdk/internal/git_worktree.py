@@ -113,6 +113,23 @@ def remote_url(repo_root: Path, name: str = "origin") -> str | None:
     return value or None
 
 
+def _remote_ref_sha(repo_root: Path, remote: str, ref: str) -> str | None:
+    """Read one exact ref from a configured remote, failing closed on ambiguity."""
+    proc = _run(
+        ["git", "-C", str(repo_root), "ls-remote", "--exit-code", remote, ref],
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    lines = proc.stdout.splitlines()
+    if len(lines) != 1:
+        return None
+    fields = lines[0].split()
+    if len(fields) != 2 or fields[1] != ref:
+        return None
+    return fields[0]
+
+
 def is_tracked_path(path: Path) -> bool:
     """Return whether an enclosing Git index owns this exact path."""
     candidate = Path(path).absolute()

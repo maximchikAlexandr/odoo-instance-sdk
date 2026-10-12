@@ -200,6 +200,7 @@ class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=
     checkout_commit_sha: str | None = None
     code_ownership: EnvironmentCodeOwnership = EnvironmentCodeOwnership.UNKNOWN
     artifact_root: str | None = None
+    adoption_input_fingerprint: str | None = None
 
 
 class BackupProvenanceComparison(

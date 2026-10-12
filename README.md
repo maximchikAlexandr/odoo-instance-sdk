@@ -533,6 +533,35 @@ Rich tables may shorten paths beneath `HOME`, but `odcli env path` always emits
 the absolute worktree path for safe shell navigation. Do not copy a displayed
 `~` shorthand into JSON or use a project-local `.odcli/` path as global state.
 
+### Exact-revision numbered tools and hot fixes
+
+Numbered management is deliberately private developer service tooling. The
+checked-in `scripts/odcli_agent_tools/numbered_tool.py` wrapper validates the
+trusted canonical interpreter and installed repository provenance before
+calling the package-owned coordinator. Its machine-readable create, list,
+inspect, and remove results contain bounded identity evidence and never secrets.
+The public `odcli` command tree has no numbered-management group. Ordinary
+OdCLI use and reviewed hot-fix unblocking stay in
+`.agents/skills/odcli-autonomous-work`; repository developers use the separate
+`.agents/skills/odcli-developer-work` instructions.
+
+`odcli-N` and the reviewed `odcli-fix-<issue>` skill workflow use the same
+installation, provenance, selector probe, manifest, launcher lock, inspection,
+and fail-closed removal implementation. Their policy adapters differ only in
+numbered replacement versus hot-fix review, merge, ancestry, branch, and
+retirement gates. A fresh alternate root is absent until first use and never
+copies canonical, legacy, numbered, or neighboring state. The process `HOME`
+is unchanged, so Git, SSH, uv, and unrelated user configuration remain shared.
+
+A failed provenance or selector check leaves no published launcher.
+
+User-root isolation covers OdCLI-managed SQLite catalogues, configuration,
+backups, environments, project runtime state, locks, bug reports, and
+migration/update journals. Each numbered identity is additionally bound to an
+independent checkout and SDK-owned Python environment; the caller supplies
+distinct databases, filestores, and HTTP ports. Only the PostgreSQL server,
+read-only Odoo source, and source backup may be shared.
+
 ### Module, translation, and Git workflows
 
 Module discovery reads safe literal `__manifest__.py` files on demand; it does

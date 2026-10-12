@@ -158,6 +158,11 @@ class PublicLeafCase:
     e2e_disposition: Literal["critical", "focused", "smoke", "not-applicable"] | None = None
     e2e_evidence: tuple[str, ...] = ()
     e2e_rationale: str = ""
+    success_suffix: tuple[str, ...] = ()
+    failure_suffix: tuple[str, ...] = ()
+    success_path_argument: bool = False
+    failure_args: tuple[str, ...] | None = None
+    interactive: bool = False
 
     @property
     def is_bounded(self) -> bool:
@@ -192,6 +197,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "E2E-CP-01",
         ),
         e2e_rationale="manifest/target project, resumable Compose postconditions, and truthful no-op metadata",
+        success_path_argument=True,
+        failure_args=("init", "--no-input"),
     ),
     PublicLeafCase(
         ("doctor",),
@@ -223,6 +230,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-12",),
         e2e_rationale="run-owned inventory",
+        success_suffix=("--all-projects",),
+        failure_suffix=(),
     ),
     PublicLeafCase(
         ("resource", "doctor"),
@@ -364,6 +373,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-09",),
         e2e_rationale="downloaded catalog row",
+        success_suffix=("--all-projects",),
+        failure_suffix=(),
     ),
     PublicLeafCase(
         ("backup", "retention"),
@@ -510,6 +521,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-07",),
         e2e_rationale="framed script result and non-zero failure",
+        interactive=True,
     ),
     PublicLeafCase(
         ("test",),
@@ -2238,6 +2250,19 @@ def _decode_document(document: str, mode: str) -> object:
     return decode(document, DecodeOptions(indent=2, strict=True))
 
 
+def _leaf_matrix_args(
+    case: PublicLeafCase, tmp_path: Path, *, failing: bool
+) -> tuple[tuple[str, ...], str | None]:
+    if failing and case.failure_args is not None:
+        args = case.failure_args
+    else:
+        suffix = case.failure_suffix if failing else case.success_suffix
+        args = (*case.args, *suffix)
+        if not failing and case.success_path_argument:
+            args = (*args, str(tmp_path))
+    return args, "pass\n" if case.interactive else None
+
+
 @pytest.mark.parametrize(
     "case",
     [case for case in PUBLIC_LEAF_CASES if case.is_bounded],
@@ -2253,16 +2278,12 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     failure_documents: list[tuple[object, int, str]] = []
     for mode in ("json", "toon"):
         with monkeypatch.context() as isolated:
-            args = list(case.args)
-            if case.path in (("backup", "ls"), ("resource", "ls")):
-                args.append("--all-projects")
-            if case.path == ("init",):
-                args.append(str(tmp_path))
+            args, input_text = _leaf_matrix_args(case, tmp_path, failing=False)
             _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
             success = runner.invoke(
                 cli,
                 [*args, "--format", mode],
-                input="pass\n" if case.path == ("exec",) else None,
+                input=input_text,
             )
             assert success.exit_code == 0, success.output
             assert success.stderr == ""
@@ -2276,14 +2297,12 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
             )
 
         with monkeypatch.context() as isolated:
-            args = list(case.args)
-            if case.path == ("init",):
-                args = ["init", "--no-input"]
+            args, input_text = _leaf_matrix_args(case, tmp_path, failing=True)
             _patch_leaf_external(isolated, case, failing=True, tmp_path=tmp_path)
             failure = runner.invoke(
                 cli,
                 [*args, "--format", mode],
-                input="pass\n" if case.path == ("exec",) else None,
+                input=input_text,
             )
             assert failure.exit_code == 1, failure.output
             assert failure.stderr == ""

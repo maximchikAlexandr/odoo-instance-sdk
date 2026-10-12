@@ -9,6 +9,7 @@ from odoo_instance_sdk.internal import storage_migration
 from odoo_instance_sdk.internal.repo_key import repo_key
 
 _USER_ROOT_NAME = ".odcli"
+USER_ROOT_ENV = "ODCLI_USER_ROOT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +25,8 @@ class EnvironmentArtifactPaths:
 
 def is_legacy_environment_path(value: str | None) -> bool:
     if value is None:
+        return False
+    if os.environ.get(USER_ROOT_ENV):
         return False
     legacy_root = storage_migration.legacy_storage_roots(Path.home())["data"] / "environments"
     return Path(value).expanduser().resolve().is_relative_to(legacy_root)
@@ -60,7 +63,14 @@ def resolve_environment_artifact_paths(
 
 def _user_root(*, ensure_exists: bool = True) -> Path:
     """Return the one SDK-owned root without consulting platformdirs."""
-    root = Path.home().expanduser().resolve() / _USER_ROOT_NAME
+    selected = os.environ.get(USER_ROOT_ENV)
+    if selected:
+        root = Path(selected).expanduser()
+        if not root.is_absolute():
+            raise ValueError(f"{USER_ROOT_ENV} must be an absolute path")
+        root = root.resolve()
+    else:
+        root = Path.home().expanduser().resolve() / _USER_ROOT_NAME
     if ensure_exists:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(root, 0o700)

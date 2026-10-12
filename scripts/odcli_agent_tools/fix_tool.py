@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
-"""Install pinned, shared-state-compatible OdCLI hotfix tools and retire merged ones."""
+"""Install pinned, isolated OdCLI hotfix tools and retire merged ones."""
 
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
-import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 REPOSITORY = "maximchikAlexandr/odoo-instance-sdk"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ISSUE_RE = re.compile(r"^[1-9][0-9]*$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
-REPO_ROOT = Path(__file__).resolve().parents[4]
-
-
-def _paths(issue: int) -> tuple[Path, Path, Path, Path]:
-    home = Path.home()
-    registry = home / ".odcli" / "fix-tools" / f"{issue}.json"
-    tool_dir = home / ".local" / "share" / "odcli-fix-tools" / str(issue)
-    tool_bin = tool_dir / "bin"
-    shim = home / ".local" / "bin" / f"odcli-fix-{issue}"
-    return registry, tool_dir, tool_bin, shim
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_PROVENANCE_PROBE = (
+    "import importlib.metadata,json; "
+    "d=importlib.metadata.distribution('odoo-instance-sdk'); "
+    "print(d.read_text('direct_url.json') or '')"
+)
 
 
 def _run(argv: list[str], *, env: dict[str, str] | None = None) -> str:
@@ -36,6 +33,80 @@ def _run(argv: list[str], *, env: dict[str, str] | None = None) -> str:
             f"{' '.join(argv[:3])} failed ({result.returncode}): {result.stderr[-500:]}"
         )
     return result.stdout
+
+
+def _canonical_interpreter() -> Path:
+    """Return the absolute interpreter behind the installed canonical odcli."""
+    executable = shutil.which("odcli")
+    if executable is None:
+        raise RuntimeError("canonical odcli is not available on PATH")
+    canonical_executable = (Path.home() / ".local" / "bin" / "odcli").resolve()
+    executable_path = Path(executable)
+    try:
+        if executable_path.is_symlink() or executable_path.resolve() != canonical_executable:
+            raise RuntimeError("canonical odcli is not the trusted user installation")
+        executable_stat = executable_path.stat()
+        if not stat.S_ISREG(executable_stat.st_mode) or not executable_stat.st_mode & 0o111:
+            raise RuntimeError("canonical odcli is not a regular executable")
+        first_line = executable_path.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError) as exc:
+        raise RuntimeError("cannot inspect the canonical odcli executable") from exc
+    if not first_line.startswith("#!"):
+        raise RuntimeError("canonical odcli has no absolute interpreter shebang")
+    interpreter = Path(first_line[2:].strip().split()[0])
+    canonical_tool_root = Path.home() / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    if (
+        not interpreter.is_absolute()
+        or interpreter.is_symlink()
+        or not interpreter.is_file()
+        or not interpreter.resolve().is_relative_to(canonical_tool_root.resolve())
+        or not interpreter.stat().st_mode & 0o111
+    ):
+        raise RuntimeError("canonical odcli interpreter is not an absolute executable")
+    return interpreter
+
+
+def _canonical_source(interpreter: Path) -> None:
+    raw = _run(
+        [
+            str(interpreter),
+            "-I",
+            "-c",
+            _PROVENANCE_PROBE,
+        ]
+    )
+    try:
+        payload = json.loads(raw.strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("canonical distribution has no readable VCS provenance") from exc
+    source = payload.get("url") if isinstance(payload, dict) else None
+    vcs_info = payload.get("vcs_info") if isinstance(payload, dict) else None
+    commit = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
+    if (
+        source != f"https://github.com/{REPOSITORY}.git"
+        or not isinstance(commit, str)
+        or not SHA_RE.fullmatch(commit)
+        or commit != commit.lower()
+    ):
+        raise RuntimeError("canonical distribution provenance is not the trusted repository")
+
+
+def _engine_json(arguments: list[str]) -> dict[str, object] | list[object]:
+    interpreter = _canonical_interpreter()
+    _canonical_source(interpreter)
+    raw = _run(
+        [
+            str(interpreter),
+            "-I",
+            "-m",
+            "odoo_instance_sdk.internal.alternate_tool",
+            *arguments,
+        ]
+    )
+    payload = json.loads(raw)
+    if not isinstance(payload, (dict, list)):
+        raise TypeError("alternate-tool returned a non-JSON response")
+    return payload
 
 
 def _gh_json(argv: list[str]) -> dict[str, object]:
@@ -58,8 +129,12 @@ def _links_issue(references: object, issue: int) -> bool:
     )
 
 
-def _install(issue: int, sha: str, pr: int, review_file: Path, branch: str | None) -> None:
-    if issue <= 0 or pr <= 0:
+def _install(issue: int | str, sha: str, pr: int, review_file: Path, branch: str | None) -> None:
+    issue_text = str(issue)
+    if not ISSUE_RE.fullmatch(issue_text):
+        raise ValueError("GitHub issue number must be a positive decimal without leading zeroes")
+    issue = int(issue_text)
+    if pr <= 0:
         raise ValueError("GitHub issue and PR numbers must be positive")
     if not SHA_RE.fullmatch(sha):
         raise ValueError("fix revision must be a complete lowercase SHA")
@@ -71,7 +146,7 @@ def _install(issue: int, sha: str, pr: int, review_file: Path, branch: str | Non
         or verdict.get("compatible") is not True
         or not review.get("session_id")
     ):
-        raise RuntimeError("exact-SHA shared ~/.odcli compatibility approval is required")
+        raise RuntimeError("exact-SHA isolated-root compatibility approval is required")
     if branch and (
         not BRANCH_RE.fullmatch(branch) or str(issue) not in branch or branch in ("main", "master")
     ):
@@ -91,42 +166,30 @@ def _install(issue: int, sha: str, pr: int, review_file: Path, branch: str | Non
         raise RuntimeError("PR head moved; review its new exact SHA before installing")
     if not _links_issue(pull.get("closingIssuesReferences"), issue):
         raise RuntimeError("PR body must link the report with Fixes #<issue> before installation")
-    registry, tool_dir, tool_bin, shim = _paths(issue)
-    if registry.exists() or shim.exists():
-        raise RuntimeError(f"odcli-fix-{issue} already exists; do not overwrite a running fix")
-    tool_bin.mkdir(mode=0o700, parents=True, exist_ok=True)
-    env = {**os.environ, "UV_TOOL_DIR": str(tool_dir), "UV_TOOL_BIN_DIR": str(tool_bin)}
-    _run(
+    session_id = review.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise RuntimeError("compatibility review has no session provenance")
+    result = _engine_json(
         [
-            "uv",
-            "tool",
             "install",
-            f"odoo-instance-sdk @ git+https://github.com/{REPOSITORY}.git@{sha}",
-        ],
-        env=env,
+            "--kind",
+            "hotfix",
+            "--identifier",
+            str(issue),
+            "--sha",
+            sha,
+            "--pr",
+            str(pr),
+            "--review-sha",
+            sha,
+            "--review-session",
+            session_id,
+            *(("--branch", branch) if branch else ()),
+        ]
     )
-    binary = tool_bin / "odcli"
-    if not binary.is_file():
-        raise RuntimeError("uv completed but did not provide the odcli executable")
-    shim.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    shim_text = (
-        "#!/usr/bin/env python3\n"
-        "import fcntl, subprocess, sys\n"
-        f"with open({str(registry.with_suffix('.lock'))!r}, 'a') as lock:\n"
-        "    fcntl.flock(lock, fcntl.LOCK_SH)\n"
-        f"    print('WARNING: odcli-fix-{issue} is experimental ({sha}); shares ~/.odcli', file=sys.stderr)\n"
-        f"    raise SystemExit(subprocess.call([{str(binary)!r}, *sys.argv[1:]]))\n"
-    )
-    shim.write_text(shim_text, encoding="utf-8")
-    shim.chmod(0o700)
-    registry.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    registry.write_text(
-        json.dumps({"issue": issue, "sha": sha, "pr": pr, "branch": branch, "shim": shim_text})
-        + "\n",
-        encoding="utf-8",
-    )
-    registry.chmod(0o600)
-    print(shim)
+    if not isinstance(result, dict) or not isinstance(result.get("launcher"), str):
+        raise TypeError("alternate-tool did not publish a launcher")
+    print(result["launcher"])
 
 
 def _merged_into_install(issue: int, pr: int, installed_sha: str) -> bool:
@@ -165,45 +228,38 @@ def _merged_into_install(issue: int, pr: int, installed_sha: str) -> bool:
 def _reconcile(installed_sha: str) -> None:
     if not SHA_RE.fullmatch(installed_sha):
         raise ValueError("installed revision must be a complete lowercase SHA")
-    registry_dir = Path.home() / ".odcli" / "fix-tools"
-    if not registry_dir.is_dir():
-        return
-    for manifest in sorted(registry_dir.glob("[0-9]*.json")):
+    records = _engine_json(["list", "--kind", "hotfix"])
+    if not isinstance(records, list):
+        raise TypeError("alternate-tool returned an invalid hot-fix list")
+    for record in records:
         try:
-            _retire_one(manifest, installed_sha)
+            if not isinstance(record, dict):
+                raise TypeError("invalid hot-fix inspection record")  # noqa: TRY301
+            identifier = record.get("identifier")
+            if not isinstance(identifier, str):
+                raise TypeError("hot-fix inspection has no issue identity")  # noqa: TRY301
+            _retire_one(identifier, installed_sha)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
-            print(f"kept {manifest.name}: {error}", file=sys.stderr)
+            print(f"kept hot-fix: {error}", file=sys.stderr)
 
 
-def _retire_one(manifest: Path, installed_sha: str) -> None:
-    data = json.loads(manifest.read_text(encoding="utf-8"))
-    issue, pr = data["issue"], data["pr"]
-    if not isinstance(issue, int) or not isinstance(pr, int) or manifest.name != f"{issue}.json":
-        raise ValueError("invalid fix-tool manifest")
-    registry, tool_dir, tool_bin, shim = _paths(issue)
-    if registry != manifest or not _merged_into_install(issue, pr, installed_sha):
+def _retire_one(issue_text: str, installed_sha: str) -> None:
+    issue = int(issue_text)
+    inspection = _engine_json(["inspect", "--kind", "hotfix", "--identifier", issue_text])
+    if not isinstance(inspection, dict) or inspection.get("healthy") is not True:
+        raise RuntimeError("invalid or corrupt hot-fix manifest")
+    pr = inspection.get("pr")
+    if not isinstance(pr, int) or not _merged_into_install(issue, pr, installed_sha):
         print(f"kept odcli-fix-{issue}: fix not proven present in installed main", file=sys.stderr)
         return
-    if not shim.is_file() or shim.read_text(encoding="utf-8") != data.get("shim"):
-        raise RuntimeError("fix shim changed; refusing cleanup")
-    with manifest.with_suffix(".lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("fix tool is still running") from exc
-        branch = data.get("branch")
-        if branch:
-            if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
-                raise ValueError("invalid local branch")
-            # A squash-merged PR may leave unique branch commits; keep that branch.
-            _run(["git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", "refs/heads/main"])
-            # -d also refuses a branch checked out in another worktree.
-            _run(["git", "branch", "-d", branch])
-        env = {**os.environ, "UV_TOOL_DIR": str(tool_dir), "UV_TOOL_BIN_DIR": str(tool_bin)}
-        _run(["uv", "tool", "uninstall", "odoo-instance-sdk"], env=env)
-        shim.unlink()
-        manifest.unlink()
-        print(f"retired odcli-fix-{issue}")
+    branch = inspection.get("branch")
+    if branch:
+        if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
+            raise ValueError("invalid local branch")
+        _run(["git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", "refs/heads/main"])
+        _run(["git", "branch", "-d", branch])
+    _engine_json(["remove", "--kind", "hotfix", "--identifier", issue_text])
+    print(f"retired odcli-fix-{issue}")
 
 
 def _update(ref: str) -> None:
@@ -223,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install")
-    install.add_argument("issue", type=int)
+    install.add_argument("issue")
     install.add_argument("sha")
     install.add_argument("--pr", type=int, required=True)
     install.add_argument("--review", type=Path, required=True)

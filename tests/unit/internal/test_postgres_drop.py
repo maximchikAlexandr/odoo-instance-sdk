@@ -27,6 +27,7 @@ from odoo_instance_sdk.internal.pg.drop import (
     _cleanup_proven_filestore,
     build_database_drop_command,
 )
+from odoo_instance_sdk.internal.pg.drop_types import AdoptedCopyDatabaseClaim
 from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
 from odoo_instance_sdk.internal.proc import PreparedAction, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.repo_key import repo_key
@@ -1049,6 +1050,225 @@ def test_drop_allows_only_the_selected_environment_binding(
     ).run()
 
     assert result.database == "feature_db"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_drop_allows_exact_adopted_copy_on_approved_external_postgres(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / "adopted-external.sqlite3")
+    instance = _instance(project_manifest)
+    cast("Any", instance._client).get_catalog.return_value = catalog
+    backup_id = str(uuid.uuid4())
+    backup_file = tmp_path / "adopted.zip"
+    backup_file.write_bytes(b"backup")
+    catalog.start_download(
+        backup_id, "http://127.0.0.1:8069", "feature_db", "zip", True, backup_file
+    )
+    catalog.success_download(backup_id, backup_file.name, backup_file.stat().st_size, "")
+    environment_id = "adopted-environment"
+    cluster = instance._postgres_cluster
+    assert cluster is not None and cluster.mode == "external"
+    from odoo_instance_sdk.internal.repo_key import repo_key
+
+    project_id = f"project_{repo_key(project_manifest, project_manifest / '.git')}"
+    catalog._register_project(project_id, project_manifest, project_manifest / ".git")
+    catalog.create_environment(
+        make_env(
+            environment_id,
+            repository_root=str(project_manifest),
+            git_common_dir=str(tmp_path / "checkout" / ".git"),
+            worktree_path=str(tmp_path / "checkout"),
+            target_db_name="feature_db",
+            db_mode="copy",
+            backup_id=backup_id,
+            project_id=project_id,
+            checkout_repository_root=str(tmp_path / "checkout"),
+            checkout_git_common_dir=str(tmp_path / "checkout" / ".git"),
+            code_ownership="caller_owned",
+            adoption_input_fingerprint="f" * 64,
+        )
+    )
+    catalog.record_restore(cluster.endpoint_host, cluster.endpoint_port, "feature_db", backup_id)
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "feature_db",
+        executor=_executor(),
+        allow_environment_id=environment_id,
+        allow_environment_backup_id=backup_id,
+        adopted_copy_claim=AdoptedCopyDatabaseClaim(
+            environment_id=environment_id,
+            database="feature_db",
+            endpoint_host=cluster.endpoint_host,
+            endpoint_port=cluster.endpoint_port,
+            project_id=project_id,
+            checkout_repository_root=str(tmp_path / "checkout"),
+            checkout_git_common_dir=str(tmp_path / "checkout" / ".git"),
+            adoption_input_fingerprint="f" * 64,
+        ),
+        idempotent_absent=True,
+    ).run()
+
+    assert result.database == "feature_db"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_drop_rejects_adopted_copy_claim_drift_and_non_adopted_external_path(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / "adopted-external-negative.sqlite3")
+    instance = _instance(project_manifest)
+    cast("Any", instance._client).get_catalog.return_value = catalog
+    backup_id = str(uuid.uuid4())
+    backup_file = tmp_path / "adopted-negative.zip"
+    backup_file.write_bytes(b"backup")
+    catalog.start_download(
+        backup_id, "http://127.0.0.1:8069", "feature_db", "zip", True, backup_file
+    )
+    catalog.success_download(backup_id, backup_file.name, backup_file.stat().st_size, "")
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    from odoo_instance_sdk.internal.repo_key import repo_key
+
+    project_id = f"project_{repo_key(project_manifest, project_manifest / '.git')}"
+    catalog._register_project(project_id, project_manifest, project_manifest / ".git")
+    catalog.create_environment(
+        make_env(
+            "adopted-negative",
+            repository_root=str(project_manifest),
+            git_common_dir=str(tmp_path / "checkout" / ".git"),
+            worktree_path=str(tmp_path / "checkout"),
+            target_db_name="feature_db",
+            db_mode="copy",
+            backup_id=backup_id,
+            project_id=project_id,
+            checkout_repository_root=str(tmp_path / "checkout"),
+            checkout_git_common_dir=str(tmp_path / "checkout" / ".git"),
+            code_ownership="caller_owned",
+            adoption_input_fingerprint="a" * 64,
+        )
+    )
+    catalog.record_restore(cluster.endpoint_host, cluster.endpoint_port, "feature_db", backup_id)
+    executor = _executor()
+
+    def claim(**changes: str) -> AdoptedCopyDatabaseClaim:
+        values = {
+            "environment_id": "adopted-negative",
+            "database": "feature_db",
+            "endpoint_host": cluster.endpoint_host,
+            "endpoint_port": cluster.endpoint_port,
+            "project_id": project_id,
+            "checkout_repository_root": str(tmp_path / "checkout"),
+            "checkout_git_common_dir": str(tmp_path / "checkout" / ".git"),
+            "adoption_input_fingerprint": "a" * 64,
+        }
+        values.update(changes)
+        return AdoptedCopyDatabaseClaim(**values)  # type: ignore[arg-type]
+
+    for changes, message in (
+        ({"project_id": "project-foreign"}, "adoption ownership evidence"),
+        (
+            {"checkout_repository_root": str(tmp_path / "foreign-checkout")},
+            "adoption ownership evidence",
+        ),
+        (
+            {"checkout_git_common_dir": str(tmp_path / "foreign-checkout" / ".git")},
+            "adoption ownership evidence",
+        ),
+        ({"adoption_input_fingerprint": "b" * 64}, "adoption ownership evidence"),
+        ({"endpoint_host": "foreign-postgres"}, "endpoint evidence"),
+    ):
+        with pytest.raises(ConfigError, match=message):
+            build_database_drop_command(
+                instance,
+                project_manifest,
+                "feature_db",
+                executor=_executor(),
+                allow_environment_id="adopted-negative",
+                allow_environment_backup_id=backup_id,
+                adopted_copy_claim=claim(**changes),
+            )
+
+    with pytest.raises(ConfigError, match="claim does not match target"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "foreign_db",
+            executor=executor,
+            allow_environment_id="adopted-negative",
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim(),
+        )
+    assert executor.executed == []
+
+    with pytest.raises(ConfigError, match="ownership changed"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id="adopted-negative",
+            allow_environment_backup_id="foreign-backup",
+            adopted_copy_claim=claim(),
+        )
+
+    foreign_claim = catalog._ensure_postgres_cluster_pending(
+        "foreign-project", "foreign-compose", "foreign-volume"
+    )
+    foreign_claim = catalog._activate_postgres_cluster(
+        foreign_claim.cluster_id,
+        "foreign-project",
+        "foreign-compose",
+        "foreign-volume",
+    )
+    catalog._conn.execute(
+        "UPDATE restores SET cluster_id=? WHERE database_name='feature_db'",
+        (str(foreign_claim.cluster_id),),
+    )
+    catalog._conn.commit()
+    with pytest.raises(ConfigError, match="restore identity"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id="adopted-negative",
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim(),
+        )
+
+    catalog._conn.execute("UPDATE restores SET cluster_id=NULL WHERE database_name='feature_db'")
+    catalog._conn.execute(
+        "UPDATE database_events SET backup_id=NULL, source_kind='local_archive', source_sha256=? "
+        "WHERE database_name='feature_db' AND event_type='restored'",
+        ("f" * 64,),
+    )
+    catalog._conn.commit()
+    with pytest.raises(ConfigError, match="restore identity"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id="adopted-negative",
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim(),
+        )
+
+    with pytest.raises(ConfigError, match="SDK-owned Compose cluster"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id="adopted-negative",
+        )
     catalog.close()
 
 

@@ -47,8 +47,8 @@ if TYPE_CHECKING:
     from toon.types import Depth, JsonArray, ResolvedEncodeOptions
     from toon.writer import LineWriter
 
-    from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
+    from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.proc import PrivateJsonValue, StepEvent, StepObserver
 
 
 def __getattr__(name: str) -> TypeAliasType:
@@ -183,7 +183,7 @@ def _contains_steps(value: JsonValue) -> bool:
 
 class _InspectableCommand(Protocol, Generic[_ResultT_co]):
     @property
-    def plan(self) -> msgspec.Struct: ...
+    def plan(self) -> ExecutionPlan: ...
 
     def run(
         self, *, observer: StepObserver | None = None, observe_output: bool = False
@@ -678,7 +678,8 @@ def action_command(
     *,
     description: str | None = None,
     mutating: bool = False,
-) -> _InspectableCommand[_ResultT]:
+    details: JsonValue = None,
+) -> Command[_ResultT]:
     """Capture a bounded domain operation behind one command-local action.
 
     Process-backed SDK operations provide richer command siblings.  This
@@ -693,6 +694,7 @@ def action_command(
         step_id=step_id,
         action=step_id,
         description=description or step_id,
+        details=cast("PrivateJsonValue", details),
         mutating=mutating,
     )
 
@@ -709,6 +711,7 @@ def action_command(
                     step_id=step_id,
                     action=step_id,
                     description=description or step_id,
+                    details=details,
                     mutating=mutating,
                 ),
             )
