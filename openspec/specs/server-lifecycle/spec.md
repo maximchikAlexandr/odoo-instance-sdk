@@ -457,10 +457,17 @@ A spawned long-running auxiliary Odoo handle SHALL be drained by the `command-ex
 
 The public detached launch operation MUST accept opt-in readiness waiting and a finite positive timeout that defaults to 60 seconds when enabled. Supplying a readiness timeout while waiting is disabled MUST fail validation. The immutable command snapshot MUST represent readiness and failure cleanup as actions and MUST reuse the existing process boundary, persisted runtime identity, exact PID/create-time/argv/cwd/config/listener-owner proof, and health probe; the argv proof MUST retain the injected effective `--logfile`, and auxiliary restore and detached readiness MUST share one listener-proof implementation.
 
+For an adopted independent clone, runtime binding SHALL use the configured project's identity and Git common directory while matching the exact environment owner row and its recorded checkout. Readiness polling SHALL first prove the persisted process identity without requiring a listener that has not started yet, keep that process proof during HTTP polling, and prove exact listener ownership after the health probe succeeds. A response from another process SHALL never establish readiness.
+
 #### Scenario: Detached launch becomes ready
 
 - **WHEN** readiness waiting is enabled for an environment-bound launch and the process remains alive with the expected environment/database binding until the health probe succeeds
 - **THEN** the operation returns the established bounded detached result with readiness confirmed
+
+#### Scenario: Adopted independent clone becomes ready
+
+- **WHEN** an adopted environment runs from an independent clone whose Git common directory differs from its configured project's Git common directory
+- **THEN** the runtime is recorded under the configured project and exact environment owner, the command waits while the process starts listening, and success requires both a passing health probe and listener ownership by that same persisted process
 
 #### Scenario: Readiness fails
 
