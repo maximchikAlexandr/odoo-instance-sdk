@@ -57,6 +57,81 @@ def test_adopt_command_captures_external_checkout_without_git_creation(
     assert checkout.is_dir()
 
 
+@pytest.mark.parametrize(
+    ("configured_remote", "checkout_remote"),
+    [
+        ("ssh://git@github.com/org/repository.git", "git@GITHUB.com:org/repository.git"),
+        ("git@github.com:org/repository.git", "ssh://git@GitHub.com/org/repository.git"),
+    ],
+)
+def test_adopt_command_accepts_transport_equivalent_repository_origins(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    configured_remote: str,
+    checkout_remote: str,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
+    for path, remote in ((project_manifest, configured_remote), (checkout, checkout_remote)):
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "set-url", "origin", remote],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    command = env_client.environments.adopt_command(  # type: ignore[attr-defined]
+        project_manifest,
+        checkout,
+        options=EnvironmentCheckoutOptions(
+            db_mode=EnvironmentDatabaseMode.COPY,
+            base_ref="main",
+            remote_name="staging",
+            python=str(fake_python),
+        ),
+    )
+    assert command._private_projection() is not None
+
+
+def test_adopt_command_rejects_unsafe_repository_origin_before_mutation(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project_manifest),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/org/repository.git?token=secret",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(EnvironmentConflictError, match="does not match the selected project"):
+        env_client.environments.adopt_command(  # type: ignore[attr-defined]
+            project_manifest,
+            checkout,
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                base_ref="main",
+                remote_name="staging",
+                python=str(fake_python),
+            ),
+        )
+
+    assert checkout.is_dir()
+    assert env_client.environments.list(project=project_manifest) == []  # type: ignore[attr-defined]
+
+
 def _add_named_source(project_manifest: Path) -> None:
     manifest = project_manifest / ".odcli" / "project.toml"
     manifest.write_text(

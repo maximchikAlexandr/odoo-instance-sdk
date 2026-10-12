@@ -13,7 +13,6 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 from odoo_instance_sdk.internal import (
     git_worktree as _git_worktree,
@@ -88,46 +87,11 @@ def _parse_checkout_identity(value: str, *, message: str) -> _CheckoutIdentity:
         raise AgentCheckoutError(message) from None
 
 
-def _canonical_repository_identity(source: str) -> str:  # noqa: C901 -- strict transport allowlist
-    if not source or any(char.isspace() or ord(char) < 32 for char in source):
-        raise AgentCheckoutError("repository origin contains unsafe characters")
-    if "?" in source or "#" in source or source.startswith(("!", "ext::", "git+")):
-        raise AgentCheckoutError("repository origin contains unsafe transport syntax")
-
-    scp_match = re.fullmatch(r"(?P<user>[^@/:]+)@(?P<host>[^:/]+):(?P<path>[^?#]+)", source)
-    if scp_match is not None:
-        if scp_match.group("user") != "git":
-            raise AgentCheckoutError("repository origin contains scp credentials")
-        return f"ssh://git@{scp_match.group('host').lower()}/{scp_match.group('path').lstrip('/')}"
-
-    parsed = urlsplit(source)
-    if parsed.scheme:
-        scheme = parsed.scheme.lower()
-        if scheme not in {"https", "ssh"} or not parsed.path:
-            raise AgentCheckoutError("repository origin uses an unsupported transport")
-        if (
-            parsed.username is not None
-            and (scheme != "ssh" or parsed.username != "git" or parsed.password is not None)
-        ) or (parsed.password is not None and parsed.username is None):
-            raise AgentCheckoutError("repository origin contains credentials")
-        if parsed.query or parsed.fragment:
-            raise AgentCheckoutError("repository origin contains query or fragment data")
-        try:
-            hostname = parsed.hostname
-            port = parsed.port
-        except ValueError as exc:
-            raise AgentCheckoutError("repository origin has an invalid authority") from exc
-        if hostname is None:
-            raise AgentCheckoutError("repository origin has no host")
-        host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
-        authority = host if port is None else f"{host}:{port}"
-        user = "git@" if scheme == "ssh" and parsed.username == "git" else ""
-        return f"{scheme}://{user}{authority}/{parsed.path.lstrip('/')}"
-
-    path = Path(source)
-    if path.is_absolute():
-        return str(path.resolve())
-    raise AgentCheckoutError("repository origin is not a canonical supported identity")
+def _canonical_repository_identity(source: str) -> str:
+    try:
+        return _git_worktree.canonical_repository_identity(source)
+    except _git_worktree.GitRepositoryIdentityError as exc:
+        raise AgentCheckoutError(str(exc)) from exc
 
 
 def _remove_owned_checkout(

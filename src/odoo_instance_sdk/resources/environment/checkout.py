@@ -697,8 +697,6 @@ class _CheckoutMixin(_CheckoutApiMixin):
         )
 
     def _copy_auxiliary_session(self, plan: _CheckoutPlan) -> AuxiliaryRestoreSession | None:
-        if plan.options.remote_name is not None or plan.options.backup_id is not None:
-            return None
         if plan.source_config is None:
             return None
         from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
@@ -711,7 +709,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
         instance.config = replace(
             instance.config,
             command_prefix=(python_bin, plan.odoo_bin),
-            default_cwd=Path(plan.runtime_cwd),
+            default_cwd=Path(plan.runtime_cwd) if plan.adopted else plan.repo_root,
             default_run_args=plan.project.default_run_args,
             project_environment=load_project_environment(plan.repo_root),
         )

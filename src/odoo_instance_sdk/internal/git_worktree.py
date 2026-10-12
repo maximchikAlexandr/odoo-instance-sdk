@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlsplit
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
 
@@ -19,6 +21,10 @@ class GitError(Exception):
 
 class GitRepositoryNotFoundError(GitError):
     """Git proved that a path is outside an enclosing repository."""
+
+
+class GitRepositoryIdentityError(GitError):
+    """Git remote syntax cannot be converted to a safe repository identity."""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -111,6 +117,49 @@ def remote_url(repo_root: Path, name: str = "origin") -> str | None:
     )
     value = proc.stdout.strip()
     return value or None
+
+
+def canonical_repository_identity(source: str) -> str:  # noqa: C901 -- strict transport allowlist
+    """Return one transport-aware, secret-free identity for a Git remote."""
+    if not source or any(char.isspace() or ord(char) < 32 for char in source):
+        raise GitRepositoryIdentityError("repository origin contains unsafe characters")
+    if "?" in source or "#" in source or source.startswith(("!", "ext::", "git+")):
+        raise GitRepositoryIdentityError("repository origin contains unsafe transport syntax")
+
+    scp_match = re.fullmatch(r"(?P<user>[^@/:]+)@(?P<host>[^:/]+):(?P<path>[^?#]+)", source)
+    if scp_match is not None:
+        if scp_match.group("user") != "git":
+            raise GitRepositoryIdentityError("repository origin contains scp credentials")
+        return f"ssh://git@{scp_match.group('host').lower()}/{scp_match.group('path').lstrip('/')}"
+
+    parsed = urlsplit(source)
+    if parsed.scheme:
+        scheme = parsed.scheme.lower()
+        if scheme not in {"https", "ssh"} or not parsed.path:
+            raise GitRepositoryIdentityError("repository origin uses an unsupported transport")
+        if (
+            parsed.username is not None
+            and (scheme != "ssh" or parsed.username != "git" or parsed.password is not None)
+        ) or (parsed.password is not None and parsed.username is None):
+            raise GitRepositoryIdentityError("repository origin contains credentials")
+        if parsed.query or parsed.fragment:
+            raise GitRepositoryIdentityError("repository origin contains query or fragment data")
+        try:
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            raise GitRepositoryIdentityError("repository origin has an invalid authority") from exc
+        if hostname is None:
+            raise GitRepositoryIdentityError("repository origin has no host")
+        host = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
+        authority = host if port is None else f"{host}:{port}"
+        user = "git@" if scheme == "ssh" and parsed.username == "git" else ""
+        return f"{scheme}://{user}{authority}/{parsed.path.lstrip('/')}"
+
+    path = Path(source)
+    if path.is_absolute():
+        return str(path.resolve())
+    raise GitRepositoryIdentityError("repository origin is not a canonical supported identity")
 
 
 def _remote_ref_sha(repo_root: Path, remote: str, ref: str) -> str | None:

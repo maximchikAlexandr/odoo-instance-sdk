@@ -17,7 +17,7 @@ from typing import Any, cast
 import pytest
 
 from odoo_instance_sdk.client import OdooClient
-from odoo_instance_sdk.internal import agent_checkout, numbered_command_plan
+from odoo_instance_sdk.internal import agent_checkout, git_worktree, numbered_command_plan
 from odoo_instance_sdk.internal.agent_checkout import (
     CHECKOUT_MARKER,
     AgentCheckoutError,
@@ -858,6 +858,7 @@ def test_delete_failure_with_occupied_original_is_retryable_without_environment_
 )
 def test_repository_identity_is_canonical_and_secret_free(source: str, expected: str) -> None:
     assert agent_checkout._canonical_repository_identity(source) == expected
+    assert git_worktree.canonical_repository_identity(source) == expected
 
 
 @pytest.mark.parametrize(

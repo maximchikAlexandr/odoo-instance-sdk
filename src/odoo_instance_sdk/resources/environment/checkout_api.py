@@ -225,7 +225,20 @@ class _CheckoutApiMixin:
         configured_remote = remote_url(project_root)
         checkout_remote = remote_url(actual_root)
         if configured_remote is not None and checkout_remote is not None:
-            if configured_remote != checkout_remote:
+            from odoo_instance_sdk.internal.git_worktree import (
+                GitRepositoryIdentityError,
+                canonical_repository_identity,
+            )
+
+            try:
+                configured_identity = canonical_repository_identity(configured_remote)
+                checkout_identity = canonical_repository_identity(checkout_remote)
+            except GitRepositoryIdentityError as exc:
+                raise EnvironmentConflictError(
+                    "repository_identity_mismatch",
+                    "caller-owned checkout remote does not match the selected project",
+                ) from exc
+            if configured_identity != checkout_identity:
                 raise EnvironmentConflictError(
                     "repository_identity_mismatch",
                     "caller-owned checkout remote does not match the selected project",
