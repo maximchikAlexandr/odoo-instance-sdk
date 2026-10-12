@@ -39,6 +39,11 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+@pytest.fixture(autouse=True)
+def _managed_task_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MULTICA_TASK_WORKSPACES_ROOT", str(tmp_path))
+
+
 @dataclass
 class _Command(Generic[T]):
     value: T
@@ -189,7 +194,7 @@ def _fixture(
         daemon_id="daemon",
         server_url="http://127.0.0.1:8765",
         cli_version="0.5.3",
-        workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",), path=str(tmp_path)),),
+        workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",)),),
     )
     repositories = _Repositories()
     environments = _Environments()
@@ -264,7 +269,9 @@ def test_context_rejects_project_repository_evidence_unavailable(tmp_path: Path)
         client.context(request)
 
 
-def test_context_rejects_wrong_host_or_incomplete_evidence(tmp_path: Path) -> None:
+def test_context_rejects_wrong_host_or_incomplete_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client, request, _, _ = _fixture(tmp_path)
     fake_multica = cast("_FakeMultica", client.multica)
     fake_multica.projects.resources.page = Page(
@@ -292,15 +299,9 @@ def test_context_rejects_wrong_host_or_incomplete_evidence(tmp_path: Path) -> No
     )
     wrong_host = tmp_path / "wrong-host"
     wrong_host.mkdir()
-    fake_multica.daemon.status_value = DaemonStatus(
-        status="ready",
-        daemon_id="daemon",
-        server_url="http://127.0.0.1:8765",
-        cli_version="0.5.3",
-        workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",), path=str(wrong_host)),),
-    )
+    monkeypatch.setenv("MULTICA_TASK_WORKSPACES_ROOT", str(wrong_host))
 
-    with pytest.raises(ContextVerificationError, match="outside the daemon workspace"):
+    with pytest.raises(ContextVerificationError, match="outside the daemon workspaces root"):
         client.context(request)
 
 
@@ -366,6 +367,17 @@ def test_context_rejects_forwarded_or_missing_filesystem_evidence(tmp_path: Path
     )
 
     with pytest.raises(ContextVerificationError, match="filesystem evidence"):
+        client.context(request)
+
+
+@pytest.mark.parametrize("root", ["", "relative/root"])
+def test_context_rejects_missing_or_relative_task_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: str
+) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    monkeypatch.setenv("MULTICA_TASK_WORKSPACES_ROOT", root)
+
+    with pytest.raises(ContextVerificationError, match="workspaces root is unavailable"):
         client.context(request)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import json
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -937,16 +938,17 @@ def _verify_daemon_filesystem(
     workspace = next((item for item in daemon.workspaces if item.id == workspace_id), None)
     if workspace is None or runtime_id not in workspace.runtimes:
         raise ContextVerificationError("daemon does not own the selected runtime")
-    if workspace.path is None or not Path(workspace.path).is_absolute():
-        raise ContextVerificationError("daemon workspace has no absolute filesystem evidence")
+    root_value = os.environ.get("MULTICA_TASK_WORKSPACES_ROOT", "").strip()
+    if not root_value or not Path(root_value).is_absolute():
+        raise ContextVerificationError("daemon task workspaces root is unavailable")
     try:
-        workspace_root = Path(workspace.path).resolve(strict=True)
+        workspaces_root = Path(root_value).resolve(strict=True)
     except OSError as exc:
-        raise ContextVerificationError(
-            "daemon workspace filesystem evidence is unavailable"
-        ) from exc
-    if not task_root.is_relative_to(workspace_root):
-        raise ContextVerificationError("task directory is outside the daemon workspace")
+        raise ContextVerificationError("daemon task workspaces root is unavailable") from exc
+    if not workspaces_root.is_dir():
+        raise ContextVerificationError("daemon task workspaces root is unavailable")
+    if not task_root.is_relative_to(workspaces_root):
+        raise ContextVerificationError("task directory is outside the daemon workspaces root")
     if not checkout.is_relative_to(task_root):
         raise ContextVerificationError("checkout is outside the verified task directory")
 
