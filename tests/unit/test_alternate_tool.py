@@ -287,6 +287,27 @@ def test_install_materializes_uv_tool_bin_symlink(
     assert inspect_alternate_tool(numbered)["healthy"] is True
 
 
+def test_numbered_install_accepts_only_its_prepared_state_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    numbered.state_root.mkdir(mode=0o700)
+    sentinel = numbered.state_root / "sentinel"
+    sentinel.write_text("environment", encoding="utf-8")
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(alternate_tool, "run_captured", _StagedRunner(interpreter, "c" * 40))
+
+    with pytest.raises(AlternateToolError, match="already exists"):
+        alternate_tool.install_alternate_tool(numbered, "c" * 40)
+    manifest = alternate_tool.install_alternate_tool(
+        numbered, "c" * 40, allow_existing_state_root=True
+    )
+
+    assert manifest.sha == "c" * 40
+    assert sentinel.read_text(encoding="utf-8") == "environment"
+
+
 def test_hotfix_install_uses_the_shared_provenance_and_probe_lifecycle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

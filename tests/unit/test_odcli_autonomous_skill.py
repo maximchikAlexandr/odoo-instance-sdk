@@ -329,6 +329,31 @@ def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
     ]
 
 
+def test_fix_tool_accepts_uv_tool_launcher_symlinks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fix_tool = _module("fix_tool")
+    home = tmp_path / "home"
+    tool_bin = home / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk" / "bin"
+    tool_bin.mkdir(parents=True)
+    python = tmp_path / "uv-managed-python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o700)
+    (tool_bin / "python").symlink_to(python)
+    (tool_bin / "python3").symlink_to("python")
+    launcher = tool_bin / "odcli"
+    launcher.write_text(f"#!{tool_bin / 'python3'}\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    user_bin = home / ".local" / "bin"
+    user_bin.mkdir(parents=True)
+    command = user_bin / "odcli"
+    command.symlink_to(launcher)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(fix_tool.shutil, "which", lambda _name: str(command))
+
+    assert fix_tool._canonical_interpreter() == tool_bin / "python3"
+
+
 def test_fix_tool_engine_ignores_pythonpath_package_shadow(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

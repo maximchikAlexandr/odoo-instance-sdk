@@ -42,6 +42,7 @@ from odoo_instance_sdk.internal.numbered_command_plan import (
     _CreateCommandPlan,
     _RemoveCommandPlan,
 )
+from odoo_instance_sdk.internal.paths import USER_ROOT_ENV
 from odoo_instance_sdk.models import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
 
@@ -155,6 +156,27 @@ def _fake_install(monkeypatch: pytest.MonkeyPatch) -> None:
         return manifest
 
     monkeypatch.setattr(agent_checkout, "install_alternate_tool", install)
+
+
+def test_reserved_removal_uses_numbered_state_root_for_environment_lookup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    numbered = identity("numbered", "1", home=tmp_path)
+    numbered.manager_root.mkdir(parents=True)
+    (numbered.manager_root / "reservation.json").write_text("{}", encoding="utf-8")
+    observed: list[str | None] = []
+
+    def recover(*_args: object) -> None:
+        observed.append(os.environ.get(USER_ROOT_ENV))
+
+    monkeypatch.setattr(agent_checkout, "_remove_reserved_installation", recover)
+    previous = os.environ.get(USER_ROOT_ENV)
+    agent_checkout.remove_numbered_installation(
+        "1", client=cast("OdooClient", object()), home=tmp_path
+    )
+
+    assert observed == [str(numbered.state_root)]
+    assert os.environ.get(USER_ROOT_ENV) == previous
 
 
 @dataclass

@@ -1118,6 +1118,78 @@ def test_drop_allows_exact_adopted_copy_on_approved_external_postgres(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("foreign_binding", [False, True])
+def test_adopted_copy_on_owned_compose_requires_cluster_and_checkout_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    tmp_path: Path,
+    foreign_binding: bool,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "adopted-compose.sqlite3")
+    instance, _ = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=None, foreign_binding=foreign_binding
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None and cluster.mode == "compose"
+    binding = catalog._latest_restore_binding(
+        cluster.endpoint_host, cluster.endpoint_port, "feature_db"
+    )
+    assert binding is not None
+    backup_id = str(binding["backup_id"])
+    environment_id = "adopted-compose-environment"
+    checkout = tmp_path / "checkout"
+    project_id = f"project_{cluster._project_id}"
+    catalog._register_project(project_id, project_manifest, project_manifest / ".git")
+    catalog.create_environment(
+        make_env(
+            environment_id,
+            repository_root=str(project_manifest),
+            git_common_dir=str(checkout / ".git"),
+            worktree_path=str(checkout),
+            target_db_name="feature_db",
+            db_mode="copy",
+            backup_id=backup_id,
+            project_id=project_id,
+            checkout_repository_root=str(checkout),
+            checkout_git_common_dir=str(checkout / ".git"),
+            code_ownership="caller_owned",
+            adoption_input_fingerprint="f" * 64,
+        )
+    )
+    claim = AdoptedCopyDatabaseClaim(
+        environment_id=environment_id,
+        database="feature_db",
+        endpoint_host=cluster.endpoint_host,
+        endpoint_port=cluster.endpoint_port,
+        project_id=project_id,
+        checkout_repository_root=str(checkout),
+        checkout_git_common_dir=str(checkout / ".git"),
+        adoption_input_fingerprint="f" * 64,
+    )
+
+    def drop() -> Any:
+        return build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=_executor(),
+            allow_environment_id=environment_id,
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim,
+            idempotent_absent=True,
+        ).run()
+
+    if foreign_binding:
+        with pytest.raises(ConfigError, match="exact active restore binding"):
+            drop()
+    else:
+        assert drop().database == "feature_db"
+    catalog.close()
+
+
+@pytest.mark.unit
 def test_drop_rejects_adopted_copy_claim_drift_and_non_adopted_external_path(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
 ) -> None:

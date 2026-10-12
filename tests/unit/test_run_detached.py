@@ -24,7 +24,7 @@ from odoo_instance_sdk.exceptions import (
     LogfileUnwritableError,
     ReadinessTimeoutError,
 )
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessHandle,
@@ -825,6 +825,102 @@ def test_detached_readiness_passes_effective_logfile_argv_to_identity_proof(
     expected_argv = proof.call_args.kwargs["expected_argv"]
     logfile_index = expected_argv.index("--logfile")
     assert expected_argv[logfile_index + 1] == str((wt / "odoo.log").resolve())
+    assert [call.kwargs["require_socket_owner"] for call in proof.call_args_list] == [False, True]
+
+
+@pytest.mark.unit
+def test_environment_runtime_proof_uses_exact_owner_and_project_identity(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    checkout_root = tmp_path / "checkout"
+    binding = _RuntimeBinding(
+        owner_kind="environment",
+        owner_id="env-a",
+        project_id="project-a",
+        repository_root=project_root,
+        git_common_dir=project_root / ".git",
+    )
+    runtime: dict[str, JsonValue] = {
+        "owner_kind": "environment",
+        "owner_id": "env-a",
+        "http_port": 18158,
+        "http_url": "http://127.0.0.1:18158",
+        "root_pid": 4242,
+        "create_time": 123.5,
+    }
+    environment: dict[str, JsonValue] = {
+        "project_id": "project-a",
+        "repository_root": str(project_root),
+        "git_common_dir": str(checkout_root / ".git"),
+    }
+    process = MagicMock()
+    process.is_running.return_value = True
+    process.status.return_value = "running"
+    process.create_time.return_value = 123.5
+    instance = MagicMock()
+    instance.config.base_url = "http://127.0.0.1:18158"
+    config = StartConfig(http_port=18158)
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime_identity.psutil.Process",
+            return_value=process,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime_identity._runtime_process_matches",
+            return_value=True,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime_identity._socket_owned_by",
+            return_value=True,
+        ),
+    ):
+        assert (
+            runtime_identity._runtime_row_matches(instance, config, binding, runtime, environment)
+            == 4242
+        )
+        assert (
+            runtime_identity._runtime_row_matches(
+                instance, config, binding, {**runtime, "owner_id": "env-b"}, environment
+            )
+            is None
+        )
+        assert (
+            runtime_identity._runtime_row_matches(
+                instance, config, binding, runtime, {**environment, "project_id": "project-b"}
+            )
+            is None
+        )
+        assert (
+            runtime_identity._runtime_row_matches(
+                instance, config, binding, {**runtime, "owner_kind": "project"}, environment
+            )
+            is None
+        )
+
+
+@pytest.mark.unit
+def test_recorded_runtime_pid_reads_environment_binding(tmp_path: Path) -> None:
+    binding = _RuntimeBinding(
+        owner_kind="environment",
+        owner_id="env-a",
+        project_id="project-a",
+        repository_root=tmp_path,
+        git_common_dir=tmp_path / ".git",
+    )
+    instance = MagicMock()
+    instance._runtime_binding = binding
+    snapshot = MagicMock()
+    snapshot.project_runtimes = ()
+    snapshot.environments = (({"id": "env-a"}, {"root_pid": 4242}),)
+    instance._client.get_catalog.return_value._monitor_snapshot_rows.return_value = snapshot
+    with patch(
+        "odoo_instance_sdk.resources.instance.runtime_identity._runtime_row_matches",
+        return_value=4242,
+    ) as row_matches:
+        assert runtime_identity._recorded_runtime_pid(instance, StartConfig()) == 4242
+    row_matches.assert_called_once()
+    instance._client.get_catalog.return_value._monitor_snapshot_rows.assert_called_once_with(
+        project_id="project-a"
+    )
 
 
 @pytest.mark.unit
