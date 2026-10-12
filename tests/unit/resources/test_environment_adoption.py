@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError, StalePlanError
+from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.models import EnvironmentState
 from odoo_instance_sdk.resources.environment import (
@@ -92,6 +93,68 @@ def test_adopt_command_accepts_transport_equivalent_repository_origins(
         ),
     )
     assert command._private_projection() is not None
+
+
+@pytest.mark.parametrize(
+    ("difference", "configured_remote", "checkout_remote"),
+    [
+        (
+            "host",
+            "ssh://git@github.com/org/repository.git",
+            "git@other.example:org/repository.git",
+        ),
+        (
+            "explicit port",
+            "ssh://git@github.com/org/repository.git",
+            "ssh://git@github.com:2222/org/repository.git",
+        ),
+        (
+            "path",
+            "ssh://git@github.com/org/repository.git",
+            "git@github.com:org/other-repository.git",
+        ),
+        (
+            "transport",
+            "https://github.com/org/repository.git",
+            "git@github.com:org/repository.git",
+        ),
+    ],
+)
+def test_adopt_command_rejects_non_equivalent_origins_before_mutation(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    difference: str,
+    configured_remote: str,
+    checkout_remote: str,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
+    for path, remote in ((project_manifest, configured_remote), (checkout, checkout_remote)):
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "set-url", "origin", remote],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    catalog_path = get_catalog_path(ensure_exists=False)
+    catalog_before = catalog_path.read_bytes() if catalog_path.exists() else None
+
+    with pytest.raises(EnvironmentConflictError, match="does not match the selected project"):
+        env_client.environments.adopt_command(  # type: ignore[attr-defined]
+            project_manifest,
+            checkout,
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                base_ref="main",
+                remote_name="staging",
+                python=str(fake_python),
+            ),
+        )
+
+    assert difference
+    assert checkout.is_dir()
+    assert (catalog_path.read_bytes() if catalog_path.exists() else None) == catalog_before
 
 
 def test_adopt_command_rejects_unsafe_repository_origin_before_mutation(
