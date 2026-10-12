@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from multica_py import Issue
+from multica_py import Issue, Project, ProjectStatus
 from odcli_multica.client import MulticaOdooClient, read_gitlab_credential_mappings
+from odcli_multica.client_policies import askpass_command
 from odcli_multica.models import (
     ContextVerificationError,
     MulticaCompatibility,
@@ -25,6 +28,18 @@ class _Issues:
             raise RuntimeError("missing issue") from exc
 
 
+class _Projects:
+    def __init__(self, other_workspace: str) -> None:
+        self._projects = {
+            "other": Project(
+                "other", "Other", ProjectStatus.in_progress, workspace_id=other_workspace
+            )
+        }
+
+    def get(self, project_id: str) -> Project:
+        return self._projects[project_id]
+
+
 def _context(issue_id: str = "child") -> VerifiedTaskContext:
     return VerifiedTaskContext(
         checkout_path="/task/checkout",
@@ -40,9 +55,9 @@ def _context(issue_id: str = "child") -> VerifiedTaskContext:
     )
 
 
-def _client(*issues: Issue) -> MulticaOdooClient:
+def _client(*issues: Issue, other_workspace: str = "different-workspace") -> MulticaOdooClient:
     client = object.__new__(MulticaOdooClient)
-    client.multica = SimpleNamespace(issues=_Issues(issues))
+    client.multica = SimpleNamespace(issues=_Issues(issues), projects=_Projects(other_workspace))
     client._compatibility = MulticaCompatibility(
         package_version="0.1.0",
         package_revision="c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed",
@@ -70,6 +85,47 @@ def test_root_creator_traversal_is_finite_and_workspace_bound() -> None:
     assert result.root_issue_id == "root"
     assert result.root_creator_id == "human-root"
     assert result.workspace_id == "workspace"
+
+
+def test_root_creator_accepts_parent_in_another_project_of_same_workspace() -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "in_progress",
+        project_id="other",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    child = Issue("child", "Child", "in_progress", project_id="project", parent_id="root")
+
+    result = _client(child, root, other_workspace="workspace").root_creator(_context())
+
+    assert result.root_issue_id == "root"
+    assert result.root_creator_id == "human-root"
+
+
+def test_git_askpass_helper_is_a_runnable_executable() -> None:
+    helper = askpass_command()
+    environment = os.environ.copy()
+    environment.update(GITLAB_LOGIN="test-user", GITLAB_TOKEN="test-token")
+
+    username = subprocess.run(
+        [helper, "Username for HTTPS"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    password = subprocess.run(
+        [helper, "Password for HTTPS"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert (username.returncode, username.stdout) == (0, "test-user")
+    assert (password.returncode, password.stdout) == (0, "test-token")
 
 
 @pytest.mark.parametrize(

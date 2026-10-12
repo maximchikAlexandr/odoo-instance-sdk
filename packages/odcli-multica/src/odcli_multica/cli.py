@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -204,7 +205,9 @@ def _git_resource(client: MulticaOdooClient, project: Path) -> GitResourceLike:
     candidates = (project / "odoo.conf", project / ".odoo.conf", project / ".odcli" / "odoo.conf")
     for candidate in candidates:
         if candidate.is_file():
-            return client.core.instance.from_config(candidate).git
+            instance = client.core.instance.from_config(candidate)
+            instance.config = replace(instance.config, default_cwd=project.resolve())
+            return instance.git
     raise click.UsageError("project has no readable odoo.conf for the core Git resource")
 
 
@@ -375,6 +378,7 @@ def merge_request() -> None:
 @click.option("--target", "target_branch", required=True)
 @click.option("--title", required=True)
 @click.option("--description-file", required=True, type=click.Path(path_type=Path))
+@click.option("--issue-url", default=None)
 @click.option("--assignee", default=None)
 @click.option("--project-path", default=None)
 @click.option("--profile", default=None)
@@ -395,6 +399,7 @@ def merge_request_publish(
     target_branch: str,
     title: str,
     description_file: Path,
+    issue_url: str | None,
     assignee: str | None,
     project_path: str | None,
     profile: str | None,
@@ -419,6 +424,7 @@ def merge_request_publish(
             target_branch=target_branch,
             title=title,
             description_file=description_file,
+            issue_url=issue_url,
             assignee=assignee,
             project_path=project_path,
         )

@@ -39,6 +39,9 @@ Git and GitLab operations run as the resolved human root creator. Remote URLs,
 argv, logs, and result documents contain only safe host/project identifiers;
 credentials are supplied to the child process for one command and redacted at
 the boundary. Publication descriptions are file-backed and bounded.
+For `gitlab mr publish`, pass `--issue-url` with the exact HTTPS issue link when
+the Multica client profile has no `server_url`. Git operations use the verified
+checkout root and an installed `odcli-multica-askpass` executable for HTTPS.
 
 ## Publication and external panel prerequisites
 

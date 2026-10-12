@@ -416,6 +416,7 @@ class MulticaOdooClient:
         target_branch: str,
         title: str,
         description_file: Path | str,
+        issue_url: str | None = None,
         assignee: str | None = None,
         project_path: str | None = None,
         mapping_path: Path | str | None = None,
@@ -433,6 +434,25 @@ class MulticaOdooClient:
         host, inferred_project = repository_project_path(context.repository_url)
         selected_project = _validated_project_path(project_path, inferred_project)
         description = read_description_file(description_file)
+        server_url = getattr(self.multica.config, "server_url", None)
+        selected_issue_url = issue_url or (
+            server_url.rstrip("/") + f"/issues/{context.issue_id}"
+            if isinstance(server_url, str) and server_url.strip()
+            else None
+        )
+        if selected_issue_url is None:
+            raise ContextVerificationError("Multica issue URL is unavailable")
+        parsed_issue_url = urlsplit(selected_issue_url)
+        if (
+            parsed_issue_url.scheme != "https"
+            or not parsed_issue_url.netloc
+            or parsed_issue_url.username is not None
+            or parsed_issue_url.password is not None
+            or not parsed_issue_url.path.strip("/")
+            or parsed_issue_url.query
+            or parsed_issue_url.fragment
+        ):
+            raise ContextVerificationError("Multica issue URL is invalid")
 
         context_step = PreparedAction(
             step_id="gitlab.mr.revalidate-context",
@@ -466,6 +486,7 @@ class MulticaOdooClient:
                 "target_branch": target_branch,
                 "title": title,
                 "description_file": str(Path(description_file).resolve()),
+                "issue_url": selected_issue_url,
                 "assignee": assignee,
             },
         )
@@ -491,7 +512,7 @@ class MulticaOdooClient:
 
             if git_resource is not None:
                 run_context.action(branch_step.step_id)
-                current_branch = _current_branch(git_resource)
+                current_branch = _current_branch(Path(context.checkout_path))
                 if current_branch != source_branch:
                     raise ContextVerificationError("current Git branch changed")
                 run_context.complete_action(branch_step.step_id)
@@ -504,9 +525,6 @@ class MulticaOdooClient:
                 mapping_path=mapping_path,
                 process_environment=process_environment,
             )
-            server_url = getattr(self.multica.config, "server_url", None)
-            if not isinstance(server_url, str) or not server_url.strip():
-                raise ContextVerificationError("Multica issue URL is unavailable")
             result = publish_merge_request(
                 credential=credential,
                 project_path=selected_project,
@@ -514,7 +532,7 @@ class MulticaOdooClient:
                 target_branch=target_branch,
                 title=title,
                 description=description,
-                issue_url=server_url.rstrip("/") + f"/issues/{context.issue_id}",
+                issue_url=selected_issue_url,
                 assignee=assignee,
             )
             run_context.complete_action(publish_step.step_id)
@@ -540,6 +558,7 @@ class MulticaOdooClient:
         target_branch: str,
         title: str,
         description_file: Path | str,
+        issue_url: str | None = None,
         assignee: str | None = None,
         project_path: str | None = None,
         mapping_path: Path | str | None = None,
@@ -552,6 +571,7 @@ class MulticaOdooClient:
             target_branch=target_branch,
             title=title,
             description_file=description_file,
+            issue_url=issue_url,
             assignee=assignee,
             project_path=project_path,
             mapping_path=mapping_path,
@@ -609,6 +629,7 @@ class MulticaOdooClient:
             workspace_id,
             project.id,
             self.multica.issues,
+            self.multica.projects,
         )
         return VerifiedTaskContext(
             checkout_path=str(checkout),
@@ -629,6 +650,7 @@ class MulticaOdooClient:
         return _resolve_root_creator(
             context,
             self.multica.issues,
+            self.multica.projects,
         )
 
     def _resolve_credentials(

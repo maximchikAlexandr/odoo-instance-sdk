@@ -4,7 +4,7 @@
 TBD - created by archiving change extend-odcli-automation-primitives. Update Purpose after archive.
 ## Requirements
 ### Requirement: Typed GitLab merge-request publication
-The existing `odcli-multica` public integration SDK SHALL expose `publish_merge_request_command()` and a delegating convenience method, and its CLI SHALL expose `odcli-multica gitlab mr publish`. The operation SHALL accept source branch, target branch, title, UTF-8 description file, and optional assignee; resolve host/project and the root Multica issue through the shared verified task context; append a canonical issue link; and return a frozen result containing MR ID, web URL, source/target branches, and outcome `created` or `updated`. The core wheel SHALL NOT import this extension operation.
+The existing `odcli-multica` public integration SDK SHALL expose `publish_merge_request_command()` and a delegating convenience method, and its CLI SHALL expose `odcli-multica gitlab mr publish`. The operation SHALL accept source branch, target branch, title, UTF-8 description file, optional assignee, and an optional explicit HTTPS issue URL when the client has no configured server URL; resolve host/project and the root Multica issue through the shared verified task context; append the validated issue link; and return a frozen result containing MR ID, web URL, source/target branches, and outcome `created` or `updated`. The core wheel SHALL NOT import this extension operation.
 
 #### Scenario: Create a merge request
 - **WHEN** no open merge request matches the exact GitLab project, source branch, and target branch

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ import httpx
 import pytest
 from multica_py import Issue
 from odcli_multica.client import MulticaOdooClient
+from odcli_multica.client_policies import current_branch
 from odcli_multica.gitlab import (
     GitLabPublicationError,
     publish_merge_request,
@@ -227,6 +229,7 @@ def _mr_client(root: Issue) -> MulticaOdooClient:
     client = object.__new__(MulticaOdooClient)
     client.multica = SimpleNamespace(
         issues=_IssueStore(root),
+        projects=SimpleNamespace(get=lambda _: pytest.fail("unexpected project lookup")),
         config=SimpleNamespace(server_url="https://multica.example"),
     )
     client._compatibility = MulticaCompatibility(
@@ -374,6 +377,7 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
     description = tmp_path / "description.md"
     description.write_text("body", encoding="utf-8")
     client = _mr_client(root)
+    client.multica.config.server_url = None
     client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
     monkeypatch.setattr(
         "odcli_multica.gitlab.publish_merge_request",
@@ -388,6 +392,7 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
         target_branch="main",
         title="Add feature",
         description_file=description,
+        issue_url="https://multica.example/my-lab/issues/MYL-444",
     )
 
     plan_text = repr(command.plan)
@@ -395,6 +400,7 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
     assert "gitlab.mr.revalidate-context" in plan_text
     assert "gitlab.mr.revalidate-branch" in plan_text
     assert "gitlab.mr.publish" in plan_text
+    assert "https://multica.example/my-lab/issues/MYL-444" in plan_text
 
 
 def test_mr_execution_revalidates_stale_context_and_current_branch(
@@ -420,6 +426,8 @@ def test_mr_execution_revalidates_stale_context_and_current_branch(
     description.write_text("body", encoding="utf-8")
     client = _mr_client(root)
     client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    observed_branch = "feature"
+    monkeypatch.setattr("odcli_multica.client._current_branch", lambda _: observed_branch)
     provider_calls: list[bool] = []
     monkeypatch.setattr(
         "odcli_multica.gitlab.publish_merge_request",
@@ -441,6 +449,7 @@ def test_mr_execution_revalidates_stale_context_and_current_branch(
     assert provider_calls == []
 
     client.multica.issues.issue = root
+    observed_branch = "other"
     bad_branch = client.publish_merge_request_command(
         _mr_context(),
         project_root=tmp_path,
@@ -453,3 +462,14 @@ def test_mr_execution_revalidates_stale_context_and_current_branch(
     with pytest.raises(Exception, match="branch"):
         bad_branch.run()
     assert provider_calls == []
+
+
+def test_current_branch_reads_git_output_without_passthrough_stdout(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "feature", str(checkout)],
+        check=True,
+        capture_output=True,
+    )
+
+    assert current_branch(checkout) == "feature"

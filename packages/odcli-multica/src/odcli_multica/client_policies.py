@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-import shlex
 import stat
+import subprocess
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
 
 from odcli_multica.models import (
@@ -22,24 +23,15 @@ from odcli_multica.models import (
 from odoo_instance_sdk.execution import JsonValue
 
 if TYPE_CHECKING:
-    from multica_py import Issue
+    from multica_py import Issue, Project
 
 
 class IssueStore(Protocol):
     def get(self, issue_id: str) -> Issue: ...
 
 
-class BranchResultLike(Protocol):
-    returncode: int
-    stdout: str
-
-
-class BranchCommandLike(Protocol):
-    def run(self) -> BranchResultLike: ...
-
-
-class GitResourceLike(Protocol):
-    def passthrough(self, args: Sequence[str]) -> BranchCommandLike | BranchResultLike: ...
+class ProjectStore(Protocol):
+    def get(self, project_id: str) -> Project: ...
 
 
 def canonical_checkout(value: Path) -> Path:
@@ -58,6 +50,7 @@ def optional_root_creator(
     workspace_id: str,
     project_id: str,
     issues: IssueStore,
+    projects: ProjectStore,
 ) -> RootCreatorContext | None:
     if issue.creator_type is None and issue.creator_id is None:
         return None
@@ -67,10 +60,13 @@ def optional_root_creator(
         workspace_id=workspace_id,
         project_id=project_id,
         issues=issues,
+        projects=projects,
     )
 
 
-def resolve_root_creator(context: VerifiedTaskContext, issues: IssueStore) -> RootCreatorContext:
+def resolve_root_creator(
+    context: VerifiedTaskContext, issues: IssueStore, projects: ProjectStore
+) -> RootCreatorContext:
     try:
         issue = issues.get(context.issue_id)
     except Exception as exc:
@@ -81,6 +77,7 @@ def resolve_root_creator(context: VerifiedTaskContext, issues: IssueStore) -> Ro
         workspace_id=context.workspace_id,
         project_id=context.multica_project_id,
         issues=issues,
+        projects=projects,
     )
 
 
@@ -91,6 +88,7 @@ def resolve_root_creator_from_issue(
     workspace_id: str,
     project_id: str,
     issues: IssueStore,
+    projects: ProjectStore,
 ) -> RootCreatorContext:
     visited: set[str] = set()
     current_id = issue_id
@@ -99,7 +97,9 @@ def resolve_root_creator_from_issue(
         if current_id in visited:
             raise ContextVerificationError("issue lineage is cyclic")
         visited.add(current_id)
-        verify_lineage_issue(issue, workspace_id=workspace_id, project_id=project_id)
+        verify_lineage_issue(
+            issue, workspace_id=workspace_id, project_id=project_id, projects=projects
+        )
         parent_id = issue.parent_id
         if parent_id is None or not parent_id.strip():
             creator_type = (issue.creator_type or "").strip().casefold()
@@ -121,9 +121,18 @@ def resolve_root_creator_from_issue(
             raise ContextVerificationError("parent issue evidence is unavailable") from exc
 
 
-def verify_lineage_issue(issue: Issue, *, workspace_id: str, project_id: str) -> None:
+def verify_lineage_issue(
+    issue: Issue, *, workspace_id: str, project_id: str, projects: ProjectStore
+) -> None:
+    if issue.project_id is None:
+        raise ContextVerificationError("issue lineage project identity is unavailable")
     if issue.project_id != project_id:
-        raise ContextVerificationError("issue lineage crosses the verified workspace")
+        try:
+            ancestor_project = projects.get(issue.project_id)
+        except Exception as exc:
+            raise ContextVerificationError("issue lineage project evidence is unavailable") from exc
+        if ancestor_project.workspace_id != workspace_id:
+            raise ContextVerificationError("issue lineage crosses the verified workspace")
     issue_workspace = getattr(issue, "workspace_id", None)
     if issue_workspace is not None and issue_workspace != workspace_id:
         raise ContextVerificationError("issue lineage crosses the verified workspace")
@@ -262,20 +271,23 @@ def https_host(value: str) -> str | None:
     return authority
 
 
-def current_branch(git_resource: GitResourceLike) -> str:
-    command = git_resource.passthrough(("symbolic-ref", "--quiet", "--short", "HEAD"))
-    runner = getattr(command, "run", None)
-    result = (
-        cast("BranchResultLike", runner())
-        if callable(runner)
-        else cast("BranchResultLike", command)
-    )
-    if getattr(result, "returncode", 1) != 0:
+def current_branch(checkout: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(checkout), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ContextVerificationError("current Git branch is unavailable") from exc
+    if result.returncode != 0:
         raise ContextVerificationError("current Git branch is unavailable")
-    branch = getattr(result, "stdout", "")
-    if not isinstance(branch, str) or not branch.strip():
+    branch = result.stdout.strip()
+    if not branch:
         raise ContextVerificationError("current Git branch is unavailable")
-    return branch.strip()
+    return branch
 
 
 def remote_host_for_operation(args: Sequence[str], repository_url: str) -> str | None:
@@ -325,4 +337,9 @@ def validated_project_path(override: str | None, inferred: str) -> str:
 
 
 def askpass_command() -> str:
-    return shlex.join((sys.executable, "-m", "odcli_multica.askpass"))
+    helper = Path(sys.executable).with_name(
+        "odcli-multica-askpass.exe" if os.name == "nt" else "odcli-multica-askpass"
+    )
+    if not helper.is_file():
+        raise ContextVerificationError("GitLab askpass helper is unavailable")
+    return str(helper)

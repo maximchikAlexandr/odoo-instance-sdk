@@ -2506,7 +2506,7 @@ The root `--project PATH` selector SHALL address a main checkout for `db refresh
 - **THEN** the CLI exits with usage/context error before runtime or Caddy probes
 
 ### Requirement: Native Git and GitLab CLI routing
-The existing `odcli-multica` CLI SHALL expose a `git` group that reserves literal `--` for raw native Git passthrough while preserving the core Git resource's named sync behavior. Its `gitlab mr publish` leaf SHALL accept description only through `--description-file`, expose dry-run and bounded machine output, and resolve Multica/GitLab identity without a user-ID option. Native passthrough SHALL remain a documented raw transport exception rather than a bounded CLI envelope. The core wheel SHALL NOT import the Multica extension.
+The existing `odcli-multica` CLI SHALL expose a `git` group that reserves literal `--` for raw native Git passthrough while preserving the core Git resource's named sync behavior. Its `gitlab mr publish` leaf SHALL accept description only through `--description-file`, accept `--issue-url` when the client has no configured server URL, expose dry-run and bounded machine output, and resolve Multica/GitLab identity without a user-ID option. Native passthrough SHALL remain a documented raw transport exception rather than a bounded CLI envelope. The core wheel SHALL NOT import the Multica extension.
 
 #### Scenario: Existing Git subcommand remains stable
 - **WHEN** a caller invokes the Multica extension's named Git sync operation with push enabled
