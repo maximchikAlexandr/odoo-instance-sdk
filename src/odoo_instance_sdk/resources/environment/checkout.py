@@ -70,6 +70,7 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _resolve_checkout_dependency_inputs,
     _resolve_checkout_hash_lock,
 )
+from odoo_instance_sdk.resources.environment.checkout_source_runtime import _source_auxiliary_python
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -707,7 +708,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
         instance = self._client.instance.from_config(plan.source_config)
         if not isinstance(instance, OdooInstance) or instance.config.start_config is None:
             return None
-        python_bin = str(plan.venv / "bin" / "python") if plan.python_owned else plan.python_path
+        python_bin = _source_auxiliary_python(plan)
         instance.config = replace(
             instance.config,
             command_prefix=(python_bin, plan.odoo_bin),
@@ -760,7 +761,6 @@ class _CheckoutMixin(_CheckoutApiMixin):
                         f"existing adoption is {state}; recover or remove it before retrying",
                         details={"existing_id": str(existing["id"]), "state": state},
                     )
-            # Prove identity for new adoptions; a matching ready row already did.
             if not plan.adopted or existing is None:
                 self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:

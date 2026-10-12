@@ -60,11 +60,11 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/self_update.py", 828),
         ("src/odoo_instance_sdk/internal/self_update.py", 829),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 511),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 964),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 966),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 968),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 974),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 977),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 978),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 980),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 982),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 988),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 991),
     }
 )
 
@@ -105,11 +105,11 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
         "src/odoo_instance_sdk/resources/instance/identity.py",
         511,
     ): "lifecycle cleanup diagnostic transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 964): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 966): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 968): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 974): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 977): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 978): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 980): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 982): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 988): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 991): "alternate lifecycle JSON transport",
 }
 
 

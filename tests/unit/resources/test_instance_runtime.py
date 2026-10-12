@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import msgspec
 import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
@@ -22,6 +23,7 @@ from odoo_instance_sdk.internal.proc import (
     StepEvent,
     StepObserver,
 )
+from odoo_instance_sdk.internal.repo_key import git_common_dir
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
@@ -553,12 +555,15 @@ class TestInstancePrefix:
         )
         env = env_client.environments.checkout(project_manifest, "feat/prefix", options=opts)
         assert env.state == EnvironmentState.READY
+        env = msgspec.structs.replace(env, git_common_dir=str(project_manifest / "other.git"))
         inst = env_client.instance.from_environment(env)
         assert inst.config.command_prefix is not None
         assert len(inst.config.command_prefix) == 2
         assert inst.config.command_prefix[0] == str(fake_python)
         assert inst.config.command_prefix[1] == str(fake_python.parent / "odoo-bin")
         assert inst.config.master_password is None
+        assert inst._runtime_binding is not None
+        assert inst._runtime_binding.git_common_dir == git_common_dir(Path(env.repository_root))
 
     def test_from_environment_non_ready_raises(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path

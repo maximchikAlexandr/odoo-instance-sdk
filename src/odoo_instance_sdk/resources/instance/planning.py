@@ -581,32 +581,45 @@ class _PlanningMixin:
         timeout: float,
         pid: int,
     ) -> ReadinessResult:
-        """Poll health only while the exact persisted runtime still owns its listener."""
+        """Poll health while the exact persisted runtime lives, then prove listener ownership."""
         from odoo_instance_sdk.exceptions import ProcessExitedBeforeReady
         from odoo_instance_sdk.internal.health import poll_health
 
         expected_cwd = step.cwd
 
-        def owned() -> bool:
+        def process_owned() -> bool:
             return (
                 _recorded_runtime_pid(
                     cast("OdooInstance", self),
                     config,
+                    require_socket_owner=False,
                     expected_argv=step.argv,
                     expected_cwd=expected_cwd,
                 )
                 == pid
             )
 
-        if not owned():
-            raise ProcessExitedBeforeReady(
-                "detached runtime identity or listener ownership could not be proven"
-            )
-        return poll_health(
+        if not process_owned():
+            raise ProcessExitedBeforeReady("detached runtime identity could not be proven")
+        result = poll_health(
             self.config.base_url,
             timeout=timeout,
-            alive_check=owned,
+            alive_check=process_owned,
         )
+        if (
+            _recorded_runtime_pid(
+                cast("OdooInstance", self),
+                config,
+                require_socket_owner=True,
+                expected_argv=step.argv,
+                expected_cwd=expected_cwd,
+            )
+            != pid
+        ):
+            raise ProcessExitedBeforeReady(
+                "detached runtime listener ownership could not be proven"
+            )
+        return result
 
     def _clear_runtime_identity_if_matches(self, identity: _RuntimeIdentity) -> None:
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())

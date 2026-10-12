@@ -9,6 +9,7 @@ import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -59,9 +60,31 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
+from odoo_instance_sdk.resources.environment.checkout_source_runtime import _source_auxiliary_python
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 
 FIXED_NOW = datetime(2026, 9, 26, 21, 30, tzinfo=UTC)
+
+
+def test_copy_source_manager_uses_existing_project_python_before_owned_venv(
+    tmp_path: Path,
+) -> None:
+    source_python = tmp_path / "source-python"
+    source_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    source_python.chmod(0o700)
+    plan = cast(
+        "Any",
+        SimpleNamespace(
+            python_owned=True,
+            python_path=str(tmp_path / "not-created" / "venv" / "bin" / "python"),
+            project=SimpleNamespace(python=str(source_python)),
+            repo_root=tmp_path,
+        ),
+    )
+
+    assert _source_auxiliary_python(plan) == str(source_python)
+    assert not Path(plan.python_path).exists()
+
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient

@@ -1,7 +1,7 @@
 # numbered-odcli-slots Specification
 
 ## Purpose
-TBD - created by archiving change add-numbered-odcli-slots. Update Purpose after archive.
+Define the private numbered OdCLI lifecycle, its trusted canonical-tool entrypoint, and isolation from canonical and hot-fix installations.
 ## Requirements
 ### Requirement: One shared alternate-tool lifecycle
 Numbered and hot-fix launchers SHALL use one package-owned implementation for deterministic identity paths, uv installation, exact provenance, selector-capability probing, manifest serialization, shim rendering, lifecycle locking, bounded inspection, and fail-closed tool/state removal. The private numbered coordinator and hot-fix skill wrapper SHALL contain only their distinct policy and SHALL NOT implement or copy those mechanics.
@@ -17,6 +17,8 @@ Numbered and hot-fix launchers SHALL use one package-owned implementation for de
 ### Requirement: Numbered management is private service tooling
 The public `odcli` Click tree and package console scripts SHALL NOT expose install, list, replace, remove, or allocation commands for numbered installations. An instruction-only developer skill SHALL invoke a repository-owned service wrapper outside `.agents/skills/**`; that wrapper SHALL resolve the trusted canonical interpreter and invoke one private package coordinator. The user-agent OdCLI skill SHALL NOT describe or invoke numbered management. The coordinator SHALL require a full lowercase 40-character SDK SHA and SHALL return bounded machine-readable identity evidence without printing secrets.
 
+The service wrapper SHALL accept the normal `uv tool install` layout: the canonical `~/.local/bin/odcli` launcher MAY be a symlink only to the executable in the canonical `~/.local/share/uv/tools/odoo-instance-sdk` tool environment, and its absolute shebang interpreter MAY itself be a symlink within that tool environment's `bin` directory. A different launcher path, symlink target, interpreter location, non-executable target, or unsupported installed provenance SHALL fail before invoking the coordinator.
+
 #### Scenario: Public help has no slot manager
 - **WHEN** an operator inspects root and nested public CLI help
 - **THEN** no `slot` group or numbered lifecycle management leaf is present
@@ -24,6 +26,10 @@ The public `odcli` Click tree and package console scripts SHALL NOT expose insta
 #### Scenario: Service wrapper invokes the trusted package
 - **WHEN** an OdCLI developer follows the developer skill to create, list, inspect, or remove a numbered installation
 - **THEN** it validates canonical executable provenance before invoking the private package coordinator and emits one bounded result
+
+#### Scenario: Standard uv-tool symlinks remain trusted
+- **WHEN** the canonical launcher and interpreter use the symlinks created by `uv tool install` within the canonical tool environment
+- **THEN** the service wrapper accepts them and invokes that exact installed package; a redirected launcher or interpreter outside the canonical tool layout is rejected
 
 #### Scenario: User skill does not expose developer management
 - **WHEN** an agent loads the ordinary OdCLI user skill
@@ -54,6 +60,8 @@ The private coordinator SHALL hold one global allocation lock while scanning pos
 ### Requirement: Numbered tool, checkout, and Python environment are one linked identity
 For number `N`, the coordinator SHALL bind launcher `odcli-N`, selected root `<real-home>/.odcli-N`, manager metadata, checkout `<configured-checkout-parent>/odcli-N`, and exactly one caller-owned-checkout environment returned by the existing SDK adoption lifecycle. The fixed numbered manifest SHALL record the verified checkout path, source repository/SHA, environment identity/path, audited dependency-lock digest, and resolved interpreter path; hot-fix manifests SHALL NOT contain checkout or numbered-environment fields. Real `HOME` and Git, SSH, uv, and unrelated user configuration SHALL remain unchanged.
 
+Adoption MAY create the selected numbered state root before the shared alternate-tool publisher runs. Publication SHALL accept that exact existing numbered root while still rejecting an occupied launcher, tool or manager target and any symlink or path escape; the general hot-fix install path SHALL retain its absent-root requirement.
+
 #### Scenario: Fresh numbered identity is published
 - **WHEN** a valid exact SDK SHA is created with a clean configured reference checkout and all required external inputs
 - **THEN** the coordinator clones `odcli-N`, passes it to existing environment `adopt_command()`/`adopt()` for config/port/COPY DB/catalogue/owned-venv creation, verifies the returned environment plus checkout/tool provenance, publishes one linked manifest/launcher, and leaves every canonical or neighboring identity unchanged
@@ -61,6 +69,10 @@ For number `N`, the coordinator SHALL bind launcher `odcli-N`, selected root `<r
 #### Scenario: Tool provenance fails after checkout staging
 - **WHEN** the staged SDK tool does not match the requested repository and SHA
 - **THEN** no launcher or ready manifest is published; if adoption already returned ready, existing environment `remove()` cleans that environment once before the coordinator deletes only checkout/tool artifacts proven to belong to the reservation, while any cleanup failure retains linkage for retry
+
+#### Scenario: Adoption creates the numbered state root first
+- **WHEN** adoption has created `~/.odcli-N` and all other publication targets remain unoccupied
+- **THEN** the shared publisher completes the same numbered identity without treating that exact state root as a foreign installation; a pre-existing launcher, tool or manager target still blocks publication
 
 ### Requirement: Checkout coordination delegates the environment lifecycle
 The SDK private coordinator SHALL implement only global numbered allocation/reservation, clean reference/origin verification, local no-hardlink clone, origin rewrite, fixed marker/hash creation, external-checkout inspection, manifest linkage, and contained checkout deletion after environment cleanup. It SHALL pass the caller-owned checkout and GitLab-owned `ProjectConfig`/`EnvironmentCheckoutOptions` inputs to existing environment `adopt_command()`/`adopt()` for generated config, port, COPY database/backup restore, catalogue, owned venv, verification and recovery. It SHALL call existing environment `remove()` exactly once for DB/backup/config/lock/venv cleanup before deleting the external checkout. It SHALL NOT implement or copy config rewrite, port allocation, restore, DB drop, catalogue mutation, venv, or environment-cleanup mechanics. If a required option is proven unavailable, only the smallest typed extension of the existing environment API with a focused test is permitted. Secrets SHALL NOT be printed, returned, stored in the numbered manifest, or committed.
@@ -80,6 +92,8 @@ The SDK private coordinator SHALL implement only global numbered allocation/rese
 ### Requirement: Numbered cleanup is selective and fail closed
 Removal SHALL take the global allocation lock and selected lifecycle lock, re-read manifest/marker/linkage, and reject symlink/path escape, dirty or unpushed external checkout, origin/marker mismatch, running launcher, or foreign ownership before mutation. It SHALL then invoke existing environment `remove()` for the recorded environment; that path SHALL own runtime/config/lock/interpreter/database evidence and DB/backup/config/lock/venv cleanup while preserving the caller-owned checkout. Only after successful environment removal SHALL the coordinator delete the marked checkout and delegate launcher/tool/state removal to the shared lifecycle. It SHALL NOT independently drop a database or delete generated config, dependency lock, venv, backup, filestore, or catalogue data. A failed environment removal or checkout deletion SHALL retain linkage for bounded retry and preserve every neighbor/reference/persistent asset.
 
+Environment removal SHALL resolve its catalogue, locks and other global evidence under the selected numbered root for the full guarded cleanup, including when the private coordinator is invoked from a canonical process. It SHALL restore the caller's root selection after completion or failure.
+
 #### Scenario: One clean numbered identity is removed
 - **WHEN** two numbered identities exist and one idle identity has a clean pushed checkout with matching markers/configuration
 - **THEN** existing environment removal deletes only its recorded DB/backup/config/lock/owned venv, then the coordinator deletes only its marked checkout, and the shared alternate lifecycle removes only its launcher/tool/manager/selected root
@@ -87,6 +101,10 @@ Removal SHALL take the global allocation lock and selected lifecycle lock, re-re
 #### Scenario: Dirty checkout blocks removal
 - **WHEN** the selected linked checkout has an uncommitted file or unpushed commit
 - **THEN** removal changes no database, checkout, launcher, tool, manifest, lock, state root, or neighbor
+
+#### Scenario: Canonical coordinator removes one numbered root
+- **WHEN** a canonical process requests removal of an idle numbered installation
+- **THEN** the environment cleanup reads the selected `~/.odcli-N` catalogue and removes only that identity's proven resources; the canonical and neighboring roots retain their contents and the caller's original root selection is restored
 
 ### Requirement: Hot-fix identity remains isolated without checkout policy
 The existing `odcli-fix-ISSUE` workflow SHALL retain its positive issue identity, exact reviewed SHA, PR linkage, isolated `~/.odcli-fix-ISSUE`, shared lifecycle, and merge/ancestry/issue/branch retirement gates. It SHALL NOT allocate or manage numbered checkouts, ports, databases, or filestores.

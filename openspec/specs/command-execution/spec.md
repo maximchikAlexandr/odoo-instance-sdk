@@ -315,6 +315,8 @@ The single production process pump SHALL write the immutable `PreparedStep.stdin
 
 The internal process pump SHALL drain `stdout` and `stderr` concurrently and continuously for every spawned long-running handle whose `inherit_stdio` is false. Each stream SHALL keep the last `_TIMEOUT_TAIL_BYTES = 8192` bytes after redaction. It SHALL attach that tail and the original error type to readiness/startup failures. Readers SHALL be terminated together with the owned process group on cleanup and interrupt. `DEVNULL` SHALL NOT be used. JSON/TOON SHALL remain one final document; drained bytes SHALL NOT be written to CLI stdout.
 
+Termination SHALL signal and reap the owned child or process group before stopping its pipe drain. The drain SHALL join readers before closing buffered streams and SHALL not close a stream from another thread while a reader remains blocked in `read()`. A failed or slow reader join SHALL remain bounded without hanging the caller.
+
 #### Scenario: Limited output crosses its bound
 
 - **WHEN** `run_captured_limited()` receives a chunk that would exceed the configured stream limit
@@ -339,6 +341,11 @@ The internal process pump SHALL drain `stdout` and `stderr` concurrently and con
 
 - **WHEN** cleanup or interrupt runs
 - **THEN** the child process group and the readers are terminated with no leaked threads or handles
+
+#### Scenario: Buffered reader does not deadlock detached cleanup
+
+- **WHEN** a detached child has a reader blocked in buffered pipe `read()` and its runtime cleanup begins
+- **THEN** the owned child is terminated and reaped before the drain joins its readers, and cleanup returns without blocking on a cross-thread stream close
 
 #### Scenario: machine stdout stays a single document
 

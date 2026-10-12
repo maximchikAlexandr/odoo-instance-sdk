@@ -40,10 +40,16 @@ def _canonical_interpreter() -> Path:
     executable = shutil.which("odcli")
     if executable is None:
         raise RuntimeError("canonical odcli is not available on PATH")
-    canonical_executable = (Path.home() / ".local" / "bin" / "odcli").resolve()
+    canonical_executable = Path.home() / ".local" / "bin" / "odcli"
     executable_path = Path(executable)
+    canonical_tool_root = Path.home() / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
     try:
-        if executable_path.is_symlink() or executable_path.resolve() != canonical_executable:
+        if executable_path != canonical_executable:
+            raise RuntimeError("canonical odcli is not the trusted user installation")
+        # uv tool install links the user command to the tool environment.
+        if executable_path.is_symlink() and executable_path.resolve(strict=True) != (
+            canonical_tool_root / "bin" / "odcli"
+        ).resolve(strict=True):
             raise RuntimeError("canonical odcli is not the trusted user installation")
         executable_stat = executable_path.stat()
         if not stat.S_ISREG(executable_stat.st_mode) or not executable_stat.st_mode & 0o111:
@@ -54,12 +60,10 @@ def _canonical_interpreter() -> Path:
     if not first_line.startswith("#!"):
         raise RuntimeError("canonical odcli has no absolute interpreter shebang")
     interpreter = Path(first_line[2:].strip().split()[0])
-    canonical_tool_root = Path.home() / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
     if (
         not interpreter.is_absolute()
-        or interpreter.is_symlink()
         or not interpreter.is_file()
-        or not interpreter.resolve().is_relative_to(canonical_tool_root.resolve())
+        or interpreter.parent != canonical_tool_root / "bin"
         or not interpreter.stat().st_mode & 0o111
     ):
         raise RuntimeError("canonical odcli interpreter is not an absolute executable")

@@ -256,6 +256,8 @@ class InstanceFactory:
         except (ProjectManifestNotFoundError, PostgresClusterError):
             cluster = None
 
+        project_root = Path(environment.repository_root).resolve()
+        project_common = git_common_dir(project_root)
         return OdooInstance(
             config=InstanceConfig(
                 base_url=normalized,
@@ -278,11 +280,10 @@ class InstanceFactory:
                 owner_kind="environment",
                 owner_id=str(environment.id),
                 project_id=(
-                    environment.project_id
-                    or f"project_{repo_key(Path(environment.repository_root), Path(environment.git_common_dir))}"
+                    environment.project_id or f"project_{repo_key(project_root, project_common)}"
                 ),
-                repository_root=Path(environment.repository_root).resolve(),
-                git_common_dir=Path(environment.git_common_dir).resolve(),
+                repository_root=project_root,
+                git_common_dir=project_common,
             ),
         )
 

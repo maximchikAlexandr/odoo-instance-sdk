@@ -1246,6 +1246,8 @@ Adoption SHALL require COPY mode, an explicit compatible base and exactly one ex
 
 Adoption and ordinary checkout SHALL use the same internal provenance normalization and the same public/execution projection builders after their mode-specific validation. The captured `base_revision` SHALL populate `plan.provenance.resolved_base_revision` for both paths; adoption SHALL retain its separate caller-owned checkout and repository-identity checks.
 
+Removal of an adopted COPY environment on an SDK-owned Compose PostgreSQL cluster SHALL validate the exact caller-owned checkout and endpoint claim, then reuse the managed cluster's volume, restore-binding, database and filestore ownership guards. An external PostgreSQL target SHALL retain its separate exact restore-provenance guard. A foreign cluster binding or changed adoption claim SHALL fail before database mutation.
+
 #### Scenario: Adopt a native external checkout
 
 - **WHEN** a valid existing checkout and compatible explicit COPY inputs are supplied
@@ -1377,6 +1379,8 @@ Environment adoption SHALL compare configured and caller-owned checkout remotes 
 
 For named-remote and retained-backup COPY checkout or adoption, only backup acquisition SHALL access the selected remote source. Target preflight, auxiliary Database Manager startup or reuse, restore, the single captured PostgreSQL before/after probe pair, generated filestore, catalogue binding, and compensation SHALL resolve from the configured local project runtime and PostgreSQL cluster. The source kind SHALL NOT disable the local auxiliary restore lifecycle or redirect target mutation to the backup source.
 
+When the target environment owns a Python environment that has not yet been created, the local auxiliary Database Manager SHALL use the configured source project's available Python interpreter. It SHALL NOT attempt to launch through the future target interpreter. An unavailable source interpreter SHALL fail before creating the target environment's owned artifacts.
+
 #### Scenario: Named remote provisions a local adopted environment
 - **WHEN** adoption selects a named remote, an absent local target database, and a free or exactly-owned local auxiliary endpoint
 - **THEN** the backup SHALL be acquired from that named remote, restored through the bounded local auxiliary Database Manager, proven by the captured local PostgreSQL after-probe, and bound to the adopted environment with an isolated filestore
@@ -1384,6 +1388,14 @@ For named-remote and retained-backup COPY checkout or adoption, only backup acqu
 #### Scenario: Retained backup provisions a local adopted environment
 - **WHEN** adoption selects an exact retained backup UUID and an absent local target database
 - **THEN** it SHALL skip remote acquisition, restore through the same bounded local auxiliary Database Manager, and apply the same local target and cleanup postconditions as named-remote adoption
+
+#### Scenario: Source Python starts auxiliary Odoo before target venv exists
+- **WHEN** a COPY checkout will create an owned target Python environment and the local auxiliary Database Manager must start first
+- **THEN** the auxiliary Odoo uses the configured source project's available interpreter, while the eventual environment runtime uses its distinct owned target interpreter
+
+#### Scenario: Source Python is unavailable
+- **WHEN** the configured source project interpreter is missing during auxiliary planning
+- **THEN** COPY checkout fails before creating an owned target environment or claiming a ready numbered identity
 
 #### Scenario: Local target postcondition fails closed
 - **WHEN** restore returns without the captured local PostgreSQL after-probe finding the exact target

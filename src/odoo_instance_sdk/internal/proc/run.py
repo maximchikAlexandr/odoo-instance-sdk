@@ -174,8 +174,6 @@ class ProcessHandle:
 
     def terminate(self) -> None:
         """Terminate this owned process through the bounded process seam."""
-        if self.drain is not None:
-            self.drain.stop()
         from .terminate import terminate as terminate_process
 
         terminate_process(self, process_group_id=self.process_group_id)

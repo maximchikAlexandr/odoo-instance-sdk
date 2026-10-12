@@ -63,46 +63,48 @@ def terminate(
     process_group_id: int | None = None,
     timeout: float = _CLEANUP_TIMEOUT,
 ) -> None:
-    if handle.drain is not None:
-        handle.drain.stop()
-    if sys.platform == "win32":
-        _taskkill(handle, force=False)
+    try:
+        if sys.platform == "win32":
+            _taskkill(handle, force=False)
+            try:
+                handle.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _taskkill(handle, force=True)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    handle.wait(timeout=timeout)
+            return
+
+        group_id = process_group_id or handle.process_group_id
+        if group_id is None:
+            with contextlib.suppress(ProcessLookupError):
+                group_id = os.getpgid(handle.pid)
+        if group_id is None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                handle.wait(timeout=timeout)
+            return
+        with contextlib.suppress(OSError):
+            os.killpg(group_id, signal.SIGTERM)
+
+        # Reap the direct child before checking the group.  On Darwin a terminated
+        # group leader can remain visible to ``killpg(..., 0)`` while it is a
+        # zombie; waiting on the owned handle first makes signal-driven foreground
+        # cleanup bounded instead of waiting through the full TERM/KILL windows.
         try:
             handle.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _taskkill(handle, force=True)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                handle.wait(timeout=timeout)
-        return
-
-    group_id = process_group_id or handle.process_group_id
-    if group_id is None:
-        with contextlib.suppress(ProcessLookupError):
-            group_id = os.getpgid(handle.pid)
-    if group_id is None:
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            handle.wait(timeout=timeout)
-        return
-    with contextlib.suppress(OSError):
-        os.killpg(group_id, signal.SIGTERM)
-
-    # Reap the direct child before checking the group.  On Darwin a terminated
-    # group leader can remain visible to ``killpg(..., 0)`` while it is a
-    # zombie; waiting on the owned handle first makes signal-driven foreground
-    # cleanup bounded instead of waiting through the full TERM/KILL windows.
-    try:
-        handle.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(OSError):
-            os.killpg(group_id, signal.SIGKILL)
-        _wait_for_process_group_exit(handle, group_id, timeout=timeout)
-    else:
-        if is_process_group_alive(group_id):
             with contextlib.suppress(OSError):
                 os.killpg(group_id, signal.SIGKILL)
             _wait_for_process_group_exit(handle, group_id, timeout=timeout)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        handle.wait(timeout=timeout)
+        else:
+            if is_process_group_alive(group_id):
+                with contextlib.suppress(OSError):
+                    os.killpg(group_id, signal.SIGKILL)
+                _wait_for_process_group_exit(handle, group_id, timeout=timeout)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            handle.wait(timeout=timeout)
+    finally:
+        if handle.drain is not None:
+            handle.drain.stop()
 
 
 def is_process_alive(pid: int, *, expected_create_time: float | None = None) -> bool:
