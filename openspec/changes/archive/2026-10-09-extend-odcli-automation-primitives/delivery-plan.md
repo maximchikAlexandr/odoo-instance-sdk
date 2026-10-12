@@ -277,15 +277,31 @@ set -euo pipefail
 "$SLOT_LAUNCHER" --project "$CHECKOUT" db refresh --restore --no-input --format json > "$RUN_DIR/e2e-2-restore.json"
 "$SLOT_LAUNCHER" --project "$CHECKOUT" run --detach --wait-ready --format json -- > "$RUN_DIR/e2e-2-run.json"
 "$TEST_PYTHON" "$CHECKOUT/tests/e2e/prepare_myl411_stand.py" --start-local-monitors --stand "$RUN_DIR/stand.json"
-"$TEST_PYTHON" "$CHECKOUT/tests/e2e/prepare_myl411_http_caddy.py" --stand "$RUN_DIR/stand.json" --private-config "$TEST_CADDY_CONFIG" --admin-url "$TEST_CADDY_ADMIN_URL" --candidate "$RUN_DIR/http-caddy.candidate" --apply
+
+restore_http_caddy() {
+    child_status=$?
+    trap - EXIT HUP INT TERM
+    if ! "$TEST_PYTHON" "$CHECKOUT/tests/e2e/prepare_myl411_http_caddy.py" --stand "$RUN_DIR/stand.json" --private-config "$TEST_CADDY_CONFIG" --admin-url "$TEST_CADDY_ADMIN_URL" --snapshot "$RUN_DIR/http-caddy.before" --restore; then
+        exit 1
+    fi
+    exit "$child_status"
+}
+trap restore_http_caddy EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+"$TEST_PYTHON" "$CHECKOUT/tests/e2e/prepare_myl411_http_caddy.py" --stand "$RUN_DIR/stand.json" --private-config "$TEST_CADDY_CONFIG" --admin-url "$TEST_CADDY_ADMIN_URL" --candidate "$RUN_DIR/http-caddy.candidate" --snapshot "$RUN_DIR/http-caddy.before" --apply
 "$TEST_PYTHON" -m pytest -q "$CHECKOUT/tests/e2e/test_myl411_http_proxy.py::test_local_http_proxy_and_panel"
+"$TEST_PYTHON" "$CHECKOUT/tests/e2e/prepare_myl411_http_caddy.py" --stand "$RUN_DIR/stand.json" --private-config "$TEST_CADDY_CONFIG" --admin-url "$TEST_CADDY_ADMIN_URL" --snapshot "$RUN_DIR/http-caddy.before" --restore
+trap - EXIT HUP INT TERM
 ```
 
 The monitor start action SHALL supervise both baseline and candidate in local mode and wait for their read endpoints before the HTTP route reload.
 
-The monitor runs in local mode under the test project's foreground supervisor and must be ready before pytest. `prepare_myl411_http_caddy.py` reads the separate Caddy's existing full config and private listener/admin parameters; it SHALL preserve the health route and admin listener, add distinct test-owned HTTP Host routes for baseline and candidate Odoo/local monitors, validate the complete candidate with Caddy, then reload only `TEST_CADDY_ADMIN_URL`. It SHALL reject any path/process/admin identity matching the primary Caddy, preserve prior config bytes, and register a fail-safe restore/reload before mutation. No SDK publication settings or `publish` command are used. The test SHALL confirm restored database/filestore binding, ready runtime identity, authenticated Odoo login, redirects, assets, attachment and bus/WebSocket through HTTP, local panel SPA/read API, missing Basic Auth rejection and unknown Host non-routing. It SHALL assert the local snapshot against the runtime and SHALL NOT expect a production external URL or external-mode pgAdmin omission. The exact HTTPS route, forwarded-origin, external-mode and secure-CSRF contracts remain with the CI checks mapped above.
+The monitor runs in local mode under the test project's foreground supervisor and must be ready before pytest. `prepare_myl411_http_caddy.py` reads the separate Caddy's existing full config and private listener/admin parameters; it SHALL preserve the health route and admin listener, add distinct test-owned HTTP Host routes for baseline and candidate Odoo/local monitors, validate the complete candidate with Caddy, then reload only `TEST_CADDY_ADMIN_URL`. It SHALL reject any path/process/admin identity matching the primary Caddy. Before mutation, `--apply` SHALL atomically persist the original config bytes, their digest, the parsed config read-back, and the verified health/admin listener identities in `--snapshot`. The idempotent `--restore` SHALL atomically restore those exact bytes, reload the same verified test admin endpoint, and fail unless byte/digest and parsed-config read-back match the snapshot and both the original health route and admin listener respond. The shell arms the `EXIT` trap before `--apply`; therefore pytest failure, interruption, or a partially failed apply still enters restore. The explicit successful restore runs before traps are disarmed. A child failure remains non-zero after successful restoration, and any restoration/read-back failure forces a non-zero result. No SDK publication settings or `publish` command are used. The test SHALL confirm restored database/filestore binding, ready runtime identity, authenticated Odoo login, redirects, assets, attachment and bus/WebSocket through HTTP, local panel SPA/read API, missing Basic Auth rejection and unknown Host non-routing. It SHALL assert the local snapshot against the runtime and SHALL NOT expect a production external URL or external-mode pgAdmin omission. The exact HTTPS route, forwarded-origin, external-mode and secure-CSRF contracts remain with the CI checks mapped above.
 
-The fresh agent repeats restore/run and the test-owned HTTP route application in a reset stand, uses the separate baseline/candidate browser profiles from `stand.json`, and checks the JSON endpoint plus browser paths independently. Capture the root-help render pair with the same text method as `E2E-1`. Capture the actual local-panel screenshot pair with pinned Playwright/Chromium at `1440x900`, the same test fixture and locale, and a full database/filestore/browser reset between revisions:
+The fresh agent repeats restore/run in a reset stand, then uses the same executable lifecycle block above: arm the idempotent `EXIT`/signal restore traps, apply the test-owned HTTP routes, perform the independent JSON/browser walkthrough instead of pytest, explicitly restore, and only then disarm the traps. The walkthrough is incomplete unless `--restore` reads back the original bytes/digest and parsed config and verifies the original health route and admin listener. The agent uses the separate baseline/candidate browser profiles from `stand.json` and checks the JSON endpoint plus browser paths independently. Capture the root-help render pair with the same text method as `E2E-1`. Capture the actual local-panel screenshot pair with pinned Playwright/Chromium at `1440x900`, the same test fixture and locale, and a full database/filestore/browser reset between revisions:
 
 ```sh
 LC_ALL=C NO_COLOR=1 COLUMNS=120 "$BASELINE_SLOT_LAUNCHER" --help > "$RUN_DIR/e2e-2-root-help-baseline.txt"
