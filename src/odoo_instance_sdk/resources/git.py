@@ -204,7 +204,8 @@ def _commit_context_from_results(
         first += resolved_ticket + " "
     message = first + description
     if link is not None:
-        message += "\n\n" + link
+        # A bare URL is parsed as an `https:` trailer by git interpret-trailers.
+        message += "\n\n<" + link + ">"
     return GitCommitContext(
         module=module,
         tag=resolved_tag,

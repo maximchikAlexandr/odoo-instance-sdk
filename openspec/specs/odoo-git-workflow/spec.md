@@ -7,12 +7,12 @@ TBD - created by archiving change developer-workflow-cli-contracts. Update Purpo
 
 ### Requirement: Frozen Odoo commit context and message
 
-The Git resource SHALL use the already-resolved project ticket settings from the selected project manifest when composing a commit message in an environment worktree. It SHALL NOT re-load `.odcli/project.toml` from the environment worktree root. When `ticket_link_enabled` is `true` and `ticket_base_url` is set in the selected project manifest, the ticket URL SHALL be appended as the second paragraph of the commit message, regardless of whether the worktree has its own `.odcli/project.toml`. Copying `.odcli/project.toml` into each worktree SHALL NOT be required.
+The Git resource SHALL use the already-resolved project ticket settings from the selected project manifest when composing a commit message in an environment worktree. It SHALL NOT re-load `.odcli/project.toml` from the environment worktree root. When `ticket_link_enabled` is `true` and `ticket_base_url` is set in the selected project manifest, the ticket URL SHALL be appended as an angle-bracketed link in the second paragraph of the commit message, regardless of whether the worktree has its own `.odcli/project.toml`. Copying `.odcli/project.toml` into each worktree SHALL NOT be required. History validation SHALL accept existing bare URL paragraphs and optional standard `Co-authored-by` trailers without accepting arbitrary extra paragraphs.
 
 #### Scenario: Build a configured ticket commit
 
 - **WHEN** tracker-neutral `ticket_link_enabled` and `ticket_base_url` settings are configured and ticket resolution succeeds by `--ticket`, registered-environment branch, or default-checkout branch precedence
-- **THEN** the immutable plan contains `[TAG] module: TICKET description`, a blank line, and configured base URL plus ticket
+- **THEN** the immutable plan contains `[TAG] module: TICKET description`, a blank line, and the configured base URL plus ticket enclosed in angle brackets
 - **AND** dry-run and execution share scope, tag, ticket, URL, staged paths, and command snapshot
 - **AND** no supported identifier, provenance key, machine field, error, or help text names a ticket vendor
 
@@ -20,6 +20,11 @@ The Git resource SHALL use the already-resolved project ticket settings from the
 
 - **WHEN** `ticket_base_url` is configured as `https://tracker.example/issues/` and the resolved ticket is `PROJ-123`
 - **THEN** the commit message links to `https://tracker.example/issues/PROJ-123` in its second paragraph
+
+#### Scenario: Git trailer hook preserves the ticket link
+
+- **WHEN** a `prepare-commit-msg` hook appends a standard `Co-authored-by` trailer with `git interpret-trailers`
+- **THEN** the committed second paragraph keeps the exact ticket URL and the trailing co-author is accepted by history validation
 
 #### Scenario: Infer prefix deterministically
 

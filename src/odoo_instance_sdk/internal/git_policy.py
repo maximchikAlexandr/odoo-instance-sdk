@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 _TICKET = re.compile(r"(?<![A-Za-z])([A-Z][A-Z0-9]+-\d+)(?:_\d+)?(?![A-Za-z0-9])")
 _MESSAGE = re.compile(r"^\[(?P<tag>[A-Z][A-Z0-9_-]*)\] (?P<module>[^:]+): .+$")
 _SUBJECT_TICKET = re.compile(r"^(?P<ticket>[A-Z][A-Z0-9]+-\d+)(?:_\d+)?(?:\s+|$)")
+_COAUTHOR = re.compile(r"Co-authored-by: [^<>\n]+ <[^<>\s]+@[^<>\s]+>", re.IGNORECASE)
 _ALLOWED_TAGS = frozenset(
     {"ADD", "DEL", "PORT", "I18N", "UI", "TEST", "DOC", "CI", "IMP", "FIX", "REF"}
 )
@@ -126,8 +127,30 @@ def _subject_parts(message: str) -> tuple[str, str, str | None] | None:
     )
 
 
-def _message_issue(message: str, *, root: Path) -> str | None:
+def _message_paragraphs(message: str) -> tuple[str, ...]:
     paragraphs = tuple(part for part in message.strip("\n").split("\n\n") if part)
+    if paragraphs and all(_COAUTHOR.fullmatch(line) for line in paragraphs[-1].splitlines()):
+        return paragraphs[:-1]
+    return paragraphs
+
+
+def _link_target(paragraph: str) -> str:
+    return paragraph[1:-1] if paragraph.startswith("<") and paragraph.endswith(">") else paragraph
+
+
+def _ticket_link_issue(paragraph: str, base_url: str) -> str | None:
+    link = _link_target(paragraph)
+    if not re.fullmatch(r"https?://\S+", link):
+        return "the second commit paragraph must be an HTTP(S) link"
+    if not link.startswith(base_url.rstrip("/") + "/"):
+        return "commit ticket link does not use the configured base URL"
+    if _TICKET.search(link.rsplit("/", 1)[-1]) is None:
+        return "commit ticket link does not contain a valid Ticket key"
+    return None
+
+
+def _message_issue(message: str, *, root: Path) -> str | None:
+    paragraphs = _message_paragraphs(message)
     if len(paragraphs) not in {1, 2} or any("\n" in part for part in paragraphs[:1]):
         return "commit message must contain one subject or a subject plus one link paragraph"
     parts = _subject_parts(message)
@@ -142,11 +165,8 @@ def _message_issue(message: str, *, root: Path) -> str | None:
     if settings is not None and settings.enabled:
         if len(paragraphs) != 2 or not settings.base_url:
             return "configured ticket links require a second message paragraph"
-        if not paragraphs[1].startswith(settings.base_url.rstrip("/") + "/"):
-            return "commit ticket link does not use the configured base URL"
-        if _TICKET.search(paragraphs[1].rsplit("/", 1)[-1]) is None:
-            return "commit ticket link does not contain a valid Ticket key"
-    elif len(paragraphs) == 2 and not re.fullmatch(r"https?://\S+", paragraphs[1]):
+        return _ticket_link_issue(paragraphs[1], settings.base_url)
+    if len(paragraphs) == 2 and not re.fullmatch(r"https?://\S+", _link_target(paragraphs[1])):
         return "the second commit paragraph must be an HTTP(S) link"
     return None
 
@@ -198,9 +218,9 @@ def check_log(  # noqa: C901
         except Exception:
             settings = None
         if parts is not None and settings is not None and settings.enabled:
-            paragraphs = tuple(part for part in message.strip("\n").split("\n\n") if part)
+            paragraphs = _message_paragraphs(message)
             link_ticket = (
-                safe_ticket(paragraphs[1].rsplit("/", 1)[-1])
+                safe_ticket(_link_target(paragraphs[1]).rsplit("/", 1)[-1])
                 if len(paragraphs) == 2 and "/" in paragraphs[1]
                 else None
             )
