@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import traceback
 import uuid
 from pathlib import Path
 from typing import cast
@@ -8,13 +9,19 @@ from typing import cast
 import pytest
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError, StalePlanError
-from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.paths import get_catalog_path
+from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
+    ProcessResult,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.models import EnvironmentState
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
 )
 from odoo_instance_sdk.resources.environment.checkout_planning import _CheckoutSnapshot
+from tests.unit.resources.adoption_test_support import _external_checkout, _process_result
 
 
 def test_adopt_command_captures_external_checkout_without_git_creation(
@@ -57,76 +64,262 @@ def test_adopt_command_captures_external_checkout_without_git_creation(
     assert checkout.is_dir()
 
 
-def _add_named_source(project_manifest: Path) -> None:
-    manifest = project_manifest / ".odcli" / "project.toml"
-    manifest.write_text(
-        manifest.read_text()
-        + "\n[remote_instances.staging]\n"
-        + 'base_url = "https://staging.example"\n'
-        + 'database = "comerta"\n'
-        + 'git_branch = "main"\n'
-    )
-
-
-def _external_checkout(project_manifest: Path, tmp_path: Path, *, linked: bool) -> Path:
-    subprocess.run(
-        ["git", "-C", str(project_manifest), "remote", "add", "origin", str(project_manifest)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    checkout = tmp_path / ("linked" if linked else "clone")
-    if linked:
+@pytest.mark.parametrize(
+    ("configured_remote", "checkout_remote"),
+    [
+        ("ssh://git@github.com/org/repository.git", "git@GITHUB.com:org/repository.git"),
+        ("git@github.com:org/repository.git", "ssh://git@GitHub.com/org/repository.git"),
+    ],
+)
+def test_adopt_command_accepts_transport_equivalent_repository_origins(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    configured_remote: str,
+    checkout_remote: str,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
+    for path, remote in ((project_manifest, configured_remote), (checkout, checkout_remote)):
         subprocess.run(
-            [
-                "git",
-                "-C",
-                str(project_manifest),
-                "worktree",
-                "add",
-                "-b",
-                "adopted",
-                str(checkout),
-                "main",
-            ],
+            ["git", "-C", str(path), "remote", "set-url", "origin", remote],
             check=True,
             capture_output=True,
             text=True,
         )
-    else:
+
+    command = env_client.environments.adopt_command(  # type: ignore[attr-defined]
+        project_manifest,
+        checkout,
+        options=EnvironmentCheckoutOptions(
+            db_mode=EnvironmentDatabaseMode.COPY,
+            base_ref="main",
+            remote_name="staging",
+            python=str(fake_python),
+        ),
+    )
+    assert command._private_projection() is not None
+
+
+@pytest.mark.parametrize(
+    ("difference", "configured_remote", "checkout_remote"),
+    [
+        (
+            "host",
+            "ssh://git@github.com/org/repository.git",
+            "git@other.example:org/repository.git",
+        ),
+        (
+            "explicit port",
+            "ssh://git@github.com/org/repository.git",
+            "ssh://git@github.com:2222/org/repository.git",
+        ),
+        (
+            "path",
+            "ssh://git@github.com/org/repository.git",
+            "git@github.com:org/other-repository.git",
+        ),
+        (
+            "transport",
+            "https://github.com/org/repository.git",
+            "git@github.com:org/repository.git",
+        ),
+    ],
+)
+def test_adopt_command_rejects_non_equivalent_origins_before_mutation(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    difference: str,
+    configured_remote: str,
+    checkout_remote: str,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
+    for path, remote in ((project_manifest, configured_remote), (checkout, checkout_remote)):
         subprocess.run(
-            ["git", "clone", str(project_manifest), str(checkout)],
+            ["git", "-C", str(path), "remote", "set-url", "origin", remote],
             check=True,
             capture_output=True,
             text=True,
         )
+    catalog_path = get_catalog_path(ensure_exists=False)
+    catalog_before = catalog_path.read_bytes() if catalog_path.exists() else None
+
+    with pytest.raises(EnvironmentConflictError, match="does not match the selected project"):
+        env_client.environments.adopt_command(  # type: ignore[attr-defined]
+            project_manifest,
+            checkout,
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                base_ref="main",
+                remote_name="staging",
+                python=str(fake_python),
+            ),
+        )
+
+    assert difference
+    assert checkout.is_dir()
+    assert (catalog_path.read_bytes() if catalog_path.exists() else None) == catalog_before
+
+
+def test_adopt_command_rejects_unsafe_repository_origin_before_mutation(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
     subprocess.run(
-        ["git", "-C", str(checkout), "config", "user.email", "test@test.com"],
+        [
+            "git",
+            "-C",
+            str(project_manifest),
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/org/repository.git?token=secret",
+        ],
         check=True,
         capture_output=True,
         text=True,
     )
+
+    with pytest.raises(EnvironmentConflictError, match="does not match the selected project"):
+        env_client.environments.adopt_command(  # type: ignore[attr-defined]
+            project_manifest,
+            checkout,
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                base_ref="main",
+                remote_name="staging",
+                python=str(fake_python),
+            ),
+        )
+
+    assert checkout.is_dir()
+    assert env_client.environments.list(project=project_manifest) == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("configured_remote", "checkout_remote"),
+    [
+        (
+            "ssh://git@github.com/org/repository.git",
+            "git@github.com:/org/repository.git",
+        ),
+        (
+            "ssh://git@github.com/org/repository.git",
+            "ssh://git@github.com//org/repository.git",
+        ),
+        (
+            "git@github.com:org/repository.git",
+            "git@github.com:/org/repository.git",
+        ),
+        (
+            "git@github.com:org/repository.git",
+            "git@github.com://org/repository.git",
+        ),
+    ],
+    ids=["relative-vs-absolute-scp", "single-vs-double-uri", "relative-scp", "double-leading-scp"],
+)
+def test_adopt_command_rejects_distinct_repository_path_forms_before_mutation(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    configured_remote: str,
+    checkout_remote: str,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
+    for path, remote in ((project_manifest, configured_remote), (checkout, checkout_remote)):
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "set-url", "origin", remote],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    catalog_path = get_catalog_path(ensure_exists=False)
+    catalog_before = catalog_path.read_bytes() if catalog_path.exists() else None
+
+    with pytest.raises(EnvironmentConflictError, match="does not match the selected project"):
+        env_client.environments.adopt_command(  # type: ignore[attr-defined]
+            project_manifest,
+            checkout,
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                base_ref="main",
+                remote_name="staging",
+                python=str(fake_python),
+            ),
+        )
+
+    assert checkout.is_dir()
+    assert (catalog_path.read_bytes() if catalog_path.exists() else None) == catalog_before
+
+
+@pytest.mark.parametrize(
+    ("remote", "marker"),
+    [
+        pytest.param(
+            "https://git\N{FULLWIDTH COLON}authority-redaction-marker@example.com/org/repository.git",
+            "authority-redaction-marker",
+            id="invalid-unicode-authority",
+        ),
+        pytest.param(
+            "ssh://git@example.com:port-redaction-marker/org/repository.git",
+            "port-redaction-marker",
+            id="invalid-port",
+        ),
+    ],
+)
+def test_adopt_command_sanitizes_invalid_authority_before_mutation(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    remote: str,
+    marker: str,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=False)
     subprocess.run(
-        ["git", "-C", str(checkout), "config", "user.name", "Test"],
+        [
+            "git",
+            "-C",
+            str(project_manifest),
+            "remote",
+            "set-url",
+            "origin",
+            remote,
+        ],
         check=True,
         capture_output=True,
         text=True,
     )
-    _add_named_source(project_manifest)
-    return checkout
+    catalog_path = get_catalog_path(ensure_exists=False)
+    catalog_before = catalog_path.read_bytes() if catalog_path.exists() else None
 
+    with pytest.raises(EnvironmentConflictError) as raised:
+        env_client.environments.adopt_command(  # type: ignore[attr-defined]
+            project_manifest,
+            checkout,
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                base_ref="main",
+                remote_name="staging",
+                python=str(fake_python),
+            ),
+        )
 
-def _process_result(step: PreparedProcess, stdout: str = "", stderr: str = "") -> ProcessResult:
-    text = getattr(step, "text", False)
-    return ProcessResult(
-        argv=step.argv,
-        returncode=0,
-        stdout=stdout if text else stdout.encode(),
-        stderr=stderr if text else stderr.encode(),
-        duration=0.0,
-        cwd=step.cwd,  # type: ignore[attr-defined]
-        environment=step.environment,  # type: ignore[attr-defined]
-    )
+    rendered = "".join(traceback.format_exception(raised.value))
+    assert raised.value.code == "repository_identity_mismatch"
+    assert marker not in str(raised.value)
+    assert raised.value.__cause__ is not None
+    assert marker not in repr(raised.value.__cause__)
+    assert raised.value.__cause__.__cause__ is None
+    assert marker not in rendered
+    assert checkout.is_dir()
+    assert (catalog_path.read_bytes() if catalog_path.exists() else None) == catalog_before
 
 
 def _capture_adoption_command(  # noqa: C901
@@ -193,7 +386,7 @@ def _capture_adoption_command(  # noqa: C901
 
     monkeypatch.setattr(type(resource), "_command_from_snapshot", build)
     monkeypatch.setattr(type(resource), "_copy_auxiliary_session", lambda *_args: None)
-    monkeypatch.setattr(type(resource), "_preflight_copy_checkout", lambda *_args: None)
+    monkeypatch.setattr(type(resource), "_preflight_copy_checkout", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(type(resource), "_do_copy_restore", restore)
     command = resource.adopt_command(
         project_manifest,
