@@ -135,6 +135,8 @@ class _CheckoutMixin(_CheckoutApiMixin):
             self, project: ProjectConfig, repo_root: Path, worktree: Path
         ) -> str: ...
 
+        def _preflight_copy_archive(self, plan: _CheckoutPlan) -> None: ...
+
         def _preflight_copy_checkout(self, plan: _CheckoutPlan) -> None: ...
 
         def _do_copy_restore(
@@ -697,8 +699,6 @@ class _CheckoutMixin(_CheckoutApiMixin):
         )
 
     def _copy_auxiliary_session(self, plan: _CheckoutPlan) -> AuxiliaryRestoreSession | None:
-        if plan.options.remote_name is not None or plan.options.backup_id is not None:
-            return None
         if plan.source_config is None:
             return None
         from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
@@ -711,7 +711,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
         instance.config = replace(
             instance.config,
             command_prefix=(python_bin, plan.odoo_bin),
-            default_cwd=Path(plan.runtime_cwd),
+            default_cwd=Path(plan.runtime_cwd) if plan.adopted else plan.repo_root,
             default_run_args=plan.project.default_run_args,
             project_environment=load_project_environment(plan.repo_root),
         )
@@ -760,13 +760,13 @@ class _CheckoutMixin(_CheckoutApiMixin):
                         f"existing adoption is {state}; recover or remove it before retrying",
                         details={"existing_id": str(existing["id"]), "state": state},
                     )
-            # A new adoption must prove the requested checkout/base identity.
-            # A matching ready row has already proved that identity; ordinary
-            # caller edits and commits are explicitly allowed on that retry.
+            # Prove identity for new adoptions; a matching ready row already did.
             if not plan.adopted or existing is None:
                 self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:
                 plan.branch_revalidator(context)
+            if plan.selected_backup is not None:
+                self._preflight_copy_archive(plan)
             from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
 
             auxiliary_session = active_auxiliary_restore_session()
