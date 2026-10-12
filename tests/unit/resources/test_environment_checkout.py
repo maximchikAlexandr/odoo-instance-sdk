@@ -227,6 +227,33 @@ def _catalog_backup(
 
 
 class TestCheckoutPreflight:
+    @pytest.fixture
+    def _fake_auxiliary_lifecycle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep explicit COPY-source tests focused on plan and restore behavior."""
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+            lambda _config: None,
+        )
+        monkeypatch.setattr(
+            OdooInstance,
+            "wait_ready",
+            lambda _self, _process, *, timeout, version_info=False, database_manager=False: None,
+        )
+
+        def spawn(_executor: object, step: PreparedStep, **_kwargs: object) -> ProcessHandle:
+            process = MagicMock()
+            process.pid = 123
+            return ProcessHandle(
+                process=process,
+                argv=step.argv,
+                process_group_id=123,
+                session_id=123,
+                inherited_stdio=step.inherit_stdio,
+                step=step,
+            )
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.run.SubprocessExecutor.spawn", spawn)
+
     def test_successful_checkout_publishes_complete_applied_snapshot(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
@@ -336,6 +363,92 @@ class TestCheckoutPreflight:
         assert plan.provenance.database_name == "staging_db"
         assert plan.provenance.recorded_branch == "main"
 
+    def _explicit_copy_plan_step_ids(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        options: EnvironmentCheckoutOptions,
+        branch: str,
+    ) -> tuple[str, ...]:
+        from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        local = _copy_instance(env_client)
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=local))
+        snapshot = env_client.environments._build_checkout_snapshot(
+            project_manifest,
+            branch,
+            options=options,
+        )
+        command = env_client.environments._command_from_snapshot(snapshot)
+        return tuple(step.step_id for step in command.plan.steps)
+
+    @staticmethod
+    def _assert_auxiliary_plan_steps(step_ids: tuple[str, ...]) -> None:
+        auxiliary_ids = (
+            "database.restore.auxiliary.probe",
+            "database.restore.auxiliary.port",
+            "database.restore.auxiliary.start",
+            "database.restore.auxiliary.ready",
+            "database.restore.auxiliary.backup-revalidate",
+            "database.restore.auxiliary.restore-revalidate",
+            "database.restore.auxiliary.cleanup",
+        )
+        assert all(step_ids.count(step_id) == 1 for step_id in auxiliary_ids)
+
+    def test_named_remote_copy_plan_keeps_local_auxiliary_lifecycle(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _add_named_remote_config(project_manifest)
+        step_ids = self._explicit_copy_plan_step_ids(
+            env_client,
+            project_manifest,
+            fake_python,
+            monkeypatch,
+            EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                remote_name="staging",
+                target_database="named_copy",
+            ),
+            "feat/auxiliary-named",
+        )
+        self._assert_auxiliary_plan_steps(step_ids)
+        assert "database.backup.transfer" in step_ids
+        assert "database.backup.wait" in step_ids
+
+    def test_retained_backup_copy_plan_keeps_local_auxiliary_lifecycle(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backup = _valid_retained_backup(tmp_path)
+        _record_backup(env_client, backup)
+        step_ids = self._explicit_copy_plan_step_ids(
+            env_client,
+            project_manifest,
+            fake_python,
+            monkeypatch,
+            EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                backup_id=backup.id,
+                target_database="retained_copy",
+            ),
+            "feat/auxiliary-retained",
+        )
+        self._assert_auxiliary_plan_steps(step_ids)
+        assert "database.backup.transfer" not in step_ids
+        assert "database.backup.wait" not in step_ids
+
     @pytest.mark.parametrize(
         "options",
         [
@@ -436,6 +549,7 @@ class TestCheckoutPreflight:
         fake_python: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        _fake_auxiliary_lifecycle: None,
     ) -> None:
         from odoo_instance_sdk.resources.instance import InstanceFactory
 
@@ -607,6 +721,7 @@ class TestCheckoutPreflight:
         fake_python: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        _fake_auxiliary_lifecycle: None,
     ) -> None:
         from odoo_instance_sdk.internal.backup_validation import RestoreDiskPreflight
         from odoo_instance_sdk.resources.instance import InstanceFactory

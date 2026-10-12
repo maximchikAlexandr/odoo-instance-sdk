@@ -178,9 +178,6 @@ class _SettingsMixin(_CheckoutInventoryMixin):
         )
         backup = acquired.backup
         ownership = acquired.ownership
-        if selected_backup is not None:
-            self._validate_copy_archive(backup, cfg_dict)
-
         cat.upsert_copy_journal(
             str(env_id),
             target_database=target_db,
@@ -295,16 +292,19 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             raise RestoreFailedError(f"Database {target_db!r} was not created after restore")
         raise DatabaseAlreadyExistsError(f"Target database {target_db!r} already exists")
 
-    def _preflight_copy_checkout(self, plan: _CheckoutPlan) -> None:
-        """Perform every COPY rejection check before creating owned artifacts."""
-        if plan.source_config is None:
-            raise ConfigError("copy mode requires a source config")
-        if plan.source_database is None or plan.target_database is None:
-            raise ConfigError("copy mode requires source and target databases")
+    def _preflight_copy_archive(self, plan: _CheckoutPlan) -> None:
+        """Validate a retained archive before starting the auxiliary runtime."""
         if plan.selected_backup is not None:
             catalog = self._client.get_catalog()
             catalog.verify_identity(plan.selected_backup, verify_content=True)
             self._validate_copy_archive(plan.selected_backup, plan.config_values)
+
+    def _preflight_copy_checkout(self, plan: _CheckoutPlan) -> None:
+        """Validate source and target COPY settings after auxiliary readiness."""
+        if plan.source_config is None:
+            raise ConfigError("copy mode requires a source config")
+        if plan.source_database is None or plan.target_database is None:
+            raise ConfigError("copy mode requires source and target databases")
         base_url = infer_base_url(plan.config_values)
         assert_local(base_url)
         master_pwd = get_admin_passwd(plan.config_values)

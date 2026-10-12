@@ -501,7 +501,6 @@ def acquire_copy_backup(
 ) -> CopyBackupAcquisition:
     """Acquire one COPY input at the preparation/source boundary."""
     if selected_backup is not None:
-        client.get_catalog().verify_identity(selected_backup, verify_content=True)
         return CopyBackupAcquisition(backup=selected_backup, ownership="borrowed")
     if remote_name is not None:
         source = resolve_test_source(project, DatabaseRefreshOptions(remote_name=remote_name))
