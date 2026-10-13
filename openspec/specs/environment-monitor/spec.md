@@ -1,6 +1,6 @@
 ## Purpose
 
-Read-only observability surface over the existing lifecycle catalog, `PostgresCluster` and Docker CLI: one `EnvironmentMonitor` collector that produces a typed immutable snapshot of all catalog projects, their environments and one nullable project PostgreSQL cluster per project, consumed by Python SDK, headless FastAPI JSON API and a React+Mantine Web UI. No control operations, no historical metrics, no second catalog.
+Read-only observability surface over the existing lifecycle catalog, `PostgresCluster` and Docker CLI: one `EnvironmentMonitor` collector that produces a typed immutable snapshot of all catalog projects, their environments and one nullable project PostgreSQL cluster per project, consumed by Python SDK, headless FastAPI JSON API and a React+Mantine Web UI. The collector remains read-only, with no historical metrics or second catalog. Separate protected dashboard runtime operations are defined in dashboard-http-api and do not mutate through the collector.
 ## Requirements
 ### Requirement: Canonical snapshot types
 
@@ -409,14 +409,14 @@ For either selection, project cluster collection and partial-data isolation SHAL
 - Для project, чьи environments ссылаются на repository с `[postgres] mode="compose"` manifest, `cluster` — non-null `ClusterSnapshot` (даже если контейнер stopped/missing — с соответствующим `state`/error).
 - Для project с `[postgres] mode="external"` (или legacy без секции) `cluster` — non-null `ClusterSnapshot` с `mode="external"`, `owned=False`, container fields `null` и `unavailability_reason="external_not_owned"`.
 - Для project без доступного manifest (например orphan environment с удалённым repository root) `cluster` — `None` (явный null в JSON); collector не падает.
-- Container CPU/RAM/volume cluster metrics не приписываются ни одному environment и не делятся поровну между worktrees; они живут только на cluster card / project-level CLI summary.
+- Container CPU/RAM/volume cluster metrics не приписываются ни одному environment и не делятся поровну между worktrees; они живут только в project-level snapshot / CLI summary; compact dashboard cards may hide them as specified in web-sdk-codegen.
 
-#### Scenario: Compose project has cluster card
+#### Scenario: Compose project has a cluster snapshot
 
 - **WHEN** a project has a compose manifest and a healthy container
 - **THEN** `ProjectSummary.cluster` is a non-null `ClusterSnapshot` with `mode="compose"`, `owned=True`, non-null container/metrics
 
-#### Scenario: External project has cluster card with null container
+#### Scenario: External project has cluster snapshot with null container
 
 - **WHEN** a project has an external manifest
 - **THEN** `ProjectSummary.cluster` is non-null with `mode="external"`, `owned=False`, `container is None` and `unavailability_reason="external_not_owned"`
