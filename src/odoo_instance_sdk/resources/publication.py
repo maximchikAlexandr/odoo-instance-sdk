@@ -36,6 +36,7 @@ from odoo_instance_sdk.internal.publication_routes import (
     read_owned_routes,
     reconcile_route_file,
     render_panel_route,
+    root_imports_owned_route,
     route_identity,
 )
 
@@ -54,7 +55,7 @@ _DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _BASIC_AUTH_USERNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _PASSWORD_HASH = re.compile(
     r"(?:\$2[aby]\$(?:0[4-9]|[12][0-9]|3[01])\$[./A-Za-z0-9]{53}"
-    r"|\$argon2(?:id|i|d)\$v=[0-9]+\$m=[0-9]+,t=[0-9]+,p=[0-9]+\$"
+    r"|\$argon2id\$v=[0-9]+\$m=[0-9]+,t=[0-9]+,p=[0-9]+\$"
     r"[A-Za-z0-9+/.-]{8,}\$[A-Za-z0-9+/.-]{16,})\Z"
 )
 _ROUTE_MARKER = "# odcli-managed-route-file-v1"
@@ -137,11 +138,49 @@ def _proxy_addresses(value: Sequence[str] | None) -> tuple[str, ...]:
             address = ipaddress.ip_address(item.strip())
         except ValueError as exc:
             raise ConfigError("publication trusted proxy address must be an IP") from exc
+        if address.is_unspecified or address.is_multicast or address.is_reserved:
+            raise ConfigError("publication trusted proxy address must be a specific IP")
         normalized = str(address)
         if normalized in result:
             raise ConfigError("publication trusted proxy addresses must be unique")
         result.append(normalized)
     return tuple(result)
+
+
+def _validate_upstream_bind_address(value: str | None) -> None:
+    try:
+        address = ipaddress.ip_address(value or "")
+    except ValueError as exc:
+        raise ConfigError("publication upstream_bind_address must be an IP") from exc
+    if (
+        address.is_unspecified
+        or address.is_multicast
+        or address.is_global
+        or address.is_reserved
+        or address.is_link_local
+    ):
+        raise ConfigError("publication upstream_bind_address is unsafe")
+
+
+def _upstream_http_settings(settings: PublicationSettings) -> None:
+    if settings.caddy_reload_config is not None:
+        try:
+            config = settings.caddy_reload_config.expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise ConfigError("publication caddy_reload_config is unavailable") from exc
+        if not config.is_file():
+            raise ConfigError("publication caddy_reload_config must be a file")
+        msgspec.structs.force_setattr(settings, "caddy_reload_config", config)
+        if not root_imports_owned_route(config, settings.owned_route_file):
+            raise ConfigError("publication caddy_reload_config must import owned_route_file")
+    if (settings.upstream_http_port is None) != (settings.upstream_bind_address is None):
+        raise ConfigError("publication upstream HTTP port and bind address must be paired")
+    if settings.upstream_http_port is not None:
+        if not 1 <= settings.upstream_http_port <= 65535:
+            raise ConfigError("publication upstream_http_port is invalid")
+        _validate_upstream_bind_address(settings.upstream_bind_address)
+        if settings.caddy_reload_config is None:
+            raise ConfigError("publication upstream HTTP mode requires caddy_reload_config")
 
 
 class PublicationSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -154,7 +193,11 @@ class PublicationSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     basic_auth_username: str
     basic_auth_password_hash: str
     panel_host_label: str = "panel"
+    odoo_basic_auth_enabled: bool = True
     trusted_proxy_addresses: tuple[str, ...] = ()
+    caddy_reload_config: Path | None = None
+    upstream_http_port: int | None = None
+    upstream_bind_address: str | None = None
 
     def __post_init__(self) -> None:
         root = get_config_root(ensure_exists=False).parent
@@ -187,6 +230,7 @@ class PublicationSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
             "trusted_proxy_addresses",
             _proxy_addresses(self.trusted_proxy_addresses),
         )
+        _upstream_http_settings(self)
 
     def __repr__(self) -> str:
         return (
@@ -226,7 +270,11 @@ class PublicationSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
             "basic_auth_username",
             "basic_auth_password_hash",
             "panel_host_label",
+            "odoo_basic_auth_enabled",
             "trusted_proxy_addresses",
+            "caddy_reload_config",
+            "upstream_http_port",
+            "upstream_bind_address",
         }
         if set(data) - expected:
             raise ConfigError("publication settings contain an unknown key")
@@ -235,6 +283,9 @@ class PublicationSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
             route_file = normalized.get("owned_route_file")
             if isinstance(route_file, str):
                 normalized["owned_route_file"] = Path(route_file)
+            reload_config = normalized.get("caddy_reload_config")
+            if isinstance(reload_config, str):
+                normalized["caddy_reload_config"] = Path(reload_config)
             return msgspec.convert(normalized, type=cls)
         except (TypeError, msgspec.ValidationError) as exc:
             raise ConfigError("publication settings are incomplete") from exc
@@ -329,7 +380,7 @@ def _publication_steps(
         settings.caddy_executable,
         "reload",
         "--config",
-        str(settings.owned_route_file),
+        str(settings.caddy_reload_config or settings.owned_route_file),
         "--adapter",
         "caddyfile",
         "--address",
