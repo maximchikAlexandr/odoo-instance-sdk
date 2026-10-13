@@ -65,8 +65,9 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: uv sync --frozen --group test
+      - run: uv sync --frozen --group test --all-packages
       - run: make test
+      - run: uv run pytest -q -o addopts='' packages/odcli-multica/tests
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -96,6 +97,7 @@ jobs:
       - run: cd src/odoo_instance_sdk/web && npm test
       - run: cd src/odoo_instance_sdk/web && npm run build
       - run: uv run pytest -q -o addopts='' -m dashboard
+      - run: uv run pytest -q -o addopts='' tests/unit/test_http_contract.py::test_external_same_origin_mutation_accepts_secure_csrf
       - run: make smoke
 
   compatibility:
