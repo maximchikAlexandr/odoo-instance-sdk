@@ -5,6 +5,8 @@ import {
   getMonitorSnapshot,
   HttpErrorCode,
   openPgAdmin,
+  startRuntime,
+  stopRuntime,
   PgAdminEligibilityState,
   PgAdminOpenState,
   type EnvironmentSnapshot,
@@ -31,6 +33,8 @@ const handwrittenApiSources = import.meta.glob("./api.ts", { eager: true, query:
 it("exports the flat Fetch operations and all generated files have headers", () => {
   expect(typeof getMonitorSnapshot).toBe("function");
   expect(typeof openPgAdmin).toBe("function");
+  expect(typeof startRuntime).toBe("function");
+  expect(typeof stopRuntime).toBe("function");
   expect(Object.keys(generatedSources).length).toBeGreaterThan(0);
 
   for (const source of Object.values(generatedSources)) {
@@ -47,6 +51,9 @@ it("preserves the exact generated enum values and required nullable boundaries",
     "monitor_snapshot_failed",
     "pgadmin_not_eligible",
     "pgadmin_unavailable",
+    "runtime_conflict",
+    "runtime_not_found",
+    "runtime_unavailable",
   ]);
   expect(Object.values(PgAdminEligibilityState)).toEqual([
     "cluster_not_owned",

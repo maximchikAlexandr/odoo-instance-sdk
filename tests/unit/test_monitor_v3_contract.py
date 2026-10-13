@@ -124,6 +124,9 @@ def test_pgadmin_enum_values() -> None:
         "pgadmin_not_eligible",
         "database_not_found",
         "pgadmin_unavailable",
+        "runtime_not_found",
+        "runtime_conflict",
+        "runtime_unavailable",
     ]
 
 

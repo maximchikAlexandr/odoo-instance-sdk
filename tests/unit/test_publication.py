@@ -131,6 +131,10 @@ def test_publish_is_stable_and_unpublish_is_idempotent(
     assert second.status == "already_published"
     assert removed.status == "unpublished"
     assert absent.status == "already_absent"
+    reloads = [step for step in executor.executed if "reload" in step.step_id]
+    assert reloads
+    for step in reloads:
+        assert step.argv[step.argv.index("--address") + 1] == "127.0.0.1:2019"
 
 
 def test_monitor_route_is_reconciled_and_preserved_by_runtime_publication(

@@ -488,9 +488,10 @@ def test_raw_stream_dry_run_option_order_is_stable_and_preserves_shell_args(
         assert instance.shell_command.call_args.kwargs == {"args": ["--dev"]}
 
 
-def test_discovered_public_methods() -> None:
-    expected = {
-        EnvironmentResource: (
+PUBLIC_METHOD_EXPECTATIONS = (
+    (
+        EnvironmentResource,
+        (
             "adopt",
             "adopt_command",
             "checkout",
@@ -516,7 +517,10 @@ def test_discovered_public_methods() -> None:
             "sync_python",
             "sync_python_command",
         ),
-        EnvironmentMonitor: (
+    ),
+    (
+        EnvironmentMonitor,
+        (
             "checkout_inventory",
             "checkout_inventory_command",
             "processes",
@@ -525,7 +529,10 @@ def test_discovered_public_methods() -> None:
             "snapshot_command",
             "watch",
         ),
-        PostgresCluster: (
+    ),
+    (
+        PostgresCluster,
+        (
             "approve_image",
             "approve_image_command",
             "ensure_running",
@@ -542,7 +549,10 @@ def test_discovered_public_methods() -> None:
             "stop_command",
             "to_diagnostic_dict",
         ),
-        DatabaseResource: (
+    ),
+    (
+        DatabaseResource,
+        (
             "backup",
             "backup_command",
             "bloat",
@@ -572,7 +582,10 @@ def test_discovered_public_methods() -> None:
             "stats",
             "stats_command",
         ),
-        BackupResource: (
+    ),
+    (
+        BackupResource,
+        (
             "delete",
             "delete_command",
             "delete_owned",
@@ -591,13 +604,19 @@ def test_discovered_public_methods() -> None:
             "validate",
             "validate_command",
         ),
-        DatabasePreparationCoordinator: (
+    ),
+    (
+        DatabasePreparationCoordinator,
+        (
             "prepare",
             "prepare_command",
             "refresh_database",
             "refresh_database_command",
         ),
-        OdooInstance: (
+    ),
+    (
+        OdooInstance,
+        (
             "iter_logs",
             "run",
             "run_command",
@@ -620,7 +639,10 @@ def test_discovered_public_methods() -> None:
             "stop_runtime_command",
             "wait_ready",
         ),
-        BackupCatalog: (
+    ),
+    (
+        BackupCatalog,
+        (
             "active_environment_for",
             "add_environment_event",
             "adopted_environment_for",
@@ -635,6 +657,7 @@ def test_discovered_public_methods() -> None:
             "get_copy_journal",
             "get_environment",
             "get_environment_runtime",
+            "get_project",
             "get_runtime",
             "has_tracked_database",
             "is_owned_copy_backup",
@@ -663,15 +686,18 @@ def test_discovered_public_methods() -> None:
             "upsert_environment_runtime",
             "verify_identity",
         ),
-    }
+    ),
+)
 
-    for cls, names in expected.items():
-        discovered = tuple(
-            name
-            for name, value in inspect.getmembers(cls, inspect.isroutine)
-            if not name.startswith("_")
-        )
-        assert discovered == names, (cls.__name__, names, discovered)
+
+@pytest.mark.parametrize(("cls", "expected"), PUBLIC_METHOD_EXPECTATIONS)
+def test_discovered_public_methods(cls: type[object], expected: tuple[str, ...]) -> None:
+    discovered = tuple(
+        name
+        for name, value in inspect.getmembers(cls, inspect.isroutine)
+        if not name.startswith("_")
+    )
+    assert discovered == expected, (cls.__name__, expected, discovered)
 
 
 def _assert_envelope_keys(envelope: dict[str, object], *, success: bool) -> None:

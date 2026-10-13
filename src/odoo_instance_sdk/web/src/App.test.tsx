@@ -5,9 +5,9 @@ import App from "./App";
 import {
   getMonitorSnapshot,
   GitActivityState,
-  HttpErrorCode,
   openPgAdmin,
-  PgAdminOpenState,
+  startRuntime,
+  stopRuntime,
   EnvironmentState,
   PgAdminEligibilityState,
   PidScope,
@@ -21,6 +21,8 @@ vi.mock("./generated", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./generated")>()),
   getMonitorSnapshot: vi.fn(),
   openPgAdmin: vi.fn(),
+  startRuntime: vi.fn(),
+  stopRuntime: vi.fn(),
 }));
 
 Object.defineProperty(window, "matchMedia", {
@@ -99,18 +101,8 @@ const snapshot: Snapshot = {
 };
 
 type SnapshotResponse = { data: Snapshot; request: Request; response: Response };
-type OpenResponse = {
-  data: { state: PgAdminOpenState; url: string };
-  request: Request;
-  response: Response;
-};
-
 function snapshotResponse(value: Snapshot): SnapshotResponse {
   return { data: value, request: new Request("http://localhost"), response: new Response() };
-}
-
-function openResponse(state: PgAdminOpenState, url: string): OpenResponse {
-  return { data: { state, url }, request: new Request("http://localhost"), response: new Response() };
 }
 
 function snapshotForState(state: PgAdminEligibilityState): Snapshot {
@@ -130,50 +122,122 @@ function snapshotForState(state: PgAdminEligibilityState): Snapshot {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("App", () => {
-  it("keeps all selector options while filtering cards and opens only ready Odoo", async () => {
+  it("uses the same compact cards for projects and worktrees and preserves publication navigation", async () => {
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
-    vi.mocked(openPgAdmin).mockResolvedValue(
-      openResponse(PgAdminOpenState.STARTED, "http://127.0.0.1:5050/") as never,
-    );
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     render(<MantineProvider><App /></MantineProvider>);
 
     await screen.findByText("ready-env");
-    expect(screen.getAllByTestId("cluster-card")).toHaveLength(3);
-    expect(screen.getAllByTestId("cluster-card")[0].textContent).toContain("Cluster — alpha");
-    expect(screen.getAllByTestId("cluster-card")[1].textContent).toContain("Cluster — beta");
-    expect(screen.getAllByTestId("cluster-card")[1].textContent).toContain("PostgreSQL: unavailable (manifest missing)");
-    expect(screen.getAllByTestId("cluster-card")[2].textContent).toContain("container: —");
-    expect(screen.getAllByTestId("cluster-card")[2].textContent).toContain("stats_failed");
-    expect(screen.getAllByTestId("project-runtime")[2].textContent).toContain("database: project_c · port: 8071");
-    expect(screen.getAllByText(/↑— ↓—/)).toHaveLength(2);
-    expect(screen.getAllByTestId("environment-card")).toHaveLength(2);
-    expect(screen.getByTestId("worker-pids").textContent).toContain("workers 12, 13");
+    const projects = screen.getAllByTestId("project-card");
+    const environments = screen.getAllByTestId("environment-card");
+    expect(projects).toHaveLength(3);
+    expect(environments).toHaveLength(2);
+    expect(projects[2].textContent).toContain("Main checkout");
+    expect(projects[2].textContent).toContain("project_c");
+    expect(projects[2].textContent).toContain("http://127.0.0.1:8071");
+    expect(environments[0].textContent).toContain("Worktree");
+    expect(projects[2].querySelector(".instance-branch")?.textContent).toBe("Branch main");
+    expect(projects[0].querySelector(".instance-branch")?.textContent).toBe("Branch Not recorded");
+    expect(environments[1].querySelector(".instance-branch")?.textContent).toBe("Branch main");
+    for (const card of [...projects, ...environments]) {
+      expect(card.className).toContain("instance-card");
+      expect(card.querySelectorAll(".instance-status")).toHaveLength(1);
+      expect(card.textContent).not.toMatch(/pgAdmin|publication:|port:|container:|PID|disk:|venv|git:/);
+    }
+
+    const projectButtons = screen.getAllByTestId("open-project-odoo") as HTMLButtonElement[];
+    expect(projectButtons[0].disabled).toBe(true);
+    expect(projectButtons[2].disabled).toBe(false);
+    fireEvent.click(projectButtons[2]);
+    expect(open).toHaveBeenCalledWith("https://project-c.example.test", "_blank", "noopener,noreferrer");
     const buttons = screen.getAllByTestId("open-odoo") as HTMLButtonElement[];
     expect(buttons[1].disabled).toBe(true);
     fireEvent.click(buttons[0]);
     expect(open).toHaveBeenCalledWith("https://env-a.example.test", "_blank", "noopener,noreferrer");
 
-    const pgAdmin = screen.getAllByTestId("open-pgadmin") as HTMLButtonElement[];
-    expect(pgAdmin[0].disabled).toBe(false);
-    expect(pgAdmin[1].disabled).toBe(true);
-    fireEvent.click(pgAdmin[0]);
-    await waitFor(() => expect(open).toHaveBeenCalledWith(
-      "http://127.0.0.1:5050/",
-      "_blank",
-      "noopener,noreferrer",
-    ));
-    expect(openPgAdmin).toHaveBeenCalledWith(expect.objectContaining({
-      body: { environment_id: "a" },
-    }));
-
-    fireEvent.click(screen.getByRole("textbox"));
+    fireEvent.click(screen.getByRole("textbox", { name: "Project" }));
     fireEvent.click(await screen.findByText("alpha (a)"));
     await waitFor(() => expect(screen.getAllByTestId("environment-card")).toHaveLength(1));
+    expect(screen.getAllByTestId("project-card")).toHaveLength(1);
     expect(screen.getByText("beta (b)")).toBeTruthy();
-    expect(getMonitorSnapshot).toHaveBeenCalledWith(expect.objectContaining({
-      throwOnError: true,
-    }));
+    expect(getMonitorSnapshot).toHaveBeenCalledWith(expect.objectContaining({ throwOnError: true }));
+  });
+
+  it.each(Object.values(PgAdminEligibilityState))("hides pgAdmin for eligibility %s", async (state) => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshotForState(state)) as never);
+    render(<MantineProvider><App /></MantineProvider>);
+    await screen.findByTestId("environment-card");
+    expect(screen.queryByTestId("open-pgadmin")).toBeNull();
+    expect(screen.queryByTestId("pgadmin-state")).toBeNull();
+    expect(screen.queryByTestId("pgadmin-error")).toBeNull();
+    expect(openPgAdmin).not.toHaveBeenCalled();
+  });
+
+  it("does not render empty metrics or technical storage fields", async () => {
+    const environment = snapshot.environments[0];
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse({
+      ...snapshot,
+      environments: [{ ...environment, runtime: { ...environment.runtime, cpu_percent: null, memory_bytes: null } }],
+    }) as never);
+    render(<MantineProvider><App /></MantineProvider>);
+    const card = await screen.findByTestId("environment-card");
+    expect(card.textContent).not.toMatch(/CPU|RAM|Volume|disk|worktree|venv|7324f72/);
+    expect(card.textContent).toContain("http://127.0.0.1:8069");
+  });
+
+  it("keeps an environment lifecycle failure visible as one status", async () => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse({
+      ...snapshot,
+      environments: [{ ...snapshot.environments[0], lifecycle_state: EnvironmentState.FAILED }],
+    }) as never);
+    render(<MantineProvider><App /></MantineProvider>);
+    const card = await screen.findByTestId("environment-card");
+    expect(card.querySelector(".instance-status")?.textContent).toBe("Failed");
+    expect(card.querySelectorAll(".instance-status")).toHaveLength(1);
+  });
+
+  it.each(["project", "environment"] as const)("switches Start/Stop for %s and prevents repeated requests", async (ownerKind) => {
+    const running = { ...snapshot, projects: [snapshot.projects[2]], environments: [snapshot.environments[0]] };
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(running) as never);
+    let finish!: (value: unknown) => void;
+    vi.mocked(stopRuntime).mockImplementation(() => new Promise(resolve => { finish = resolve; }) as never);
+    vi.mocked(startRuntime).mockResolvedValue({ data: { state: "started" } } as never);
+    render(<MantineProvider><App /></MantineProvider>);
+    const card = await screen.findByTestId(ownerKind === "project" ? "project-card" : "environment-card");
+    const button = card.querySelector('[data-testid="runtime-control"]') as HTMLButtonElement;
+    expect(button.textContent).toBe("Stop");
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("Stopping…");
+    expect(stopRuntime).toHaveBeenCalledTimes(1);
+    expect(stopRuntime).toHaveBeenCalledWith(expect.objectContaining({ body: { owner_kind: ownerKind, owner_id: ownerKind === "project" ? "project_c" : "a" } }));
+    const stopped = {
+      ...running,
+      projects: running.projects.map(p => ({ ...p, runtime: { ...p.runtime!, state: RuntimeState.STOPPED } })),
+      environments: running.environments.map(e => ({ ...e, runtime: { ...e.runtime, state: RuntimeState.STOPPED } })),
+    };
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(stopped) as never);
+    finish({ data: { state: "stopped" } });
+    await waitFor(() => expect(button.textContent).toBe("Start"));
+    expect(button.disabled).toBe(false);
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(running) as never);
+    fireEvent.click(button);
+    await waitFor(() => expect(button.textContent).toBe("Stop"));
+    expect(startRuntime).toHaveBeenCalledWith(expect.objectContaining({ body: { owner_kind: ownerKind, owner_id: ownerKind === "project" ? "project_c" : "a" } }));
+  });
+
+  it("shows a rejected runtime action and preserves the current control", async () => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
+    vi.mocked(stopRuntime).mockRejectedValue({ code: "runtime_conflict", message: "Runtime action rejected." });
+    render(<MantineProvider><App /></MantineProvider>);
+    await screen.findByText("gamma");
+    const card = screen.getAllByTestId("project-card")[2];
+    const button = card.querySelector('[data-testid="runtime-control"]') as HTMLButtonElement;
+    fireEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Runtime action rejected.");
+    expect(button.textContent).toBe("Stop");
+    expect(button.disabled).toBe(false);
   });
 
   it("polls on a fixed cadence without overlap, coalesces misses, and cancels on unmount", async () => {
@@ -182,18 +246,15 @@ describe("App", () => {
     vi.mocked(getMonitorSnapshot).mockImplementationOnce(() => new Promise<SnapshotResponse>((resolve) => { resolveFirst = resolve; }) as never);
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
     const view = render(<MantineProvider><App /></MantineProvider>);
-
     expect(getMonitorSnapshot).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(5_500);
     expect(getMonitorSnapshot).toHaveBeenCalledTimes(1);
-
     resolveFirst(snapshotResponse(snapshot));
     await Promise.resolve();
     await vi.advanceTimersByTimeAsync(499);
     expect(getMonitorSnapshot).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(getMonitorSnapshot).toHaveBeenCalledTimes(2);
-
     view.unmount();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(getMonitorSnapshot).toHaveBeenCalledTimes(2);
@@ -204,84 +265,9 @@ describe("App", () => {
       .mockRejectedValueOnce(new Error("temporary snapshot failure"))
       .mockResolvedValueOnce(snapshotResponse(snapshot) as never);
     render(<MantineProvider><App /></MantineProvider>);
-
     expect(await screen.findByText("API error: temporary snapshot failure")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("ready-env")).toBeTruthy();
     expect(getMonitorSnapshot).toHaveBeenCalledTimes(2);
-  });
-
-  it("disables pgAdmin for every backend-provided ineligible state", async () => {
-    const states = [
-      PgAdminEligibilityState.ENVIRONMENT_NOT_READY,
-      PgAdminEligibilityState.DATABASE_UNRESOLVED,
-      PgAdminEligibilityState.CLUSTER_NOT_OWNED,
-      PgAdminEligibilityState.CLUSTER_UNHEALTHY,
-    ];
-    for (const state of states) {
-      vi.mocked(getMonitorSnapshot).mockResolvedValueOnce(snapshotResponse(snapshotForState(state)) as never);
-      const view = render(<MantineProvider><App /></MantineProvider>);
-      const card = await screen.findByTestId("environment-card");
-      expect(card.textContent).toContain(`pgAdmin: ${state === PgAdminEligibilityState.ENVIRONMENT_NOT_READY ? "environment is not ready" : state === PgAdminEligibilityState.DATABASE_UNRESOLVED ? "database is unresolved" : state === PgAdminEligibilityState.CLUSTER_NOT_OWNED ? "PostgreSQL cluster is not SDK-owned" : "PostgreSQL cluster is unhealthy"}`);
-      expect((screen.getByTestId("open-pgadmin") as HTMLButtonElement).disabled).toBe(true);
-      view.unmount();
-    }
-    expect(openPgAdmin).not.toHaveBeenCalled();
-  });
-
-  it("prevents duplicate pgAdmin opens while the typed operation is pending", async () => {
-    let resolveOpen!: (value: unknown) => void;
-    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
-    vi.mocked(openPgAdmin).mockImplementation(() => new Promise((resolve) => { resolveOpen = resolve; }) as never);
-    const open = vi.spyOn(window, "open").mockImplementation(() => null);
-    render(<MantineProvider><App /></MantineProvider>);
-    const button = (await screen.findAllByTestId("open-pgadmin"))[0];
-
-    fireEvent.click(button);
-    fireEvent.click(button);
-    expect(openPgAdmin).toHaveBeenCalledTimes(1);
-    expect((button as HTMLButtonElement).disabled).toBe(true);
-
-    resolveOpen(openResponse(PgAdminOpenState.REUSED, "http://localhost:5050/"));
-    await waitFor(() => expect(open).toHaveBeenCalledWith(
-      "http://localhost:5050/",
-      "_blank",
-      "noopener,noreferrer",
-    ));
-  });
-
-  it("shows a sanitized typed pgAdmin error and recovers on retry", async () => {
-    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
-    vi.mocked(openPgAdmin)
-      .mockRejectedValueOnce({ code: HttpErrorCode.DATABASE_NOT_FOUND, message: "secret detail" })
-      .mockResolvedValueOnce(
-        openResponse(PgAdminOpenState.REUSED, "http://127.0.0.1:5050/") as never,
-      );
-    const open = vi.spyOn(window, "open").mockImplementation(() => null);
-    render(<MantineProvider><App /></MantineProvider>);
-    const button = (await screen.findAllByTestId("open-pgadmin"))[0];
-
-    fireEvent.click(button);
-    await waitFor(() => expect(screen.getByTestId("pgadmin-error").textContent).toContain("database was not found"));
-    expect(screen.getByTestId("pgadmin-error").textContent).not.toContain("secret detail");
-    fireEvent.click(button);
-    await waitFor(() => expect(open).toHaveBeenCalledWith(
-      "http://127.0.0.1:5050/",
-      "_blank",
-      "noopener,noreferrer",
-    ));
-  });
-
-  it("rejects an unsafe typed result URL without launching a browser", async () => {
-    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
-    vi.mocked(openPgAdmin).mockResolvedValue(
-      openResponse(PgAdminOpenState.STARTED, "https://evil.example/") as never,
-    );
-    const open = vi.spyOn(window, "open").mockImplementation(() => null);
-    render(<MantineProvider><App /></MantineProvider>);
-    fireEvent.click((await screen.findAllByTestId("open-pgadmin"))[0]);
-
-    await waitFor(() => expect(screen.getByTestId("pgadmin-error").textContent).toContain("unsafe URL"));
-    expect(open).not.toHaveBeenCalled();
   });
 });

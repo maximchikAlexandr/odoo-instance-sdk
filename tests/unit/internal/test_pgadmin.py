@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -745,15 +746,17 @@ def test_phase_result_reinspects_after_phase_completion(
     assert reconciliation_deadlines[1] > reconciliation_deadlines[0]
 
 
-def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_args(  # noqa: C901
+def _run_backend_identity_lifecycle_case(  # noqa: C901
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> tuple[pgadmin_files.PgAdminPaths, Any, PgAdminOpenResult, Mock]:
     paths = _paths(tmp_path)
     monkeypatch.setattr(pgadmin_files.PgAdminPaths, "from_defaults", classmethod(lambda cls: paths))
     monkeypatch.setattr(pgadmin_files, "get_data_root", lambda *, ensure_exists: tmp_path)
     monkeypatch.setattr(pgadmin_files, "_linux", lambda: False)
     monkeypatch.setattr(pgadmin_container, "_wait_ready", lambda port, *, deadline: None)
+    probe_address = Mock(return_value=AddressState.FREE)
+    monkeypatch.setattr(pgadmin, "probe_address", probe_address)
 
     postgres_inspect = {
         "Name": "/odcli_pg_project-postgres-1",
@@ -884,10 +887,18 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
         .run()
     )
 
+    return paths, runner, result, probe_address
+
+
+def test_open_pgadmin_lifecycle_uses_backend_identity_and_start_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, runner, result, probe_address = _run_backend_identity_lifecycle_case(
+        tmp_path, monkeypatch
+    )
     assert result.state.value == "started"
     assert result.url == "http://127.0.0.1:5050"
     run_call = next(call for call in runner.calls if call[1] == "run")
-    rendered = " ".join(run_call)
     first_label = next(
         run_call[index + 1].split("=", 1)[1]
         for index, value in enumerate(run_call[:-1])
@@ -908,6 +919,17 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
             "db-secret",
         ).fingerprint
     )
+    assert probe_address.call_args_list == [call("127.0.0.1", 5050)] * 2
+
+
+def test_open_pgadmin_lifecycle_uses_secret_free_docker_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _paths_result, runner, _result, _probe_address = _run_backend_identity_lifecycle_case(
+        tmp_path, monkeypatch
+    )
+    run_call = next(call for call in runner.calls if call[1] == "run")
+    rendered = " ".join(run_call)
     assert "db-secret" not in rendered
     assert "db-secret" not in " ".join(" ".join(call) for call in runner.calls)
     assert "--network" in run_call
@@ -917,9 +939,18 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
     assert "--user" in run_call and "5050" in run_call
     assert "--mount" in run_call
     assert "docker.sock" not in rendered
+
+
+def test_open_pgadmin_lifecycle_writes_database_restrictions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _runner, _result, probe_address = _run_backend_identity_lifecycle_case(
+        tmp_path, monkeypatch
+    )
     assert "MaintenanceDB" in paths.servers_json.read_text()
     assert '"MaintenanceDB":"demo"' in paths.servers_json.read_text()
     assert '"DBRestriction":"demo"' in paths.servers_json.read_text()
+    assert probe_address.call_args_list == [call("127.0.0.1", 5050)] * 2
 
 
 def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C901
@@ -931,6 +962,8 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
     monkeypatch.setattr(pgadmin_files, "get_data_root", lambda *, ensure_exists: tmp_path)
     monkeypatch.setattr(pgadmin_files, "_linux", lambda: False)
     monkeypatch.setattr(pgadmin_container, "_wait_ready", lambda *_args, **_kwargs: None)
+    probe_address = Mock(return_value=AddressState.FREE)
+    monkeypatch.setattr(pgadmin, "probe_address", probe_address)
 
     postgres_inspect = {
         "Name": "/odcli_pg_project-postgres-1",
@@ -1104,3 +1137,4 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
     assert [result.state for result in results].count(PgAdminOpenState.REUSED) == 1
     assert runner.create_count == 1
     assert not any(call[1:2] == ["rm"] for call in runner.calls)
+    assert probe_address.call_args_list == [call("127.0.0.1", 5050)] * 4
