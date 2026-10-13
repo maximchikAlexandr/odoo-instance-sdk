@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock, call
 
 import msgspec
 import pytest
@@ -31,6 +31,7 @@ from odoo_instance_sdk.exceptions import (
     PlanValidationError,
 )
 from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
+from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -784,12 +785,12 @@ def test_open_pgadmin_command_construction_has_no_lifecycle_state_mutation(
     assert not (paths.private_dir / ".fingerprint-key").exists()
 
 
-def test_open_pgadmin_real_cluster_uses_one_captured_docker_ledger(  # noqa: C901
+def _build_pgadmin_ledger_scenario(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+) -> dict[str, Any]:
     """The public pgAdmin command owns every Docker child it launches."""
     from odoo_instance_sdk.config import InstanceConfig
-    from odoo_instance_sdk.internal import pgadmin_container, pgadmin_files
+    from odoo_instance_sdk.internal import pgadmin, pgadmin_container, pgadmin_files
     from odoo_instance_sdk.internal.postgres_compose import SubprocessComposeRunner
     from odoo_instance_sdk.resources.instance import OdooInstance
 
@@ -861,6 +862,8 @@ def test_open_pgadmin_real_cluster_uses_one_captured_docker_ledger(  # noqa: C90
         ),
     )
     monkeypatch.setattr(pgadmin_container, "_wait_ready", lambda _port, *, deadline: None)
+    probe_address = Mock(return_value=AddressState.FREE)
+    monkeypatch.setattr(pgadmin, "probe_address", probe_address)
     recording = RecordingExecutor()
     first_command = resource.open_pgadmin_command(env, executor=recording)
     assert not paths.root.exists()
@@ -1067,88 +1070,174 @@ def test_open_pgadmin_real_cluster_uses_one_captured_docker_ledger(  # noqa: C90
     monkeypatch.setattr(RunContext, "process_prepared", record_process)
     monkeypatch.setattr(RunContext, "_consume", record_consume)
     monkeypatch.setattr(pgadmin_container, "reconcile_container", record_reconcile_deadline)
-    assert first_command.plan.process_steps
-    assert "pgadmin.container.run" in {step.step_id for step in first_command.plan.process_steps}
-    assert "pgadmin.reconciliation.inspect.0" in {step.step_id for step in first_command.plan.steps}
-    full_ids = [step.step_id for step in first_command.plan.steps]
-    assert full_ids.index("pgadmin.database.exists.psql") < full_ids.index("pgadmin.identity.ps")
 
-    key_written = threading.Event()
-    release_after_key = threading.Event()
-    ensure_guard = threading.Lock()
-    pause_once = True
-    original_ensure_key = pgadmin_files._ensure_fingerprint_key
+    def run_initial() -> dict[str, Any]:
+        key_written = threading.Event()
+        release_after_key = threading.Event()
+        ensure_guard = threading.Lock()
+        pause_once = True
+        original_ensure_key = pgadmin_files._ensure_fingerprint_key
 
-    def pause_after_key_write(
-        ensure_paths: pgadmin_files.PgAdminPaths,
-        *,
-        expected_key: bytes | None = None,
-    ) -> None:
-        nonlocal pause_once
-        original_ensure_key(ensure_paths, expected_key=expected_key)
-        with ensure_guard:
-            pause = pause_once
-            pause_once = False
-        if pause:
-            key_written.set()
-            assert release_after_key.wait(timeout=5)
+        def pause_after_key_write(
+            ensure_paths: pgadmin_files.PgAdminPaths,
+            *,
+            expected_key: bytes | None = None,
+        ) -> None:
+            nonlocal pause_once
+            original_ensure_key(ensure_paths, expected_key=expected_key)
+            with ensure_guard:
+                pause = pause_once
+                pause_once = False
+            if pause:
+                key_written.set()
+                release_after_key.wait(timeout=5)
 
-    monkeypatch.setattr(pgadmin_files, "_ensure_fingerprint_key", pause_after_key_write)
-    results: dict[str, PgAdminOpenResult] = {}
-    errors: dict[str, BaseException] = {}
-    second_started = threading.Event()
+        monkeypatch.setattr(pgadmin_files, "_ensure_fingerprint_key", pause_after_key_write)
+        results: dict[str, PgAdminOpenResult] = {}
+        errors: dict[str, BaseException] = {}
+        second_started = threading.Event()
 
-    def run_thread(label: str, command: Command[PgAdminOpenResult]) -> None:
-        if label == "second":
-            second_started.set()
-        try:
-            results[label] = run_once(label, command)
-        except BaseException as exc:
-            errors[label] = exc
+        def run_thread(label: str, command: Command[PgAdminOpenResult]) -> None:
+            if label == "second":
+                second_started.set()
+            try:
+                results[label] = run_once(label, command)
+            except BaseException as exc:
+                errors[label] = exc
 
-    first_thread = threading.Thread(target=run_thread, args=("first", first_command))
-    first_thread.start()
-    assert key_written.wait(timeout=5)
-    # Capture the second command only after the first private key write.  Both
-    # immutable commands therefore carry the same key without any run-time
-    # convergence or private-key substitution.
-    second_command = resource.open_pgadmin_command(env, executor=recording)
-    assert first_command.plan.process_steps == second_command.plan.process_steps
-    second_thread = threading.Thread(target=run_thread, args=("second", second_command))
-    second_thread.start()
-    assert second_started.wait(timeout=5)
-    time.sleep(0.05)
-    assert second_thread.is_alive()
-    release_after_key.set()
-    first_thread.join(timeout=5)
-    second_thread.join(timeout=5)
-    assert not first_thread.is_alive()
-    assert not second_thread.is_alive()
-    assert not errors, errors
-    first_result = results["first"]
-    assert first_result.state is PgAdminOpenState.STARTED
-    first_execution = execution_sequences["first"]
-    second_result = results["second"]
-    assert second_result.state is PgAdminOpenState.REUSED
-    successive_command = resource.open_pgadmin_command(env, executor=recording)
-    assert run_once("successive", successive_command).state is PgAdminOpenState.REUSED
-    for label, command in (
-        ("first", first_command),
-        ("second", second_command),
-        ("successive", successive_command),
-    ):
-        assert consumption_sequences[label] == [step.step_id for step in command.plan.steps], (
-            consumption_sequences[label],
-            command.plan,
+        first_thread = threading.Thread(target=run_thread, args=("first", first_command))
+        first_thread.start()
+        key_ready = key_written.wait(timeout=5)
+        second_command = resource.open_pgadmin_command(env, executor=recording)
+        second_thread = threading.Thread(target=run_thread, args=("second", second_command))
+        second_thread.start()
+        second_ready = second_started.wait(timeout=5)
+        time.sleep(0.05)
+        second_blocked = second_thread.is_alive()
+        release_after_key.set()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+        threads_stopped = not first_thread.is_alive() and not second_thread.is_alive()
+        successive_command = resource.open_pgadmin_command(env, executor=recording)
+        successive_result = run_once("successive", successive_command)
+        first_execution = execution_sequences.get("first", [])
+        first_run = next(
+            step for step in first_execution if step.step_id == "pgadmin.container.run"
         )
-        assert len(reconciliation_deadlines[label]) == 1
+        first_label = next(
+            first_run.argv[index + 1].split("=", 1)[1]
+            for index, argument in enumerate(first_run.argv[:-1])
+            if argument == "--label"
+            and first_run.argv[index + 1].startswith(first_run_label_prefix)
+        )
+        return {
+            "key_ready": key_ready,
+            "second_ready": second_ready,
+            "second_blocked": second_blocked,
+            "threads_stopped": threads_stopped,
+            "errors": errors,
+            "results": results,
+            "successive_result": successive_result,
+            "first_command": first_command,
+            "second_command": second_command,
+            "successive_command": successive_command,
+            "first_execution": first_execution,
+            "first_label": first_label,
+            "plans_match": first_command.plan.process_steps == second_command.plan.process_steps,
+            "initial_container_runs": sum(
+                step.step_id == "pgadmin.container.run" for step in recording.executed
+            ),
+        }
+
+    def run_rotation() -> dict[str, Any]:
+        object.__setattr__(instance.config, "db_password", "rotated-secret")
+        rotated_command = resource.open_pgadmin_command(env, executor=recording)
+        rotated_result = run_once("rotated", rotated_command)
+        rotated_run = [
+            step for step in recording.executed if step.step_id == "pgadmin.container.run"
+        ][-1]
+        rotated_label = next(
+            rotated_run.argv[index + 1].split("=", 1)[1]
+            for index, argument in enumerate(rotated_run.argv[:-1])
+            if argument == "--label"
+            and rotated_run.argv[index + 1].startswith(first_run_label_prefix)
+        )
+        return {
+            "rotated_command": rotated_command,
+            "rotated_result": rotated_result,
+            "rotated_label": rotated_label,
+        }
+
+    first_run_label_prefix = f"{pgadmin_files.PGADMIN_LABEL_FINGERPRINT}="
+
+    return {
+        "paths": paths,
+        "captured": captured,
+        "probe_address": probe_address,
+        "recording": recording,
+        "consumption_sequences": consumption_sequences,
+        "execution_sequences": execution_sequences,
+        "reconciliation_deadlines": reconciliation_deadlines,
+        "run_initial": run_initial,
+        "run_rotation": run_rotation,
+    }
+
+
+def test_open_pgadmin_ledger_first_run_is_single_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    scenario = _build_pgadmin_ledger_scenario(monkeypatch, tmp_path)
+    initial = scenario["run_initial"]()
+    assert initial["key_ready"]
+    assert initial["second_ready"]
+    assert initial["second_blocked"]
+    assert initial["threads_stopped"]
+    assert not initial["errors"], initial["errors"]
+    results = initial["results"]
+    assert results["first"].state is PgAdminOpenState.STARTED
+    assert results["second"].state is PgAdminOpenState.REUSED
+    assert initial["successive_result"].state is PgAdminOpenState.REUSED
+    assert initial["initial_container_runs"] == 1
+    assert all(
+        len(scenario["reconciliation_deadlines"][label]) == 1
+        for label in ("first", "second", "successive")
+    )
     assert (
-        len({reconciliation_deadlines[label][0] for label in ("first", "second", "successive")})
+        len(
+            {
+                scenario["reconciliation_deadlines"][label][0]
+                for label in ("first", "second", "successive")
+            }
+        )
         == 3
     )
-    assert sum(step.step_id == "pgadmin.container.run" for step in recording.executed) == 1
 
-    public = {step.step_id: step for step in first_command.plan.process_steps}
+
+def test_open_pgadmin_ledger_preserves_step_order_and_projection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from odoo_instance_sdk.internal import pgadmin_files
+
+    scenario = _build_pgadmin_ledger_scenario(monkeypatch, tmp_path)
+    initial = scenario["run_initial"]()
+    first_command = initial["first_command"]
+    assert first_command.plan.process_steps
+    assert any(step.step_id == "pgadmin.container.run" for step in first_command.plan.process_steps)
+    assert any(
+        step.step_id == "pgadmin.reconciliation.inspect.0" for step in first_command.plan.steps
+    )
+    full_ids = [step.step_id for step in first_command.plan.steps]
+    assert full_ids.index("pgadmin.database.exists.psql") < full_ids.index("pgadmin.identity.ps")
+    assert initial["plans_match"]
+    for label, command in (
+        ("first", initial["first_command"]),
+        ("second", initial["second_command"]),
+        ("successive", initial["successive_command"]),
+    ):
+        assert scenario["consumption_sequences"][label] == [
+            step.step_id for step in command.plan.steps
+        ]
+    first_execution = initial["first_execution"]
     executed_ids = [step.step_id for step in first_execution]
     assert len(executed_ids) == len(set(executed_ids))
     assert "pgadmin.container.inspect.3" not in executed_ids
@@ -1161,43 +1250,38 @@ def test_open_pgadmin_real_cluster_uses_one_captured_docker_ledger(  # noqa: C90
     assert executed_ids.index("pgadmin.acl.admin.final.set") < executed_ids.index(
         "pgadmin.container.run"
     )
+    public = {step.step_id: step for step in first_command.plan.process_steps}
     for step in first_execution:
         if step.step_id in public:
-            inspected = public[step.step_id]
-            assert tuple(inspected.argv) == tuple(step.public_projection().argv)
-
-    first_run = next(step for step in first_execution if step.step_id == "pgadmin.container.run")
-    first_label = next(
-        first_run.argv[index + 1].split("=", 1)[1]
-        for index, argument in enumerate(first_run.argv[:-1])
-        if argument == "--label"
-        and first_run.argv[index + 1].startswith(f"{pgadmin_files.PGADMIN_LABEL_FINGERPRINT}=")
-    )
+            assert tuple(public[step.step_id].argv) == tuple(step.public_projection().argv)
     assert (
-        first_label
+        initial["first_label"]
         == pgadmin_files.execution_fingerprint_inputs(
-            paths, captured.identity, captured.database, "database-secret"
+            scenario["paths"],
+            scenario["captured"].identity,
+            scenario["captured"].database,
+            "database-secret",
         ).fingerprint
     )
-    object.__setattr__(instance.config, "db_password", "rotated-secret")
-    rotated_command = resource.open_pgadmin_command(env, executor=recording)
-    assert run_once("rotated", rotated_command).state is PgAdminOpenState.RECONFIGURED
-    assert consumption_sequences["rotated"] == [step.step_id for step in rotated_command.plan.steps]
-    assert len(reconciliation_deadlines["rotated"]) == 1
 
+
+def test_open_pgadmin_ledger_rotates_credentials_and_reprobes_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    scenario = _build_pgadmin_ledger_scenario(monkeypatch, tmp_path)
+    initial = scenario["run_initial"]()
+    rotation = scenario["run_rotation"]()
+    paths = scenario["paths"]
+    assert rotation["rotated_result"].state is PgAdminOpenState.RECONFIGURED
+    assert scenario["consumption_sequences"]["rotated"] == [
+        step.step_id for step in rotation["rotated_command"].plan.steps
+    ]
+    assert len(scenario["reconciliation_deadlines"]["rotated"]) == 1
     assert paths.pgpass.read_text() == "odcli_pg_project-postgres-1:5432:*:odoo:rotated-secret\n"
     assert "database-secret" not in paths.pgpass.read_text()
-    rotated_run = [step for step in recording.executed if step.step_id == "pgadmin.container.run"][
-        -1
-    ]
-    rotated_label = next(
-        rotated_run.argv[index + 1].split("=", 1)[1]
-        for index, argument in enumerate(rotated_run.argv[:-1])
-        if argument == "--label"
-        and rotated_run.argv[index + 1].startswith(f"{pgadmin_files.PGADMIN_LABEL_FINGERPRINT}=")
-    )
-    assert rotated_label != first_label
-    assert "rotated-secret" not in repr(rotated_command.plan)
+    assert rotation["rotated_label"] != initial["first_label"]
+    assert "rotated-secret" not in repr(rotation["rotated_command"].plan)
+    assert scenario["probe_address"].call_args_list == [call("127.0.0.1", 5050)] * 8
 
 
 def test_public_pgadmin_first_run_converges_across_processes(

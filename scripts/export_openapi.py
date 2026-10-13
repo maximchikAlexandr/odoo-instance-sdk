@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from odoo_instance_sdk.http.app import create_app
-from odoo_instance_sdk.models import PgAdminOpenResult, Snapshot
+from odoo_instance_sdk.models import (
+    PgAdminOpenResult,
+    RuntimeActionRequest,
+    RuntimeActionResult,
+    Snapshot,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 OPENAPI_PATH = REPOSITORY_ROOT / "openapi.json"
@@ -47,6 +52,10 @@ def _schema_pgadmin_opener(environment_id: str) -> PgAdminOpenResult:
     raise AssertionError("schema export must not open pgAdmin")
 
 
+def _schema_runtime_controller(action: str, target: RuntimeActionRequest) -> RuntimeActionResult:
+    raise AssertionError("schema export must not control a runtime")
+
+
 def build_openapi() -> dict[str, Any]:
     """Build OpenAPI exclusively through the static-free production app."""
     document: dict[str, Any] = create_app(
@@ -54,6 +63,7 @@ def build_openapi() -> dict[str, Any]:
         static_assets=False,
         monitor=_SchemaMonitor(),
         pgadmin_opener=_schema_pgadmin_opener,
+        runtime_controller=_schema_runtime_controller,
     ).openapi()
     return document
 

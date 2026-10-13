@@ -333,7 +333,7 @@ def _publication_steps(
         "--adapter",
         "caddyfile",
         "--address",
-        settings.caddy_control_endpoint,
+        urlsplit(settings.caddy_control_endpoint).netloc,
     )
     return (
         PreparedAction(

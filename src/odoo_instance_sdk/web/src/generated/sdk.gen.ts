@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { GetMonitorSnapshotData, GetMonitorSnapshotErrors, GetMonitorSnapshotResponses, HealthzHealthzGetData, HealthzHealthzGetResponses, OpenPgAdminData, OpenPgAdminErrors, OpenPgAdminResponses } from './types.gen';
+import type { GetMonitorSnapshotData, GetMonitorSnapshotErrors, GetMonitorSnapshotResponses, HealthzHealthzGetData, HealthzHealthzGetResponses, OpenPgAdminData, OpenPgAdminErrors, OpenPgAdminResponses, StartRuntimeData, StartRuntimeErrors, StartRuntimeResponses, StopRuntimeData, StopRuntimeErrors, StopRuntimeResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -23,6 +23,30 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
  */
 export const openPgAdmin = <ThrowOnError extends boolean = false>(options: Options<OpenPgAdminData, ThrowOnError>): RequestResult<OpenPgAdminResponses, OpenPgAdminErrors, ThrowOnError> => (options.client ?? client).post<OpenPgAdminResponses, OpenPgAdminErrors, ThrowOnError>({
     url: '/api/v1/pgadmin/open',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Start
+ */
+export const startRuntime = <ThrowOnError extends boolean = false>(options: Options<StartRuntimeData, ThrowOnError>): RequestResult<StartRuntimeResponses, StartRuntimeErrors, ThrowOnError> => (options.client ?? client).post<StartRuntimeResponses, StartRuntimeErrors, ThrowOnError>({
+    url: '/api/v1/runtime/start',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Stop
+ */
+export const stopRuntime = <ThrowOnError extends boolean = false>(options: Options<StopRuntimeData, ThrowOnError>): RequestResult<StopRuntimeResponses, StopRuntimeErrors, ThrowOnError> => (options.client ?? client).post<StopRuntimeResponses, StopRuntimeErrors, ThrowOnError>({
+    url: '/api/v1/runtime/stop',
     ...options,
     headers: {
         'Content-Type': 'application/json',

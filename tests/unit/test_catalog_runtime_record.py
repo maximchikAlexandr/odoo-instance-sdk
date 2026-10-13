@@ -356,3 +356,24 @@ def test_runtime_owner_validation_rejects_invalid_and_missing_owners(tmp_path: P
         )
 
     catalog.close()
+
+
+def test_registered_project_lookup_is_exact_and_read_only(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    try:
+        root = tmp_path / "repo"
+        common = root / ".git"
+        common.mkdir(parents=True)
+        project_id = f"project_{repo_key(root, common)}"
+        catalog._register_project(project_id, root, common)
+        before = catalog._conn.total_changes
+        row = catalog.get_project(project_id)
+        assert row is not None
+        assert row["project_id"] == project_id
+        assert row["repository_root"] == str(root.resolve())
+        assert row["git_common_dir"] == str(common.resolve())
+        assert catalog.get_project("missing") is None
+        assert catalog.get_project("' OR 1=1 --") is None
+        assert catalog._conn.total_changes == before
+    finally:
+        catalog.close()

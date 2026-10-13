@@ -236,14 +236,15 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
 
 
 def test_dashboard_source_has_stable_monitor_affordances() -> None:
-    """Keep the user-visible card/open controls in the built dashboard contract.
+    """Keep both runtime card entries and actions in the packaged source.
 
-    This repository has no browser/component-test runner; source-level selectors
-    are the narrow deterministic boundary and the package gate separately proves
-    that Vite type-checks and bundles the same source.
+    Vitest covers card behavior; this packaging guard checks that the source
+    bundled by Vite retains both owner entry points and shared runtime controls.
     """
     app = (_REPO / "src/odoo_instance_sdk/web/src/App.tsx").read_text(encoding="utf-8")
-    assert 'data-testid="cluster-card"' in app
-    assert 'data-testid="environment-card"' in app
-    assert 'data-testid="open-odoo"' in app
+    assert 'testId="project-card"' in app
+    assert 'testId="environment-card"' in app
+    assert 'actionTestId="open-project-odoo"' in app
+    assert 'actionTestId="open-odoo"' in app
+    assert 'data-testid="runtime-control"' in app
     assert 'window.open(externalUrl, "_blank", "noopener,noreferrer")' in app

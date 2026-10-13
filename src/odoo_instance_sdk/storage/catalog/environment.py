@@ -377,6 +377,14 @@ class _EnvironmentMixin:
         return list(self._monitor_snapshot_rows(include_removed=include_removed).environments)
 
     @_translate_sqlite_error
+    def get_project(self, project_id: str) -> sqlite3.Row | None:
+        """Resolve an already registered project without accepting a caller path."""
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        return row
+
+    @_translate_sqlite_error
     def _monitor_snapshot_rows(
         self, *, include_removed: bool = False, project_id: str | None = None
     ) -> MonitorCatalogSnapshot:

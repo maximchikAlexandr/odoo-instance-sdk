@@ -1,7 +1,7 @@
 # local-pgadmin Specification
 
 ## Purpose
-TBD - created by archiving change add-typed-http-codegen. Update Purpose after archive.
+Define the local SDK-managed pgAdmin lifecycle, typed open operation, readiness checks and private credential storage without claiming the deferred dashboard authorization flow is complete.
 ## Requirements
 ### Requirement: Public typed pgAdmin operation
 
@@ -58,7 +58,7 @@ After eligibility resolution and before any pgAdmin lifecycle mutation, the publ
 
 The SDK MUST manage at most one pgAdmin container per OS user across all projects. The container MUST be created lazily by the first successful open operation, use the official `dpage/pgadmin4` image pinned by immutable digest, publish only to `127.0.0.1` on a deterministic-or-allocated user-level port, and MUST NOT mount the Docker socket. One user-global file lock MUST cover resolve/configure/create/start/reuse/reconfigure so concurrent clicks cannot create duplicate containers.
 
-Every create/recreate MUST configure supported local single-user/no-login operation with exact non-secret settings `PGADMIN_CONFIG_SERVER_MODE=False`, `PGADMIN_REPLACE_SERVERS_ON_STARTUP=True`, and deterministic `PGADMIN_DEFAULT_EMAIL=odoo-instance-sdk@localhost.invalid`. It MUST set exact file references `PGADMIN_DEFAULT_PASSWORD_FILE=/run/odoo-instance-sdk/pgadmin-admin-password` and `PGPASS_FILE=/run/odoo-instance-sdk/pgpass`. The password and passfile MUST be read-only mounts at those paths, declarative `servers.json` MUST be read-only at `/pgadmin4/servers.json`, and persistent data MUST be read-write at `/var/lib/pgadmin`. After every successful create/recreate, the SDK MUST use a secret-free, ID-scoped command after ownership/fingerprint re-inspection to copy the selected mounted passfile to `/var/lib/pgadmin/.pgpass` as UID 5050 with mode `0600`. Neither API/UI nor the returned root URL MUST carry credentials; after readiness the root URL MUST be usable without a login form.
+Every create/recreate MUST configure supported local single-user/no-login operation with exact non-secret settings `PGADMIN_CONFIG_SERVER_MODE=False`, `PGADMIN_REPLACE_SERVERS_ON_STARTUP=True`, and deterministic `PGADMIN_DEFAULT_EMAIL=odoo-instance-sdk@example.com`. It MUST set exact file references `PGADMIN_DEFAULT_PASSWORD_FILE=/run/odoo-instance-sdk/pgadmin-admin-password` and `PGPASS_FILE=/run/odoo-instance-sdk/pgpass`. The password and passfile MUST be read-only mounts at those paths, declarative `servers.json` MUST be read-only at `/pgadmin4/servers.json`, and persistent data MUST be read-write at `/var/lib/pgadmin`. After every successful create/recreate, the SDK MUST use a secret-free, ID-scoped command after ownership/fingerprint re-inspection to copy the selected mounted passfile to `/var/lib/pgadmin/.pgpass` as UID 5050 with mode `0600`. Neither API/UI nor the returned root URL MUST carry credentials; after readiness the root URL MUST be usable without a login form.
 
 The SDK MUST connect the single container only to the selected SDK-owned Compose network(s) needed for declarative PostgreSQL access. The selected server definition MUST use backend-resolved container/network identity, `MaintenanceDB=<selected database>`, and `DBRestriction=<selected database>`; it MUST return only the pgAdmin root URL and MUST NOT depend on undocumented deep links. The reconciliation fingerprint MUST be a non-secret HMAC-SHA256 using a private per-user random key stored owner-only in the protected pgAdmin directory, over the public backend identity and selected PostgreSQL credential. Public identity and a candidate password without that key MUST NOT derive the label. A same-backend password rotation MUST therefore change the fingerprint, recreate the container, and refresh the active passfile instead of returning `reused`.
 
@@ -97,7 +97,7 @@ Matching-container reuse MUST accept inherited image environment variables in ad
 #### Scenario: Readiness retries only transient startup failures
 
 - **WHEN** the loopback root refuses a connection transiently before becoming valid
-- **THEN** readiness retries at a bounded interval until success or the monotonic deadline; repeated refusal returns unavailable at the deadline, while a login page, unsafe redirect, or invalid/security response fails without retry
+- **THEN** readiness retries at a bounded interval until success or the monotonic deadline; repeated refusal returns unavailable at the deadline, a redirect ending at the exact root-derived same-origin `/browser/` URL is accepted when the final page has no login form, while a login page, a changed host/port, URL credentials/query/fragment, any other final URL, or invalid/security response fails without retry
 
 ### Requirement: Credentials stay in private generated files
 
@@ -130,3 +130,13 @@ All pgAdmin private/data artifacts SHALL resolve through the canonical unified O
 #### Scenario: Migrate pgAdmin state
 - **WHEN** legacy pgAdmin data exists and the unified destination is compatible
 - **THEN** it is preserved below `~/.odcli/pgadmin/` with existing permissions and ownership
+
+
+### Requirement: Dashboard access remains deferred
+
+The public local SDK/openPgAdmin API and snapshot eligibility SHALL remain available. The compact dashboard SHALL hide its pgAdmin action, status and error panel, make no pgAdmin open request, and retain a restoration TODO while #147 is deferred. Automatic master-password provisioning, user-private env persistence and automatic pgAdmin session/database authorization SHALL remain future work in #147, not behavior delivered by this change. Absence of a login form in HTTP readiness SHALL NOT be interpreted as proof that a browser master-password prompt or database authorization is resolved.
+
+#### Scenario: Local readiness is not full browser authorization
+
+- **WHEN** the loopback root returns HTTP 200 directly or via the exact same-origin /browser/ redirect without a login form
+- **THEN** readiness may succeed and the SDK returns the root URL, while dashboard access stays hidden pending the credential flow

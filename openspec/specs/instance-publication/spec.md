@@ -1,7 +1,7 @@
 # instance-publication Specification
 
 ## Purpose
-TBD - created by archiving change extend-odcli-automation-primitives. Update Purpose after archive.
+Define stable project/environment publication through a validated OdCLI-owned Caddy aggregate, protected proxy routes, lifecycle reconciliation and the boundary between local route application and external acceptance.
 ## Requirements
 ### Requirement: Stable publication identity and settings
 OdCLI SHALL store publication settings in the canonical owner-only user configuration root. Settings SHALL contain a normalized domain suffix, dedicated OdCLI-owned Caddy aggregate configuration path, local Caddy control endpoint, Basic Auth username and password hash, and panel host label; they SHALL reject schemes, ports, paths, credentials, wildcard characters, malformed DNS labels, plaintext passwords, and configuration paths outside the owned root. A project URL SHALL use a deterministic `project-<stable-project-id>` label and an environment URL SHALL use `env-<stable-environment-id>` so restarts preserve addresses and distinct owners cannot collide.
@@ -31,7 +31,7 @@ The public SDK SHALL expose inspectable `publish_command()` and `unpublish_comma
 - **THEN** only that environment's route is removed and a repeated call succeeds as already absent
 
 ### Requirement: Validated OdCLI-owned Caddy configuration
-Publication mutations SHALL hold one canonical publication lock, read the current owned route file, produce a complete deterministic candidate for only that file, validate it with the configured Caddy executable, and reload it through the shared process boundary. The canonical file SHALL be atomically replaced only as part of the validated reload operation; reload failure SHALL restore its prior bytes while Caddy retains its prior live configuration. OdCLI SHALL NOT create a publication database, edit unowned ingress configuration, or expose Caddy's administrative endpoint externally.
+Publication mutations SHALL hold one canonical publication lock, read the current owned route file, produce a complete deterministic candidate for only that file, validate it with the configured Caddy executable, and reload it through the shared process boundary. The configured HTTP Caddy control endpoint SHALL be converted to its network authority (host and port) for `caddy reload --address`; the full HTTP URL SHALL NOT be passed as that argument. The canonical file SHALL be atomically replaced only as part of the validated reload operation; reload failure SHALL restore its prior bytes while Caddy retains its prior live configuration. OdCLI SHALL NOT create a publication database, edit unowned ingress configuration, or expose Caddy's administrative endpoint externally.
 
 #### Scenario: Candidate configuration is rejected
 - **WHEN** candidate validation or reload fails
@@ -62,3 +62,18 @@ Stopping a runtime SHALL leave its deterministic route entry in place but report
 #### Scenario: Environment deletion cannot remove its route
 - **WHEN** environment removal cannot validate and reload a candidate without that environment route
 - **THEN** worktree/catalog cleanup does not claim success and the retryable publication cleanup failure is recorded
+
+
+### Requirement: Publication result describes local route application
+
+A successful published/already_published result SHALL describe the validated local runtime and applied OdCLI-owned Caddy aggregate configuration; it SHALL NOT claim external DNS, TLS, tunnel reachability or an authenticated browser session were verified. The managed aggregate is the complete configuration supplied to Caddy reload, not a patch merged into arbitrary unowned ingress configuration. Manual tunnel-facing Caddy listeners, root configuration and panel routes SHALL remain deployment configuration until an explicit supported integration owns them.
+
+#### Scenario: Caddy reload uses a network address
+
+- **WHEN** settings supply a local HTTP control endpoint and publication reload runs
+- **THEN** its argv uses the endpoint host:port authority for --address and validation/reload failure retains the existing recovery contract
+
+#### Scenario: Local route is applied before external acceptance
+
+- **WHEN** a healthy runtime route is validated and successfully reloaded
+- **THEN** the result can be published without claiming an external HTTPS/login probe; external acceptance is a separate verification step

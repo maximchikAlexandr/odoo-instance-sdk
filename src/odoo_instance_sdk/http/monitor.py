@@ -4,12 +4,13 @@ import logging
 import secrets
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import msgspec
 
 from odoo_instance_sdk.exceptions import (
     MonitorError,
+    OdooInstanceSdkError,
     PgAdminDatabaseNotFoundError,
     PgAdminEnvironmentNotFoundError,
     PgAdminNotEligibleError,
@@ -21,6 +22,8 @@ from odoo_instance_sdk.models import (
     HttpErrorCode,
     PgAdminOpenRequest,
     PgAdminOpenResult,
+    RuntimeActionRequest,
+    RuntimeActionResult,
     Snapshot,
 )
 
@@ -40,6 +43,8 @@ class SnapshotProvider(Protocol):
 
 
 PgAdminOpener = Callable[[str], PgAdminOpenResult]
+RuntimeAction = Literal["start", "stop"]
+RuntimeControl = Callable[[RuntimeAction, RuntimeActionRequest], RuntimeActionResult]
 
 
 def _replace_refs(value: JsonValue) -> JsonValue:
@@ -126,7 +131,7 @@ def build_monitor_router(monitor: SnapshotProvider) -> APIRouter:
     return router
 
 
-def build_pgadmin_router(  # noqa: C901
+def build_pgadmin_router(
     opener: PgAdminOpener,
     *,
     external_origin: tuple[str, tuple[str, ...]] | None = None,
@@ -155,22 +160,8 @@ def build_pgadmin_router(  # noqa: C901
             status_code=status_code,
         )
 
-    def request_is_safe(request: Request) -> bool:
-        """Apply browser request-boundary checks before decoding or delegation."""
-        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        if content_type != "application/json":
-            return False
-        if not _same_origin(request, external_origin=external_origin):
-            return False
-        fetch_site = request.headers.get("sec-fetch-site")
-        if fetch_site is not None and fetch_site.lower() != "same-origin":
-            return False
-        token = request.headers.get("x-csrf-token")
-        cookie = request.cookies.get("odoo_instance_sdk_csrf")
-        return bool(token and cookie and secrets.compare_digest(token, cookie))
-
     async def open_pgadmin(request: Request) -> Response:
-        if not request_is_safe(request):
+        if not request_is_safe(request, external_origin=external_origin):
             return error(HttpErrorCode.invalid_request, 422)
         try:
             payload = msgspec.json.decode(
@@ -198,6 +189,23 @@ def build_pgadmin_router(  # noqa: C901
     router.post("/api/v1/pgadmin/open", operation_id="openPgAdmin")(open_pgadmin)
 
     return router
+
+
+def request_is_safe(
+    request: Request, *, external_origin: tuple[str, tuple[str, ...]] | None = None
+) -> bool:
+    """Apply browser request-boundary checks before decoding or delegation."""
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        return False
+    if not _same_origin(request, external_origin=external_origin):
+        return False
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site.lower() != "same-origin":
+        return False
+    token = request.headers.get("x-csrf-token")
+    cookie = request.cookies.get("odoo_instance_sdk_csrf")
+    return bool(token and cookie and secrets.compare_digest(token, cookie))
 
 
 def _same_origin(
@@ -229,7 +237,9 @@ def _same_origin(
     if external_origin is not None:
         expected_scheme, expected_hosts = external_origin
         return (
-            parsed.scheme.lower() == expected_scheme and parsed.hostname.lower() in expected_hosts
+            parsed.scheme.lower() == expected_scheme
+            and parsed.hostname.lower() in expected_hosts
+            and origin_port in (None, 443)
         )
     request_scheme = request.url.scheme.lower()
     request_host = request.url.hostname
@@ -263,7 +273,14 @@ def install_openapi_schema(app: FastAPI) -> None:
         components = schema.setdefault("components", {})
         schemas = cast("dict[str, dict[str, JsonValue]]", components.setdefault("schemas", {}))
         schemas.update(
-            _msgspec_components(Snapshot, HttpError, PgAdminOpenRequest, PgAdminOpenResult)
+            _msgspec_components(
+                Snapshot,
+                HttpError,
+                PgAdminOpenRequest,
+                PgAdminOpenResult,
+                RuntimeActionRequest,
+                RuntimeActionResult,
+            )
         )
         paths = schema["paths"]
         snapshot_path = cast("dict[str, JsonValue]", paths["/api/v1/snapshot"])
@@ -308,7 +325,93 @@ def install_openapi_schema(app: FastAPI) -> None:
                     **_typed_response(HttpError),
                 },
             }
+        for action in ("start", "stop"):
+            path = paths.get(f"/api/v1/runtime/{action}")
+            if isinstance(path, dict) and isinstance(path.get("post"), dict):
+                operation = cast("dict[str, JsonValue]", path["post"])
+                operation["requestBody"] = {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/RuntimeActionRequest"}
+                        }
+                    },
+                }
+                operation["responses"] = {
+                    "200": {
+                        "description": "Runtime action completed",
+                        **_typed_response(RuntimeActionResult),
+                    },
+                    **{
+                        str(code): {"description": description, **_typed_response(HttpError)}
+                        for code, description in (
+                            (404, "Runtime not found"),
+                            (409, "Runtime action rejected"),
+                            (422, "Invalid request"),
+                            (503, "Runtime unavailable"),
+                        )
+                    },
+                }
         app.openapi_schema = schema
         return cast("dict[str, JsonValue]", schema)
 
     setattr(app, "openapi", custom_openapi)
+
+
+def build_runtime_router(
+    controller: RuntimeControl, *, external_origin: tuple[str, tuple[str, ...]] | None = None
+) -> APIRouter:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fastapi import APIRouter, Request
+    from fastapi.responses import Response
+
+    globals()["Request"] = Request
+    globals()["Response"] = Response
+    router = APIRouter()
+    # One worker preserves the SDK catalog connection's thread affinity.
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="odcli-runtime")
+    router.add_event_handler("shutdown", lambda: executor.shutdown(wait=True))
+
+    async def perform(request: Request, action: RuntimeAction) -> Response:
+        def error(code: HttpErrorCode, status: int, message: str) -> Response:
+            return Response(
+                content=msgspec.json.encode(HttpError(code=code, message=message)),
+                status_code=status,
+                media_type="application/json",
+            )
+
+        if not request_is_safe(request, external_origin=external_origin):
+            return error(HttpErrorCode.invalid_request, 422, "invalid request")
+        try:
+            target = msgspec.json.decode(
+                await request.body(), type=RuntimeActionRequest, strict=True
+            )
+        except (msgspec.DecodeError, msgspec.ValidationError, TypeError, ValueError):
+            return error(HttpErrorCode.invalid_request, 422, "invalid request")
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                executor, controller, action, target
+            )
+        except LookupError:
+            return error(HttpErrorCode.runtime_not_found, 404, "runtime not found")
+        except (OdooInstanceSdkError, RuntimeError):
+            return error(
+                HttpErrorCode.runtime_conflict,
+                409,
+                "Runtime action rejected. Check the instance configuration, dependencies and runtime ownership.",
+            )
+        except Exception:
+            return error(HttpErrorCode.runtime_unavailable, 503, "runtime operation unavailable")
+        return Response(content=msgspec.json.encode(result), media_type="application/json")
+
+    async def start(request: Request) -> Response:
+        return await perform(request, "start")
+
+    async def stop(request: Request) -> Response:
+        return await perform(request, "stop")
+
+    router.post("/api/v1/runtime/start", operation_id="startRuntime")(start)
+    router.post("/api/v1/runtime/stop", operation_id="stopRuntime")(stop)
+    return router

@@ -62,6 +62,29 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def test_pgadmin_default_email_is_accepted_by_pinned_image() -> None:
+    _skip_if_prerequisites_missing()
+    _ensure_image(pgadmin_files.PGADMIN_IMAGE)
+    result = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/venv/bin/python3",
+            pgadmin_files.PGADMIN_IMAGE,
+            "-c",
+            (
+                "import sys; from email_validator import validate_email; "
+                "validate_email(sys.argv[1], check_deliverability=False)"
+            ),
+            pgadmin_files.PGADMIN_DEFAULT_EMAIL,
+        ],
+        timeout=30.0,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def _compose_args(project: str, compose_file: Path, *extra: str) -> list[str]:
     return [
         "docker",

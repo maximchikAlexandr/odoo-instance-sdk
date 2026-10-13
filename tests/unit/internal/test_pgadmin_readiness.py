@@ -29,6 +29,48 @@ class _Response:
         return self.body
 
 
+@pytest.mark.parametrize("path", ["", "browser/"])
+def test_wait_ready_accepts_the_local_browser_page(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    def fake_urlopen(url: str, *, timeout: float) -> _Response:
+        calls.append((url, timeout))
+        return _Response('<div id="browser"></div>', f"http://127.0.0.1:5050/{path}")
+
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        pgadmin_readiness,
+        "urlopen",
+        fake_urlopen,
+    )
+    pgadmin_readiness.wait_ready(5050, deadline=123.0)
+    assert calls == [("http://127.0.0.1:5050/", 23.0)]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:5050/login",
+        "http://127.0.0.1:5051/browser/",
+        "https://example.com/browser/",
+        "http://user:password@127.0.0.1:5050/browser/",
+        "http://127.0.0.1:5050/browser/?next=/login",
+    ],
+)
+def test_wait_ready_rejects_other_redirect_targets(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setattr(
+        pgadmin_readiness,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response('<div id="browser"></div>', url),
+    )
+    with pytest.raises(PgAdminUnavailableError):
+        pgadmin_readiness.wait_ready(5050, deadline=1e12)
+
+
 def test_wait_ready_rejects_login_page_and_redirect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
