@@ -23,7 +23,7 @@ _READINESS_RETRY_INTERVAL = 0.25
 
 def _validate_response(response: _HttpResponse, root_url: str) -> None:
     final_url = getattr(response, "geturl", lambda: root_url)()
-    if final_url != root_url:
+    if final_url not in {root_url, f"{root_url}browser/"}:
         raise PgAdminUnavailableError()
     status = getattr(response, "status", None)
     if not isinstance(status, int):
