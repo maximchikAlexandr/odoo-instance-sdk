@@ -122,6 +122,10 @@ def _annotate_retained_failure(
     default_switch_confirmed: bool = False,
     source_kind: str | None = None,
     source_sha256: str | None = None,
+    project_id: str | None = None,
+    effective_config: str | None = None,
+    managed_filestore: str | None = None,
+    binding_published: bool | None = None,
 ) -> None:
     """Attach only non-secret retained-artifact identifiers to a failure."""
     restore_stage_id = getattr(error, "restore_stage_id", None)
@@ -142,6 +146,10 @@ def _annotate_retained_failure(
             source_kind if source_kind in {"catalogue", "local_archive"} else None,
         ),
         source_sha256=source_sha256 if isinstance(source_sha256, str) else None,
+        project_id=project_id if isinstance(project_id, str) else None,
+        effective_config=effective_config if isinstance(effective_config, str) else None,
+        managed_filestore=managed_filestore if isinstance(managed_filestore, str) else None,
+        binding_published=binding_published,
     )
     setattr(error, "failure_context", context)
     note = retained_artifact_context(

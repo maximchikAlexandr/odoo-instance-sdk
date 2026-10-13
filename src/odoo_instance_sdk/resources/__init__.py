@@ -10,6 +10,13 @@ from odoo_instance_sdk.resources.environment import (
 from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 from odoo_instance_sdk.resources.module import ModuleResource
+from odoo_instance_sdk.resources.publication import (
+    PublicationResource,
+    PublicationResult,
+    PublicationSettings,
+    PublicationTarget,
+    render_panel_route,
+)
 
 __all__ = [
     "BackupResource",
@@ -23,4 +30,9 @@ __all__ = [
     "InstanceFactory",
     "ModuleResource",
     "OdooInstance",
+    "PublicationResource",
+    "PublicationResult",
+    "PublicationSettings",
+    "PublicationTarget",
+    "render_panel_route",
 ]

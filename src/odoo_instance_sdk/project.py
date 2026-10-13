@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import msgspec
 
 from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
+from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.sanitize import sanitize_terminal_text
 from odoo_instance_sdk.internal.urls import normalize_base_url
 
@@ -130,6 +131,8 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     python: str | Path | None = None
     source_config: Path | None = None
     default_source_database: str | None = None
+    managed_filestore: Path | None = None
+    addon_repositories: tuple[Path, ...] = ()
     preferred_http_port: int | None = None
     requirements: tuple[str, ...] = ()
     default_run_args: tuple[str, ...] = ()
@@ -142,7 +145,22 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     ticket_link_enabled: bool | None = None
     ticket_base_url: str | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901
+        root = self.repository_root.resolve()
+        if self.default_source_database is not None:
+            validate_db_name(self.default_source_database)
+        if self.managed_filestore is not None:
+            _validate_project_path(root, self.managed_filestore, "managed_filestore")
+        seen_repositories: set[Path] = set()
+        repositories: list[Path] = []
+        for repository in self.addon_repositories:
+            canonical = _validate_project_path(root, repository, "addon_repositories")
+            if canonical in seen_repositories:
+                continue
+            seen_repositories.add(canonical)
+            repositories.append(repository)
+        if tuple(repositories) != self.addon_repositories:
+            msgspec.structs.force_setattr(self, "addon_repositories", tuple(repositories))
         if self.default_base_ref is not None and not self.default_base_ref.strip():
             raise ConfigError("project.default_base_ref must not be empty")
         if self.refresh_after_hours is not None and (
@@ -242,6 +260,8 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             python=_python_field(data.get("python")),
             source_config=_path_or_none(data.get("source_config")),
             default_source_database=_str_or_none(data.get("default_source_database")),
+            managed_filestore=_path_or_none(data.get("managed_filestore")),
+            addon_repositories=tuple(_path_list(data.get("addon_repositories"))),
             preferred_http_port=_int_or_none(data.get("preferred_http_port")),
             requirements=tuple(_str_list(data.get("requirements"))),
             default_run_args=tuple(_str_list(data.get("default_run_args"))),
@@ -272,7 +292,15 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         return "\n".join(lines) + "\n"
 
 
-def _append_project_manifest_fields(lines: list[str], config: ProjectConfig) -> None:
+def managed_filestore_path(config: ProjectConfig) -> Path:
+    """Return the project-owned data directory used by the active binding."""
+    root = config.repository_root.resolve()
+    value = config.managed_filestore or Path(".odcli") / "filestore"
+    _validate_project_path(root, value, "managed_filestore")
+    return (value if value.is_absolute() else root / value).resolve()
+
+
+def _append_project_manifest_fields(lines: list[str], config: ProjectConfig) -> None:  # noqa: C901
     if config.odoo_bin is not None:
         lines.append(f'odoo_bin = "{_toml_path(config.odoo_bin)}"')
     if config.python is not None:
@@ -281,6 +309,11 @@ def _append_project_manifest_fields(lines: list[str], config: ProjectConfig) -> 
         lines.append(f'source_config = "{_toml_path(config.source_config)}"')
     if config.default_source_database is not None:
         lines.append(f'default_source_database = "{_toml_str(config.default_source_database)}"')
+    if config.managed_filestore is not None:
+        lines.append(f'managed_filestore = "{_toml_path(config.managed_filestore)}"')
+    if config.addon_repositories:
+        repositories = ", ".join(f'"{_toml_path(path)}"' for path in config.addon_repositories)
+        lines.append(f"addon_repositories = [{repositories}]")
     if config.default_base_ref is not None:
         lines.append(f'default_base_ref = "{_toml_str(config.default_base_ref)}"')
     if config.refresh_after_hours is not None:
@@ -489,6 +522,32 @@ def _str_list(value: JsonValue) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(v) for v in value]
     return [str(value)]
+
+
+def _path_list(value: JsonValue) -> list[Path]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ConfigError("project.addon_repositories must be an array")
+    return [Path(str(item)) for item in value]
+
+
+def _validate_project_path(root: Path, value: Path, field: str) -> Path:
+    candidate = value if value.is_absolute() else root / value
+    current = root
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        relative = None
+    if relative is not None:
+        for component in relative.parts:
+            current /= component
+            if current.is_symlink():
+                raise ConfigError(f"project.{field} must not traverse a symlink")
+    resolved = candidate.resolve(strict=False)
+    if not resolved.is_relative_to(root):
+        raise ConfigError(f"project.{field} must stay inside the project checkout")
+    return resolved
 
 
 def _toml_path(p: Path) -> str:

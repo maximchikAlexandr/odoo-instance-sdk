@@ -93,13 +93,16 @@ class PipeDrain:
             self._stopped = True
         for thread in self._threads:
             thread.join(timeout=_CLEANUP_TIMEOUT)
-        # A buffered reader holds its lock while blocked in read(). Closing it
-        # from this thread before the child exits can deadlock the CLI.
-        if all(not thread.is_alive() for thread in self._threads):
-            for stream in self._streams.values():
-                if stream is not None:
-                    with contextlib.suppress(OSError, ValueError):
-                        stream.close()
+        # Closing a buffered stream while its reader is blocked in read() can
+        # wait forever for the reader's internal lock (notably on macOS).
+        # A remaining reader is a daemon; leave its pipe open if another child
+        # still holds the write end after the owned process has exited.
+        if any(thread.is_alive() for thread in self._threads):
+            return
+        for stream in self._streams.values():
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
 
     def join(self, timeout: float | None = _CLEANUP_TIMEOUT) -> None:
         """Wait for readers to observe EOF without closing their streams."""

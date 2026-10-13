@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import msgspec
 
@@ -55,6 +57,12 @@ _ALLOWED_TAGS = frozenset(
 _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
+class _StepOptions(TypedDict):
+    environment: Mapping[str, str] | None
+    secret_values: Sequence[str]
+    hooks_path: str | None
+
+
 def _worktree(instance: OdooInstance) -> Path:
     value = getattr(instance.config, "default_cwd", None)
     if value is None:
@@ -73,12 +81,37 @@ def _text(value: str | bytes | None) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _cleanup_secret_channel(path: str | None) -> None:
+    if path is not None:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
+def _credentialed_args(
+    args: Sequence[str],
+    environment: Mapping[str, str] | None,
+    hooks_path: str | None = None,
+) -> tuple[str, ...]:
+    native_args = tuple(args)
+    controls: list[str] = []
+    if environment is not None and environment.get("ODCLI_GITLAB_TOKEN_FILE"):
+        controls.extend(("-c", "credential.helper=", "-c", "core.fsmonitor=false"))
+    if hooks_path is not None:
+        controls.extend(("-c", f"core.hooksPath={hooks_path}"))
+    return (*controls, *native_args)
+
+
 def _command_result(value: ProcessResult, step: PreparedStep) -> CommandResult:
+    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+    secrets = step.secret_values
+    stdout = redacted_projection(_text(value.stdout), secrets=secrets, field="stdout")
+    stderr = redacted_projection(_text(value.stderr), secrets=secrets, field="stderr")
     return CommandResult(
         args=list(step.public_projection().argv),
         returncode=value.returncode,
-        stdout=_text(value.stdout),
-        stderr=_text(value.stderr),
+        stdout=stdout if isinstance(stdout, str) else str(stdout),
+        stderr=stderr if isinstance(stderr, str) else str(stderr),
         duration=value.duration,
         cwd=value.cwd,
         environment=step.public_projection().environment_overrides,
@@ -91,16 +124,23 @@ def _step(
     args: Sequence[str],
     *,
     mutating: bool = False,
+    environment: Mapping[str, str] | None = None,
+    secret_values: Sequence[str] = (),
+    hooks_path: str | None = None,
 ) -> PreparedStep:
     from odoo_instance_sdk.internal.proc import PreparedStep
 
     return PreparedStep(
         step_id=step_id,
-        argv=("git", "-C", str(root), *tuple(args)),
+        argv=("git", "-C", str(root), *_credentialed_args(args, environment, hooks_path)),
         cwd=str(root),
         read_only=not mutating,
         mutating=mutating,
         text=True,
+        environment=tuple(sorted((environment or {}).items())),
+        secret_config_path=(environment or {}).get("ODCLI_GITLAB_TOKEN_FILE"),
+        secret_values=tuple(secret_values),
+        environment_policy=("explicit" if secret_values else "sanitized-inherit"),
     )
 
 
@@ -369,6 +409,61 @@ class GitResource:
 
     def __init__(self, instance: OdooInstance) -> None:
         self._instance = instance
+
+    def passthrough_command(
+        self,
+        args: Sequence[str],
+        *,
+        environment: Mapping[str, str] | None = None,
+        secret_values: Sequence[str] = (),
+        hooks_path: str | None = None,
+    ) -> Command[CommandResult]:
+        """Capture one native Git invocation without interpreting its arguments."""
+        from odoo_instance_sdk.execution import Command
+        from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
+
+        root = _worktree(self._instance)
+        native_args = _credentialed_args(
+            tuple(str(value) for value in args), environment, hooks_path
+        )
+        credentialed = bool(secret_values)
+        step = PreparedStep(
+            step_id="git.passthrough",
+            argv=("git", *native_args),
+            cwd=str(root),
+            environment=tuple(sorted((environment or {}).items())),
+            secret_config_path=(environment or {}).get("ODCLI_GITLAB_TOKEN_FILE"),
+            secret_values=tuple(secret_values),
+            environment_policy=("explicit" if secret_values else "sanitized-inherit"),
+            mode="passthrough",
+            interactive=not credentialed,
+            inherit_stdio=not credentialed,
+            mutating=True,
+            text=True,
+        )
+
+        def callback(context: RunContext[CommandResult]) -> CommandResult:
+            try:
+                result = cast("ProcessResult", context.process(step.step_id))
+                return _command_result(result, step)
+            finally:
+                _cleanup_secret_channel(step.secret_config_path)
+
+        return Command.create(_plan((step,)), callback, (step,), executor=SubprocessExecutor())
+
+    def passthrough(
+        self,
+        args: Sequence[str],
+        *,
+        environment: Mapping[str, str] | None = None,
+        secret_values: Sequence[str] = (),
+    ) -> CommandResult:
+        """Run one native Git argument vector and return its native exit code."""
+        return self.passthrough_command(
+            args,
+            environment=environment,
+            secret_values=secret_values,
+        ).run()
 
     def commit_context_command(
         self, description: str, *, ticket: str | None = None, tag: str | None = None
@@ -650,51 +745,87 @@ class GitResource:
         return self.absorb_command(base=base, dry_run=dry_run, and_rebase=and_rebase).run()
 
     def sync_command(
-        self, *, base: str | None = None, push: bool = False
+        self,
+        *,
+        base: str | None = None,
+        push: bool = False,
+        environment: Mapping[str, str] | None = None,
+        secret_values: Sequence[str] = (),
+        remote_allowed: Callable[[str], bool] | None = None,
+        hooks_path: str | None = None,
     ) -> Command[GitSyncResult]:
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
         root = _worktree(self._instance)
         resolved = _base_ref(self._instance, base)
-        status = _step(root, "git.sync.status", ("status", "--porcelain=v1"))
-        branch = _step(root, "git.sync.branch", ("symbolic-ref", "--quiet", "--short", "HEAD"))
+        step_options: _StepOptions = {
+            "environment": environment,
+            "secret_values": secret_values,
+            "hooks_path": hooks_path,
+        }
+        status = _step(root, "git.sync.status", ("status", "--porcelain=v1"), **step_options)
+        branch = _step(
+            root,
+            "git.sync.branch",
+            ("symbolic-ref", "--quiet", "--short", "HEAD"),
+            **step_options,
+        )
         branch_probe = _capture_probe(branch)
         actual_branch = _text(branch_probe.stdout).strip()
         if not actual_branch:
             raise GitSyncError("detached or protected branches cannot be synchronized")
         upstream = _step(
-            root, "git.sync.upstream", ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+            root,
+            "git.sync.upstream",
+            ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"),
+            **step_options,
         )
-        remote = _step(root, "git.sync.remote", ("remote", "get-url", "origin"))
+        remote = _step(root, "git.sync.remote", ("remote", "get-url", "origin"), **step_options)
         remote_probe = _capture_probe(remote, allow_failure=True)
         planned_remote_url = _text(remote_probe.stdout).strip()
         authoritative = _step(
             root,
             "git.sync.authoritative-remote-sha",
             ("ls-remote", "--heads", "origin", f"refs/heads/{actual_branch}"),
+            **step_options,
         )
+        remote_policy = remote_allowed or _ssh_remote
         authoritative_planned = remote_probe.returncode == 0 and not (
-            push and not _ssh_remote(planned_remote_url)
+            push and not remote_policy(planned_remote_url)
         )
         if not authoritative_planned:
             planned_remote_sha = None
         else:
             authoritative_probe = _capture_probe(authoritative, allow_failure=True)
             planned_remote_sha = _remote_head(_text(authoritative_probe.stdout))
-        fetch = _step(root, "git.sync.fetch", ("fetch", "origin", "--prune"), mutating=True)
+        fetch = _step(
+            root,
+            "git.sync.fetch",
+            ("fetch", "origin", "--prune"),
+            mutating=True,
+            **step_options,
+        )
         fetched_sha = _step(
             root,
             "git.sync.fetched-sha",
             ("rev-parse", "--verify", f"refs/remotes/origin/{actual_branch}"),
+            **step_options,
         )
         integrate = _step(
             root,
             "git.sync.integrate",
             ("rebase", f"refs/remotes/origin/{actual_branch}"),
             mutating=True,
+            **step_options,
         )
-        rebase = _step(root, "git.sync.rebase", ("rebase", resolved), mutating=True)
+        rebase = _step(
+            root,
+            "git.sync.rebase",
+            ("rebase", resolved),
+            mutating=True,
+            **step_options,
+        )
         verify = _step(
             root,
             "git.sync.check",
@@ -705,6 +836,7 @@ class GitResource:
                 "--end-of-options",
                 f"{resolved}..HEAD",
             ),
+            **step_options,
         )
         ancestry = _step(
             root,
@@ -715,12 +847,14 @@ class GitResource:
                 f"refs/remotes/origin/{actual_branch}",
                 "HEAD",
             ),
+            **step_options,
         )
         fast_forward = _step(
             root,
             "git.sync.push-fast-forward",
             ("push", "origin", f"HEAD:refs/heads/{actual_branch}"),
             mutating=True,
+            **step_options,
         )
         rewritten = (
             _step(
@@ -733,6 +867,7 @@ class GitResource:
                     f"HEAD:refs/heads/{actual_branch}",
                 ),
                 mutating=True,
+                **step_options,
             )
             if planned_remote_sha is not None
             else None
@@ -769,17 +904,23 @@ class GitResource:
         )
 
         def callback(context: RunContext[GitSyncResult]) -> GitSyncResult:
-            return execute_sync(
-                context,
-                sync_steps,
-                actual_branch=actual_branch,
-                planned_remote_sha=planned_remote_sha,
-                resolved=resolved,
-                push=push,
-                instance=self._instance,
-                root=root,
-                ssh_remote=_ssh_remote,
-            )
+            try:
+                return execute_sync(
+                    context,
+                    sync_steps,
+                    actual_branch=actual_branch,
+                    planned_remote_sha=planned_remote_sha,
+                    resolved=resolved,
+                    push=push,
+                    instance=self._instance,
+                    root=root,
+                    ssh_remote=remote_policy,
+                )
+            finally:
+                for path in {
+                    step.secret_config_path for step in steps if step.secret_config_path is not None
+                }:
+                    _cleanup_secret_channel(path)
 
         planning_steps = (
             (branch, remote, authoritative) if authoritative_planned else (branch, remote)
@@ -792,8 +933,24 @@ class GitResource:
             executor=SubprocessExecutor(),
         )
 
-    def sync(self, *, base: str | None = None, push: bool = False) -> GitSyncResult:
-        return self.sync_command(base=base, push=push).run()
+    def sync(
+        self,
+        *,
+        base: str | None = None,
+        push: bool = False,
+        environment: Mapping[str, str] | None = None,
+        secret_values: Sequence[str] = (),
+        remote_allowed: Callable[[str], bool] | None = None,
+        hooks_path: str | None = None,
+    ) -> GitSyncResult:
+        return self.sync_command(
+            base=base,
+            push=push,
+            environment=environment,
+            secret_values=secret_values,
+            remote_allowed=remote_allowed,
+            hooks_path=hooks_path,
+        ).run()
 
 
 def _ssh_remote(value: str) -> bool:

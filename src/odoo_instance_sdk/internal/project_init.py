@@ -124,6 +124,10 @@ def manifest_dict(
         "python": str(config.python) if config.python else None,
         "source_config": str(config.source_config) if config.source_config else None,
         "default_source_database": config.default_source_database,
+        "managed_filestore": (
+            str(config.managed_filestore) if config.managed_filestore is not None else None
+        ),
+        "addon_repositories": [str(path) for path in config.addon_repositories],
         "default_base_ref": config.default_base_ref,
         "ticket_link_enabled": config.ticket_link_enabled is True,
         "ticket_base_url": config.ticket_base_url,

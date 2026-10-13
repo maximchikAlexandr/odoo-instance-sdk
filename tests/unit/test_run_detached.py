@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -799,13 +800,27 @@ def test_detached_readiness_passes_effective_logfile_argv_to_identity_proof(
         http_port=http_port,
         logfile="odoo.log",
     )
+    listener_ready = False
+
+    def recorded(*_args: object, **kwargs: object) -> int | None:
+        if kwargs["require_socket_owner"] and not listener_ready:
+            return None
+        return 4242
+
+    def poll(*_args: object, **kwargs: object) -> ReadinessResult:
+        nonlocal listener_ready
+        assert cast("Callable[[], bool]", kwargs["alive_check"])()
+        listener_ready = True
+        return ReadinessResult(ok=True, elapsed=0.1, attempts=1)
+
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.planning._recorded_runtime_pid", return_value=4242
+            "odoo_instance_sdk.resources.instance.planning._recorded_runtime_pid",
+            side_effect=recorded,
         ) as proof,
         patch(
             "odoo_instance_sdk.internal.health.poll_health",
-            return_value=ReadinessResult(ok=True, elapsed=0.1, attempts=1),
+            side_effect=poll,
         ),
     ):
         command = instance.run_detached_command(wait_ready=True)
@@ -822,10 +837,14 @@ def test_detached_readiness_passes_effective_logfile_argv_to_identity_proof(
             pid=4242,
         )
     assert result.ok
+    assert [call.kwargs["require_socket_owner"] for call in proof.call_args_list] == [
+        False,
+        False,
+        True,
+    ]
     expected_argv = proof.call_args.kwargs["expected_argv"]
     logfile_index = expected_argv.index("--logfile")
     assert expected_argv[logfile_index + 1] == str((wt / "odoo.log").resolve())
-    assert [call.kwargs["require_socket_owner"] for call in proof.call_args_list] == [False, True]
 
 
 @pytest.mark.unit

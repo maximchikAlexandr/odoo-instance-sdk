@@ -18,6 +18,7 @@ import {
   type EnvironmentSnapshot,
   HttpErrorCode,
   PgAdminEligibilityState,
+  type PublicationSnapshot,
   type ProjectSummary,
   type RuntimeMetrics,
   type Snapshot,
@@ -163,7 +164,7 @@ function ClusterCard({
       <Card data-testid="cluster-card" withBorder padding="md" radius="sm">
         <Text fw={600}>Cluster — {project.name}</Text>
         <Text size="sm" c="dimmed">PostgreSQL: unavailable (manifest missing)</Text>
-        <ProjectRuntime runtime={project.runtime} />
+        <ProjectRuntime runtime={project.runtime} publication={project.publication} />
       </Card>
     );
   }
@@ -212,13 +213,20 @@ function ClusterCard({
           color="violet"
         />
       ) : null}
-      <ProjectRuntime runtime={project.runtime} />
+      <ProjectRuntime runtime={project.runtime} publication={project.publication} />
     </Card>
   );
 }
 
-function ProjectRuntime({ runtime }: { runtime: RuntimeMetrics | null }) {
+function ProjectRuntime({
+  runtime,
+  publication,
+}: {
+  runtime: RuntimeMetrics | null;
+  publication?: PublicationSnapshot;
+}) {
   const live = runtime?.state === "ready" || runtime?.state === "not_ready";
+  const externalUrl = publication?.state === "available" ? publication.external_url : null;
   return (
     <Stack gap={2} mt="sm" data-testid="project-runtime">
       <Group gap="xs">
@@ -240,6 +248,20 @@ function ProjectRuntime({ runtime }: { runtime: RuntimeMetrics | null }) {
           </Text>
         </>
       ) : null}
+      <Text size="xs" c="dimmed">
+        publication: {publication?.state ?? "unpublished"}
+        {publication?.reason ? ` (${publication.reason})` : ""}
+      </Text>
+      <Button
+        data-testid="open-project-odoo"
+        size="xs"
+        disabled={!externalUrl}
+        onClick={() => {
+          if (externalUrl) window.open(externalUrl, "_blank", "noopener,noreferrer");
+        }}
+      >
+        Open Odoo
+      </Button>
     </Stack>
   );
 }
@@ -262,7 +284,9 @@ function EnvironmentCard({
 
   const workerPids = rt?.child_pids ?? [];
   const isLive = rt?.state === "ready" || rt?.state === "not_ready";
-  const isOpenEnabled = rt?.state === "ready" && rt.http_url !== null;
+  const publication = env.publication;
+  const externalUrl = publication?.state === "available" ? publication.external_url : null;
+  const isOpenEnabled = externalUrl !== null && externalUrl !== undefined;
   const [pgAdminPending, setPgAdminPending] = useState(false);
   const [pgAdminError, setPgAdminError] = useState<string | null>(null);
   const pgAdminState = env.pgadmin.state;
@@ -312,6 +336,10 @@ function EnvironmentCard({
         </Text>
         <Text size="sm" c="dimmed">
           database: {env.database ?? "—"} · port: {port ?? "—"}
+        </Text>
+        <Text size="xs" c="dimmed">
+          local endpoint: {rt.http_url ?? "—"} · publication: {publication?.state ?? "unpublished"}
+          {publication?.reason ? ` (${publication.reason})` : ""}
         </Text>
 
         <Text size="sm" c="dimmed">
@@ -364,7 +392,7 @@ function EnvironmentCard({
             size="xs"
             disabled={!isOpenEnabled}
             onClick={() => {
-              if (rt?.http_url) window.open(rt.http_url, "_blank", "noopener,noreferrer");
+              if (externalUrl) window.open(externalUrl, "_blank", "noopener,noreferrer");
             }}
           >
             Open Odoo

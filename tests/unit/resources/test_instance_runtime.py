@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 import pytest
+from msgspec.structs import replace
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.config import InstanceConfig
@@ -23,7 +24,7 @@ from odoo_instance_sdk.internal.proc import (
     StepEvent,
     StepObserver,
 )
-from odoo_instance_sdk.internal.repo_key import git_common_dir
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
@@ -141,6 +142,8 @@ class TestInstancePrefix:
         fake_python: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        filestore = project_manifest / ".odcli" / "filestore"
+        filestore.mkdir(exist_ok=True)
         project = ProjectConfig.load(project_manifest)
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
@@ -177,12 +180,16 @@ class TestInstancePrefix:
         for path in (python, odoo_bin, config):
             path.write_text("[options]\n" if path == config else "")
         python.chmod(0o755)
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
         missing = root / "missing"
         project = ProjectConfig(
             repository_root=root,
             odoo_bin=missing if field == "odoo_bin" else odoo_bin,
             python=missing if field == "python" else python,
             source_config=missing if field == "source_config" else config,
+            default_source_database="bound",
+            managed_filestore=Path(".odcli/filestore"),
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
@@ -203,6 +210,8 @@ class TestInstancePrefix:
         python.write_text("#!/bin/sh\nexit 0\n")
         odoo_bin.write_text("#!/bin/sh\nexit 0\n")
         config.write_text("[options]\n")
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
         cluster_factory = MagicMock(return_value=MagicMock())
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
@@ -213,6 +222,8 @@ class TestInstancePrefix:
             python=python,
             odoo_bin=odoo_bin,
             source_config=config,
+            default_source_database="bound",
+            managed_filestore=Path(".odcli/filestore"),
         )
 
         with pytest.raises(InstanceConfigurationError, match="not executable"):
@@ -233,6 +244,8 @@ class TestInstancePrefix:
         )
         runtime = root / "runtime"
         runtime.mkdir()
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
         project = ProjectConfig(
             repository_root=root,
             python=Path("python"),
@@ -241,6 +254,7 @@ class TestInstancePrefix:
             runtime_cwd=Path("runtime"),
             preferred_http_port=8077,
             default_source_database="fresh",
+            managed_filestore=Path(".odcli/filestore"),
             default_run_args=("--dev=xml",),
         )
         monkeypatch.setattr(
@@ -260,6 +274,93 @@ class TestInstancePrefix:
         )
         assert foreground.argv[-2:] == ("--dev=xml", "--stop-after-init")
 
+    def test_from_project_rejects_database_only_binding_before_cluster_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "python").chmod(0o755)
+        config = root / "odoo.conf"
+        config.write_text("[options]\nhttp_interface = 127.0.0.1\n")
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=config,
+            default_source_database="fresh",
+        )
+        cluster_factory = MagicMock(return_value=MagicMock())
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(cluster_factory),
+        )
+
+        with pytest.raises(InstanceConfigurationError, match="project binding is incomplete"):
+            _make_client().instance.from_project(project)
+
+        cluster_factory.assert_not_called()
+
+    def test_from_project_rejects_absent_binding_before_cluster_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "python").chmod(0o755)
+        config = root / "odoo.conf"
+        config.write_text("[options]\nhttp_interface = 127.0.0.1\n")
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=config,
+        )
+        cluster_factory = MagicMock(return_value=MagicMock())
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(cluster_factory),
+        )
+
+        with pytest.raises(InstanceConfigurationError, match="project binding is incomplete"):
+            _make_client().instance.from_project(project)
+
+        cluster_factory.assert_not_called()
+
+    def test_from_project_consumes_published_database_filestore_binding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "python").chmod(0o755)
+        config = root / "odoo.conf"
+        config.write_text("[options]\nhttp_interface = 127.0.0.1\n")
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=Path("odoo.conf"),
+            default_source_database="restored",
+            managed_filestore=Path(".odcli/filestore"),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock(owned=False)),
+        )
+
+        instance = _make_client().instance.from_project(project)
+
+        assert instance.config.configured_database_names == ("restored",)
+        assert instance.config.start_config is not None
+        assert instance.config.start_config.data_dir == str(filestore)
+        assert instance.config.start_config.dbfilter == "restored"
+
     def test_from_project_uses_owned_compose_runtime_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -270,6 +371,7 @@ class TestInstancePrefix:
         (root / "python").chmod(0o755)
         generated = root / ".odcli" / "odoo.conf"
         generated.parent.mkdir()
+        (root / ".odcli" / "filestore").mkdir()
         generated.write_text(
             "[options]\nhttp_port = 8077\ndb_name = tenant\n"
             "db_host = 127.0.0.1\ndb_port = 5468\ndb_user = odoo\n"
@@ -281,6 +383,8 @@ class TestInstancePrefix:
             odoo_bin=Path("odoo-bin"),
             source_config=None,
             preferred_http_port=8077,
+            default_source_database="tenant",
+            managed_filestore=Path(".odcli/filestore"),
             postgres=PostgresProjectConfig(
                 mode="compose", image="postgres:16", port=5468, user="odoo"
             ),
@@ -317,6 +421,8 @@ class TestInstancePrefix:
         odoo_bin.write_text("")
         config = root / "odoo.conf"
         config.write_text("[options]\n")
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.project_runtime.shutil.which",
             lambda value: str(resolved_python) if value == selector else None,
@@ -330,6 +436,8 @@ class TestInstancePrefix:
             python=selector,
             odoo_bin=odoo_bin,
             source_config=config,
+            default_source_database="bound",
+            managed_filestore=Path(".odcli/filestore"),
         )
 
         inst = _make_client().instance.from_project(project)
@@ -347,11 +455,15 @@ class TestInstancePrefix:
         odoo_bin.write_text("")
         config = root / "odoo.conf"
         config.write_text("[options]\n")
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
         project = ProjectConfig(
             repository_root=root,
             python="3.12",
             odoo_bin=odoo_bin,
             source_config=config,
+            default_source_database="bound",
+            managed_filestore=Path(".odcli/filestore"),
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
@@ -392,11 +504,15 @@ class TestInstancePrefix:
         odoo_bin.write_text("#!/bin/sh\nexit 0\n")
         config = root / "odoo.conf"
         config.write_text("[options]\n")
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
         project = ProjectConfig(
             repository_root=root,
             python="3.12",
             odoo_bin=odoo_bin,
             source_config=config,
+            default_source_database="bound",
+            managed_filestore=Path(".odcli/filestore"),
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
@@ -445,11 +561,15 @@ class TestInstancePrefix:
         odoo_bin.write_text("")
         config = root / "odoo.conf"
         config.write_text("[options]\n")
+        filestore = root / ".odcli" / "filestore"
+        filestore.mkdir(parents=True)
         project = ProjectConfig(
             repository_root=root,
             python=Path(".venv/bin/python"),
             odoo_bin=odoo_bin,
             source_config=config,
+            default_source_database="bound",
+            managed_filestore=Path(".odcli/filestore"),
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
@@ -564,6 +684,39 @@ class TestInstancePrefix:
         assert inst.config.master_password is None
         assert inst._runtime_binding is not None
         assert inst._runtime_binding.git_common_dir == git_common_dir(Path(env.repository_root))
+
+    def test_adopted_environment_uses_project_git_identity(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path, tmp_path: Path
+    ) -> None:
+        from odoo_instance_sdk.resources.environment import (
+            EnvironmentCheckoutOptions,
+            EnvironmentDatabaseMode,
+        )
+
+        options = EnvironmentCheckoutOptions(
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            python=str(fake_python),
+            odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
+        )
+        environment = env_client.environments.checkout(
+            project_manifest, "feat/adopted-identity", options=options
+        )
+        project_common = git_common_dir(project_manifest)
+        checkout_common = tmp_path / "caller-checkout" / ".git"
+        adopted = replace(
+            environment,
+            git_common_dir=str(checkout_common),
+            project_id=f"project_{repo_key(project_manifest, project_common)}",
+        )
+
+        instance = env_client.instance.from_environment(adopted)
+        binding = instance._runtime_binding
+        assert binding is not None
+        assert binding.git_common_dir == project_common
+        env_client.get_catalog()._register_project(
+            binding.project_id, binding.repository_root, binding.git_common_dir
+        )
 
     def test_from_environment_non_ready_raises(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path

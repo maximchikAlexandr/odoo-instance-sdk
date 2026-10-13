@@ -114,6 +114,100 @@ def test_core_imports_keep_dashboard_dependencies_lazy() -> None:
 
 
 @pytest.mark.dashboard
+def test_external_proxy_requires_trusted_forwarding_and_secure_csrf() -> None:
+    from fastapi.testclient import TestClient
+
+    from odoo_instance_sdk.http.app import ExternalProxyConfig, create_app
+
+    snapshot = Snapshot(
+        schema_version=4, generated_at=datetime.now(UTC), projects=(), environments=()
+    )
+    app = create_app(
+        headless=True,
+        monitor=_schema_monitor(snapshot),
+        external_proxy=ExternalProxyConfig(
+            allowed_hosts=("panel.example.test",),
+            trusted_proxy_addresses=("testclient",),
+        ),
+    )
+    client = TestClient(app, base_url="http://panel.example.test")
+    accepted = client.get(
+        "/healthz",
+        headers={
+            "X-Forwarded-Host": "panel.example.test",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+    assert accepted.status_code == 200
+    assert "Secure" in accepted.headers["set-cookie"]
+    assert "/api/v1/pgadmin/open" not in app.openapi()["paths"]
+
+    rejected = client.get(
+        "/healthz",
+        headers={
+            "X-Forwarded-Host": "attacker.example.test",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+    assert rejected.status_code == 400
+
+
+@pytest.mark.dashboard
+def test_external_same_origin_mutation_accepts_secure_csrf() -> None:
+    from fastapi.testclient import TestClient
+
+    from odoo_instance_sdk.http.app import ExternalProxyConfig, create_app
+    from odoo_instance_sdk.http.monitor import build_pgadmin_router
+
+    calls: list[str] = []
+
+    def opener(environment_id: str) -> PgAdminOpenResult:
+        calls.append(environment_id)
+        return PgAdminOpenResult(state=PgAdminOpenState.STARTED, url="http://127.0.0.1:5050")
+
+    snapshot = Snapshot(
+        schema_version=4, generated_at=datetime.now(UTC), projects=(), environments=()
+    )
+    app = create_app(
+        headless=True,
+        monitor=_schema_monitor(snapshot),
+        external_proxy=ExternalProxyConfig(
+            allowed_hosts=("panel.example.test",),
+            trusted_proxy_addresses=("testclient",),
+        ),
+    )
+    app.include_router(
+        build_pgadmin_router(
+            opener,
+            external_origin=("https", ("panel.example.test",)),
+        )
+    )
+
+    with TestClient(app, base_url="https://panel.example.test") as client:
+        forwarded = {
+            "X-Forwarded-Host": "panel.example.test",
+            "X-Forwarded-Proto": "https",
+        }
+        response = client.get("/healthz", headers=forwarded)
+        assert response.status_code == 200
+        token = client.cookies.get("odoo_instance_sdk_csrf")
+        assert isinstance(token, str) and token
+        response = client.post(
+            "/api/v1/pgadmin/open",
+            content=b'{"environment_id":"env-1"}',
+            headers={
+                **forwarded,
+                "Content-Type": "application/json",
+                "Origin": "https://panel.example.test",
+                "Sec-Fetch-Site": "same-origin",
+                "X-CSRF-Token": token,
+            },
+        )
+    assert response.status_code == 200
+    assert calls == ["env-1"]
+
+
+@pytest.mark.dashboard
 def test_openapi_uses_stable_msgspec_components_and_resolvable_refs() -> None:
     from odoo_instance_sdk.http.app import create_app
 

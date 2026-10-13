@@ -87,6 +87,82 @@ def _ticket_project(root: Path, base_url: str = "https://tracker.test") -> None:
     )
 
 
+def test_passthrough_preserves_native_args_and_checkout_cwd(tmp_path: Path) -> None:
+    _repo(tmp_path)
+
+    command = GitResource(_instance(tmp_path)).passthrough_command(("status", "--short"))
+
+    step = command.plan.process_steps[0]
+    assert step.argv == ("git", "status", "--short")
+    assert step.cwd == str(tmp_path)
+    assert step.interactive is True
+    assert step.environment_overrides == ()
+    assert command.run().returncode == 0
+
+
+def test_credentialed_passthrough_captures_output_instead_of_inheriting_stdio(
+    tmp_path: Path,
+) -> None:
+    _repo(tmp_path)
+    _git(
+        tmp_path,
+        "config",
+        "alias.canary",
+        "!printf security-canary; printf security-canary >&2",
+    )
+
+    command = GitResource(_instance(tmp_path)).passthrough_command(
+        ("canary",),
+        environment={"GITLAB_TOKEN": "security-canary"},
+        secret_values=("security-canary",),
+    )
+
+    step = command.plan.process_steps[0]
+    assert step.interactive is False
+    assert "security-canary" not in repr(command.plan)
+    result = command.run()
+    assert result.returncode == 0
+    assert "security-canary" not in result.stdout
+    assert "security-canary" not in result.stderr
+    assert "security-canary" not in repr(result)
+
+
+def test_credentialed_sync_disables_repository_fsmonitor_before_status(
+    tmp_path: Path,
+) -> None:
+    remote = tmp_path / "remote.git"
+    local = tmp_path / "repo"
+    remote.mkdir()
+    _git(remote, "init", "-q", "--bare", "-b", "main")
+    local.mkdir()
+    _repo(local)
+    _git(local, "remote", "add", "origin", str(remote))
+    _git(local, "push", "-qu", "origin", "main")
+    _git(local, "checkout", "-qb", "feature")
+
+    marker = tmp_path / "fsmonitor-canary"
+    fsmonitor = tmp_path / "malicious-fsmonitor"
+    fsmonitor.write_text(
+        f'#!/bin/sh\ncat "$ODCLI_GITLAB_TOKEN_FILE" > "{marker}"\n',
+        encoding="utf-8",
+    )
+    fsmonitor.chmod(0o700)
+    _git(local, "config", "core.fsmonitor", str(fsmonitor))
+    channel = tmp_path / "token-channel"
+    channel.write_text("secret-token\n", encoding="utf-8")
+
+    command = GitResource(_instance(local)).sync_command(
+        base="main",
+        environment={"ODCLI_GITLAB_TOKEN_FILE": str(channel)},
+        secret_values=("secret-token",),
+    )
+    status = next(step for step in command.plan.process_steps if step.step_id == "git.sync.status")
+    assert "core.fsmonitor=false" in status.argv
+
+    command.run()
+    assert not marker.exists()
+
+
 def test_commit_context_resolves_module_ticket_and_url(tmp_path: Path) -> None:
     _repo(tmp_path)
     module = tmp_path / "addons" / "sale"

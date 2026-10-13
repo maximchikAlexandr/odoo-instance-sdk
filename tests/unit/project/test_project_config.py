@@ -13,6 +13,7 @@ from odoo_instance_sdk.project import (
     ProjectConfig,
     RemoteSourceConfig,
     TestInstanceProjectConfig as ConfigTestInstance,
+    managed_filestore_path,
 )
 from odoo_instance_sdk.project_init import (
     configure_remote_source,
@@ -411,6 +412,19 @@ def test_named_remote_sources_roundtrip_deterministically(tmp_path: Path) -> Non
         == "alpha"
     )
 
+    with pytest.raises(ConfigError, match="duplicate remote source"):
+        ProjectConfig(
+            repository_root=tmp_path,
+            remote_instances=(
+                RemoteSourceConfig(
+                    name="alpha", base_url="https://a.example", database="a", git_branch="main"
+                ),
+                RemoteSourceConfig(
+                    name="ALPHA", base_url="https://b.example", database="b", git_branch="main"
+                ),
+            ),
+        )
+
 
 def test_named_remote_sources_reject_unknown_and_duplicate_fields(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="invalid"):
@@ -426,18 +440,34 @@ def test_named_remote_sources_reject_unknown_and_duplicate_fields(tmp_path: Path
                 }
             },
         )
-    with pytest.raises(ConfigError, match="duplicate remote source"):
-        ProjectConfig(
-            repository_root=tmp_path,
-            remote_instances=(
-                RemoteSourceConfig(
-                    name="alpha", base_url="https://a.example", database="a", git_branch="main"
-                ),
-                RemoteSourceConfig(
-                    name="ALPHA", base_url="https://b.example", database="b", git_branch="main"
-                ),
-            ),
-        )
+
+
+def test_project_binding_and_ordered_addon_repositories_roundtrip(tmp_path: Path) -> None:
+    addon = tmp_path / "addons"
+    addon.mkdir()
+    config = ProjectConfig(
+        repository_root=tmp_path,
+        default_source_database="restored",
+        managed_filestore=Path(".odcli/filestore"),
+        addon_repositories=(Path("addons"), addon),
+    )
+
+    write_manifest(tmp_path, config)
+    loaded = ProjectConfig.load(tmp_path)
+
+    assert loaded.managed_filestore == Path(".odcli/filestore")
+    assert loaded.addon_repositories == (Path("addons"),)
+    assert managed_filestore_path(loaded) == (tmp_path / ".odcli" / "filestore").resolve()
+    assert tomllib.loads(loaded.to_manifest()) == tomllib.loads(config.to_manifest())
+
+
+@pytest.mark.parametrize("field", ["managed_filestore", "addon_repositories"])
+def test_project_binding_paths_must_stay_inside_checkout(tmp_path: Path, field: str) -> None:
+    value = Path("../outside")
+    kwargs = {field: value if field == "managed_filestore" else (value,)}
+
+    with pytest.raises(ConfigError, match="inside"):
+        ProjectConfig(repository_root=tmp_path, **kwargs)  # type: ignore[arg-type]
 
 
 def test_public_remote_source_operations_are_atomic_and_idempotent(tmp_path: Path) -> None:

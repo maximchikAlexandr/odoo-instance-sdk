@@ -57,6 +57,11 @@ def _taskkill(handle: ProcessHandle, *, force: bool) -> None:
         SubprocessExecutor().execute(taskkill)
 
 
+def _finish_drain(handle: ProcessHandle) -> None:
+    if handle.drain is not None:
+        handle.drain.stop()
+
+
 def terminate(
     handle: ProcessHandle,
     *,
@@ -103,8 +108,7 @@ def terminate(
         with contextlib.suppress(subprocess.TimeoutExpired):
             handle.wait(timeout=timeout)
     finally:
-        if handle.drain is not None:
-            handle.drain.stop()
+        _finish_drain(handle)
 
 
 def is_process_alive(pid: int, *, expected_create_time: float | None = None) -> bool:

@@ -50,8 +50,10 @@ const snapshot: Snapshot = {
         unavailability_reason: null, sampled_at: "2026-08-24T00:00:00Z",
       },
       runtime: null,
+      publication: { state: "unpublished", external_url: null, reason: null, route_identity: null },
     },
-    { id: "project_b", name: "beta", display_hint: "b", repository_root: "/tmp/beta", environment_count: 1, cluster: null, runtime: null },
+    { id: "project_b", name: "beta", display_hint: "b", repository_root: "/tmp/beta", environment_count: 1, cluster: null, runtime: null,
+      publication: { state: "unpublished", external_url: null, reason: null, route_identity: null } },
     {
       id: "project_c", name: "gamma", display_hint: "c", repository_root: "/tmp/gamma", environment_count: 0,
       cluster: {
@@ -61,6 +63,7 @@ const snapshot: Snapshot = {
       runtime: { state: RuntimeState.READY, root_pid: 31, child_pids: [], process_count: 1,
         cpu_percent: 2.5, memory_bytes: 4096, started_at: null, http_url: "http://127.0.0.1:8071",
         http_port: 8071, database_name: "project_c", commit_sha: "def", branch: "main" },
+      publication: { state: "available", external_url: "https://project-c.example.test", reason: null, route_identity: "route-c" },
     },
   ],
   environments: [
@@ -68,6 +71,7 @@ const snapshot: Snapshot = {
       id: "a", project_id: "project_a", name: "ready-env", branch: "main", short_sha: "abc1234",
       db_mode: "shared", database: "a", lifecycle_state: EnvironmentState.READY, allocated_http_port: 8069,
       observed_port: PortObservation.FREE,
+      publication: { state: "available", external_url: "https://env-a.example.test", reason: null, route_identity: "route-a" },
       artifacts: { worktree_exists: true, worktree_registered: true, config_exists: true,
         python_exists: true, python_contained: true, dependency_lock_exists: true, backup_exists: null },
       runtime: { state: RuntimeState.READY, root_pid: 11, child_pids: [12, 13], process_count: 3,
@@ -81,6 +85,7 @@ const snapshot: Snapshot = {
       id: "b", project_id: "project_b", name: "stopped-env", branch: "main", short_sha: "def5678",
       db_mode: "shared", database: "b", lifecycle_state: EnvironmentState.READY, allocated_http_port: 8070,
       observed_port: null,
+      publication: { state: "unpublished", external_url: null, reason: null, route_identity: null },
       artifacts: { worktree_exists: false, worktree_registered: false, config_exists: false,
         python_exists: false, python_contained: true, dependency_lock_exists: false, backup_exists: null },
       runtime: { state: RuntimeState.STOPPED, root_pid: null, child_pids: [], process_count: 0,
@@ -147,7 +152,7 @@ describe("App", () => {
     const buttons = screen.getAllByTestId("open-odoo") as HTMLButtonElement[];
     expect(buttons[1].disabled).toBe(true);
     fireEvent.click(buttons[0]);
-    expect(open).toHaveBeenCalledWith("http://127.0.0.1:8069", "_blank", "noopener,noreferrer");
+    expect(open).toHaveBeenCalledWith("https://env-a.example.test", "_blank", "noopener,noreferrer");
 
     const pgAdmin = screen.getAllByTestId("open-pgadmin") as HTMLButtonElement[];
     expect(pgAdmin[0].disabled).toBe(false);

@@ -22,6 +22,7 @@ from multica_py.models.issue_activity import TaskProjectResourceData
 from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
 from multica_py.models.system import DaemonStatus, DaemonWorkspace, RepositoryCheckoutResult
 from odcli_multica import ContextRequest, MulticaOdooClient
+from odcli_multica.client import _remote_host_for_operation
 from odcli_multica.models import (
     ContextVerificationError,
     PreparationRequest,
@@ -36,6 +37,11 @@ if TYPE_CHECKING:
     from multica_py.config import OperationOptions
 
 T = TypeVar("T")
+
+
+@pytest.fixture(autouse=True)
+def _managed_task_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MULTICA_TASK_WORKSPACES_ROOT", str(tmp_path))
 
 
 @dataclass
@@ -85,11 +91,15 @@ class _Projects:
 class _Daemon:
     def __init__(self, status: DaemonStatus) -> None:
         self.status_value = status
+        self.status_calls = 0
+        self.status_command_calls = 0
 
     def status(self) -> DaemonStatus:
+        self.status_calls += 1
         return self.status_value
 
     def status_command(self, *, options: OperationOptions | None = None) -> _Command[DaemonStatus]:
+        self.status_command_calls += 1
         return _Command(self.status_value)
 
 
@@ -97,16 +107,22 @@ class _Repositories:
     def __init__(self) -> None:
         self.fresh_values: list[bool] = []
         self.checkout_error: BaseException | None = None
+        self.checkout_calls = 0
+        self.checkout_command_calls = 0
 
     def checkout_command(
         self, _url: str, *, ref: str | None, fresh: bool, options: OperationOptions | None
     ) -> _Command[RepositoryCheckoutResult]:
+        self.checkout_command_calls += 1
         self.fresh_values.append(fresh)
+        if self.checkout_error is not None:
+            raise self.checkout_error
         return _Command(RepositoryCheckoutResult(path="/task/checkout"))
 
     def checkout(
         self, _url: str, *, ref: str | None, fresh: bool, options: OperationOptions | None
     ) -> RepositoryCheckoutResult:
+        self.checkout_calls += 1
         self.fresh_values.append(fresh)
         if self.checkout_error is not None:
             raise self.checkout_error
@@ -188,7 +204,7 @@ def _fixture(
         daemon_id="daemon",
         server_url="http://127.0.0.1:8765",
         cli_version="0.5.3",
-        workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",), path=str(tmp_path)),),
+        workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",)),),
     )
     repositories = _Repositories()
     environments = _Environments()
@@ -263,7 +279,9 @@ def test_context_rejects_project_repository_evidence_unavailable(tmp_path: Path)
         client.context(request)
 
 
-def test_context_rejects_wrong_host_or_incomplete_evidence(tmp_path: Path) -> None:
+def test_context_rejects_wrong_host_or_incomplete_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client, request, _, _ = _fixture(tmp_path)
     fake_multica = cast("_FakeMultica", client.multica)
     fake_multica.projects.resources.page = Page(
@@ -291,15 +309,9 @@ def test_context_rejects_wrong_host_or_incomplete_evidence(tmp_path: Path) -> No
     )
     wrong_host = tmp_path / "wrong-host"
     wrong_host.mkdir()
-    fake_multica.daemon.status_value = DaemonStatus(
-        status="ready",
-        daemon_id="daemon",
-        server_url="http://127.0.0.1:8765",
-        cli_version="0.5.3",
-        workspaces=(DaemonWorkspace(id="workspace", runtimes=("runtime",), path=str(wrong_host)),),
-    )
+    monkeypatch.setenv("MULTICA_TASK_WORKSPACES_ROOT", str(wrong_host))
 
-    with pytest.raises(ContextVerificationError, match="outside the daemon workspace"):
+    with pytest.raises(ContextVerificationError, match="outside the daemon workspaces root"):
         client.context(request)
 
 
@@ -355,6 +367,21 @@ def test_native_checkout_never_forces_fresh(tmp_path: Path) -> None:
 
     assert result.path == "/task/checkout"
     assert repositories.fresh_values == [False]
+    assert repositories.checkout_command_calls == 1
+    assert repositories.checkout_calls == 0
+
+
+def test_native_daemon_status_delegates_to_command_sibling(tmp_path: Path) -> None:
+    client, _, _, _ = _fixture(tmp_path)
+    fake_multica = cast("_FakeMultica", client.multica)
+    fake_multica.daemon.status_calls = 0
+    fake_multica.daemon.status_command_calls = 0
+
+    result = client.daemon_status()
+
+    assert result.status == "ready"
+    assert fake_multica.daemon.status_command_calls == 1
+    assert fake_multica.daemon.status_calls == 0
 
 
 def test_context_rejects_forwarded_or_missing_filesystem_evidence(tmp_path: Path) -> None:
@@ -365,6 +392,17 @@ def test_context_rejects_forwarded_or_missing_filesystem_evidence(tmp_path: Path
     )
 
     with pytest.raises(ContextVerificationError, match="filesystem evidence"):
+        client.context(request)
+
+
+@pytest.mark.parametrize("root", ["", "relative/root"])
+def test_context_rejects_missing_or_relative_task_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: str
+) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    monkeypatch.setenv("MULTICA_TASK_WORKSPACES_ROOT", root)
+
+    with pytest.raises(ContextVerificationError, match="workspaces root is unavailable"):
         client.context(request)
 
 
@@ -555,4 +593,41 @@ def test_prepare_delegates_one_selector_and_captures_recovery_command(tmp_path: 
             PreparationRequest(
                 context=request, base_ref="main", remote_name="origin", backup_id="b"
             )
+        )
+
+
+def test_raw_git_credentials_require_the_actual_remote_command() -> None:
+    with pytest.raises(ContextVerificationError, match="command overrides"):
+        _remote_host_for_operation(
+            ("-c", "alias.leak=!f(){ env; };f", "leak", "fetch"),
+            "https://gitlab.example/team/repo",
+        )
+
+    assert (
+        _remote_host_for_operation(("status", "--short"), "https://gitlab.example/team/repo")
+        is None
+    )
+
+
+@pytest.mark.parametrize("args", [("-C", "fetch", "leak"), ("-Cfetch", "fetch")])
+def test_raw_git_credentials_reject_git_c_directory_variants(args: tuple[str, ...]) -> None:
+    with pytest.raises(ContextVerificationError, match="command overrides"):
+        _remote_host_for_operation(args, "https://gitlab.example/team/repo")
+
+
+def test_merge_request_project_override_cannot_escape_verified_repository(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    context = client.context(request)
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+
+    with pytest.raises(ContextVerificationError, match="verified repository"):
+        client.publish_merge_request_command(
+            context,
+            project_root=tmp_path,
+            source_branch="feature",
+            target_branch="main",
+            title="title",
+            description_file=description,
+            project_path="other/repository",
         )
