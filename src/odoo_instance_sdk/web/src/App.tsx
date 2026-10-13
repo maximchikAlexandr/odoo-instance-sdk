@@ -1,25 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Badge,
-  Button,
-  Card,
-  Group,
-  Progress,
-  Select,
-  SimpleGrid,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
+import { Badge, Button, Card, Group, Select, SimpleGrid, Stack, Text, Title } from "@mantine/core";
 import {
   getMonitorSnapshot,
-  openPgAdmin,
-  type ClusterSnapshot,
-  type EnvironmentSnapshot,
-  HttpErrorCode,
-  PgAdminEligibilityState,
+  startRuntime,
+  stopRuntime,
+  type RuntimeActionRequest,
   type PublicationSnapshot,
-  type ProjectSummary,
   type RuntimeMetrics,
   type Snapshot,
 } from "./generated";
@@ -91,401 +77,237 @@ export default function App() {
   const filteredEnvs = selectedProjectId
     ? environments.filter((e) => e.project_id === selectedProjectId)
     : environments;
-  const projectsById = (() => {
-    const m = new Map<string, ProjectSummary>();
-    for (const p of projects) m.set(p.id, p);
-    return m;
-  })();
-
   const displayedProjects = selectedProjectId
     ? projects.filter((p) => p.id === selectedProjectId)
     : projects;
 
   return (
-    <Stack p="md" maw={1400} mx="auto">
-      <Group justify="space-between" align="baseline">
-        <Title order={2}>odcli monitor</Title>
-        <Select
-          w={320}
-          data={selectData}
-          value={selectedProjectId ?? ""}
-          onChange={(v) => setSelectedProjectId(v ?? null)}
-          placeholder="All projects"
-        />
-      </Group>
+    <div className="monitor-shell">
+      <header className="monitor-navbar">
+        <div className="monitor-navbar-inner">
+          <span className="monitor-app-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+              <rect x="3" y="3" width="7" height="7" rx="1" />
+              <rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" />
+              <rect x="14" y="14" width="7" height="7" rx="1" />
+            </svg>
+          </span>
+          <span className="monitor-brand">odcli</span>
+          <span className="monitor-app-name">Monitor</span>
+        </div>
+      </header>
 
-      <Stack gap="sm">
+      <main className="monitor-content">
+        <div className="monitor-control-panel">
+          <div>
+            <Title order={1} className="monitor-title">Instances</Title>
+            <Text className="monitor-subtitle">
+              {selectedProjectId ? displayedProjects[0]?.name : "All projects"}
+              {snapshot ? ` · ${displayedProjects.length + filteredEnvs.length} instances` : ""}
+            </Text>
+          </div>
+          <Select
+            className="monitor-project-select"
+            aria-label="Project"
+            data={selectData}
+            value={selectedProjectId ?? ""}
+            onChange={(v) => setSelectedProjectId(v ?? null)}
+            placeholder="All projects"
+          />
+        </div>
+
         {loading && !snapshot ? (
-          <Text>Loading…</Text>
+          <div className="monitor-message" role="status">Loading instances…</div>
         ) : error ? (
-          <Stack gap="xs">
+          <Stack gap="xs" className="monitor-message" role="alert">
             <Text c="red">API error: {error}</Text>
-            <Button onClick={() => void load()} w={120}>
-              Retry
-            </Button>
+            <Button onClick={() => void load()} w={120}>Retry</Button>
           </Stack>
         ) : projects.length === 0 ? (
-          <Text>
-            No environments found. Use `odcli env checkout` to create one.
-          </Text>
+          <div className="monitor-message">No projects or environments found.</div>
         ) : (
-          <>
-            {displayedProjects.map((p) => (
-              <ClusterCard key={`cluster-${p.id}`} project={p} cluster={p.cluster} />
+          <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" className="instance-grid">
+            {displayedProjects.map((project) => (
+              <RuntimeCard
+                key={`project-${project.id}`}
+                name={project.name}
+                kind="Main checkout"
+                target={{ owner_kind: "project", owner_id: project.id }}
+                refresh={load}
+                branch={project.runtime?.branch}
+                runtime={project.runtime}
+                publication={project.publication}
+                database={project.runtime?.database_name}
+                testId="project-card"
+                actionTestId="open-project-odoo"
+              />
             ))}
-            <SimpleGrid
-              cols={{ base: 1, sm: 2, lg: 3 }}
-              spacing="md"
-            >
-              {filteredEnvs.map((e) => (
-                <EnvironmentCard
-                  key={e.id}
-                  env={e}
-                  projectName={projectsById.get(e.project_id)?.name ?? e.project_id}
-                />
-              ))}
-            </SimpleGrid>
-          </>
+            {filteredEnvs.map((env) => (
+              <RuntimeCard
+                key={env.id}
+                name={env.name}
+                kind="Worktree"
+                target={{ owner_kind: "environment", owner_id: env.id }}
+                refresh={load}
+                branch={env.branch}
+                runtime={env.runtime}
+                publication={env.publication}
+                database={env.database}
+                lifecycleState={env.lifecycle_state}
+                testId="environment-card"
+                actionTestId="open-odoo"
+              />
+            ))}
+          </SimpleGrid>
         )}
-      </Stack>
-    </Stack>
+      </main>
+    </div>
   );
 }
 
-function ClusterCard({
-  project,
-  cluster,
-}: {
-  project: ProjectSummary;
-  cluster: ClusterSnapshot | null;
-}) {
-  if (cluster === null) {
-    return (
-      <Card data-testid="cluster-card" withBorder padding="md" radius="sm">
-        <Text fw={600}>Cluster — {project.name}</Text>
-        <Text size="sm" c="dimmed">PostgreSQL: unavailable (manifest missing)</Text>
-        <ProjectRuntime runtime={project.runtime} publication={project.publication} />
-      </Card>
-    );
-  }
-  const c = cluster.container;
-  const m = cluster.metrics;
-  return (
-    <Card data-testid="cluster-card" withBorder padding="md" radius="sm">
-      <Group justify="space-between" align="baseline" mb="xs">
-        <Group gap="xs" align="baseline">
-          <Text fw={600}>Cluster — {project.name}</Text>
-          <Badge variant="light">{cluster.mode}</Badge>
-          <Badge variant="light" color={cluster.owned ? "green" : "gray"}>
-            {cluster.owned ? "owned" : "external"}
-          </Badge>
-          <Badge variant="light" color={cluster.state === "healthy" ? "teal" : "orange"}>
-            state: {cluster.state}
-          </Badge>
-          {cluster.unavailability_reason ? (
-            <Badge variant="light" color="red">
-              {cluster.unavailability_reason}
-            </Badge>
-          ) : null}
-        </Group>
-      </Group>
-      {c ? (
-        <Text size="sm" c="dimmed">
-          container {c.id?.slice(0, 12) ?? "—"} · {c.name ?? "—"} · {c.image ?? "—"}
-          {c.pid !== null ? ` · PID ${c.pid} (${c.pid_scope})` : ""}
-        </Text>
-      ) : (
-        <Text size="sm" c="dimmed">container: —</Text>
-      )}
-      <Group gap="xl" mt="xs">
-        <Text size="sm">CPU: {formatPercent(m?.cpu_percent ?? null)}</Text>
-        <Text size="sm">
-          RAM: {formatBytes(m?.memory_usage_bytes ?? null)}
-          {m?.memory_limit_bytes ? ` / ${formatBytes(m.memory_limit_bytes)}` : ""}
-        </Text>
-        <Text size="sm">Volume: {formatBytes(m?.volume_usage_bytes ?? null)}</Text>
-      </Group>
-      {m?.memory_usage_bytes && m?.memory_limit_bytes ? (
-        <Progress
-          mt="xs"
-          value={(m.memory_usage_bytes / m.memory_limit_bytes) * 100}
-          size="xs"
-          color="violet"
-        />
-      ) : null}
-      <ProjectRuntime runtime={project.runtime} publication={project.publication} />
-    </Card>
-  );
-}
-
-function ProjectRuntime({
+function RuntimeCard({
+  name,
+  kind,
+  branch,
+  target,
+  refresh,
   runtime,
   publication,
+  database,
+  lifecycleState,
+  testId,
+  actionTestId,
 }: {
+  name: string;
+  kind: "Main checkout" | "Worktree";
+  branch?: string | null;
+  target: RuntimeActionRequest;
+  refresh: () => Promise<void>;
   runtime: RuntimeMetrics | null;
   publication?: PublicationSnapshot;
+  database: string | null | undefined;
+  lifecycleState?: string;
+  testId: string;
+  actionTestId: string;
 }) {
-  const live = runtime?.state === "ready" || runtime?.state === "not_ready";
-  const externalUrl = publication?.state === "available" ? publication.external_url : null;
-  return (
-    <Stack gap={2} mt="sm" data-testid="project-runtime">
-      <Group gap="xs">
-        <Text fw={600} size="sm">Project runtime</Text>
-        <Badge variant="light" color={runtimeStateColor(runtime?.state)}>
-          {runtime?.state ?? "not recorded"}
-        </Badge>
-      </Group>
-      {live && runtime ? (
-        <>
-          <Text size="sm" c="dimmed">
-            Odoo PID {runtime.root_pid ?? "—"}
-            {runtime.child_pids.length > 0 ? ` · workers ${runtime.child_pids.join(", ")}` : ""}
-            {" · CPU "}{formatPercent(runtime.cpu_percent)}
-            {" · RAM "}{formatBytes(runtime.memory_bytes)}
-          </Text>
-          <Text size="sm" c="dimmed">
-            database: {runtime.database_name ?? "—"} · port: {runtime.http_port ?? "—"}
-          </Text>
-        </>
-      ) : null}
-      <Text size="xs" c="dimmed">
-        publication: {publication?.state ?? "unpublished"}
-        {publication?.reason ? ` (${publication.reason})` : ""}
-      </Text>
-      <Button
-        data-testid="open-project-odoo"
-        size="xs"
-        disabled={!externalUrl}
-        onClick={() => {
-          if (externalUrl) window.open(externalUrl, "_blank", "noopener,noreferrer");
-        }}
-      >
-        Open Odoo
-      </Button>
-    </Stack>
-  );
-}
+  const [pending, setPending] = useState<"start" | "stop" | null>(null);
+  const pendingAction = useRef(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [completedState, setCompletedState] = useState<"started" | "stopped" | null>(null);
+  const runtimeLive = runtime?.state === "ready" || runtime?.state === "not_ready";
+  useEffect(() => {
+    if (completedState && runtimeLive === (completedState === "started")) setCompletedState(null);
+  }, [completedState, runtimeLive]);
+  const live = completedState ? completedState === "started" : runtimeLive;
+  const state = lifecycleState && lifecycleState !== "ready"
+    ? lifecycleState
+    : completedState === "stopped" ? "stopped" : completedState === "started" ? "not_ready" : runtime?.state;
+  const status = pending
+    ? { label: pending === "start" ? "Starting…" : "Stopping…", color: "orange" }
+    : runtimeStatus(state);
+  const controllable = !lifecycleState || lifecycleState === "ready";
 
-function EnvironmentCard({
-  env,
-  projectName,
-}: {
-  env: EnvironmentSnapshot;
-  projectName: string;
-}) {
-  const rt: RuntimeMetrics = env.runtime;
-  const git = env.git;
-  const st = env.storage;
-
-  const port =
-    rt && (rt.state === "ready" || rt.state === "not_ready") && rt.http_port !== null
-      ? rt.http_port
-      : env.allocated_http_port;
-
-  const workerPids = rt?.child_pids ?? [];
-  const isLive = rt?.state === "ready" || rt?.state === "not_ready";
-  const publication = env.publication;
-  const externalUrl = publication?.state === "available" ? publication.external_url : null;
-  const isOpenEnabled = externalUrl !== null && externalUrl !== undefined;
-  const [pgAdminPending, setPgAdminPending] = useState(false);
-  const [pgAdminError, setPgAdminError] = useState<string | null>(null);
-  const pgAdminState = env.pgadmin.state;
-  const pgAdminEligible = pgAdminState === PgAdminEligibilityState.ELIGIBLE;
-
-  const openEnvironmentPgAdmin = async () => {
-    if (!pgAdminEligible || pgAdminPending) return;
-    setPgAdminPending(true);
-    setPgAdminError(null);
+  const controlRuntime = async () => {
+    if (pendingAction.current || !controllable) return;
+    const action = live ? "stop" : "start";
+    pendingAction.current = true;
+    setPending(action);
+    setActionError(null);
     try {
-      const result = await openPgAdmin({
-        client,
-        body: { environment_id: env.id },
-        throwOnError: true,
-      });
-      if (!isSafeLoopbackRoot(result.data.url)) {
-        setPgAdminError("pgAdmin returned an unsafe URL.");
-        return;
-      }
-      window.open(result.data.url, "_blank", "noopener,noreferrer");
+      const operation = action === "start" ? startRuntime : stopRuntime;
+      const result = await operation({ client, body: target, throwOnError: true });
+      setCompletedState(result.data.state);
+      await refresh();
     } catch (error) {
-      setPgAdminError(pgAdminErrorMessage(error));
+      setActionError(
+        typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+          ? error.message : `Unable to ${action} this instance.`,
+      );
     } finally {
-      setPgAdminPending(false);
+      pendingAction.current = false;
+      setPending(null);
     }
   };
+  const externalUrl = publication?.state === "available" ? publication.external_url : null;
 
   return (
-    <Card data-testid="environment-card" withBorder padding="md" radius="sm">
-      <Stack gap="xs">
-        <Group justify="space-between" align="baseline">
-          <Text fw={600}>{env.name}</Text>
-          <Text size="xs" c="dimmed">{projectName}</Text>
-        </Group>
-
-        <Group gap="xs">
-          <Badge variant="light" color={lifecycleColor(env.lifecycle_state)}>
-            {env.lifecycle_state}
-          </Badge>
-          <Badge variant="light" color={runtimeStateColor(rt?.state)}>
-            runtime: {rt?.state ?? "—"}
-          </Badge>
-        </Group>
-
-        <Text size="sm">
-          {env.branch ?? "—"} · {env.short_sha ?? "—"}
-        </Text>
-        <Text size="sm" c="dimmed">
-          database: {env.database ?? "—"} · port: {port ?? "—"}
-        </Text>
-        <Text size="xs" c="dimmed">
-          local endpoint: {rt.http_url ?? "—"} · publication: {publication?.state ?? "unpublished"}
-          {publication?.reason ? ` (${publication.reason})` : ""}
-        </Text>
-
-        <Text size="sm" c="dimmed">
-          git: {git.state} · ↑{git.ahead ?? "—"} ↓{git.behind ?? "—"}
-          {git.diff ? ` · +${git.diff.added} -${git.diff.deleted}` : ""}
-        </Text>
-
-        <Stack gap={2}>
-          <Text size="sm" data-testid="pgadmin-state">
-            pgAdmin: {pgAdminExplanation(pgAdminState)}
+    <Card data-testid={testId} className="instance-card" withBorder padding="lg" radius="sm">
+      <div className="instance-heading">
+        <div className="instance-identity">
+          <Text className="instance-name" title={name}>{name}</Text>
+          <Text className="instance-kind">{kind}</Text>
+          <Text className="instance-branch">
+            <span>Branch</span> <code title={branch ?? undefined}>{branch || "Not recorded"}</code>
           </Text>
-          {pgAdminError ? (
-            <Text size="xs" c="red" data-testid="pgadmin-error">
-              pgAdmin error: {pgAdminError}
-            </Text>
+        </div>
+        <Badge className="instance-status" color={status.color} variant="light">
+          {status.label}
+        </Badge>
+      </div>
+
+      <dl className="instance-fields">
+        <div>
+          <dt>Database</dt>
+          <dd title={database ?? undefined}>{database ?? "Not configured"}</dd>
+        </div>
+        <div>
+          <dt>Local endpoint</dt>
+          <dd title={runtime?.http_url ?? undefined}>{runtime?.http_url ?? "Not running"}</dd>
+        </div>
+      </dl>
+
+      <div className="instance-footer">
+        <Group gap="lg" className="instance-metrics">
+          {live && runtime?.cpu_percent != null ? (
+            <Text><span>CPU</span> {formatPercent(runtime.cpu_percent)}</Text>
           ) : null}
-        </Stack>
-
-        <Stack gap={2}>
-            <Text size="sm">
-              disk: {st.complete ? "" : "≥ "}{formatBytes(st.total_bytes)}
-            </Text>
-            <Text size="xs" c="dimmed">
-              worktree {formatBytes(st.worktree_bytes)} · venv{" "}
-              {formatBytes(st.python_environment?.bytes ?? null)} · db{" "}
-              {formatBytes(st.database?.total_bytes ?? null)} · other{" "}
-              {formatBytes(st.other_files_bytes)}
-            </Text>
-        </Stack>
-
-        <Group justify="space-between" align="baseline">
-          <Text size="sm">
-            {isLive && rt ? (
-              <>
-                Odoo PID {rt.root_pid ?? "—"}
-                {workerPids.length > 0 ? (
-                  <span data-testid="worker-pids"> · workers {workerPids.join(", ")}</span>
-                ) : null}
-                {" · CPU "}
-                {formatPercent(rt.cpu_percent)}
-                {" · RAM "}
-                {formatBytes(rt.memory_bytes)}
-              </>
-            ) : (
-              "Odoo: —"
-            )}
-          </Text>
+          {live && runtime?.memory_bytes != null ? (
+            <Text><span>RAM</span> {formatBytes(runtime.memory_bytes)}</Text>
+          ) : null}
+        </Group>
+        <Group gap="sm" className="instance-actions">
           <Button
-            data-testid="open-odoo"
-            size="xs"
-            disabled={!isOpenEnabled}
+            data-testid={actionTestId}
+            className="instance-open"
+            size="sm"
+            disabled={!externalUrl}
+            title={externalUrl ? "Open published Odoo" : publication?.reason ?? "Publish this instance to open Odoo"}
             onClick={() => {
               if (externalUrl) window.open(externalUrl, "_blank", "noopener,noreferrer");
             }}
           >
-            Open Odoo
+            Open Odoo <span className="instance-open-arrow" aria-hidden="true">↗</span>
           </Button>
           <Button
-            data-testid="open-pgadmin"
-            size="xs"
-            disabled={!pgAdminEligible || pgAdminPending}
-            loading={pgAdminPending}
-            onClick={() => void openEnvironmentPgAdmin()}
+            data-testid="runtime-control"
+            variant="outline"
+            color={live ? "red" : "odoo"}
+            size="sm"
+            disabled={pending !== null || !controllable}
+            loading={pending !== null}
+            onClick={() => void controlRuntime()}
           >
-            {pgAdminPending ? "Opening pgAdmin…" : "Open pgAdmin"}
+            {pending === "start" ? "Starting…" : pending === "stop" ? "Stopping…" : live ? "Stop" : "Start"}
           </Button>
         </Group>
-      </Stack>
+        {actionError ? <Text size="xs" c="red" role="alert">{actionError}</Text> : null}
+        {/* TODO(#147): Restore Open pgAdmin and its status after automatic credential provisioning and authorization are ready. */}
+      </div>
     </Card>
   );
 }
 
-function pgAdminExplanation(state: PgAdminEligibilityState): string {
+function runtimeStatus(state: string | undefined): { label: string; color: string } {
   switch (state) {
-    case PgAdminEligibilityState.ELIGIBLE:
-      return "ready";
-    case PgAdminEligibilityState.ENVIRONMENT_NOT_READY:
-      return "environment is not ready";
-    case PgAdminEligibilityState.DATABASE_UNRESOLVED:
-      return "database is unresolved";
-    case PgAdminEligibilityState.CLUSTER_NOT_OWNED:
-      return "PostgreSQL cluster is not SDK-owned";
-    case PgAdminEligibilityState.CLUSTER_UNHEALTHY:
-      return "PostgreSQL cluster is unhealthy";
-  }
-}
-
-function pgAdminErrorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    switch (error.code) {
-      case HttpErrorCode.ENVIRONMENT_NOT_FOUND:
-        return "environment was not found";
-      case HttpErrorCode.PGADMIN_NOT_ELIGIBLE:
-        return "environment is not eligible";
-      case HttpErrorCode.DATABASE_NOT_FOUND:
-        return "database was not found";
-      case HttpErrorCode.PGADMIN_UNAVAILABLE:
-        return "pgAdmin is unavailable";
-    }
-  }
-  return "pgAdmin is unavailable";
-}
-
-function isSafeLoopbackRoot(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === "http:" &&
-      ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
-      !url.username &&
-      !url.password &&
-      url.pathname === "/" &&
-      !url.search &&
-      !url.hash
-    );
-  } catch {
-    return false;
-  }
-}
-
-function lifecycleColor(state: string): string {
-  switch (state) {
-    case "ready":
-      return "green";
-    case "creating":
-      return "blue";
+    case "ready": return { label: "Running", color: "green" };
+    case "not_ready": return { label: "Not ready", color: "orange" };
+    case "stopped": return { label: "Stopped", color: "gray" };
+    case "creating": return { label: "Creating", color: "blue" };
     case "failed":
-    case "cleanup_failed":
-      return "red";
-    case "removing":
-    case "removed":
-      return "gray";
-    default:
-      return "orange";
-  }
-}
-
-function runtimeStateColor(state: string | undefined): string {
-  switch (state) {
-    case "ready":
-      return "green";
-    case "not_ready":
-      return "orange";
-    case "stopped":
-      return "gray";
-    default:
-      return "gray";
+    case "cleanup_failed": return { label: "Failed", color: "red" };
+    case "removing": return { label: "Removing", color: "orange" };
+    case "removed": return { label: "Removed", color: "gray" };
+    default: return { label: "Not started", color: "gray" };
   }
 }

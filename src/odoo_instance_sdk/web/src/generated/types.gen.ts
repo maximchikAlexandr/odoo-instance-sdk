@@ -169,7 +169,10 @@ export enum HttpErrorCode {
     INVALID_REQUEST = 'invalid_request',
     MONITOR_SNAPSHOT_FAILED = 'monitor_snapshot_failed',
     PGADMIN_NOT_ELIGIBLE = 'pgadmin_not_eligible',
-    PGADMIN_UNAVAILABLE = 'pgadmin_unavailable'
+    PGADMIN_UNAVAILABLE = 'pgadmin_unavailable',
+    RUNTIME_CONFLICT = 'runtime_conflict',
+    RUNTIME_NOT_FOUND = 'runtime_not_found',
+    RUNTIME_UNAVAILABLE = 'runtime_unavailable'
 }
 
 /**
@@ -302,6 +305,21 @@ export type PythonEnvFootprint = {
 };
 
 /**
+ * RuntimeActionRequest
+ */
+export type RuntimeActionRequest = {
+    owner_id: string;
+    owner_kind: 'environment' | 'project';
+};
+
+/**
+ * RuntimeActionResult
+ */
+export type RuntimeActionResult = {
+    state: 'started' | 'stopped';
+};
+
+/**
  * RuntimeMetrics
  */
 export type RuntimeMetrics = {
@@ -414,6 +432,80 @@ export type OpenPgAdminResponses = {
 };
 
 export type OpenPgAdminResponse = OpenPgAdminResponses[keyof OpenPgAdminResponses];
+
+export type StartRuntimeData = {
+    body: RuntimeActionRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/runtime/start';
+};
+
+export type StartRuntimeErrors = {
+    /**
+     * Runtime not found
+     */
+    404: HttpError;
+    /**
+     * Runtime action rejected
+     */
+    409: HttpError;
+    /**
+     * Invalid request
+     */
+    422: HttpError;
+    /**
+     * Runtime unavailable
+     */
+    503: HttpError;
+};
+
+export type StartRuntimeError = StartRuntimeErrors[keyof StartRuntimeErrors];
+
+export type StartRuntimeResponses = {
+    /**
+     * Runtime action completed
+     */
+    200: RuntimeActionResult;
+};
+
+export type StartRuntimeResponse = StartRuntimeResponses[keyof StartRuntimeResponses];
+
+export type StopRuntimeData = {
+    body: RuntimeActionRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/runtime/stop';
+};
+
+export type StopRuntimeErrors = {
+    /**
+     * Runtime not found
+     */
+    404: HttpError;
+    /**
+     * Runtime action rejected
+     */
+    409: HttpError;
+    /**
+     * Invalid request
+     */
+    422: HttpError;
+    /**
+     * Runtime unavailable
+     */
+    503: HttpError;
+};
+
+export type StopRuntimeError = StopRuntimeErrors[keyof StopRuntimeErrors];
+
+export type StopRuntimeResponses = {
+    /**
+     * Runtime action completed
+     */
+    200: RuntimeActionResult;
+};
+
+export type StopRuntimeResponse = StopRuntimeResponses[keyof StopRuntimeResponses];
 
 export type GetMonitorSnapshotData = {
     body?: never;

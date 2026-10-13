@@ -1,0 +1,97 @@
+/* Palette and compact geometry follow Odoo 19's primary_variables.scss. */
+:root {
+  --odoo-brand: #714b67;
+  --odoo-action: #017e84;
+  --odoo-background: #f9fafb;
+  --odoo-border: #d8dadd;
+  --odoo-muted: #6c757d;
+}
+
+body {
+  margin: 0;
+  background: var(--odoo-background);
+  color: #212529;
+}
+
+.monitor-navbar {
+  background: var(--odoo-brand);
+  color: white;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.monitor-navbar-inner {
+  max-width: 1440px;
+  margin: auto;
+  height: 54px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.monitor-app-icon { display: flex; opacity: 0.9; }
+.monitor-brand { font-size: 21px; font-weight: 700; letter-spacing: -0.6px; }
+.monitor-app-name {
+  margin-left: 4px;
+  padding-left: 20px;
+  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  font-size: 15px;
+}
+
+.monitor-content { max-width: 1440px; margin: auto; padding: 0 24px 32px; }
+.monitor-control-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--odoo-border);
+}
+.monitor-title { font-size: 24px; font-weight: 500; line-height: 1.3; }
+.monitor-subtitle { margin-top: 5px; color: var(--odoo-muted); font-size: 13px; }
+.monitor-project-select { width: 340px; max-width: 100%; }
+.monitor-project-select .mantine-Input-input {
+  height: 38px;
+  border-color: var(--odoo-border);
+  background: white;
+  border-radius: 4px;
+  font-size: 14px;
+}
+.monitor-project-select .mantine-Input-input:focus {
+  border-color: var(--odoo-action);
+}
+.monitor-message { padding: 32px 0; color: var(--odoo-muted); }
+.instance-grid { align-items: stretch; grid-auto-rows: 1fr; }
+.instance-card {
+  min-height: 272px;
+  border-color: var(--odoo-border);
+  box-shadow: 0 1px 2px rgba(33, 37, 41, 0.03);
+  display: flex;
+  flex-direction: column;
+}
+.instance-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.instance-identity { min-width: 0; }
+.instance-name { font-size: 17px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-kind { color: var(--odoo-muted); font-size: 12px; margin-top: 5px; }
+.instance-branch { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; font-size: 12px; }
+.instance-branch span { color: var(--odoo-muted); }
+.instance-branch code { color: var(--odoo-brand); font-size: 12px; background: #f6f0f4; padding: 2px 6px; border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-status { flex-shrink: 0; text-transform: none; font-weight: 500; letter-spacing: 0; border-radius: 4px; }
+.instance-fields { margin: 24px 0 20px; display: grid; gap: 13px; }
+.instance-fields > div { min-width: 0; }
+.instance-fields dt { color: var(--odoo-muted); font-size: 12px; margin-bottom: 3px; }
+.instance-fields dd { margin: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-footer { margin-top: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 15px; }
+.instance-metrics { min-height: 20px; }
+.instance-metrics p { font-size: 12px; font-weight: 500; color: #495057; }
+.instance-metrics span { color: var(--odoo-muted); font-weight: 400; margin-right: 4px; }
+.instance-open { height: 34px; padding: 0 15px; font-weight: 500; border-radius: 4px; }
+.instance-open-arrow { margin-left: 12px; font-size: 16px; }
+
+@media (max-width: 767px) {
+  .monitor-navbar-inner { padding: 0 16px; }
+  .monitor-content { padding: 0 16px 24px; }
+  .monitor-control-panel { align-items: stretch; flex-direction: column; gap: 16px; padding: 20px 0; }
+  .monitor-project-select { width: 100%; }
+}
