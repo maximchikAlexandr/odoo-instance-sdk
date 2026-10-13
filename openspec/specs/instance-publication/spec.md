@@ -1,10 +1,10 @@
 # instance-publication Specification
 
 ## Purpose
-Define stable project/environment publication through a validated OdCLI-owned Caddy aggregate, protected proxy routes, lifecycle reconciliation and the boundary between local route application and external acceptance.
+Define stable project/environment publication through a validated OdCLI-owned Caddy route file, a protected panel route, lifecycle reconciliation and the boundary between local route application and external acceptance.
 ## Requirements
 ### Requirement: Stable publication identity and settings
-OdCLI SHALL store publication settings in the canonical owner-only user configuration root. Settings SHALL contain a normalized domain suffix, dedicated OdCLI-owned Caddy aggregate configuration path, local Caddy control endpoint, Basic Auth username and password hash, and panel host label; they SHALL reject schemes, ports, paths, credentials, wildcard characters, malformed DNS labels, plaintext passwords, and configuration paths outside the owned root. A project URL SHALL use a deterministic `project-<stable-project-id>` label and an environment URL SHALL use `env-<stable-environment-id>` so restarts preserve addresses and distinct owners cannot collide.
+OdCLI SHALL store publication settings in the canonical owner-only user configuration root. Settings SHALL contain a normalized domain suffix, dedicated OdCLI-owned Caddy route-file path, local Caddy control endpoint, Basic Auth username and password hash for the panel, and panel host label; they SHALL reject schemes, ports, paths, credentials, wildcard characters, malformed DNS labels, plaintext passwords, and owned-route paths outside the owned root. An optional existing Caddy reload configuration and paired upstream HTTP listen port/bind IP SHALL support deployments where an upstream proxy terminates HTTPS; the upstream bind IP SHALL be a specific non-wildcard local address, and trusted proxy peers SHALL be explicit IP addresses. The `odoo_basic_auth_enabled` setting SHALL default to true and SHALL affect only Odoo routes. A project URL SHALL use a deterministic `project-<stable-project-id>` label and an environment URL SHALL use `env-<stable-environment-id>` so restarts preserve addresses and distinct owners cannot collide.
 
 #### Scenario: Two runtimes receive stable distinct URLs
 - **WHEN** a project runtime and an environment runtime are published under the same configured suffix
@@ -14,6 +14,10 @@ OdCLI SHALL store publication settings in the canonical owner-only user configur
 #### Scenario: Invalid publication settings
 - **WHEN** the suffix, Caddy endpoint, owned path, username, or password hash is absent or invalid
 - **THEN** publication fails before probing the runtime or changing Caddy configuration
+
+#### Scenario: Incomplete upstream HTTP configuration
+- **WHEN** the upstream port or bind address is supplied without its pair or without an existing reload configuration
+- **THEN** settings validation fails before any route mutation
 
 ### Requirement: Typed publish and unpublish operations
 The public SDK SHALL expose inspectable `publish_command()` and `unpublish_command()` operations and delegating convenience methods for exactly one project or environment runtime. The CLI SHALL expose `odcli publish` and `odcli unpublish` with mutually exclusive `--project PATH` and `--env ENV` selectors. Publish SHALL resolve the persisted runtime identity and local endpoint, require Odoo readiness, apply the owner route in the single owned route file, and return owner identity, local endpoint, external URL, and status. Unpublish SHALL remove only that owner's route, be idempotent when already absent, and leave runtime data unchanged.
@@ -31,26 +35,36 @@ The public SDK SHALL expose inspectable `publish_command()` and `unpublish_comma
 - **THEN** only that environment's route is removed and a repeated call succeeds as already absent
 
 ### Requirement: Validated OdCLI-owned Caddy configuration
-Publication mutations SHALL hold one canonical publication lock, read the current owned route file, produce a complete deterministic candidate for only that file, validate it with the configured Caddy executable, and reload it through the shared process boundary. The configured HTTP Caddy control endpoint SHALL be converted to its network authority (host and port) for `caddy reload --address`; the full HTTP URL SHALL NOT be passed as that argument. The canonical file SHALL be atomically replaced only as part of the validated reload operation; reload failure SHALL restore its prior bytes while Caddy retains its prior live configuration. OdCLI SHALL NOT create a publication database, edit unowned ingress configuration, or expose Caddy's administrative endpoint externally.
+Publication mutations SHALL hold one canonical publication lock, read the current owned route file, produce a complete deterministic candidate for only that file, validate it with the configured Caddy executable, and reload through the shared process boundary. Reload SHALL use the owned route file by default or the configured existing Caddy root file that imports it. The configured HTTP Caddy control endpoint SHALL be converted to its network authority (host and port) for `caddy reload --address`; the full HTTP URL SHALL NOT be passed as that argument. The owned file SHALL be atomically replaced only as part of the validated reload operation; reload failure SHALL restore its prior bytes while Caddy retains its prior live configuration. OdCLI SHALL NOT create a publication database, edit the existing root/ingress configuration itself, or expose Caddy's administrative endpoint externally.
 
 #### Scenario: Candidate configuration is rejected
 - **WHEN** candidate validation or reload fails
 - **THEN** the prior owned file remains byte-for-byte authoritative, prior live routes continue to work, and the result reports a bounded sanitized failure
+- **AND** a failed recovery reload reports that live rollback was not confirmed
 
 #### Scenario: Concurrent publications
 - **WHEN** two owners are published concurrently
 - **THEN** the lock serializes candidate generation and the second candidate includes the first successful route instead of losing it
 
+#### Scenario: Existing Caddy root imports OdCLI routes
+- **WHEN** upstream HTTP mode selects an existing Caddy root configuration and an OdCLI-owned route file imported by that root
+- **THEN** the owned candidate contains host-specific HTTP listener and bind directives, and reload uses the existing root configuration without replacing its unrelated routes
+- **AND** publication fails before mutation unless that root imports the exact owned route file
+
 ### Requirement: Odoo and panel proxy contract
-Every Odoo route SHALL enforce HTTPS and configured Basic Auth, preserve the validated external Host, set trusted `X-Forwarded-Proto`, `X-Forwarded-Host`, and client-address headers, and proxy ordinary pages, redirects, static assets, downloads/uploads, and the Odoo 19 bus/WebSocket endpoint to the captured local runtime. The panel route SHALL protect SPA and API with the same HTTPS/Auth boundary and proxy only to the captured local monitor endpoint. Unknown hosts SHALL match no OdCLI backend.
+Every Odoo route SHALL preserve the validated external HTTPS Host, set trusted `X-Forwarded-Proto`, `X-Forwarded-Host`, and client-address headers, and proxy ordinary pages, redirects, static assets, downloads/uploads, and the Odoo 19 bus/WebSocket endpoint to the captured local runtime. It SHALL enforce configured Basic Auth when `odoo_basic_auth_enabled` is true and omit that layer when false; this setting SHALL NOT change Odoo's own authorization. The panel route SHALL always protect SPA and API with configured Basic Auth at the same HTTPS origin and proxy only to the captured local monitor endpoint. Caddy SHALL select the configured hash algorithm for Basic Auth. Unknown hosts SHALL match no OdCLI backend. In upstream HTTP mode, the external proxy SHALL terminate HTTPS and forward the original Host to Caddy's configured HTTP listener; only configured trusted proxy peers SHALL reach the HTTP routes, and other peers SHALL receive 403.
 
 #### Scenario: Published Odoo browser flow
 - **WHEN** an authenticated browser uses login, assets, redirects, attachments, and bus/WebSocket through a published URL
 - **THEN** each request reaches the selected runtime with the correct external scheme and host semantics
 
-#### Scenario: Unknown or unauthenticated host
-- **WHEN** a request omits valid Basic Auth or uses an unregistered Host
-- **THEN** Caddy rejects it without forwarding to Odoo or the monitor
+#### Scenario: Odoo route without secondary Basic Auth
+- **WHEN** `odoo_basic_auth_enabled` is false and a browser requests a published Odoo URL without Basic Auth
+- **THEN** Caddy forwards the request to Odoo while the panel route still rejects unauthenticated requests
+
+#### Scenario: Unknown or unauthenticated panel host
+- **WHEN** a request uses an unregistered Host or omits valid Basic Auth for the panel
+- **THEN** Caddy forwards it to no OdCLI backend
 
 ### Requirement: Publication lifecycle reconciliation
 Stopping a runtime SHALL leave its deterministic route entry in place but report publication as `backend_unavailable` with a reason and no actionable external link. Restart plus republish SHALL reactivate the same address. Environment removal SHALL delete its route before final environment removal and SHALL enter `cleanup_failed` if route cleanup cannot be proven; explicit unpublish SHALL be available for retry. Project removal SHALL NOT be inferred from a missing directory.
@@ -66,7 +80,7 @@ Stopping a runtime SHALL leave its deterministic route entry in place but report
 
 ### Requirement: Publication result describes local route application
 
-A successful published/already_published result SHALL describe the validated local runtime and applied OdCLI-owned Caddy aggregate configuration; it SHALL NOT claim external DNS, TLS, tunnel reachability or an authenticated browser session were verified. The managed aggregate is the complete configuration supplied to Caddy reload, not a patch merged into arbitrary unowned ingress configuration. Manual tunnel-facing Caddy listeners, root configuration and panel routes SHALL remain deployment configuration until an explicit supported integration owns them.
+A successful published/already_published result SHALL describe the validated local runtime and applied OdCLI-owned Caddy route file; it SHALL NOT claim external DNS, TLS, tunnel reachability or an authenticated browser session were verified. The owned file is a complete standalone Caddy configuration by default. When an existing root configuration is explicitly selected, the owned file is imported into it and reload uses that root; OdCLI does not edit the root or claim to own the upstream proxy.
 
 #### Scenario: Caddy reload uses a network address
 

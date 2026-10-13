@@ -890,6 +890,23 @@ host/protocol headers are accepted only from those peers, external CSRF cookies
 are secure, and pgAdmin is local-only. Keep `/api` and dashboard assets
 relative so the panel works under the configured external origin.
 
+If another proxy terminates HTTPS before Caddy, set `upstream_http_port` and
+`upstream_bind_address` together in the private publication settings. Set
+`caddy_reload_config` to the existing top-level Caddyfile, and import the
+OdCLI-owned route file from that Caddyfile. OdCLI then writes host-specific
+HTTP routes on that listener while keeping the public URLs HTTPS. It validates
+the candidate route file before replacement and reloads the top-level config;
+on reload failure it restores the previous route file and reports an
+unconfirmed live rollback if the recovery reload fails. The bind address must
+be a specific local address (not a wildcard, global, multicast, reserved, or
+link-local address), and only peers listed in `trusted_proxy_addresses` may
+reach the generated HTTP routes; other peers receive 403. The upstream proxy
+must forward the original Host header and serve HTTPS for the configured
+domain.
+Set `odoo_basic_auth_enabled = false` to omit Caddy Basic Auth from Odoo
+runtime routes when Odoo's own authentication is sufficient. The monitor panel
+route always keeps Basic Auth.
+
 ## Security and data location
 
 Secrets are never written to the project manifest. Generated secret config and

@@ -209,7 +209,7 @@ The SDK SHALL read and update `backup.retention_days` and `backup.auto_prune` in
 - **THEN** the written document remains valid TOML, `retention_days` and `auto_prune` parse only from `backup`, and every `profile` entry and unrelated section is preserved
 
 ### Requirement: Canonical user publication settings
-The client SHALL load publication settings from one owner-only file below the canonical user config root using the repository's existing configuration conventions. The settings SHALL cover normalized domain suffix, Caddy executable/control/owned-route-file locations, Basic Auth username and password hash, panel label, and exact trusted proxy addresses. Loading SHALL not create defaults silently; malformed permissions, duplicate keys, unsafe paths, or invalid host/network values SHALL fail with sanitized diagnostics.
+The client SHALL load publication settings from one owner-only file below the canonical user config root using the repository's existing configuration conventions. The settings SHALL cover normalized domain suffix, Caddy executable/control/owned-route-file locations, Basic Auth username and password hash for the panel, panel label, exact trusted proxy addresses, optional existing Caddy reload configuration, paired upstream HTTP listen port/bind IP, and an Odoo-only Basic Auth switch that defaults to enabled. Loading SHALL not create defaults silently; malformed permissions, duplicate keys, unsafe paths, or invalid host/network values SHALL fail with sanitized diagnostics.
 
 #### Scenario: Valid publication settings load
 - **WHEN** the owner-only settings file contains valid normalized values
