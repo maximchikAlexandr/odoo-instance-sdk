@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, Literal
 
 from odoo_instance_sdk.http.monitor import (
     PgAdminOpener,
+    RuntimeControl,
     SnapshotProvider,
     build_monitor_router,
     build_pgadmin_router,
+    build_runtime_router,
     install_openapi_schema,
 )
 
@@ -85,6 +87,7 @@ def create_app(  # noqa: C901
     static_assets: bool = True,
     pgadmin_opener: PgAdminOpener | None = None,
     external_proxy: ExternalProxyConfig | None = None,
+    runtime_controller: RuntimeControl | None = None,
 ) -> FastAPI:
     """Build the FastAPI app while keeping dashboard dependencies optional."""
     from fastapi import FastAPI
@@ -139,7 +142,7 @@ def create_app(  # noqa: C901
     ) -> Response:
         response = await call_next(request)
         # The browser reads this non-HttpOnly double-submit token and sends it
-        # in X-CSRF-Token for the one state-changing dashboard operation.
+        # in X-CSRF-Token for state-changing dashboard operations.
         # Tokens are created only on safe requests; rejected POSTs cannot mint
         # a session token as a side effect.
         if request.method in {"GET", "HEAD"} and _CSRF_COOKIE not in request.cookies:
@@ -177,6 +180,22 @@ def create_app(  # noqa: C901
             pgadmin_opener = client.environments.open_pgadmin
         if external_proxy is None:
             app.include_router(build_pgadmin_router(pgadmin_opener))
+        if runtime_controller is None:
+            from odoo_instance_sdk.client import OdooClient
+            from odoo_instance_sdk.config import OdooClientConfig
+            from odoo_instance_sdk.http.runtime import RuntimeController
+
+            if not hasattr(app.state, "odoo_client"):
+                app.state.odoo_client = OdooClient(config=OdooClientConfig(executable="odoo"))
+            runtime_controller = RuntimeController(app.state.odoo_client.config, app_monitor)
+        app.include_router(
+            build_runtime_router(
+                runtime_controller,
+                external_origin=(external_proxy.scheme, external_proxy.allowed_hosts)
+                if external_proxy
+                else None,
+            )
+        )
         if static_assets:
             if not _WEB_DIST.is_dir():
                 raise RuntimeError(

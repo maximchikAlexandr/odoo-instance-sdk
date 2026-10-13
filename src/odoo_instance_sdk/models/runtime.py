@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+from typing import Annotated, Literal
 
 import msgspec
 
@@ -52,6 +53,18 @@ class HttpErrorCode(enum.StrEnum):
     pgadmin_not_eligible = "pgadmin_not_eligible"
     database_not_found = "database_not_found"
     pgadmin_unavailable = "pgadmin_unavailable"
+    runtime_not_found = "runtime_not_found"
+    runtime_conflict = "runtime_conflict"
+    runtime_unavailable = "runtime_unavailable"
+
+
+class RuntimeActionRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    owner_kind: Literal["project", "environment"]
+    owner_id: Annotated[str, msgspec.Meta(min_length=1)]
+
+
+class RuntimeActionResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    state: Literal["started", "stopped"]
 
 
 class PgAdminEligibility(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

@@ -608,7 +608,10 @@
           "invalid_request",
           "monitor_snapshot_failed",
           "pgadmin_not_eligible",
-          "pgadmin_unavailable"
+          "pgadmin_unavailable",
+          "runtime_conflict",
+          "runtime_not_found",
+          "runtime_unavailable"
         ],
         "title": "HttpErrorCode"
       },
@@ -876,6 +879,43 @@
           "bytes"
         ],
         "title": "PythonEnvFootprint",
+        "type": "object"
+      },
+      "RuntimeActionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "owner_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner_kind": {
+            "enum": [
+              "environment",
+              "project"
+            ]
+          }
+        },
+        "required": [
+          "owner_kind",
+          "owner_id"
+        ],
+        "title": "RuntimeActionRequest",
+        "type": "object"
+      },
+      "RuntimeActionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "enum": [
+              "started",
+              "stopped"
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "RuntimeActionResult",
         "type": "object"
       },
       "RuntimeMetrics": {
@@ -1201,6 +1241,142 @@
           }
         },
         "summary": "Open Pgadmin"
+      }
+    },
+    "/api/v1/runtime/start": {
+      "post": {
+        "operationId": "startRuntime",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeActionResult"
+                }
+              }
+            },
+            "description": "Runtime action completed"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Runtime not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Runtime action rejected"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Runtime unavailable"
+          }
+        },
+        "summary": "Start"
+      }
+    },
+    "/api/v1/runtime/stop": {
+      "post": {
+        "operationId": "stopRuntime",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeActionResult"
+                }
+              }
+            },
+            "description": "Runtime action completed"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Runtime not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Runtime action rejected"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Runtime unavailable"
+          }
+        },
+        "summary": "Stop"
       }
     },
     "/api/v1/snapshot": {
