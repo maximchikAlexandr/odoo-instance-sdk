@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     import msgspec
 
     from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.commands.context import OperationContext
     from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
     from odoo_instance_sdk.exceptions import (
         BackupCatalogError,
@@ -242,7 +241,6 @@ if TYPE_CHECKING:
             | PublicationResult
             | PublicationSettings
             | PublicationTarget
-            | OperationContext
         ]
         | _CanonicalBytes
         | _CanonicalProjection
@@ -437,7 +435,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "OdooClient": ("odoo_instance_sdk.client", "OdooClient"),
     "OdooClientConfig": ("odoo_instance_sdk.config", "OdooClientConfig"),
     "OdooInstance": ("odoo_instance_sdk.resources.instance", "OdooInstance"),
-    "OperationContext": ("odoo_instance_sdk.commands.context", "OperationContext"),
     "OdooInstanceSdkError": ("odoo_instance_sdk.exceptions", "OdooInstanceSdkError"),
     "OdooProcess": ("odoo_instance_sdk.models", "OdooProcess"),
     "OdooTestResult": ("odoo_instance_sdk.models", "OdooTestResult"),

@@ -110,7 +110,7 @@ The first two cases produce an environment context; the third produces a project
 
 ### Requirement: SDK-first CLI leaf contract
 
-Every entry in the canonical `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason why the operation stays CLI-only. A generic formulation such as "convenient for CLI" SHALL NOT be accepted. A new CLI leaf SHALL NOT pass contract tests without one of these two values.
+Every entry in the test-owned `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason why the operation stays CLI-only. A generic formulation such as "convenient for CLI" SHALL NOT be accepted. A new CLI leaf SHALL NOT pass contract tests without one of these two values.
 
 CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operation through `internal.*` when a public typed SDK primitive applies. The SDK SHALL own typed inputs/results, `Command`, immutable plans, revalidation, process/actions, cleanup, and failure semantics. Convenience methods SHALL delegate to the corresponding `*_command()` sibling and SHALL NOT rebuild the snapshot. The public SDK SHALL NOT export Click context, Rich renderables, CLI envelopes, or private executor callbacks.
 
@@ -304,19 +304,19 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 #### Scenario: Canonical bounded inventory remains single-source
 
 - **WHEN** the stable machine-output characterization gate compares the documented normal-execution leaves
-- **THEN** they equal canonical `PUBLIC_LEAF_CASES`, including every backup, database, resource, and `ps` leaf added by this change
+- **THEN** they equal test-owned `PUBLIC_LEAF_CASES`, including every backup, database, resource, and `ps` leaf added by this change
 - **AND** no second bounded-leaf table is introduced
 
 #### Scenario: Mutating lifecycle dry-runs are canonical leaves
 
 - **WHEN** the characterization gate exercises `backup delete`, `db restore`, or `db drop` with `--dry-run` in every shared format
-- **THEN** each appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
+- **THEN** each appears exactly once in test-owned `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
 - **AND** no file, database, configuration, process, or catalogue mutation occurs
 
 #### Scenario: Database drop is a canonical bounded leaf
 
 - **WHEN** the stable machine-output characterization gate exercises `db drop DATABASE --dry-run` in every shared format
-- **THEN** `db drop` appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
+- **THEN** `db drop` appears exactly once in test-owned `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
 - **AND** no database, session, or catalogue mutation occurs
 
 ### Requirement: Exit codes
@@ -2527,44 +2527,3 @@ The existing `odcli-multica` CLI SHALL expose a `git` group that reserves litera
 #### Scenario: External monitor configuration is incomplete
 - **WHEN** external mode lacks a valid panel host, trusted proxy, Basic Auth, or publication settings
 - **THEN** startup fails before network bind or Caddy mutation
-
-### Requirement: CLI paths bind to stable operation IDs
-
-Every canonical CLI leaf and alias SHALL bind to exactly one operation ID from production `PUBLIC_LEAF_CASES`. Existing friendly paths, Rich/JSON/TOON behavior and exit codes SHALL remain compatible. Renaming or adding an alias SHALL NOT change the operation ID or create another implementation binding.
-
-#### Scenario: Existing alias shares contract
-
-- **WHEN** canonical and legacy alias paths are inspected or invoked
-- **THEN** discovery reports one operation identity and both adapters delegate to the same SDK primitive
-
-### Requirement: Operation contract commands are read-only
-
-The CLI SHALL expose bounded `contract export` and operation discovery commands that inspect the validated registry without resolving project/environment context, opening the catalogue, probing Git/Docker/PostgreSQL, importing unselected operation implementations or mutating state.
-
-#### Scenario: Contract export has no domain I/O
-
-- **WHEN** contract export runs outside an initialized project
-- **THEN** it succeeds from metadata alone and domain-I/O spies observe no catalogue, filesystem discovery, Git, Docker, PostgreSQL or Odoo operation
-
-### Requirement: Local operation invoke preserves output boundary
-
-Finite `operation invoke` SHALL use the existing envelope-v1 construction, sanitizer and exit mapping. JSONL session records SHALL use a separate declared session transport and SHALL NOT be emitted by existing document-mode aliases. Machine invocation SHALL never prompt; approval-required mutations SHALL require the bounded session protocol.
-
-#### Scenario: Machine invoke has clean stdout
-
-- **WHEN** a finite operation succeeds, fails or reports a negative domain result
-- **THEN** stdout contains only the selected document/session transport, diagnostics are separate and no Rich prompt, status or ANSI bytes appear
-
-#### Scenario: Approval-required document call is rejected
-
-- **WHEN** a caller selects finite document transport for a mutation requiring same-process approval
-- **THEN** no preview or execution occurs and a typed `session_transport_required` failure is returned
-
-### Requirement: Native and streaming CLI transports remain native
-
-Existing native TTY, interactive, Rich live and JSONL streaming leaves SHALL retain their direct CLI behavior and cancellation semantics. Discovery SHALL describe those transports, while finite invoke SHALL reject them rather than buffering or fabricating a terminal JSON document.
-
-#### Scenario: Interactive transport is unchanged
-
-- **WHEN** an existing interactive or native command runs through its friendly CLI path
-- **THEN** it retains inherited stdin/stdout/stderr, TTY and child exit behavior without a document wrapper

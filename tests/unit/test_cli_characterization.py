@@ -34,7 +34,7 @@ from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from tests.unit.test_cli_output_modes import PUBLIC_LEAF_TEST_CASES
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
 
 ROOT_HELP_DESCRIPTIONS = (
     "Prepare and reset project databases.",
@@ -182,8 +182,6 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "shell",
         "doctor",
         "remote",
-        "contract",
-        "operation",
         "stop",
         "publish",
         "unpublish",
@@ -295,7 +293,7 @@ def test_shell_completion_still_discovers_nested_commands() -> None:
 
 
 def test_command_local_json_alias_is_removed() -> None:
-    for case in PUBLIC_LEAF_TEST_CASES:
+    for case in PUBLIC_LEAF_CASES:
         if not case.is_bounded:
             continue
         path = case.path
