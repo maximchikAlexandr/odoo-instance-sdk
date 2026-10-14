@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,7 +125,7 @@ def test_publish_is_stable_and_unpublish_is_idempotent(
     ).run()
 
     assert first.external_url == "https://project-abc-123.example.test"
-    assert "basic_auth" in route_text
+    assert "basic_auth bcrypt" in route_text
     assert "/websocket" in route_text
     assert "project-abc-123.example.test" in route_text
     assert "panel.example.test" in render_panel_route("http://127.0.0.1:9000", settings)
@@ -135,6 +136,216 @@ def test_publish_is_stable_and_unpublish_is_idempotent(
     assert reloads
     for step in reloads:
         assert step.argv[step.argv.index("--address") + 1] == "127.0.0.1:2019"
+
+
+def test_upstream_http_routes_reload_existing_caddy_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
+    base = _settings()
+    root_config = tmp_path / "Caddyfile"
+    root_config.write_text(f"import {base.owned_route_file}\n")
+    settings = PublicationSettings(
+        domain_suffix=base.domain_suffix,
+        caddy_executable=base.caddy_executable,
+        caddy_control_endpoint=base.caddy_control_endpoint,
+        owned_route_file=base.owned_route_file,
+        basic_auth_username=base.basic_auth_username,
+        basic_auth_password_hash=("$argon2id$v=19$m=47104,t=1,p=1$" + "a" * 22 + "$" + "a" * 43),
+        trusted_proxy_addresses=base.trusted_proxy_addresses,
+        caddy_reload_config=root_config,
+        upstream_http_port=18081,
+        upstream_bind_address="192.168.100.110",
+    )
+    executor = RecordingExecutor()
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_abc",
+        project_id="project_abc",
+        local_endpoint="http://127.0.0.1:8069",
+    )
+    _client().publication.publish_command(target, settings=settings, executor=executor).run()
+    route_text = settings.owned_route_file.read_text()
+    assert "http://project-abc.example.test:18081 {" in route_text
+    assert "bind 192.168.100.110" in route_text
+    assert "http://panel.example.test:18081 {" in render_panel_route(
+        "http://127.0.0.1:8123", settings
+    )
+    assert "basic_auth argon2id" in render_panel_route("http://127.0.0.1:8123", settings)
+    project_block = route_text.split("http://project-abc.example.test:18081 {\n", 1)[1].split(
+        "\n}\n", 1
+    )[0]
+    matcher = "@odcli_trusted_proxy remote_ip 127.0.0.1"
+    handle = "handle @odcli_trusted_proxy {"
+    backend = "reverse_proxy http://127.0.0.1:8069"
+    fallback = "respond 403"
+    assert matcher in project_block
+    assert handle in project_block
+    assert backend in project_block
+    assert fallback in project_block
+    assert project_block.index(matcher) < project_block.index(handle)
+    assert project_block.index(handle) < project_block.index(backend)
+    handle_end = project_block.index("\n    }\n    respond 403")
+    assert project_block.index(backend) < handle_end < project_block.index(fallback)
+    assert "reverse_proxy" not in project_block[handle_end:]
+    reloads = [step for step in executor.executed if step.step_id.endswith("caddy.reload")]
+    assert reloads
+    assert all(step.argv[step.argv.index("--config") + 1] == str(root_config) for step in reloads)
+
+
+def test_missing_existing_caddy_config_fails_with_bounded_error(tmp_path: Path) -> None:
+    base = _settings()
+    with pytest.raises(ConfigError, match="caddy_reload_config is unavailable"):
+        PublicationSettings(
+            domain_suffix=base.domain_suffix,
+            caddy_executable=base.caddy_executable,
+            caddy_control_endpoint=base.caddy_control_endpoint,
+            owned_route_file=base.owned_route_file,
+            basic_auth_username=base.basic_auth_username,
+            basic_auth_password_hash=base.basic_auth_password_hash,
+            trusted_proxy_addresses=base.trusted_proxy_addresses,
+            caddy_reload_config=tmp_path / "missing.caddy",
+            upstream_http_port=18081,
+            upstream_bind_address="127.0.0.1",
+        )
+
+
+def test_non_file_existing_caddy_config_fails_with_bounded_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    base = _settings()
+    root_config = tmp_path / "caddy-directory"
+    root_config.mkdir()
+    with pytest.raises(ConfigError, match="caddy_reload_config must be a file"):
+        PublicationSettings(
+            domain_suffix=base.domain_suffix,
+            caddy_executable=base.caddy_executable,
+            caddy_control_endpoint=base.caddy_control_endpoint,
+            owned_route_file=base.owned_route_file,
+            basic_auth_username=base.basic_auth_username,
+            basic_auth_password_hash=base.basic_auth_password_hash,
+            trusted_proxy_addresses=base.trusted_proxy_addresses,
+            caddy_reload_config=root_config,
+            upstream_http_port=18081,
+            upstream_bind_address="127.0.0.1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"upstream_http_port": None}, "port and bind address must be paired"),
+        ({"upstream_bind_address": None}, "port and bind address must be paired"),
+        ({"upstream_http_port": 0}, "upstream_http_port is invalid"),
+        ({"upstream_http_port": 65536}, "upstream_http_port is invalid"),
+        ({"upstream_bind_address": "not-an-ip"}, "upstream_bind_address must be an IP"),
+        ({"upstream_bind_address": "0.0.0.0"}, "upstream_bind_address is unsafe"),
+    ],
+)
+def test_upstream_settings_validate_pair_range_and_bind_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    base = _settings()
+    root_config = tmp_path / "Caddyfile"
+    root_config.write_text(f"import {base.owned_route_file}\n")
+    values: dict[str, object] = {
+        "domain_suffix": base.domain_suffix,
+        "caddy_executable": base.caddy_executable,
+        "caddy_control_endpoint": base.caddy_control_endpoint,
+        "owned_route_file": base.owned_route_file,
+        "basic_auth_username": base.basic_auth_username,
+        "basic_auth_password_hash": base.basic_auth_password_hash,
+        "trusted_proxy_addresses": base.trusted_proxy_addresses,
+        "caddy_reload_config": root_config,
+        "upstream_http_port": 18081,
+        "upstream_bind_address": "127.0.0.1",
+    }
+    values.update(overrides)
+
+    with pytest.raises(ConfigError, match=message):
+        PublicationSettings(**cast("dict[str, Any]", values))
+
+
+def test_upstream_settings_require_exact_owned_route_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    base = _settings()
+    root_config = tmp_path / "Caddyfile"
+    root_config.write_text("http://:18081 { respond 404 }\n")
+
+    with pytest.raises(ConfigError, match="must import owned_route_file"):
+        PublicationSettings(
+            domain_suffix=base.domain_suffix,
+            caddy_executable=base.caddy_executable,
+            caddy_control_endpoint=base.caddy_control_endpoint,
+            owned_route_file=base.owned_route_file,
+            basic_auth_username=base.basic_auth_username,
+            basic_auth_password_hash=base.basic_auth_password_hash,
+            trusted_proxy_addresses=base.trusted_proxy_addresses,
+            caddy_reload_config=root_config,
+            upstream_http_port=18081,
+            upstream_bind_address="127.0.0.1",
+        )
+
+
+def test_root_import_proof_handles_relative_and_malformed_imports(tmp_path: Path) -> None:
+    route_file = tmp_path / "routes.caddy"
+    root_config = tmp_path / "Caddyfile"
+    root_config.write_text('import "routes.caddy"\n')
+    assert publication_routes.root_imports_owned_route(root_config, route_file)
+
+    root_config.write_text('import "routes.caddy\n')
+    assert not publication_routes.root_imports_owned_route(root_config, route_file)
+
+    missing_root = tmp_path / "missing.Caddyfile"
+    assert not publication_routes.root_imports_owned_route(missing_root, route_file)
+
+
+@pytest.mark.parametrize("routes", [None, ["not-a-route"]], ids=["not-a-list", "not-a-dict"])
+def test_decode_routes_rejects_invalid_route_payloads(routes: object) -> None:
+    encoded = base64.urlsafe_b64encode(json.dumps({"routes": routes}).encode("utf-8")).decode(
+        "ascii"
+    )
+    raw = f"# odcli-routes-json: {encoded}\n".encode()
+
+    with pytest.raises(PublicationError, match="not an OdCLI route file"):
+        publication_routes.decode_routes(raw)
+
+
+def test_odoo_auth_can_be_disabled_without_disabling_panel_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
+    base = _settings()
+    settings = PublicationSettings(
+        domain_suffix=base.domain_suffix,
+        caddy_executable=base.caddy_executable,
+        caddy_control_endpoint=base.caddy_control_endpoint,
+        owned_route_file=base.owned_route_file,
+        basic_auth_username=base.basic_auth_username,
+        basic_auth_password_hash=base.basic_auth_password_hash,
+        trusted_proxy_addresses=base.trusted_proxy_addresses,
+        odoo_basic_auth_enabled=False,
+    )
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_abc",
+        project_id="project_abc",
+        local_endpoint="http://127.0.0.1:8069",
+    )
+    _client().publication.publish_command(
+        target, settings=settings, executor=RecordingExecutor()
+    ).run()
+    assert "basic_auth" not in settings.owned_route_file.read_text()
+    assert "basic_auth bcrypt" in render_panel_route("http://127.0.0.1:8123", settings)
 
 
 def test_monitor_route_is_reconciled_and_preserved_by_runtime_publication(
@@ -169,6 +380,73 @@ def test_monitor_route_is_reconciled_and_preserved_by_runtime_publication(
         ("panel", "monitor"),
         ("project", "project_abc"),
     }
+
+
+@pytest.mark.parametrize("recovery_fails", [False, True], ids=["recovery-ok", "recovery-fails"])
+def test_upstream_reload_failure_restores_prior_route_and_checks_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery_fails: bool
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
+    base = _settings()
+    root_config = tmp_path / "Caddyfile"
+    root_config.write_text(f"import {base.owned_route_file}\n")
+    settings = PublicationSettings(
+        domain_suffix=base.domain_suffix,
+        caddy_executable=base.caddy_executable,
+        caddy_control_endpoint=base.caddy_control_endpoint,
+        owned_route_file=base.owned_route_file,
+        basic_auth_username=base.basic_auth_username,
+        basic_auth_password_hash=base.basic_auth_password_hash,
+        trusted_proxy_addresses=base.trusted_proxy_addresses,
+        caddy_reload_config=root_config,
+        upstream_http_port=18081,
+        upstream_bind_address="127.0.0.1",
+    )
+    client = _client()
+    first = PublicationTarget(
+        owner_kind="project",
+        owner_id="project_a",
+        project_id="project_a",
+        local_endpoint="http://127.0.0.1:8069",
+    )
+    second = PublicationTarget(
+        owner_kind="environment",
+        owner_id="env-b",
+        project_id="project_a",
+        environment_id="env-b",
+        local_endpoint="http://127.0.0.1:8070",
+    )
+    client.publication.publish_command(first, settings=settings, executor=RecordingExecutor()).run()
+    previous = settings.owned_route_file.read_bytes()
+
+    def fail_reload(step: PreparedProcess) -> ProcessResult:
+        return _process(
+            step,
+            returncode=(
+                1
+                if step.step_id == "publication.publish.caddy.reload"
+                or (recovery_fails and step.step_id == "publication.publish.caddy.reload.restore")
+                else 0
+            ),
+        )
+
+    expected_error = "live rollback was not confirmed" if recovery_fails else "rejected"
+    failing_executor = RecordingExecutor(result_factory=fail_reload)
+    with pytest.raises(PublicationError, match=expected_error):
+        client.publication.publish_command(
+            second,
+            settings=settings,
+            executor=failing_executor,
+        ).run()
+
+    assert settings.owned_route_file.read_bytes() == previous
+    reloads = [step for step in failing_executor.executed if "caddy.reload" in step.step_id]
+    assert [step.step_id for step in reloads] == [
+        "publication.publish.caddy.reload",
+        "publication.publish.caddy.reload.restore",
+    ]
+    assert all(step.argv[step.argv.index("--config") + 1] == str(root_config) for step in reloads)
 
 
 def test_reload_failure_restores_prior_route_bytes(
@@ -599,4 +877,31 @@ def test_route_validation_rejects_external_caddy_injection() -> None:
     )
 
     with pytest.raises(PublicationError, match="external_url"):
+        publication_routes.validate_route(route)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("owner_kind", "unknown", "invalid owner kind"),
+        ("owner_id", "owner\nunsafe", "unsafe owner_id"),
+        ("external_url", "https://bad_host.example.test", "unsafe external_url"),
+    ],
+)
+def test_route_validation_rejects_identity_and_host_boundaries(
+    field: str, value: str, message: str
+) -> None:
+    values: dict[str, object] = {
+        "owner_kind": "project",
+        "owner_id": "project-safe",
+        "project_id": "project-safe",
+        "environment_id": None,
+        "local_endpoint": "http://127.0.0.1:8069",
+        "external_url": "https://safe.example.test",
+        "route_identity": "0123456789abcdef",
+    }
+    values[field] = value
+    route = publication_routes.PublicationRoute(**cast("dict[str, Any]", values))
+
+    with pytest.raises(PublicationError, match=message):
         publication_routes.validate_route(route)

@@ -111,6 +111,7 @@ export default function App() {
             className="monitor-project-select"
             aria-label="Project"
             data={selectData}
+            searchable
             value={selectedProjectId ?? ""}
             onChange={(v) => setSelectedProjectId(v ?? null)}
             placeholder="All projects"
