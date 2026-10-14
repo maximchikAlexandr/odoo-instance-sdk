@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from odoo_instance_sdk.exceptions import GitRepositoryChangedError, GitRepositoryError
 from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, SubprocessExecutor
@@ -74,6 +74,11 @@ def _normalize_origin(value: str) -> tuple[str, str, str]:
     return f"https://{authority}/{project}", authority, project
 
 
+def normalize_repository_url(value: str) -> tuple[str, str, str]:
+    """Validate and normalize one credential-free GitLab HTTPS repository URL."""
+    return _normalize_origin(value)
+
+
 def repository_project_path(origin: str) -> tuple[str, str]:
     """Return normalized host/project identity from an HTTPS GitLab URL."""
     _canonical, host, project = _normalize_origin(origin)
@@ -84,6 +89,11 @@ def _staged_paths(root: Path) -> tuple[str, ...]:
     result = _probe(root, ("diff", "--cached", "--name-only", "-z"), "git.repository.staged")
     value = _stdout(result, "staged state")
     return tuple(path for path in value.split("\0") if path)
+
+
+def _index_tree(root: Path) -> str:
+    result = _probe(root, ("write-tree",), "git.repository.index-tree")
+    return _stdout(result, "index tree").strip()
 
 
 def _common_dir(root: Path) -> str:
@@ -133,6 +143,7 @@ def resolve_repository(path: Path | str) -> GitRepositorySnapshot:
         staged_paths=staged,
         worktree_dirty=dirty,
         initialized_odoo=(root / ".odcli" / "project.toml").is_file(),
+        index_tree=_index_tree(root),
     )
 
 
@@ -146,9 +157,101 @@ def revalidate_repository(snapshot: GitRepositorySnapshot) -> GitRepositorySnaps
     return current
 
 
+def _configured_values(root: Path, key_pattern: str, step_id: str) -> tuple[str, ...]:
+    result = _probe(root, ("config", "--local", "--get-regexp", key_pattern), step_id)
+    if result.returncode not in (0, 1) or not isinstance(result.stdout, str):
+        raise GitRepositoryError("repository Git configuration is unavailable")
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def submodule_urls(root: Path | str) -> tuple[tuple[str, str, str], ...]:
+    """Return ``(path, normalized URL, host)`` for repository-owned submodules.
+
+    This reads only committed ``.gitmodules`` data and never asks Git to resolve
+    or fetch a credentialed URL. Relative URLs are resolved against the
+    superproject origin so host policy is applied before a child is started.
+    """
+    checkout = Path(root).expanduser().resolve()
+    modules = checkout / ".gitmodules"
+    if modules.is_symlink():
+        raise GitRepositoryError("submodule configuration is not repository-owned")
+    if not modules.is_file():
+        return ()
+    origin, _host, _project = _normalize_origin(
+        _stdout(
+            _probe(checkout, ("remote", "get-url", "origin"), "git.submodule.origin"), "origin"
+        ).strip()
+    )
+    url_result = _probe(
+        checkout,
+        (
+            "config",
+            "--file",
+            str(modules),
+            "--get-regexp",
+            r"^submodule\..*\.url$",
+        ),
+        "git.submodule.urls",
+    )
+    if url_result.returncode not in (0, 1) or not isinstance(url_result.stdout, str):
+        raise GitRepositoryError("repository submodule URL configuration is unavailable")
+    values = tuple(line.strip() for line in url_result.stdout.splitlines() if line.strip())
+    result: list[tuple[str, str, str]] = []
+    for line in values:
+        key, separator, raw_url = line.partition(" ")
+        if not separator or not raw_url.strip():
+            raise GitRepositoryError("submodule URL configuration is malformed")
+        path = key.removeprefix("submodule.").removesuffix(".url")
+        candidate = urljoin(origin.rsplit("/", 1)[0] + "/", raw_url.strip())
+        normalized, host, _project = _normalize_origin(candidate)
+        result.append((path, normalized, host))
+    return tuple(result)
+
+
+def validate_submodule_configuration(
+    root: Path | str,
+    *,
+    allowed_hosts: Sequence[str],
+) -> tuple[tuple[str, str, str], ...]:
+    """Reject repository-controlled credential and command-routing overrides."""
+    checkout = Path(root).expanduser().resolve()
+    dangerous = _configured_values(
+        checkout,
+        r"^(credential\.helper|core\.hooksPath|submodule\..*\.update|protocol\..*|url\..*\.insteadOf)$",
+        "git.submodule.policy",
+    )
+    if dangerous:
+        raise GitRepositoryError("repository-controlled submodule transport is unsafe")
+    values = submodule_urls(checkout)
+    allowed = frozenset(allowed_hosts)
+    if any(host not in allowed for _path, _url, host in values):
+        raise GitRepositoryError("submodule host has no selected-member credential mapping")
+    return values
+
+
+def missing_submodules(root: Path | str) -> tuple[str, ...]:
+    """Return only unpopulated submodule paths from Git's recursive status."""
+    checkout = Path(root).expanduser().resolve()
+    result = _probe(checkout, ("submodule", "status", "--recursive"), "git.submodule.status")
+    if result.returncode != 0 or not isinstance(result.stdout, str):
+        raise GitRepositoryError("submodule status is unavailable")
+    missing: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("-"):
+            continue
+        fields = line[1:].strip().split(maxsplit=1)
+        if len(fields) == 2:
+            missing.append(fields[1].split(" ", 1)[0])
+    return tuple(dict.fromkeys(missing))
+
+
 __all__ = [
+    "missing_submodules",
+    "normalize_repository_url",
     "repository_project_path",
     "resolve_generic_repository",
     "resolve_repository",
     "revalidate_repository",
+    "submodule_urls",
+    "validate_submodule_configuration",
 ]

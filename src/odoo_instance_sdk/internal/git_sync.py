@@ -130,15 +130,21 @@ def _validate_and_rebase(
     branch: str,
     instance: OdooInstance,
     root: Path,
+    generic: bool,
 ) -> tuple[ProcessResult, GitCheckResult]:
     rebased = cast("ProcessResult", context.process(steps.rebase.step_id))
     if rebased.returncode != 0:
         raise GitSyncError("rebase conflict; run `git rebase --continue` or `git rebase --abort`")
     checked = cast("ProcessResult", context.process(steps.verify.step_id))
-    checked_result = check_log(
-        _text(checked.stdout), base=resolved, branch=branch, instance=instance, root=root
-    )
-    if checked.returncode != 0 or not checked_result.valid:
+    if generic:
+        checked_result = GitCheckResult(base=resolved, branch=branch, valid=checked.returncode == 0)
+    else:
+        checked_result = check_log(
+            _text(checked.stdout), base=resolved, branch=branch, instance=instance, root=root
+        )
+        if checked.returncode != 0 or not checked_result.valid:
+            raise GitSyncError("git check failed before publication")
+    if not checked_result.valid:
         raise GitSyncError("git check failed before publication")
     return rebased, checked_result
 
@@ -189,6 +195,7 @@ def execute_sync(
     instance: OdooInstance,
     root: Path,
     ssh_remote: Callable[[str], bool],
+    generic: bool = False,
 ) -> GitSyncResult:
     """Run captured Git sync phases and return the typed public result."""
     observed_branch = _validate_initial_state(
@@ -204,6 +211,7 @@ def execute_sync(
         branch=observed_branch,
         instance=instance,
         root=root,
+        generic=generic,
     )
     published = _publish_transition(context, steps, push=push, remote_sha=remote_sha)
     return GitSyncResult(

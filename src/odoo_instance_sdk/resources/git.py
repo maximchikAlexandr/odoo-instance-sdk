@@ -36,6 +36,7 @@ from odoo_instance_sdk.models import (
     GitSyncResult,
 )
 from odoo_instance_sdk.project import ProjectConfig, effective_ticket_settings
+from odoo_instance_sdk.resources.git_generic import GenericGitMixin
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
@@ -404,7 +405,7 @@ def _verified_base_ref(root: Path, candidate: str) -> str:
     return values[0]
 
 
-class GitResource:
+class GitResource(GenericGitMixin):
     """One concrete Git resource bound to an :class:`OdooInstance`."""
 
     def __init__(self, instance: OdooInstance) -> None:
@@ -514,14 +515,29 @@ class GitResource:
     ) -> GitCommitContext:
         return self.commit_context_command(description, ticket=ticket, tag=tag).run()
 
-    def commit_command(
+    def commit_command(  # noqa: C901
         self,
         context: GitCommitContext | None = None,
         *,
         description: str | None = None,
         ticket: str | None = None,
         tag: str | None = None,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
     ) -> Command[CommandResult]:
+        if repository is not None or member_id is not None:
+            if repository is None or member_id is None:
+                raise PlanValidationError("generic commit requires repository and member_id")
+            if context is not None:
+                raise PlanValidationError("generic commit does not accept an Odoo commit context")
+            if description is None:
+                raise PlanValidationError("commit description is required")
+            return cast(
+                "Command[CommandResult]",
+                self.generic_commit_command(
+                    description, repository=repository, member_id=member_id, ticket=ticket
+                ),
+            )
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
 
@@ -623,9 +639,21 @@ class GitResource:
         )
 
     def commit(
-        self, description: str, *, ticket: str | None = None, tag: str | None = None
+        self,
+        description: str,
+        *,
+        ticket: str | None = None,
+        tag: str | None = None,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
     ) -> CommandResult:
-        return self.commit_command(description=description, ticket=ticket, tag=tag).run()
+        return self.commit_command(
+            description=description,
+            ticket=ticket,
+            tag=tag,
+            repository=repository,
+            member_id=member_id,
+        ).run()
 
     def check_command(self, *, base: str | None = None) -> Command[GitCheckResult]:
         from odoo_instance_sdk.execution import Command
@@ -749,11 +777,22 @@ class GitResource:
         *,
         base: str | None = None,
         push: bool = False,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
         environment: Mapping[str, str] | None = None,
         secret_values: Sequence[str] = (),
         remote_allowed: Callable[[str], bool] | None = None,
         hooks_path: str | None = None,
     ) -> Command[GitSyncResult]:
+        if repository is not None or member_id is not None:
+            if repository is None or member_id is None or base is None:
+                raise PlanValidationError("generic sync requires repository, member_id, and base")
+            return self.generic_sync_command(
+                repository=repository,
+                member_id=member_id,
+                base=base,
+                push=push,
+            )
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
@@ -938,6 +977,8 @@ class GitResource:
         *,
         base: str | None = None,
         push: bool = False,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
         environment: Mapping[str, str] | None = None,
         secret_values: Sequence[str] = (),
         remote_allowed: Callable[[str], bool] | None = None,
@@ -946,6 +987,8 @@ class GitResource:
         return self.sync_command(
             base=base,
             push=push,
+            repository=repository,
+            member_id=member_id,
             environment=environment,
             secret_values=secret_values,
             remote_allowed=remote_allowed,
@@ -955,13 +998,3 @@ class GitResource:
 
 def _ssh_remote(value: str) -> bool:
     return value.startswith(("git@", "ssh://"))
-
-
-__all__ = [
-    "GitAbsorbResult",
-    "GitCheckIssue",
-    "GitCheckResult",
-    "GitCommitContext",
-    "GitResource",
-    "GitSyncResult",
-]
