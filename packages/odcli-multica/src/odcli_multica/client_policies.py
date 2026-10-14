@@ -228,6 +228,7 @@ def read_gitlab_credential_mappings(path: Path | str) -> tuple[GitLabCredentialM
         return _read_core_gitlab_credential_mappings(
             path,
             require_owner_only_directory=False,
+            validate_member_ids=False,
         )
     except Exception as exc:
         if isinstance(exc, ContextVerificationError):

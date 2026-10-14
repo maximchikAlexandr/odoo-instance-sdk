@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 
+import msgspec
 import pytest
 
 from odoo_instance_sdk.exceptions import (
@@ -20,6 +23,11 @@ from odoo_instance_sdk.internal.gitlab_credentials import (
     write_askpass_channel,
 )
 from odoo_instance_sdk.internal.gitlab_identity import verify_gitlab_identity
+from odoo_instance_sdk.internal.proc import SubprocessExecutor, prepared_step
+from odoo_instance_sdk.internal.proc.redaction import project_process_step
+from odoo_instance_sdk.internal.transport.gitlab import GitLabHttpClient
+from odoo_instance_sdk.models import GitMergeRequestResult
+from odoo_instance_sdk.resources.git import _command_result
 
 MEMBER_A = "11111111-1111-4111-8111-111111111111"
 MEMBER_B = "22222222-2222-4222-8222-222222222222"
@@ -79,6 +87,70 @@ def test_credential_mapping_rejects_duplicate_and_unprotected_files(tmp_path: Pa
     mapping = tmp_path / "credentials" / "gitlab-credentials.toml"
     mapping.chmod(0o644)
     with pytest.raises(GitLabCredentialError, match="owner-only"):
+        read_gitlab_credential_mappings(user_root=tmp_path)
+
+
+def test_credential_mapping_requires_canonical_uuid_and_rejects_duplicate_uuid(
+    tmp_path: Path,
+) -> None:
+    directory = ensure_credential_directory(tmp_path)
+    mapping = directory / "gitlab-credentials.toml"
+    mapping.write_text(
+        "[[mappings]]\n"
+        'user_id = "11111111-1111-4111-8111-111111111111"\n'
+        'host = "gitlab.example"\nlogin = "alice"\n'
+        'token_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+
+    parsed = read_gitlab_credential_mappings(user_root=tmp_path)
+    assert parsed[0].user_id == MEMBER_A
+
+    mapping.write_text(
+        "[[mappings]]\n"
+        'user_id = "not-a-uuid"\n'
+        'host = "gitlab.example"\nlogin = "alice"\n'
+        'token_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(GitLabCredentialError, match="member ID must be a UUID"):
+        read_gitlab_credential_mappings(user_root=tmp_path)
+
+    mapping.write_text(
+        "[[mappings]]\n"
+        'user_id = "11111111-1111-4111-8111-111111111111"\n'
+        'host = "gitlab.example"\nlogin = "alice"\n'
+        'token_key = "ODCLI_GITLAB_TOKEN_ALICE"\n\n'
+        "[[mappings]]\n"
+        'user_id = "11111111-1111-4111-8111-111111111111"\n'
+        'host = "https://GITLAB.EXAMPLE/"\nlogin = "alice-2"\n'
+        'token_key = "ODCLI_GITLAB_TOKEN_ALICE_2"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(GitLabCredentialError, match="ambiguous"):
+        read_gitlab_credential_mappings(user_root=tmp_path)
+
+
+def test_credential_reads_reject_foreign_owner_and_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _credentials(tmp_path)
+    directory = tmp_path / "credentials"
+    mapping = directory / "gitlab-credentials.toml"
+
+    current_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: current_uid + 1)
+    with pytest.raises(GitLabCredentialError, match="owned"):
+        read_gitlab_credential_mappings(user_root=tmp_path)
+
+    monkeypatch.undo()
+    target = directory / "target.toml"
+    target.write_text(mapping.read_text(encoding="utf-8"), encoding="utf-8")
+    target.chmod(0o600)
+    mapping.unlink()
+    mapping.symlink_to(target)
+    with pytest.raises(GitLabCredentialError, match="regular owner-only"):
         read_gitlab_credential_mappings(user_root=tmp_path)
 
 
@@ -198,3 +270,60 @@ def test_transport_preflight_rejects_overrides_and_foreign_https_hosts(tmp_path:
             ("clone", "https://other.example/team/repo.git"),
             "https://gitlab.example/team/repo.git",
         )
+
+
+def test_merge_request_result_serializes_project_and_exports_public_shape() -> None:
+    result = GitMergeRequestResult(
+        project="team/repo",
+        merge_request_id=7,
+        web_url="https://gitlab.example/team/repo/-/merge_requests/7",
+        source_branch="feature",
+        target_branch="main",
+        outcome="created",
+    )
+
+    assert msgspec.to_builtins(result) == {
+        "project": "team/repo",
+        "merge_request_id": 7,
+        "web_url": "https://gitlab.example/team/repo/-/merge_requests/7",
+        "source_branch": "feature",
+        "target_branch": "main",
+        "outcome": "created",
+    }
+    assert msgspec.json.decode(msgspec.json.encode(result), type=GitMergeRequestResult) == result
+
+
+def test_credential_secret_is_redacted_from_child_projection_and_gitlab_failure() -> None:
+    secret = "gitlab-token-secret"
+    step = prepared_step(
+        sys.executable,
+        (
+            "-c",
+            (
+                "import sys; print('stdout=' + sys.argv[1]); "
+                "print('stderr=' + sys.argv[1], file=sys.stderr); raise SystemExit(3)"
+            ),
+            secret,
+        ),
+        step_id="gitlab.child",
+        secret_values=(secret,),
+    )
+    projection = project_process_step(step)
+    assert secret not in repr(projection)
+    assert secret not in str(projection)
+    process = SubprocessExecutor().execute(step)
+    result = _command_result(process, step)
+    assert result.returncode == 3
+    assert secret not in result.stdout
+    assert secret not in result.stderr
+
+    class FailingClient:
+        def get(self, _url: str, **_kwargs: object) -> object:
+            raise RuntimeError(f"authorization={secret}")
+
+    client = GitLabHttpClient()
+    client._client = FailingClient()  # type: ignore[assignment]
+    with pytest.raises(GitLabIdentityError) as error:
+        client.get_user("gitlab.example", secret)
+    assert secret not in repr(error.value)
+    assert secret not in str(error.value)

@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import Literal
 
 import msgspec
 
@@ -136,6 +137,10 @@ class GitLabCredentialContext:
         """Return private child values without making them part of projections."""
         return MappingProxyType({"GITLAB_LOGIN": self.login, "GITLAB_TOKEN": self._token})
 
+    def _redaction_secrets(self) -> tuple[str, ...]:
+        """Return the private values needed by an existing diagnostic boundary."""
+        return (self._token,)
+
     def askpass_environment(self, askpass: str, *, channel_path: str) -> Mapping[str, str]:
         return MappingProxyType(
             {
@@ -251,11 +256,12 @@ class GitUploadResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, k
 
 
 class GitMergeRequestResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    project: str
     merge_request_id: int
     web_url: str
     source_branch: str
     target_branch: str
-    outcome: str
+    outcome: Literal["created", "updated"]
 
 
 GitLabUserIdentity = GitLabIdentity

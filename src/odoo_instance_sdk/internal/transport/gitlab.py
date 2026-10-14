@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 from odoo_instance_sdk.internal.transport.base import BaseHttpClient
 
 
@@ -27,7 +28,8 @@ class GitLabHttpClient(BaseHttpClient):
         except Exception as exc:
             from odoo_instance_sdk.exceptions import GitLabIdentityError
 
-            raise GitLabIdentityError("GitLab identity verification failed") from exc
+            detail = redacted_projection(str(exc), secrets=(token,), field="error")
+            raise GitLabIdentityError(f"GitLab identity verification failed: {detail}") from None
         if not isinstance(payload, Mapping):
             from odoo_instance_sdk.exceptions import GitLabIdentityError
 

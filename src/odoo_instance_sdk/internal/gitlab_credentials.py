@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -76,30 +77,64 @@ def ensure_credential_directory(user_root: Path | str | None = None) -> Path:
     return directory
 
 
-def _owner_only_file(path: Path, *, label: str) -> str:
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise GitLabCredentialError(f"{label} is unavailable: {path}") from exc
-    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-        raise GitLabCredentialError(f"{label} must be a regular owner-only file: {path}")
+def _owner_only_open_flags(*, directory: bool = False) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow == 0 or not hasattr(os, "getuid"):
+        raise GitLabCredentialError("owner-only credential reads are unavailable")
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _validate_owner_only_identity(metadata: os.stat_result, *, path: Path, label: str) -> None:
+    if metadata.st_uid != os.getuid():
+        raise GitLabCredentialError(f"{label} must be owned by the current user: {path}")
     if stat.S_IMODE(metadata.st_mode) & _OWNER_ONLY:
         raise GitLabCredentialError(f"{label} requires owner-only permissions: {path}")
+
+
+def _owner_only_file(path: Path, *, label: str) -> str:
+    descriptor: int | None = None
     try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        descriptor = os.open(path, _owner_only_open_flags())
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise GitLabCredentialError(f"{label} must be a regular owner-only file: {path}")
+        _validate_owner_only_identity(metadata, path=path, label=label)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = None
+            return stream.read()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise GitLabCredentialError(
+                f"{label} must be a regular owner-only file: {path}"
+            ) from exc
         raise GitLabCredentialError(f"{label} is unavailable: {path}") from exc
+    except UnicodeError as exc:
+        raise GitLabCredentialError(f"{label} is unavailable: {path}") from exc
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
 
 
 def _owner_only_directory(path: Path) -> None:
+    descriptor: int | None = None
     try:
-        metadata = path.lstat()
+        descriptor = os.open(path, _owner_only_open_flags(directory=True))
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise GitLabCredentialError(f"credential directory must be owner-only: {path}")
+        _validate_owner_only_identity(metadata, path=path, label="credential directory")
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise GitLabCredentialError(f"credential directory must be owner-only: {path}") from exc
         raise GitLabCredentialError(f"credential directory is unavailable: {path}") from exc
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-        raise GitLabCredentialError(f"credential directory must be owner-only: {path}")
-    if stat.S_IMODE(metadata.st_mode) & _OWNER_ONLY:
-        raise GitLabCredentialError(f"credential directory requires owner-only permissions: {path}")
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
 
 
 def _text(entry: Mapping[str, JsonValue], key: str) -> str:
@@ -161,6 +196,7 @@ def read_gitlab_credential_mappings(
     *,
     user_root: Path | str | None = None,
     require_owner_only_directory: bool = True,
+    validate_member_ids: bool = True,
 ) -> tuple[GitLabCredentialMapping, ...]:
     """Read and validate the non-secret global mapping file."""
     mapping_path = credential_mapping_path(user_root) if path is None else Path(path)
@@ -177,7 +213,8 @@ def read_gitlab_credential_mappings(
     result: list[GitLabCredentialMapping] = []
     seen: set[tuple[str, str]] = set()
     for entry in _entries(raw):
-        user_id = _text(entry, "user_id")
+        raw_user_id = _text(entry, "user_id")
+        user_id = normalize_member_id(raw_user_id) if validate_member_ids else raw_user_id
         host = normalize_gitlab_host(_text(entry, "host"))
         login = _text(entry, "login")
         token_key = _text(entry, "token_key")
