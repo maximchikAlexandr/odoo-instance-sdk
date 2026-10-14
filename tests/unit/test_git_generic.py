@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from odoo_instance_sdk.exceptions import (
     GitSyncError,
     GitWorkflowError,
 )
-from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.execution import ActionStep, JsonValue
 from odoo_instance_sdk.internal import proc
 from odoo_instance_sdk.internal.gitlab_credentials import ensure_credential_directory
 from odoo_instance_sdk.models import (
@@ -202,9 +203,9 @@ def test_recursive_clone_requires_mapping_for_each_cross_host_submodule(tmp_path
         identity_transport=_identity_transport,
     )
     update = next(
-        step for step in command.plan.process_steps if step.step_id == "git.clone.submodule-update"
+        step for step in command.plan.steps if step.step_id == "git.clone.submodule-update"
     )
-    assert any(argument.startswith("credential.helper=") for argument in update.argv)
+    assert cast("ActionStep", update).details == {"recursive": True, "mode": "explicit-host-phases"}
     assert "token-1" not in repr(command.plan)
 
 
@@ -251,6 +252,154 @@ def test_absent_recursive_clone_validates_hosts_before_submodule_update(
     with pytest.raises(GitWorkflowError, match=r"credential|host-specific"):
         command.run()
     assert update_called is False
+
+
+def test_absent_recursive_clone_initializes_valid_cross_host_submodule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "other-source"
+    _repo(source, origin="https://gitlab.other.example/team/other")
+    credential, identity = _credential()
+    _mapping(tmp_path, (HOST, OTHER_HOST))
+    update_steps: list[tuple[str, dict[str, str], tuple[str, ...]]] = []
+
+    class FakeExecutor:
+        def execute(self, step: object, **_kwargs: object) -> proc.ProcessResult:
+            step_id = getattr(step, "step_id")
+            if step_id == "git.clone":
+                destination = Path(getattr(step, "argv")[-1])
+                _repo(destination)
+                _git(
+                    destination,
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    str(source),
+                    "other",
+                )
+                _git(
+                    destination,
+                    "config",
+                    "-f",
+                    ".gitmodules",
+                    "submodule.other.url",
+                    "https://gitlab.other.example/team/other",
+                )
+                shutil.rmtree(destination / "other")
+            elif step_id.startswith("git.clone.submodule-update."):
+                update_steps.append(
+                    (
+                        step_id,
+                        dict(getattr(step, "environment_overrides")),
+                        tuple(getattr(step, "secret_values")),
+                    )
+                )
+                target = Path(getattr(step, "argv")[2])
+                paths = getattr(step, "argv")[getattr(step, "argv").index("--") + 1 :]
+                for path in paths:
+                    shutil.copytree(source, target / path)
+            return proc.ProcessResult(
+                argv=tuple(getattr(step, "argv")),
+                returncode=0,
+                stdout="",
+                stderr="",
+                duration=0.0,
+                cwd=getattr(step, "cwd"),
+                environment=(),
+            )
+
+    monkeypatch.setattr(proc, "SubprocessExecutor", FakeExecutor)
+    result = (
+        GitResource(_instance(tmp_path))
+        .clone_command(
+            "https://gitlab.example/team/repo",
+            tmp_path / "new-repository",
+            member_id=MEMBER,
+            recurse_submodules=True,
+            credential=credential,
+            identity=identity,
+            user_root=tmp_path,
+            identity_transport=_identity_transport,
+        )
+        .run()
+    )
+
+    assert result.initialized_submodules == ("other",)
+    assert len(update_steps) == 1
+    assert update_steps[0][2] == ("token-1",)
+    assert "token-0" not in repr(update_steps[0])
+
+
+def test_absent_recursive_clone_rejects_nested_hostile_config_before_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "other-source"
+    _repo(source, origin="https://gitlab.other.example/team/other")
+    (source / ".gitmodules").write_text(
+        '[submodule "evil"]\n'
+        "\tpath = evil\n"
+        "\turl = https://evil.example/team/evil\n"
+        "\tupdate = !touch /tmp/should-not-run\n",
+        encoding="utf-8",
+    )
+    credential, identity = _credential()
+    _mapping(tmp_path, (HOST, OTHER_HOST))
+    updates: list[tuple[str, ...]] = []
+
+    class FakeExecutor:
+        def execute(self, step: object, **_kwargs: object) -> proc.ProcessResult:
+            step_id = getattr(step, "step_id")
+            if step_id == "git.clone":
+                destination = Path(getattr(step, "argv")[-1])
+                _repo(destination)
+                _git(
+                    destination,
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    str(source),
+                    "other",
+                )
+                _git(
+                    destination,
+                    "config",
+                    "-f",
+                    ".gitmodules",
+                    "submodule.other.url",
+                    "https://gitlab.other.example/team/other",
+                )
+                shutil.rmtree(destination / "other")
+            elif step_id.startswith("git.clone.submodule-update."):
+                updates.append(tuple(getattr(step, "argv")))
+                target = Path(getattr(step, "argv")[2])
+                shutil.copytree(source, target / "other")
+            return proc.ProcessResult(
+                argv=tuple(getattr(step, "argv")),
+                returncode=0,
+                stdout="",
+                stderr="",
+                duration=0.0,
+                cwd=getattr(step, "cwd"),
+                environment=(),
+            )
+
+    monkeypatch.setattr(proc, "SubprocessExecutor", FakeExecutor)
+    with pytest.raises(GitWorkflowError, match="unsafe"):
+        GitResource(_instance(tmp_path)).clone_command(
+            "https://gitlab.example/team/repo",
+            tmp_path / "new-repository",
+            member_id=MEMBER,
+            recurse_submodules=True,
+            credential=credential,
+            identity=identity,
+            user_root=tmp_path,
+            identity_transport=_identity_transport,
+        ).run()
+
+    assert len(updates) == 1
+    assert all("evil" not in value for value in updates[0])
 
 
 def test_generic_commit_uses_staged_scope_and_verified_identity(tmp_path: Path) -> None:
@@ -374,7 +523,9 @@ def test_generic_sync_plan_captures_branch_lease_and_rejects_stale_origin(
         command.run()
 
 
-def test_child_commit_does_not_mutate_parent_gitlink(tmp_path: Path) -> None:
+def test_generic_sync_does_not_mutate_parent_gitlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     child = tmp_path / "child"
     _repo(child)
     parent = tmp_path / "parent"
@@ -385,13 +536,39 @@ def test_child_commit_does_not_mutate_parent_gitlink(tmp_path: Path) -> None:
     parent_head = _git(parent, "rev-parse", "HEAD").strip()
     parent_index = _git(parent, "write-tree").strip()
 
-    (child / "change.txt").write_text("change\n", encoding="utf-8")
-    _git(child, "add", "change.txt")
     credential, identity = _credential()
-    GitResource(_instance(tmp_path)).generic_commit_command(
-        "child change",
+    remote_sha = "a" * 40
+
+    class PlanningExecutor:
+        def execute(self, step: object, **_kwargs: object) -> proc.ProcessResult:
+            step_id = getattr(step, "step_id")
+            stdout = ""
+            if step_id == "git.sync.remote":
+                stdout = "https://gitlab.example/team/child\n"
+            elif step_id == "git.sync.authoritative-remote-sha":
+                stdout = f"{remote_sha}\trefs/heads/feature\n"
+            elif step_id == "git.sync.branch":
+                stdout = "feature\n"
+            elif step_id == "git.sync.upstream":
+                stdout = "origin/feature\n"
+            elif step_id == "git.sync.fetched-sha":
+                stdout = f"{remote_sha}\n"
+            return proc.ProcessResult(
+                argv=tuple(getattr(step, "argv")),
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+                duration=0.0,
+                cwd=getattr(step, "cwd"),
+                environment=(),
+            )
+
+    monkeypatch.setattr(proc, "SubprocessExecutor", PlanningExecutor)
+    GitResource(_instance(tmp_path)).generic_sync_command(
         repository=child,
         member_id=MEMBER,
+        base="main",
+        push=False,
         credential=credential,
         identity=identity,
     ).run()
