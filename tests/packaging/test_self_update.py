@@ -8,6 +8,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -66,15 +69,29 @@ def _require_uv() -> None:
         pytest.skip("uv is required for update packaging E2E")
 
 
-def _vcs_install_requirement(repo: Path, ref: str) -> str:
-    return f"odoo-instance-sdk @ git+file://{repo.resolve()}@{ref}"
+def _vcs_install_requirement(
+    repo: Path,
+    ref: str,
+    *,
+    extras: tuple[str, ...] = (),
+) -> str:
+    package = "odoo-instance-sdk"
+    if extras:
+        package += "[" + ",".join(extras) + "]"
+    return f"{package} @ git+file://{repo.resolve()}@{ref}"
 
 
 def _install_uv_tool_vcs(
-    env: dict[str, str], repo: Path, ref: str
+    env: dict[str, str], repo: Path, ref: str, *, extras: tuple[str, ...] = ()
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["uv", "tool", "install", "--force", _vcs_install_requirement(repo, ref)],
+        [
+            "uv",
+            "tool",
+            "install",
+            "--force",
+            _vcs_install_requirement(repo, ref, extras=extras),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -334,6 +351,85 @@ def test_uv_tool_full_update_from_old_revision(tmp_path: Path) -> None:
     assert doctor.returncode in {0, 1}, doctor.stderr or doctor.stdout
     launches = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
     assert [argv for argv in launches if argv == ["--version"]].count(["--version"]) == 1
+
+
+@pytest.mark.timeout(_FULL_UPDATE_TEST_TIMEOUT_SECONDS)
+def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
+    tmp_path: Path,
+) -> None:
+    """A built dashboard uv tool keeps imports, SPA assets, and headless API."""
+    _require_uv()
+    env = _isolated_home(tmp_path)
+    wheels = list((_REPO / "dist").glob("*.whl"))
+    if len(wheels) != 1:
+        pytest.skip("built wheel is unavailable; run `make package` first")
+    requirement = f"odoo-instance-sdk[dashboard] @ {wheels[0].resolve().as_uri()}"
+    install = subprocess.run(
+        ["uv", "tool", "install", "--python", sys.executable, "--force", requirement],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_INSTALL_CHILD_TIMEOUT_SECONDS,
+    )
+    if install.returncode != 0:
+        pytest.skip(f"uv dashboard tool install unavailable: {install.stderr}")
+    odcli = Path(env["HOME"]) / ".local" / "bin" / "odcli"
+
+    tool_root = Path(env["HOME"]) / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    tool_python = tool_root / "bin" / "python"
+    imports = subprocess.run(
+        [
+            str(tool_python),
+            "-c",
+            (
+                "import fastapi, starlette, uvicorn; "
+                "from pathlib import Path; "
+                "root=Path(__import__('odoo_instance_sdk').__file__).parent / 'web' / 'dist'; "
+                "assert (root / 'index.html').is_file(); "
+                "assert any((root / 'assets').iterdir())"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert imports.returncode == 0, imports.stderr
+
+    port = 18080 + (os.getpid() % 1000)
+    monitor = subprocess.Popen(
+        [str(odcli), "monitor", "--headless", "--host", "127.0.0.1", "--port", str(port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        for _ in range(120):
+            if monitor.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/healthz", timeout=1
+                ) as response:
+                    assert response.status == 200
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/openapi.json", timeout=1
+                ) as response:
+                    assert response.status == 200
+                break
+            except (OSError, urllib.error.URLError):
+                time.sleep(0.25)
+        else:
+            pytest.fail("restarted dashboard monitor did not become ready")
+    finally:
+        monitor.terminate()
+        try:
+            monitor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            monitor.kill()
+            monitor.wait(timeout=10)
 
 
 @pytest.mark.timeout(_CHECK_TEST_TIMEOUT_SECONDS)

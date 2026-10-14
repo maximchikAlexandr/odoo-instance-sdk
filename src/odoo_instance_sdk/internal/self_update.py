@@ -36,6 +36,12 @@ from odoo_instance_sdk.internal.proc import (
     ProcessExecutor,
     ProcessResult,
 )
+from odoo_instance_sdk.internal.self_update_composition import (
+    install_argv as _install_argv,
+    install_requirement as _install_requirement,
+    read_uv_tool_composition,
+    verify_dashboard_installation,
+)
 from odoo_instance_sdk.internal.self_update_recovery import (
     UpdateRecoveryState,
     inspect_update_recovery_state as _inspect_update_recovery_state,
@@ -69,8 +75,6 @@ _MANUAL_INSTALL_ARGV: tuple[str, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class InstalledProvenance:
-    """The resolved provenance of the currently installed OdCLI package."""
-
     version: str
     source_repo: str | None
     commit_id: str | None
@@ -79,6 +83,13 @@ class InstalledProvenance:
     uv_tool_bin_path: Path | None
     uv_tool_env_path: Path | None
     manual_argv: tuple[str, ...] | None
+    direct_requirement: str | None = None
+    requested_extras: tuple[str, ...] = ()
+
+    @property
+    def extras(self) -> tuple[str, ...]:
+        """Compatibility name for the normalized uv optional-extra set."""
+        return self.requested_extras
 
 
 def _is_exact_supported_https_repo(source_repo: str) -> bool:
@@ -125,10 +136,6 @@ def _canonical_supported_source_repo(source_repo: str | None) -> str | None:
     if not _is_exact_supported_https_repo(raw):
         return None
     return _SOURCE_REPO
-
-
-def _install_requirement(ref: str) -> str:
-    return f"{_PACKAGE_NAME} @ {_REPO_URL}@{ref}"
 
 
 def _failure_result(
@@ -363,7 +370,6 @@ def _parse_vcs_direct_url(
 def read_uv_tool_direct_url(
     package_name: str = _PACKAGE_NAME,
 ) -> InstalledProvenance:
-    """Inspect the installed package metadata and on-disk layout in-process."""
     try:
         dist = distribution(package_name)
     except PackageNotFoundError as exc:
@@ -386,6 +392,13 @@ def read_uv_tool_direct_url(
             f"unsupported source repository; only {_REPO_SLUG} uv-tool installs are supported",
             manual_argv=_MANUAL_INSTALL_ARGV,
         )
+    direct_requirement, requested_extras = read_uv_tool_composition(
+        dist,
+        package_name=_PACKAGE_NAME,
+        source_repo=canonical_source_repo or source_repo,
+        requested_revision=requested_revision,
+        manual_argv=_MANUAL_INSTALL_ARGV,
+    )
     provenance = InstalledProvenance(
         version=dist.version,
         source_repo=canonical_source_repo or source_repo,
@@ -395,6 +408,8 @@ def read_uv_tool_direct_url(
         uv_tool_bin_path=_uv_tool_executable_path(),
         uv_tool_env_path=_uv_tool_env_path(dist),
         manual_argv=None,
+        direct_requirement=direct_requirement,
+        requested_extras=requested_extras,
     )
     _assert_runtime_environment(provenance)
     return provenance
@@ -404,12 +419,7 @@ def _is_full_sha(value: str) -> bool:
     return bool(_HEX40_RE.match(value))
 
 
-def _install_argv(ref: str) -> tuple[str, ...]:
-    return ("uv", "tool", "install", "--force", _install_requirement(ref))
-
-
 def _resolve_argv(ref: str) -> tuple[str, ...]:
-    """Resolve a mutable branch or tag without modifying the uv tool."""
     return (
         "git",
         "ls-remote",
@@ -494,7 +504,13 @@ def _snapshot_metadata(provenance: InstalledProvenance, ref: str) -> dict[str, J
         "previous_version": provenance.version,
         "package_revision": provenance.version,
         "previous_sha": provenance.commit_id,
-        "install_requirement": _install_requirement(ref),
+        "direct_requirement": provenance.direct_requirement,
+        "requested_extras": list(provenance.requested_extras),
+        "install_requirement": _install_requirement(
+            ref,
+            source_repo=provenance.source_repo,
+            extras=provenance.requested_extras,
+        ),
         "source_repo": provenance.source_repo,
         "target_ref": ref,
         "snapshot_sha": provenance.commit_id,
@@ -527,8 +543,6 @@ def _clear_snapshot(snapshot_dir: Path) -> None:
 
 
 class _suppress_file_not_found:
-    """Suppress FileNotFoundError for best-effort cleanup paths."""
-
     def __enter__(self) -> _suppress_file_not_found:
         return self
 
@@ -791,6 +805,7 @@ def _maintenance_run() -> UpdateResult:
     executed, skipped, final_versions = _run_coordinator_migrations()
     _verify_doctor_startup()
     _verify_reached_schema_versions(final_versions)
+    verify_dashboard_installation(provenance)
     _normalize_legacy_direct_url(provenance)
     expected_target = _expected_sha_for_target_ref(target_ref_str)
     return UpdateResult(
@@ -971,6 +986,7 @@ def preflight_update_command(
 __all__ = [
     "InstalledProvenance",
     "UpdateRecoveryState",
+    "_install_argv",
     "assert_update_not_blocking",
     "inspect_update_recovery_state",
     "is_maintenance_mode",
