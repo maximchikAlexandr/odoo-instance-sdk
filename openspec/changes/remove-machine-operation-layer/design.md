@@ -59,9 +59,11 @@ The plan introduces no Moritora adapter. If the current external build or a repr
 
 Alternative: rely on OpenAPI compatibility or the embedded dashboard. Rejected because neither executes the separately deployed decoder that prompted the owner's concern.
 
-### D5. Reset acceptance evidence at graph 2
+### D5. Reset acceptance evidence at graph 2 and route acceptance gates on the parent
 
-The reduced candidate SHALL receive new focused tests, full required GitHub CI, four-profile review, and selected live E2E using its exact SHA. Graph-1 evidence may guide test selection but SHALL be labelled historical and SHALL NOT satisfy a graph-2 gate. Local `make compat` remains forbidden; compatibility runs only in GitHub CI.
+The reduced candidate SHALL receive new focused tests and full required GitHub CI inside the materializable WP DAG. After all WP branches fan into one authoritative implementation-parent candidate, Manager SHALL route a four-profile review on that parent SHA. Only a clean consolidated review permits Manager to dispatch Tester-owned live E2E as the next parent gate. Neither review nor E2E is a WP child or a WP definition-of-done item. A review finding returns through the parent's integrated-fix loop and invalidates the reviewed SHA; an E2E finding returns through the same parent routing before review and E2E are repeated as required.
+
+Graph-1 evidence may guide test selection but SHALL be labelled historical and SHALL NOT satisfy a graph-2 gate. Local `make compat` remains forbidden; compatibility runs only in GitHub CI. Implementer WPs prepare the reusable scripts, fixtures, CI coverage, and exact-SHA handoff manifest; reviewers and Tester do not edit those deliverables while performing their independent gates.
 
 ### D6. Ponytail full gate
 
@@ -90,7 +92,8 @@ No new subsystem is introduced. The change deletes the operation subsystem and r
 2. Remove operation registry/export/invoke/session/provider surfaces and restore test-owned CLI traceability while preserving ordinary CLI/SDK behavior.
 3. Reconcile main and delta specs, docs, packaging, architecture inventories, E2E matrices, and generated artifacts so no machine surface remains.
 4. Re-run focused retained-scope tests and regenerate OpenAPI/TypeScript only from the retained snapshot model.
-5. Run required GitHub CI on the exact graph-2 SHA, then independent review and live Moritora/database verification using revision-scoped evidence.
+5. Fan all WPs into one exact implementation-parent candidate and run required GitHub CI.
+6. On the implementation parent, route four-profile review and only after a clean result route Tester-owned live Moritora/database E2E, using fresh revision-scoped evidence for both gates.
 
 Rollback is a normal revert of graph-2 implementation commits before merge. No retained catalogue column or recovery bytes are removed, so graph-2 introduces no destructive data downgrade. The PR remains draft until all graph-2 gates pass.
 

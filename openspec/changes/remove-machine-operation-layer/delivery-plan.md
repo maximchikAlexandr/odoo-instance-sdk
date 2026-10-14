@@ -27,7 +27,7 @@ Structured replacement recovery, legacy adoption, backup-read inertness, catalog
 
 ## Test scripts, environment, and cleanup
 
-The Tester SHALL create one task MR in `TEST_REPO_URL`. Its scenario commit SHALL contain only the two reusable scripts, minimal non-secret fixtures, and instructions. A result commit SHALL exist only if the tested function itself produces a repository-worthy functional artifact; diagnostic snapshots, browser output, catalogue projections, logs, hashes, and assertions are evidence and SHALL NOT be committed.
+The Implementer work in WP-02 and WP-03 SHALL create or update one task MR in `TEST_REPO_URL`. Its scenario commits SHALL contain only the two reusable scripts, minimal non-secret fixtures, and instructions, and WP-04 SHALL publish their exact MR/commit/file references in the parent-gate handoff manifest. Tester SHALL consume those reviewed artifacts and SHALL NOT edit them while executing the live gate. A result commit SHALL exist only if the tested function itself produces a repository-worthy functional artifact; diagnostic snapshots, browser output, catalogue projections, logs, hashes, and assertions are evidence and SHALL NOT be committed.
 
 Both cases SHALL record `TESTED_PRODUCT_SHA`, `TEST_SCENARIO_SHA`, `REFERENCE_SHA`, candidate wheel digest, and graph revision before setup. G2-E01 additionally records an immutable `MORITORA_BUILD_REF` and the supplied launch contract. If that build or reproducible launch contract is absent, G2-E01 is blocked and graph-2 E2E cannot pass. Private hosts, credentials, user identities, and absolute local paths stay in execution inputs/evidence and are sanitized from public Git.
 
@@ -43,7 +43,9 @@ The independent agent SHALL perform the public/manual steps in the matrix from f
 
 Implementer-owned graph-2 CI SHALL include strict OpenSpec, format/Ruff, strict typing, focused and full offline tests, Alembic/schema checks, HTTP/OpenAPI export, generated TypeScript check, dashboard tests, package/build, both real-Odoo smoke jobs, and GitHub-only Ubuntu/macOS compatibility. The source-boundary gate from task 6.1 SHALL run in offline/architecture coverage. No new CI framework is introduced.
 
-After required GitHub CI succeeds on the exact graph-2 SHA, four independent profiles SHALL review the full graph-2 range: security, specification/standards, code quality, and tests/coverage. Any Blocker or Required finding returns to a bounded graph-2 fix iteration and invalidates prior exact-SHA acceptance. Live E2E dispatch occurs only after the consolidated clean review.
+After all WP results fan into one authoritative implementation-parent candidate and required GitHub CI succeeds on its exact SHA, Manager SHALL run two sequential parent gates. First, four independent profiles SHALL review the full graph-2 range: security, specification/standards, code quality, and tests/coverage. Any Blocker or Required finding returns to a bounded implementation-parent fix iteration and invalidates prior exact-SHA acceptance. Second, only after a clean consolidated review, Manager SHALL dispatch Tester-owned G2-E01/G2-E02 live E2E on the reviewed exact SHA. Reviewers and Tester are parent-gate actors, never WP-child assignees; every WP child is assigned through WP Delivery and ends before these gates.
+
+An E2E finding returns to Manager with case IDs and evidence. Any product fix changes the candidate SHA and therefore requires fresh exact-SHA CI, four-profile review, and affected E2E before acceptance. Graph-1 results and pre-fix graph-2 results cannot satisfy a later candidate.
 
 The final Tester comment in Multica SHALL link the test MR and every existing scenario/result commit/file, attach or link all execution-only evidence through the platform, and read the comment back to prove accessibility. It SHALL preserve the MR, branch, and commits, remove only run-owned resources, and SHALL NOT merge/close the MR or delete its branch without separate authorization.
 
@@ -51,7 +53,7 @@ The final Tester comment in Multica SHALL link the test MR and every existing sc
 
 The exact estimate totals are authoritative only in the MYL-430 custom properties named in the delivery contract. The weighted estimate property is above the multi-WP threshold. Confidence is medium and calibration is unavailable: the consolidated commits, current call sites, tests, and generated surfaces are inspectable, but machine/shared decoupling and availability of the current external Moritora build can expand repair work. The estimate covers scope census, machine removal, mixed test/doc cleanup, retained monitor and database/recovery verification, CI/review repair, and the two E2E cases. It excludes Supervisor integration, a replacement machine interface, external approval wait time, and provider outages.
 
-The topology is `delivery_mode=dag`. Stage 2 contains two genuinely independent WPs after the shared removal foundation: monitor/Moritora work and database/recovery work have disjoint production/test ownership. The final integration and E2E gates follow their fan-in.
+The topology is `delivery_mode=dag`. Stage 2 contains two genuinely independent WPs after the shared removal foundation: monitor/Moritora work and database/recovery work have disjoint production/test ownership. WP-04 produces the single integrated candidate and parent-gate handoff after their fan-in. Four-profile review and Tester-owned E2E are sequential implementation-parent gates outside the WP DAG.
 
 ## Dependency graph
 
@@ -62,7 +64,6 @@ WP-01-machine-layer-removal -> WP-02-monitor-consumer-compatibility
 WP-01-machine-layer-removal -> WP-03-database-recovery-retention
 WP-02-monitor-consumer-compatibility -> WP-04-graph2-integration
 WP-03-database-recovery-retention -> WP-04-graph2-integration
-WP-04-graph2-integration -> WP-05-graph2-live-e2e
 ```
 
 Authoritative stage mapping:
@@ -72,7 +73,6 @@ WP-01-machine-layer-removal -> 1
 WP-02-monitor-consumer-compatibility -> 2
 WP-03-database-recovery-retention -> 2
 WP-04-graph2-integration -> 3
-WP-05-graph2-live-e2e -> 4
 ```
 
 Stages are consecutive topological layers, not WIP policy. Every predecessor has a lower stage than its dependent. Task coverage below is complete and non-overlapping.
@@ -163,18 +163,18 @@ Definition of done and evidence:
 
 Parallel safety: owns database/catalogue/recovery files and tests only. It does not edit monitor/API/web surfaces owned by WP-02.
 
-## WP-04 — Graph-2 integration, CI, and independent review
+## WP-04 — Graph-2 integration and parent-gate handoff
 
 - `wp_id=WP-04-graph2-integration`
 - `stage=3`
 - `depends_on=[WP-02-monitor-consumer-compatibility,WP-03-database-recovery-retention]`
 - `task_coverage=6.1,6.2,6.3,6.4,6.5`
 
-Deliverable: one clean published graph-2 candidate with forbidden-surface proof, retained-module coverage, all required GitHub CI, and a clean four-profile review.
+Deliverable: one clean published graph-2 implementation-parent candidate with forbidden-surface proof, retained-module coverage, all required GitHub CI, and a complete handoff manifest for the subsequent parent review and E2E gates.
 
 Owned responsibility scope:
 
-- Cross-subsystem architecture/forbidden-symbol gates, final docs/generated artifacts, coverage comparison, focused/full repository gates, package/build verification, exact-SHA publication, CI evidence, and bounded fixes from four-profile review.
+- Cross-subsystem architecture/forbidden-symbol gates, final docs/generated artifacts, coverage comparison, focused/full repository gates, package/build verification, exact-SHA publication, CI evidence, and an exact-SHA handoff manifest for the parent gates.
 - Directly related tests, fixtures, snapshots, docs, support files, and generated code are included after stage-2 fan-in.
 
 Contract surface:
@@ -185,38 +185,17 @@ Contract surface:
 Definition of done and evidence:
 
 - Strict OpenSpec, format/lint/type, Alembic/schema, OpenAPI/codegen, dashboard, focused/full tests, package/build, real-Odoo smoke, GitHub-only compatibility, and `git diff --check` pass on one exact published SHA.
-- Security, specification/standards, code-quality, and test profiles return no unresolved Blocker/Required findings on that SHA/range.
+- The implementation parent has one published exact candidate with successful required CI and resolvable G2-E01/G2-E02 script, fixture, MR/commit/file, input-parameter, and cleanup references ready for independent parent-gate dispatch.
 
 Parallel safety: fan-in only after both stage-2 WPs. It may resolve cross-cutting conflicts because no sibling remains active in their write zones.
 
-## WP-05 — Graph-2 live E2E and evidence publication
+## Implementation-parent acceptance gates (outside the WP DAG)
 
-- `wp_id=WP-05-graph2-live-e2e`
-- `stage=4`
-- `depends_on=[WP-04-graph2-integration]`
-- `task_coverage=7.1,7.2,7.3,7.4`
+1. `PARENT-GATE-REVIEW`: after WP-04 publishes the authoritative fully fanned-in candidate and required CI is successful, Manager dispatches the four independent review profiles on that exact implementation-parent SHA/range. The gate passes only with one consolidated result containing no unresolved Blocker or Required finding.
+2. `PARENT-GATE-E2E`: only after `PARENT-GATE-REVIEW` passes, Manager dispatches Tester on the same reviewed SHA for G2-E01 and G2-E02. Tester uses the prepared scripts/fixtures, a dedicated numbered environment, fresh independent actions, Multica-only execution evidence with read-back, and exact-owned cleanup while preserving the test MR/branch/commits.
 
-Deliverable: independent current-Moritora snapshot compatibility and real database reconciliation evidence for the accepted exact candidate, with fail-safe cleanup and durable Multica/GitLab references.
-
-Owned responsibility scope:
-
-- Test-repository MR scripts/fixtures for G2-E01/G2-E02, isolated numbered environment execution, independent fresh-agent walkthroughs, evidence publication/read-back, and exact-owned cleanup.
-- No production repository code or graph-2 candidate mutation is permitted in this WP.
-
-Contract surface:
-
-- Current external Moritora build provenance and launch contract are mandatory; missing inputs block rather than waive G2-E01.
-- G2-E02 operates only on recorded `odcli-N` resources and one exact test database; automatic and independent actions remain separate.
-- Execution evidence stays in Multica; GitLab stores reusable scenario code and only genuine functional results.
-
-Definition of done and evidence:
-
-- Both cases satisfy every assertion in the E2E matrix on the WP-04 exact SHA.
-- Final comment read-back proves revisions, links, attachments/outputs, commands, exits, assertions, and cleanup evidence are accessible.
-- Cleanup removes all run-owned resources while preserving the test MR, branch, and commits.
-
-Parallel safety: final external verification only; it starts after code/review/CI acceptance and has no implementation sibling.
+These gates have no `wp_id`, `stage`, `depends_on`, or OpenSpec task coverage. Manager owns their dispatch and any parent-level fix/review/retest loop. They SHALL NOT be materialized as children of WP Delivery, included in a WP definition of done, or satisfied by graph-1 evidence.
 
 ## Coverage and frontier audit
 
-Tasks `1.1` through `7.4` are assigned exactly once. Direct edges omit transitive dependencies. Stage 2 is a valid two-WP parallel frontier with non-overlapping production write zones; all other stages are intentional fan-in or external verification. Any change to product scope, public contracts, estimate classification, WP ownership, or direct dependencies requires a new planning revision. Operational stage promotion does not.
+Tasks `1.1` through `6.5` are assigned exactly once to the four materializable WP children. Direct edges omit transitive dependencies. Stages 1–3 are consecutive; stage 2 is a valid two-WP parallel frontier with non-overlapping production write zones, and stage 3 is their full fan-in. Parent review and E2E gates deliberately have no WP task coverage. Any change to product scope, public contracts, estimate classification, WP ownership, direct dependencies, or parent-gate order requires a new planning revision. Operational stage promotion does not.

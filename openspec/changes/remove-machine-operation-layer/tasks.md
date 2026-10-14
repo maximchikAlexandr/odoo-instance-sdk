@@ -23,7 +23,7 @@
 
 - [ ] 4.1 Decouple monitor DTOs, planning, collectors, process metrics, CLI/API paths, and tests from removed operation types while preserving section no-call behavior, one observation boundary, completeness/unknown semantics, raw CPU identity/counters, and version-2 fields.
 - [ ] 4.2 Preserve top-level snapshot schema compatibility, regenerate OpenAPI and TypeScript from the retained model, and prove the embedded dashboard renders candidate snapshots with existing project/environment rows and additive observation metadata.
-- [ ] 4.3 Add a reproducible compatibility check that feeds a genuine candidate `/api/v1/snapshot` to the supplied current external Moritora build and fails on strict-decoder rejection, crash, blank state, or lost pre-existing fields; absence of that build/launch contract blocks completion.
+- [ ] 4.3 Implement the reusable compatibility script and minimal non-secret fixtures that feed a genuine candidate `/api/v1/snapshot` to the supplied current external Moritora build and fail on revision mismatch, strict-decoder rejection, crash, blank state, or lost pre-existing fields; absence of that build/launch contract blocks the later parent E2E gate.
 - [ ] 4.4 Run focused snapshot-v2/v3, process-metrics, CLI monitor, HTTP schema, OpenAPI codegen, generated-client, and dashboard tests without relying on graph-1 results.
 
 ## 5. Preserve and verify database observation, reconciliation, and recovery
@@ -32,7 +32,7 @@
 - [ ] 5.2 Preserve inert backup `list/latest` behavior and regression checks proving repeated reads leave catalogue bytes, rows, and events unchanged.
 - [ ] 5.3 Preserve `CopyReplacementRecovery`, nullable `recovery_json`, atomic failure persistence, guarded retry/repair, successful clearing, and fail-closed explicit legacy adoption without parsing new executable state from `last_error`.
 - [ ] 5.4 Preserve migration `0008_replacement_recovery`, one Alembic head, current/historical catalogue fixtures, idempotent reopen, foreign-key/view checks, and all existing event/history bytes.
-- [ ] 5.5 Run focused database resource, backup resource, catalogue, migration, replacement, interruption, rollback, ownership, redaction, and cleanup suites on the graph-2 candidate.
+- [ ] 5.5 Run focused database resource, backup resource, catalogue, migration, replacement, interruption, rollback, ownership, redaction, and cleanup suites on the graph-2 candidate, and implement the reusable numbered-environment reconciliation script and minimal non-secret fixtures required by the later parent E2E gate.
 
 ## 6. Rebuild graph-2 acceptance evidence
 
@@ -40,11 +40,4 @@
 - [ ] 6.2 Run focused CLI/SDK/output/architecture tests and all retained monitor/database/recovery suites, then compare coverage against the graph-2 pre-removal baseline for the retained modules without counting deleted machine modules as coverage improvement.
 - [ ] 6.3 Run strict OpenSpec validation, formatting, Ruff, strict mypy, Alembic/schema checks, OpenAPI/generated-client verification, dashboard tests, package/build checks, full repository tests, and `git diff --check`; resolve only graph-2 regressions.
 - [ ] 6.4 Publish the exact graph-2 SHA and obtain successful required GitHub CI, including Ubuntu and macOS compatibility there only; do not run local `make compat`.
-- [ ] 6.5 Obtain a new four-profile independent review on the exact graph-2 range and resolve every Blocker/Required finding before live E2E dispatch; graph-1 review verdicts do not satisfy this task.
-
-## 7. Execute the independent graph-2 E2E contract
-
-- [ ] 7.1 [Tester-owned] In the project-described test repository, commit only reusable graph-2 scripts/fixtures that capture a genuine candidate snapshot, exercise the supplied current Moritora build, and verify one disposable database observation/reconciliation lifecycle; do not commit logs, diagnostic JSON, hashes, or screenshots.
-- [ ] 7.2 [Tester-owned] From fresh agent context, independently inspect the exact candidate snapshot in Moritora and execute pre-reconcile inert reads, one exact reconciliation, and an idempotent repeat against a dedicated numbered environment without invoking the automatic test as the manual check.
-- [ ] 7.3 [Tester-owned] Record product/test revisions, commands, exit codes, assertions, sanitized snapshot/diagnostic outputs, CI links, MR/commit/file links, and cleanup proof in the final Multica comment with read-back; no before/after images are required because graph 2 intentionally changes no user-visible CLI or UI output.
-- [ ] 7.4 [Tester-owned] Remove only the recorded test-owned environment, checkout, database, process, port, volume, and temporary evidence files while preserving the test MR/branch/commits; do not merge, close, or delete them without separate authorization.
+- [ ] 6.5 Publish an exact-SHA parent-gate handoff manifest that identifies the integrated candidate, successful required CI, reusable G2-E01/G2-E02 scripts and fixtures, test-repository MR/commit/file references, required private execution inputs by parameter name, and cleanup entry points without embedding credentials, private URLs, or graph-1 evidence.
