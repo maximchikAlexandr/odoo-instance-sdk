@@ -1,9 +1,9 @@
 ## 1. Shared credential and repository foundations
 
-- [ ] 1.1 Add frozen public Git/GitLab identity, repository, clone, commit, sync, upload, and merge-request result models plus stable typed failures, keeping secret fields private and JSON projections redacted.
-- [ ] 1.2 Move/adapt the existing `odcli-multica` mapping parser, host normalization, askpass channel, and transport preflight into core global-user-root policies; enforce owner-only `credentials/gitlab-credentials.toml` and `.env`, exact member/host selection, and compatibility adapters for the extension.
-- [ ] 1.3 Implement bounded GitLab `/user` verification and verified author/committer identity resolution through the existing HTTP action boundary, including login mismatch, missing identity, concurrent-member isolation, and secret-echo redaction tests.
-- [ ] 1.4 Implement the explicit generic repository resolver and immutable revalidation snapshot for canonical root, Git common dir, origin, host/project, branch, staged state, and initialized-Odoo classification.
+- [x] 1.1 Add frozen public Git/GitLab identity, repository, clone, commit, sync, upload, and merge-request result models plus stable typed failures, keeping secret fields private and JSON projections redacted.
+- [x] 1.2 Move/adapt the existing `odcli-multica` mapping parser, host normalization, askpass channel, and transport preflight into core global-user-root policies; enforce owner-only `credentials/gitlab-credentials.toml` and `.env`, exact member/host selection, and compatibility adapters for the extension.
+- [x] 1.3 Implement bounded GitLab `/user` verification and verified author/committer identity resolution through the existing HTTP action boundary, including login mismatch, missing identity, concurrent-member isolation, and secret-echo redaction tests.
+- [x] 1.4 Implement the explicit generic repository resolver and immutable revalidation snapshot for canonical root, Git common dir, origin, host/project, branch, staged state, and initialized-Odoo classification.
 
 ## 2. Generic Git command builders
 

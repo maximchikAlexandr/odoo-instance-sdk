@@ -14,10 +14,12 @@ from odoo_instance_sdk.internal.transport.base import (
     TransportStatusError,
     TransportUnavailableError,
 )
+from odoo_instance_sdk.internal.transport.gitlab import GitLabHttpClient
 from odoo_instance_sdk.internal.transport.odoo import OdooHttpClient
 
 __all__ = [
     "BaseHttpClient",
+    "GitLabHttpClient",
     "HttpClient",
     "OdooHttpClient",
     "StreamingResponse",

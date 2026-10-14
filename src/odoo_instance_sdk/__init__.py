@@ -38,6 +38,10 @@ if TYPE_CHECKING:
         EnvironmentConflictError,
         EnvironmentNotFoundError,
         EnvironmentResolutionError,
+        GitLabCredentialError,  # noqa: F401
+        GitLabIdentityError,  # noqa: F401
+        GitRepositoryChangedError,  # noqa: F401
+        GitRepositoryError,  # noqa: F401
         InstanceConfigurationError,
         InvalidBaseUrlError,
         LockConflictError,
@@ -133,9 +137,20 @@ if TYPE_CHECKING:
         GitActivityState,
         GitCheckIssue,
         GitCheckResult,
+        GitCloneResult,  # noqa: F401
         GitCommitContext,
+        GitCommitResult,  # noqa: F401
         GitDiff,
+        GitLabCredentialContext,  # noqa: F401
+        GitLabCredentialIdentity,  # noqa: F401
+        GitLabCredentialMapping,  # noqa: F401
+        GitLabIdentity,  # noqa: F401
+        GitLabUserIdentity,  # noqa: F401
+        GitLabVerifiedIdentity,  # noqa: F401
+        GitMergeRequestResult,  # noqa: F401
+        GitRepositorySnapshot,  # noqa: F401
         GitSyncResult,
+        GitUploadResult,  # noqa: F401
         HttpError,
         HttpErrorCode,
         IndexBloat,
@@ -164,6 +179,7 @@ if TYPE_CHECKING:
         ProjectSummary,
         PythonEnvFootprint,
         ReadinessResult,
+        RepositoryResolution,  # noqa: F401
         RestoreResult,
         RuntimeMetrics,
         RuntimeState,
@@ -376,15 +392,31 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "GitActivityState": ("odoo_instance_sdk.models", "GitActivityState"),
     "GitAbsorbNotFoundError": ("odoo_instance_sdk.exceptions", "GitAbsorbNotFoundError"),
     "GitAbsorbResult": ("odoo_instance_sdk.models", "GitAbsorbResult"),
+    "GitCloneResult": ("odoo_instance_sdk.models", "GitCloneResult"),
     "GitCheckIssue": ("odoo_instance_sdk.models", "GitCheckIssue"),
     "GitCheckResult": ("odoo_instance_sdk.models", "GitCheckResult"),
     "GitCommitContext": ("odoo_instance_sdk.models", "GitCommitContext"),
+    "GitCommitResult": ("odoo_instance_sdk.models", "GitCommitResult"),
+    "GitLabCredentialContext": ("odoo_instance_sdk.models", "GitLabCredentialContext"),
+    "GitLabCredentialIdentity": ("odoo_instance_sdk.models", "GitLabCredentialIdentity"),
+    "GitLabCredentialMapping": ("odoo_instance_sdk.models", "GitLabCredentialMapping"),
+    "GitLabIdentity": ("odoo_instance_sdk.models", "GitLabIdentity"),
+    "GitLabUserIdentity": ("odoo_instance_sdk.models", "GitLabUserIdentity"),
+    "GitLabVerifiedIdentity": ("odoo_instance_sdk.models", "GitLabVerifiedIdentity"),
+    "GitMergeRequestResult": ("odoo_instance_sdk.models", "GitMergeRequestResult"),
+    "GitRepositorySnapshot": ("odoo_instance_sdk.models", "GitRepositorySnapshot"),
+    "RepositoryResolution": ("odoo_instance_sdk.models", "RepositoryResolution"),
     "GitDiff": ("odoo_instance_sdk.models", "GitDiff"),
     "GitResource": ("odoo_instance_sdk.resources.git", "GitResource"),
     "GitScopeError": ("odoo_instance_sdk.exceptions", "GitScopeError"),
     "GitSyncError": ("odoo_instance_sdk.exceptions", "GitSyncError"),
     "GitSyncResult": ("odoo_instance_sdk.models", "GitSyncResult"),
+    "GitUploadResult": ("odoo_instance_sdk.models", "GitUploadResult"),
     "GitWorkflowError": ("odoo_instance_sdk.exceptions", "GitWorkflowError"),
+    "GitLabCredentialError": ("odoo_instance_sdk.exceptions", "GitLabCredentialError"),
+    "GitLabIdentityError": ("odoo_instance_sdk.exceptions", "GitLabIdentityError"),
+    "GitRepositoryError": ("odoo_instance_sdk.exceptions", "GitRepositoryError"),
+    "GitRepositoryChangedError": ("odoo_instance_sdk.exceptions", "GitRepositoryChangedError"),
     "HttpError": ("odoo_instance_sdk.models", "HttpError"),
     "HttpErrorCode": ("odoo_instance_sdk.models", "HttpErrorCode"),
     "IndexBloat": ("odoo_instance_sdk.models", "IndexBloat"),

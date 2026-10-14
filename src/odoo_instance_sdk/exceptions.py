@@ -176,6 +176,30 @@ class GitSyncError(GitWorkflowError):
     code = "git_sync_failed"
 
 
+class GitLabCredentialError(PlanError):
+    """Credential configuration is absent, malformed, or unsafe."""
+
+    code = "gitlab_credential_error"
+
+
+class GitLabIdentityError(PlanError):
+    """The selected GitLab token did not prove the configured identity."""
+
+    code = "gitlab_identity_error"
+
+
+class GitRepositoryError(PlanError):
+    """A generic repository cannot be resolved or safely revalidated."""
+
+    code = "git_repository_error"
+
+
+class GitRepositoryChangedError(GitRepositoryError):
+    """Repository evidence changed after an immutable snapshot was captured."""
+
+    code = "git_repository_changed"
+
+
 class StalePlanError(PlanError):
     """A captured precondition changed before execution began."""
 
