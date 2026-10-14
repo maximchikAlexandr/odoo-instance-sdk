@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 from collections.abc import Callable, Mapping, Sequence
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
@@ -58,6 +60,12 @@ class _SyncOptions(TypedDict):
     hooks_path: str
 
 
+class _CredentialOptions(TypedDict):
+    environment: Mapping[str, str]
+    secrets: Sequence[str]
+    helper: str | None
+
+
 def _text(value: str | bytes | None) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
 
@@ -88,13 +96,14 @@ def _step(
     environment: Mapping[str, str],
     secrets: Sequence[str],
     hooks_path: str,
+    credential_helper: str | None = None,
     mutating: bool = False,
 ) -> PreparedStep:
     from odoo_instance_sdk.internal.proc import PreparedStep
 
     controls = (
         "-c",
-        "credential.helper=",
+        f"credential.helper={credential_helper or ''}",
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -141,13 +150,92 @@ def _credentials(
     return selected, verified
 
 
-def _environment(credential: GitLabCredentialContext, askpass: str | None) -> Mapping[str, str]:
+def _host_key(host: str) -> str:
+    return sha256(host.encode("utf-8")).hexdigest()[:16].upper()
+
+
+def _credential_helper(credentials: Sequence[GitLabCredentialContext]) -> str:
+    cases = []
+    for credential in credentials:
+        key = _host_key(credential.host)
+        cases.append(
+            f"{shlex.quote(credential.host)}) printf 'username=%s\\npassword=%s\\n' "
+            f'"$ODCLI_GITLAB_LOGIN_{key}" "$ODCLI_GITLAB_TOKEN_{key}";;'
+        )
+    body = " ".join(cases)
+    return (
+        "!f() { host=''; while IFS='=' read -r key value; do "
+        '[ "$key" = host ] && host="$value"; done; '
+        f'case "$host" in {body} *) return 1;; esac; }}; f'
+    )
+
+
+def _environment(
+    credentials: Sequence[GitLabCredentialContext], askpass: str | None
+) -> _CredentialOptions:
+    if len(credentials) > 1:
+        values: dict[str, str] = {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
+        }
+        values.update(
+            {
+                f"ODCLI_GITLAB_LOGIN_{_host_key(credential.host)}": credential.login
+                for credential in credentials
+            }
+        )
+        values.update(
+            {
+                f"ODCLI_GITLAB_TOKEN_{_host_key(credential.host)}": credential._token
+                for credential in credentials
+            }
+        )
+        return {
+            "environment": values,
+            "secrets": tuple(credential._token for credential in credentials),
+            "helper": _credential_helper(credentials),
+        }
+    credential = credentials[0]
     helper = askpass or os.environ.get("ODCLI_GIT_ASKPASS") or shutil.which("odcli-multica-askpass")
     values = dict(
         credential.askpass_environment(helper or "odcli-multica-askpass", channel_path="")
     )
     values["GITLAB_TOKEN"] = credential._token
-    return values
+    return {"environment": values, "secrets": credential._redaction_secrets(), "helper": None}
+
+
+def _credentials_for_hosts(
+    member_id: str,
+    hosts: Sequence[str],
+    *,
+    selected: GitLabCredentialContext,
+    user_root: Path | str | None,
+    mapping_path: Path | str | None,
+    environment_path: Path | str | None,
+    process_environment: Mapping[str, str] | None,
+    identity_transport: GitLabUserTransport | Callable[[str, str], Mapping[str, JsonValue]] | None,
+) -> tuple[GitLabCredentialContext, ...]:
+    result = []
+    for host in sorted(set(hosts)):
+        if host == selected.host:
+            result.append(selected)
+            continue
+        credential, _identity = _credentials(
+            member_id,
+            host,
+            credential=None,
+            identity=None,
+            user_root=user_root,
+            mapping_path=mapping_path,
+            environment_path=environment_path,
+            process_environment=process_environment,
+            identity_transport=identity_transport,
+        )
+        result.append(credential)
+    if not result or not any(credential.host == selected.host for credential in result):
+        raise PlanValidationError("selected GitLab credential is not in the host set")
+    return tuple(result)
 
 
 def _cleanup() -> None:
@@ -203,11 +291,10 @@ class GenericGitMixin:
             process_environment=process_environment,
             identity_transport=identity_transport,
         )
-        environment = _environment(selected, askpass)
-        secrets = selected._redaction_secrets()
         reused = root.exists()
         snapshot: GitRepositorySnapshot | None = None
         planned_missing: tuple[str, ...] = ()
+        credentials: tuple[GitLabCredentialContext, ...] = (selected,)
         if reused:
             if not root.is_dir():
                 raise GitWorkflowError("clone destination is not a directory")
@@ -217,19 +304,21 @@ class GenericGitMixin:
             if recurse_submodules:
                 hosts = {snapshot.host, *(item[2] for item in submodule_urls(root))}
                 validate_submodule_configuration(root, allowed_hosts=tuple(hosts))
-                for submodule_host in sorted(hosts - {host}):
-                    _credentials(
-                        member_id,
-                        submodule_host,
-                        credential=None,
-                        identity=None,
-                        user_root=user_root,
-                        mapping_path=mapping_path,
-                        environment_path=environment_path,
-                        process_environment=process_environment,
-                        identity_transport=identity_transport,
-                    )
+                credentials = _credentials_for_hosts(
+                    member_id,
+                    tuple(hosts),
+                    selected=selected,
+                    user_root=user_root,
+                    mapping_path=mapping_path,
+                    environment_path=environment_path,
+                    process_environment=process_environment,
+                    identity_transport=identity_transport,
+                )
                 planned_missing = missing_submodules(root)
+        credential_options = _environment(credentials, askpass)
+        environment = credential_options["environment"]
+        secrets = credential_options["secrets"]
+        credential_helper = credential_options["helper"]
         hooks = os.devnull
         steps: list[PreparedStep] = []
         if not reused:
@@ -241,6 +330,7 @@ class GenericGitMixin:
                     environment=environment,
                     secrets=secrets,
                     hooks_path=hooks,
+                    credential_helper=credential_helper,
                     mutating=True,
                 )
             )
@@ -253,6 +343,7 @@ class GenericGitMixin:
                     environment=environment,
                     secrets=secrets,
                     hooks_path=hooks,
+                    credential_helper=credential_helper,
                 )
             )
             args = (
@@ -270,6 +361,7 @@ class GenericGitMixin:
                     environment=environment,
                     secrets=secrets,
                     hooks_path=hooks,
+                    credential_helper=credential_helper,
                     mutating=True,
                 )
             )
@@ -289,6 +381,21 @@ class GenericGitMixin:
                             fresh = resolve_repository(root)
                             hosts = {fresh.host, *(item[2] for item in submodule_urls(root))}
                             validate_submodule_configuration(root, allowed_hosts=tuple(hosts))
+                            _credentials_for_hosts(
+                                member_id,
+                                tuple(hosts),
+                                selected=selected,
+                                user_root=user_root,
+                                mapping_path=mapping_path,
+                                environment_path=environment_path,
+                                process_environment=process_environment,
+                                identity_transport=identity_transport,
+                            )
+                            if hosts != {host}:
+                                context.skip("git.clone.submodule-update")
+                                raise GitWorkflowError(
+                                    "recursive clone requires host-specific submodule credentials"
+                                )
                     except PlanError as exc:
                         context.skip_remaining()
                         raise GitWorkflowError(str(exc)) from None
@@ -525,7 +632,8 @@ class GenericGitMixin:
             process_environment=process_environment,
             identity_transport=identity_transport,
         )
-        environment = _environment(selected, askpass)
+        credential_options = _environment((selected,), askpass)
+        environment = credential_options["environment"]
         hooks = os.devnull
         branch_name = cast("str", snapshot.branch)
         remote = _step(

@@ -342,14 +342,7 @@ def _project_settings(root: Path) -> TicketLinkSettings | None:
 def _resolved_ticket_settings(
     instance: OdooInstance, worktree_root: Path
 ) -> TicketLinkSettings | None:
-    """Resolve ticket settings from the selected project manifest root.
-
-    The environment worktree is a Git artifact, not a project manifest source.
-    Prefer the already-resolved runtime binding's ``repository_root`` (the
-    selected project manifest root) so a worktree without its own
-    ``.odcli/project.toml`` still applies the configured ticket link. Fall
-    back to the worktree root only for manual instances without a binding.
-    """
+    """Resolve ticket settings from the bound manifest, falling back to the worktree."""
     binding = getattr(instance, "_runtime_binding", None)
     project_root = getattr(binding, "repository_root", None)
     if project_root is not None:
@@ -528,16 +521,21 @@ class GitResource(GenericGitMixin):
         if repository is not None or member_id is not None:
             if repository is None or member_id is None:
                 raise PlanValidationError("generic commit requires repository and member_id")
-            if context is not None:
-                raise PlanValidationError("generic commit does not accept an Odoo commit context")
-            if description is None:
-                raise PlanValidationError("commit description is required")
-            return cast(
-                "Command[CommandResult]",
-                self.generic_commit_command(
+            if context is not None or description is None:
+                raise PlanValidationError(
+                    "generic commit does not accept an Odoo commit context"
+                    if context is not None
+                    else "commit description is required"
+                )
+            from odoo_instance_sdk.internal.git_repository import resolve_repository
+
+            if not (snapshot := resolve_repository(repository)).initialized_odoo:
+                generic = self.generic_commit_command(
                     description, repository=repository, member_id=member_id, ticket=ticket
-                ),
-            )
+                )
+                return cast("Command[CommandResult]", generic)
+            if snapshot.canonical_root != str(_worktree(self._instance)):
+                raise GitWorkflowError("initialized Odoo root is not the bound Git worktree")
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
 

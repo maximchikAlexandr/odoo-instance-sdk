@@ -202,6 +202,9 @@ def submodule_urls(root: Path | str) -> tuple[tuple[str, str, str], ...]:
         if not separator or not raw_url.strip():
             raise GitRepositoryError("submodule URL configuration is malformed")
         path = key.removeprefix("submodule.").removesuffix(".url")
+        path_parts = Path(path).parts
+        if not path or Path(path).is_absolute() or ".." in path_parts:
+            raise GitRepositoryError("submodule path escapes the repository")
         candidate = urljoin(origin.rsplit("/", 1)[0] + "/", raw_url.strip())
         normalized, host, _project = _normalize_origin(candidate)
         result.append((path, normalized, host))
@@ -222,6 +225,25 @@ def validate_submodule_configuration(
     )
     if dangerous:
         raise GitRepositoryError("repository-controlled submodule transport is unsafe")
+    modules = checkout / ".gitmodules"
+    if modules.is_symlink():
+        raise GitRepositoryError("submodule configuration is not repository-owned")
+    if modules.is_file():
+        configured = _probe(
+            checkout,
+            (
+                "config",
+                "--file",
+                str(modules),
+                "--get-regexp",
+                r"^(credential\.helper|core\.hooksPath|submodule\..*\.update|protocol\..*|url\..*\.insteadOf)$",
+            ),
+            "git.submodule.file-policy",
+        )
+        if configured.returncode not in (0, 1) or not isinstance(configured.stdout, str):
+            raise GitRepositoryError("repository submodule policy is unavailable")
+        if configured.stdout.strip():
+            raise GitRepositoryError("repository-controlled submodule transport is unsafe")
     values = submodule_urls(checkout)
     allowed = frozenset(allowed_hosts)
     if any(host not in allowed for _path, _url, host in values):
