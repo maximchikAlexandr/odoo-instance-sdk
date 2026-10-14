@@ -5,6 +5,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol, cast
 
 
@@ -79,6 +80,10 @@ class ProcessTreeResult:
     process_count: int
     cpu_percent: float | None
     memory_bytes: int | None
+    root_pid: int | None = None
+    create_time: float | None = None
+    cpu_seconds: float | None = None
+    sampled_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,8 @@ class CpuPoint:
 
     times_cpu: float
     timestamp: float
+    pid: int | None = None
+    create_time: float | None = None
 
 
 def _child_metrics(
@@ -163,7 +170,8 @@ def collect_process_tree(
         if not psutil.pid_exists(root_pid):
             return None
         proc = psutil.Process(root_pid)
-        if proc.create_time() != create_time:
+        confirmed_create_time = proc.create_time()
+        if confirmed_create_time != create_time:
             return None
         root_memory = memory_reader(cast("_Process", proc))
         if root_memory is None:
@@ -180,13 +188,17 @@ def collect_process_tree(
     new_point = CpuPoint(times_cpu=total_times_cpu, timestamp=now)
 
     cpu_percent: float | None
-    if prev_cpu_point is None:
+    if (
+        prev_cpu_point is None
+        or (prev_cpu_point.pid is not None and prev_cpu_point.pid != root_pid)
+        or (prev_cpu_point.create_time is not None and prev_cpu_point.create_time != create_time)
+    ):
         cpu_percent = None
     else:
         elapsed = now - prev_cpu_point.timestamp
         if elapsed > 0:
             delta_cpu = total_times_cpu - prev_cpu_point.times_cpu
-            cpu_percent = max(delta_cpu / elapsed * 100.0, 0.0)
+            cpu_percent = delta_cpu / elapsed * 100.0 if delta_cpu >= 0 else None
         else:
             cpu_percent = None
 
@@ -197,6 +209,15 @@ def collect_process_tree(
             process_count=1 + len(child_pids),
             cpu_percent=cpu_percent,
             memory_bytes=memory_bytes,
+            root_pid=root_pid,
+            create_time=confirmed_create_time,
+            cpu_seconds=total_times_cpu,
+            sampled_at=datetime.now(UTC),
         ),
-        new_point,
+        CpuPoint(
+            times_cpu=new_point.times_cpu,
+            timestamp=new_point.timestamp,
+            pid=root_pid,
+            create_time=confirmed_create_time,
+        ),
     )
