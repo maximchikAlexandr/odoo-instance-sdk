@@ -140,6 +140,18 @@ def test_latest_backup(client: OdooClient, sample_backup_entry: dict[str, object
     assert latest.id == uuid.UUID(cast("str", sample_backup_entry["id"]))
 
 
+def test_repeated_backup_reads_leave_catalogue_bytes_unchanged(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
+    res = BackupResource(_client=client)
+    db_path = cast("Path", sample_backup_entry["db_path"])
+    before = db_path.read_bytes()
+    for _ in range(3):
+        res.list(source_base_url="http://localhost:8069")
+        res.latest("http://localhost:8069", "mydb")
+    assert db_path.read_bytes() == before
+
+
 def test_latest_backup_none(
     client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
