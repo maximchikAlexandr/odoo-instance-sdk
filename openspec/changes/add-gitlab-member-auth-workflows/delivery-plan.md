@@ -81,7 +81,7 @@ Task coverage audit: `1.1–1.4` appear only in WP01; `2.1–2.4` only in WP02; 
 
 `e2e_required=true`.
 
-Real GitLab and isolated uv-tool E2E are required because fake HTTP/process tests cannot prove token-owner identity, askpass propagation through recursive submodules, provider-side MR upload/idempotency, retained branches/commits/MRs, or a restarted installed monitor. The project test repository URL is `https://gitlab.icode.by/a.maksimchyk/binta-test-repo`; scripts and public Git artifacts SHALL use parameter names or repository-relative identities and SHALL NOT commit this private hostname, member UUIDs, logins, tokens, or personal data to GitHub.
+Real GitLab and isolated uv-tool E2E are required because fake HTTP/process tests cannot prove token-owner identity, askpass propagation through recursive submodules, provider-side MR upload/idempotency, retained branches/commits/MRs, or a restarted installed monitor. At execution time, Tester SHALL read the private test repository URL from the current Multica project description and pass it to scripts as `TEST_REPOSITORY_URL`; the URL/hostname SHALL NOT be copied into this repository, command templates, or other public artifacts. Scripts and public Git artifacts SHALL use parameter names or repository-relative identities and SHALL NOT commit private hostnames, member UUIDs, logins, tokens, or personal data to GitHub.
 
 Required private prerequisites are two authorized Multica member UUID mappings and token keys, plus GitLab test projects representing `A`, superproject `B` with `B/ours` and `B/odoo` submodules, and one independent repository. If the supplied GitLab namespace cannot provide that topology or two users, live verification is blocked; it is not downgraded to fake coverage.
 
