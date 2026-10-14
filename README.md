@@ -834,8 +834,9 @@ See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
 database backup/restore, catalogue inspect, database inventory, dependency
 verification, shared test execution, persisted environment stop, COPY database
 replacement, environments, PostgreSQL, monitoring, and inspect-then-run
-command siblings. `PUBLIC_LEAF_CASES` records the SDK primitive or CLI-only
-reason for every leaf; the complete boundary inventory and allowlist rationale
+command siblings. The test-owned `PublicLeafCase` matrix records the SDK
+primitive or CLI-only reason, dry-run metadata, and evidence disposition for
+every registered leaf. The complete boundary inventory and allowlist rationale
 are in [docs/execution-boundary.md](docs/execution-boundary.md).
 
 The SDK-first rule governs that boundary: every CLI leaf records either a

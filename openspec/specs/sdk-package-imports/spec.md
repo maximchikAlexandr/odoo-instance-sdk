@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Keep the public SDK import surface lazy and lightweight while enforcing that CLI domain leaves delegate to typed public primitives recorded in `PUBLIC_LEAF_CASES`. Package roots defer heavy implementation imports until a caller resolves a declared export; architecture gates reject parallel domain execution inside Click callbacks.
+Keep the public SDK import surface lazy and lightweight while enforcing that CLI domain leaves delegate to typed public primitives recorded in the test-owned `PUBLIC_LEAF_CASES` matrix. Package roots defer heavy implementation imports until a caller resolves a declared export; architecture gates reject parallel domain execution inside Click callbacks.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ The package root SHALL retain the exact existing `__all__` names. Accessing any 
 
 ### Requirement: SDK-first rule for CLI domain operations
 
-Every entry in the canonical `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason. The new `bug-report init`, `bug-report submit`, and `update` leaves SHALL set `sdk_primitive` to `bug_report_init_command`, `bug_report_submit_command`, and `update_command` respectively. `cli_only_reason` SHALL NOT be used for those domain leaves. CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operation through `internal.*` when a public typed SDK primitive applies. CLI callbacks SHALL NOT import `OdooHttpClient` or `internal.transport`; they SHALL call public SDK resource primitives. Only `src/odoo_instance_sdk/internal/transport/` files listed in `architecture_inventory.py` SHALL import `httpx`. `src/` SHALL NOT import `xmlrpc.client.ServerProxy`. `OdooHttpClient` SHALL NOT be a public SDK export.
+Every entry in the test-owned `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason. The new `bug-report init`, `bug-report submit`, and `update` leaves SHALL set `sdk_primitive` to `bug_report_init_command`, `bug_report_submit_command`, and `update_command` respectively. `cli_only_reason` SHALL NOT be used for those domain leaves. CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operation through `internal.*` when a public typed SDK primitive applies. CLI callbacks SHALL NOT import `OdooHttpClient` or `internal.transport`; they SHALL call public SDK resource primitives. Only `src/odoo_instance_sdk/internal/transport/` files listed in `architecture_inventory.py` SHALL import `httpx`. `src/` SHALL NOT import `xmlrpc.client.ServerProxy`. `OdooHttpClient` SHALL NOT be a public SDK export.
 
 #### Scenario: New CLI domain operation has an SDK primitive
 

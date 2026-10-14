@@ -8,6 +8,10 @@ first catalogue-backed operation migrates legacy platformdirs locations with a
 locked, journaled, retry-safe migration. Repository-local `.odcli` manifests
 are separate project data and are never migrated into that global root.
 
+The CLI characterization and real-Odoo traceability matrix are test-owned;
+production commands remain direct SDK/resource entrypoints with no runtime
+operation registry or provider-discovery layer.
+
 ## Create a client and instance
 
 ```python
