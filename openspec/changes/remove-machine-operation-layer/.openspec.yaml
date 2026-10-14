@@ -1,4 +1,4 @@
 schema: spec-driven
 created: 2026-10-14
 goal: "Remove the machine-interface layer from PR #137 and re-verify the
-  retained scope as graph revision 2."
+  retained scope as graph revision 3."
