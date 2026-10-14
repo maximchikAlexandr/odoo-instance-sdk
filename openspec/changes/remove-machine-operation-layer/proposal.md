@@ -1,16 +1,15 @@
 ## Why
 
-PR #137 added a versioned machine-operation registry, contract export, local invoke/session transport, provider loading, and external-consumer proof without a concrete product consumer. The owner selected the existing Python SDK and JSON CLI for automation and Supervisor for Odoo process ownership, so retaining that parallel machine layer would add drift and maintenance risk without a current need.
+PR #137 contains a machine-operation registry, export/invoke/session commands, provider loading, and consumer-generation surface without a current product consumer. The owner selected the existing Python SDK and JSON CLI instead, so the remaining work is to delete that speculative layer while preserving useful code already present in the PR.
 
 ## What Changes
 
-- **BREAKING** Remove the `machine-operation-contracts` capability, production operation inventory, stable operation IDs, contract bundle/export, `operation invoke`, approval session, operation context, installed-operation provider API, provider fixtures, and external/Go consumer proof from PR #137.
-- Restore the repository's test-owned `PublicLeafCase`/`PUBLIC_LEAF_CASES` CLI characterization and E2E disposition matrix; it SHALL remain test evidence and SHALL NOT become a production runtime registry.
-- Remove machine-only public exports, Click entrypoints, documentation, packaging checks, schemas, tests, and E2E cases while retaining shared bounded CLI output and SDK-first delegation used by ordinary commands.
-- Retain selective snapshot-v3 observation/CPU semantics, inert database and backup reads, explicit database reconciliation, and structured database-replacement recovery.
-- Add a fail-closed compatibility gate for the currently deployed Moritora consumer against the additive snapshot observation field; embedded dashboard success alone SHALL NOT prove external Moritora compatibility.
-- Re-run review, CI, and selected live E2E against the graph-2 product composition. Graph-1 WP, review, CI, and E2E evidence SHALL NOT be reused as proof that graph-2 passed.
-- Keep Supervisor integration, a daemon/RPC boundary, dynamic operation discovery, language-specific client generation, and a replacement machine interface out of this change.
+- **BREAKING** Remove the production operation inventory, stable operation IDs, descriptors/schemas, contract export, local invoke/session runtime, operation context, provider API, provider fixtures, machine-only public exports, and Go/consumer proof.
+- Remove only the associated Click entrypoints, packaging metadata, tests, fixtures, documentation, generated traceability rows, and main-spec requirements; repair directly coupled shared files.
+- Restore the exhaustive test-owned `PublicLeafCase`/`PUBLIC_LEAF_CASES` CLI matrix without creating a replacement runtime registry or second authority.
+- Preserve the already implemented snapshot-v3 monitor, database observation/reconciliation, inert backup reads, catalogue migration, and structured replacement recovery. Run only regression checks whose imports, registrations, output contracts, or architecture assertions are directly touched by machine-layer removal.
+- Keep required CI and the implementation-parent four-profile review as safety gates. Do not add live Moritora/database E2E, test-repository orchestration, new scripts, manifests, adapters, or evidence infrastructure for this deletion.
+- Keep Supervisor integration, daemon/RPC dispatch, dynamic operation discovery, plugin lifecycle, and any future machine interface outside this change.
 
 ## Capabilities
 
@@ -20,15 +19,14 @@ None.
 
 ### Modified Capabilities
 
-- `machine-operation-contracts`: Remove the complete capability because no current product consumer requires registry/export/invoke/session/provider contracts.
-- `cli-odcli`: Remove machine-operation entrypoints and stable-operation bindings while preserving existing friendly CLI commands and bounded Rich/JSON/TOON behavior.
-- `command-execution`: Remove machine approval-session requirements while preserving the existing private `Command`, preview, execution, rollback, and cleanup boundary.
-- `environment-monitor`: Retain snapshot-v3 observation truth and require compatibility evidence for embedded and separately deployed Moritora consumers.
-- `real-odoo-e2e-verification`: Restore test-owned CLI traceability and replace machine-contract live evidence with graph-2 checks for the retained monitor and database boundaries.
+- `machine-operation-contracts`: Remove the complete capability.
+- `cli-odcli`: Remove machine-operation entrypoints and stable-operation bindings while preserving ordinary CLI behavior.
+- `command-execution`: Remove machine approval-session requirements while preserving the existing command execution boundary.
+- `real-odoo-e2e-verification`: Restore test-owned CLI traceability after the production inventory is removed.
 
 ## Impact
 
-- Machine-only removal reaches `src/odoo_instance_sdk/operations/`, `commands/contract.py`, `commands/operation.py`, machine-only `OperationContext` and public exports, Click registration, provider fixtures, operation packaging/unit/integration tests, machine-operation documentation, and the archived change's contract-specific E2E matrix.
-- Retained implementation reaches monitor DTO/planning/collectors, OpenAPI/generated TypeScript/dashboard consumption, database observation/reconciliation, backup catalogue migration, and database-replacement recovery. Coupled tests, fixtures, docs, and architecture inventories remain in scope.
-- `openspec/changes/archive/2026-10-10-add-typed-machine-operation-contracts` remains immutable historical context. This active change is the sole planning package for graph revision 2.
-- PR #137 remains the delivery vehicle and draft until graph-2 implementation, independent review, required CI, and live compatibility evidence complete.
+- Delete `src/odoo_instance_sdk/operations/`, `commands/contract.py`, `commands/operation.py`, operation-only `OperationContext` code, provider fixtures/entry points, operation-only tests, `docs/machine-operation-contracts.md`, and their documentation/spec/traceability references.
+- Update only direct callers and shared seams such as root exports, CLI registration/context/output, exceptions, architecture inventories, CLI characterization, command-matrix generation, packaging expectations, and documentation contracts.
+- Preserve monitor/database/recovery implementation, migrations, OpenAPI/web generated surfaces, and their existing tests except for a minimal import or assertion repair caused by the deletion.
+- The archived graph-1 package remains immutable. This active change is the sole graph-3 planning package; PR #137 remains the delivery vehicle.

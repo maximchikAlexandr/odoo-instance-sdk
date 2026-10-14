@@ -42,4 +42,4 @@
 
 ### Requirement: Representative end-to-end contract proof
 **Reason**: The operation contract and its transport matrix no longer exist.
-**Migration**: Graph-2 E2E covers retained monitor compatibility and explicit database reconciliation instead.
+**Migration**: Existing targeted tests and required CI cover directly affected shared seams; no replacement live E2E is required for deletion-only graph revision 3.
