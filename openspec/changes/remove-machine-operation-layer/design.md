@@ -65,6 +65,8 @@ The reduced candidate SHALL receive new focused tests and full required GitHub C
 
 Graph-1 evidence may guide test selection but SHALL be labelled historical and SHALL NOT satisfy a graph-2 gate. Local `make compat` remains forbidden; compatibility runs only in GitHub CI. Implementer WPs prepare the reusable scripts, fixtures, CI coverage, and exact-SHA handoff manifest; reviewers and Tester do not edit those deliverables while performing their independent gates.
 
+The parallel stage-2 WPs SHALL NOT share a mutable test-repository branch or MR. Both record one common `TEST_REPO_BASE_SHA`; WP-02 publishes its Moritora-only paths from `wp/MYL-432-WP-02-moritora-e2e`, while WP-03 publishes its database-only paths from `wp/MYL-432-WP-03-database-e2e`. After both finish, WP-04 alone creates `integration/MYL-432-graph2-e2e` from that base, integrates the two exact source commits, verifies their disjoint path trees and provenance, and opens the single integration MR consumed by the parent E2E gate. This fan-in requires no sibling commit ordering, force push, or non-fast-forward coordination.
+
 ### D6. Ponytail full gate
 
 No new subsystem is introduced. The change deletes the operation subsystem and reuses the existing CLI test matrix, monitor API, dashboard/OpenAPI checks, database resources, catalogue migration, and replacement compensation flow.
@@ -75,6 +77,7 @@ No new subsystem is introduced. The change deletes the operation subsystem and r
 | Supervisor integration | Separate product decision | Existing process lifecycle remains until separately changed | Exclude |
 | New monitor compatibility adapter | Not justified before observing a real incompatibility | Exercise the current Moritora build against candidate JSON | Do not add |
 | New E2E framework | Existing test repository and numbered environment tooling are sufficient | Extend focused scripts only | Do not add |
+| Shared stage-2 test branch/MR | Not safe for parallel siblings | Separate source branches/MRs plus WP-04 fan-in | Do not share |
 | New recovery/reconciliation abstraction | Current retained implementations already satisfy their specs | Existing typed models and commands | Do not add |
 
 ## Risks / Trade-offs
