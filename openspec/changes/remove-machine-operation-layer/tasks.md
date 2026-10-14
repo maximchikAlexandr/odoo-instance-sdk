@@ -14,4 +14,4 @@
 
 - [x] 3.1 Run the focused operation-removal, CLI characterization/surface/output/security, architecture, documentation, packaging, and any directly affected monitor/database/recovery tests; do not add a new test framework, script, fixture set, or live E2E.
 - [x] 3.2 Run strict OpenSpec validation, format/Ruff, strict mypy, required repository tests/checks, generated-file checks, package checks, and `git diff --check`; resolve only regressions caused by the reduced diff.
-- [x] 3.3 Publish one exact implementation-parent candidate and obtain required GitHub CI, including compatibility only in GitHub; record the exact SHA for the subsequent standard four-profile parent review.
+- [ ] 3.3 Publish one exact implementation-parent candidate and obtain required GitHub CI, including compatibility only in GitHub; record the exact SHA for the subsequent standard four-profile parent review.

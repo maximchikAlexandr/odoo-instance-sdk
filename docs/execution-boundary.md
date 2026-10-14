@@ -1,8 +1,7 @@
 # Execution boundary and CLI inventory
 
 This page documents the public inspect-then-run contract implemented by the
-SDK and CLI. The checked `PublicLeafCase`/`PUBLIC_LEAF_CASES` table in
-The test-owned `PublicLeafCase` matrix is the exhaustive leaf inventory for
+SDK and CLI. The test-owned `PublicLeafCase`/`PUBLIC_LEAF_CASES` matrix is the exhaustive leaf inventory for
 characterization and traceability; this page is an explanatory mirror, not a
 second source of truth. Production has no runtime operation registry. If a
 leaf changes, update its Click registration and test-owned characterization
