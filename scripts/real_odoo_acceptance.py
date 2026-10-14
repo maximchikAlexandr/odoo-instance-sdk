@@ -204,7 +204,7 @@ SCENARIO_EVIDENCE: Final[dict[str, tuple[str, ...]]] = {
     "Restored state is verified through Odoo": ("E2E-CP-10", "E2E-CP-11"),
     "Repeated public workflow is idempotent": ("E2E-CP-03", "E2E-CP-06", "E2E-CP-13"),
     "New CLI leaf cannot escape classification": ("E2E-CP-12",),
-    "Matrix is generated from the canonical inventory": ("E2E-CP-12",),
+    "Matrix is generated from the test-owned inventory": ("E2E-CP-12",),
     "Remote authentication fails safely": ("E2E-FC-01", "E2E-SEC-01"),
     "Truncated archive is rejected before publication": ("E2E-FC-03", "E2E-FC-04"),
     "Interrupted test leaves no owned resource": ("E2E-REC-01", "E2E-REC-02", "E2E-REC-03"),
@@ -244,9 +244,9 @@ SCENARIO_EXECUTORS.update(
             "tests/unit/test_real_odoo_contract.py::test_new_leaf_without_metadata_fails_closed",
             *SCENARIO_EXECUTORS["New CLI leaf cannot escape classification"],
         ),
-        "Matrix is generated from the canonical inventory": (
+        "Matrix is generated from the test-owned inventory": (
             "tests/unit/test_real_odoo_contract.py::test_generated_matrix_matches_canonical_inventory",
-            *SCENARIO_EXECUTORS["Matrix is generated from the canonical inventory"],
+            *SCENARIO_EXECUTORS["Matrix is generated from the test-owned inventory"],
         ),
         "Budget classification is measurable": (
             "tests/unit/test_real_odoo_smoke_wiring.py::test_evidence_exercises_smoke_budget_classification[warm]",

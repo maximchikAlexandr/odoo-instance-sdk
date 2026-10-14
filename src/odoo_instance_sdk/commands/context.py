@@ -471,7 +471,7 @@ def _client_config_class() -> type[OdooClientConfig]:
 
 
 def __getattr__(name: str) -> type[OdooClient | OdooClientConfig]:
-    """Keep legacy patch points lazy for operation-only dependencies."""
+    """Keep legacy patch points lazy for command dependencies."""
     if name == "OdooClient":
         from odoo_instance_sdk.client import OdooClient
 

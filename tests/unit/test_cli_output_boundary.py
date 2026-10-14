@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,39 @@ def test_emit_owns_one_bounded_rich_emission(capsys: pytest.CaptureFixture[str])
     )
     assert calls == 1
     assert capsys.readouterr().out == "one result\n"
+
+
+@pytest.mark.unit
+def test_emit_json_uses_the_bounded_envelope(capsys: pytest.CaptureFixture[str]) -> None:
+    assert (
+        emit(
+            success_document(command="boundary", result={"status": "ok"}),
+            OutputMode.JSON,
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["command"] == "boundary"
+    assert payload["result"] == {"status": "ok"}
+    assert payload["data"] == payload["result"]
+
+
+@pytest.mark.unit
+def test_emit_json_keeps_diagnostics_on_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    assert (
+        emit(
+            success_document(command="boundary", result={"status": "ok"}),
+            OutputMode.JSON,
+            diagnostic="additional diagnostic",
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["result"] == {"status": "ok"}
+    assert captured.err == "additional diagnostic\n"
 
 
 @pytest.mark.unit

@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 65-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests.unit.test_cli_output_modes::PUBLIC_LEAF_CASES` at test-owned canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. The test-owned rows carry the SDK/CLI boundary metadata, disposition, and evidence fields; the generator SHALL emit this exact provenance, rewrite the complete 65-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -34,7 +34,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `db ls` | bounded-read-only | no | smoke | E2E-SM-04 / E2E-CP-10: restored DB visible |
 | `db reset-admin-password` | mutating-or-spawning | yes | focused | E2E-FC-06: target Odoo shell reset and redaction |
 | `db rm` | mutating-or-spawning | yes | focused | E2E-FC-10: owned DB deletion, foreign DB refusal, and exact incomplete-binding reconciliation |
-| `eval` | process-previewable-read-only | yes | critical | E2E-CP-11: restored model/attachment assertion |
+| `eval` | mutating-or-spawning | yes | critical | E2E-CP-11: restored model/attachment assertion |
 | `exec` | mutating-or-spawning | yes | focused | E2E-FC-07: framed script result and non-zero failure |
 | `test` | process-previewable-read-only | yes | critical | E2E-CP-07: probe module native runner report |
 | `module ls` | process-previewable-read-only | yes | critical | E2E-CP-05: probe discovery/install state |

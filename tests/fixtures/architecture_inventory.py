@@ -52,10 +52,10 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
         ("src/odoo_instance_sdk/commands/output.py", 289),
-        ("src/odoo_instance_sdk/commands/output.py", 458),
-        ("src/odoo_instance_sdk/commands/output.py", 460),
-        ("src/odoo_instance_sdk/commands/output.py", 467),
-        ("src/odoo_instance_sdk/commands/output.py", 469),
+        ("src/odoo_instance_sdk/commands/output.py", 504),
+        ("src/odoo_instance_sdk/commands/output.py", 506),
+        ("src/odoo_instance_sdk/commands/output.py", 513),
+        ("src/odoo_instance_sdk/commands/output.py", 515),
         ("src/odoo_instance_sdk/internal/self_update.py", 827),
         ("src/odoo_instance_sdk/internal/self_update.py", 828),
         ("src/odoo_instance_sdk/internal/self_update.py", 829),
@@ -72,10 +72,10 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 115): "in-memory Rich serialization boundary",
     ("src/odoo_instance_sdk/commands/output.py", 289): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 458): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 460): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 467): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 469): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 504): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 506): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 513): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 515): "shared diagnostic boundary",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
         558,
@@ -116,12 +116,9 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
-
-
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/resources/test_database_resource.py", 634),
+        ("tests/unit/resources/test_database_resource.py", 848),
         ("tests/unit/test_monitor_cache_and_docker.py", 119),
         ("tests/unit/test_cluster_resources.py", 188),
         ("tests/unit/test_real_odoo_ci_components.py", 40),
