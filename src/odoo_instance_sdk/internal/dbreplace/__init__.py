@@ -7,9 +7,11 @@ from odoo_instance_sdk.internal.dbreplace.planning import (
     _rename,
 )
 from odoo_instance_sdk.internal.dbreplace.validation import build_copy_replacement_command
+from odoo_instance_sdk.internal.dbreplace_recovery import CopyReplacementRecovery
 
 __all__ = [
     "CopyReplacementFailureContext",
+    "CopyReplacementRecovery",
     "_rename",
     "build_copy_replacement_command",
 ]

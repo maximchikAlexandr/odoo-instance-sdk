@@ -45,8 +45,10 @@ from odoo_instance_sdk.internal.dbreplace.planning import (
     _exists_sql,
     _inspect,
     _inspect_sql,
+    _recovery_for_plan,
     _rename,
     _rename_sql,
+    _retained_failure,
     _revalidate,
     _skip_remaining,
     _stdout,
@@ -55,6 +57,7 @@ from odoo_instance_sdk.internal.dbreplace.planning import (
     _validate_retained_evidence,
     _verify_database_move,
 )
+from odoo_instance_sdk.internal.dbreplace_recovery import encode_recovery
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
     environment_lock_path,
@@ -265,7 +268,31 @@ def build_copy_replacement_command(  # noqa: C901
             ):
                 context.action("database.replace.validate")
                 context.skip(_INSPECT)
-                _revalidate(plan, cast("RunContext[None]", context), _REVALIDATE)
+                revalidated_target, revalidated_rollback, _ = _revalidate(
+                    plan, cast("RunContext[None]", context), _REVALIDATE
+                )
+                if plan.environment.state is EnvironmentState.CLEANUP_FAILED:
+                    environment_row = catalog.get_environment(str(plan.environment.id))
+                    retained = _retained_failure(environment_row)
+                    if (
+                        retained
+                        and environment_row is not None
+                        and environment_row["recovery_json"] is None
+                    ):
+                        recovery = _recovery_for_plan(
+                            plan,
+                            target_present=revalidated_target,
+                            rollback_present=revalidated_rollback,
+                            rollback_filestore_present=(
+                                plan.rollback_filestore.is_dir()
+                                and not plan.rollback_filestore.is_symlink()
+                            ),
+                            published=bool(retained.get("published", False)),
+                            stage=str(retained.get("stage", "preflight")),
+                        )
+                        catalog.adopt_environment_replacement_recovery(
+                            str(plan.environment.id), encode_recovery(recovery)
+                        )
                 execution_payload = restore_payload
                 if not plan.cleanup_only:
                     from odoo_instance_sdk.internal.restore_stages import (
@@ -560,13 +587,19 @@ def build_copy_replacement_command(  # noqa: C901
                 message = _durable_failure_message(failure, exc)
                 with contextlib.suppress(Exception):
                     catalog = plan.client.get_catalog()
-                    catalog.update_environment_state(
-                        str(plan.environment.id),
-                        EnvironmentState.CLEANUP_FAILED.value,
-                        last_error=message,
+                    recovery = _recovery_for_plan(
+                        plan,
+                        target_present=failure.target_present,
+                        rollback_present=failure.rollback_present,
+                        rollback_filestore_present=failure.rollback_filestore_present,
+                        published=failure.published,
+                        stage=failure.stage,
                     )
-                    catalog.add_environment_event(
-                        str(plan.environment.id), "sync", "failed", message=message
+                    catalog.record_environment_replacement_failure(
+                        str(plan.environment.id),
+                        encode_recovery(recovery),
+                        last_error=message,
+                        message="copy replacement cleanup failed",
                     )
             _skip_remaining(
                 cast("RunContext[None]", context),

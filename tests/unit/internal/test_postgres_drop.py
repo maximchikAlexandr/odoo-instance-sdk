@@ -1118,6 +1118,102 @@ def test_drop_allows_exact_adopted_copy_on_approved_external_postgres(
 
 
 @pytest.mark.unit
+def test_reconciled_absent_adopted_copy_cleanup_is_idempotent_and_rejects_reappearance(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / "adopted-reconciled.sqlite3")
+    instance = _instance(project_manifest)
+    cast("Any", instance._client).get_catalog.return_value = catalog
+    backup_id = str(uuid.uuid4())
+    backup_file = tmp_path / "adopted-reconciled.zip"
+    backup_file.write_bytes(b"backup")
+    catalog.start_download(
+        backup_id, "http://127.0.0.1:8069", "feature_db", "zip", True, backup_file
+    )
+    catalog.success_download(backup_id, backup_file.name, backup_file.stat().st_size, "")
+    environment_id = "adopted-reconciled-environment"
+    cluster = instance._postgres_cluster
+    assert cluster is not None and cluster.mode == "external"
+    project_id = f"project_{repo_key(project_manifest, project_manifest / '.git')}"
+    checkout = tmp_path / "checkout"
+    catalog._register_project(project_id, project_manifest, project_manifest / ".git")
+    catalog.create_environment(
+        make_env(
+            environment_id,
+            repository_root=str(project_manifest),
+            git_common_dir=str(checkout / ".git"),
+            worktree_path=str(checkout),
+            target_db_name="feature_db",
+            db_mode="copy",
+            backup_id=backup_id,
+            project_id=project_id,
+            checkout_repository_root=str(checkout),
+            checkout_git_common_dir=str(checkout / ".git"),
+            code_ownership="caller_owned",
+            adoption_input_fingerprint="f" * 64,
+        )
+    )
+    catalog.record_restore(cluster.endpoint_host, cluster.endpoint_port, "feature_db", backup_id)
+    catalog.record_database_dropped(cluster.endpoint_host, cluster.endpoint_port, "feature_db")
+    claim = AdoptedCopyDatabaseClaim(
+        environment_id=environment_id,
+        database="feature_db",
+        endpoint_host=cluster.endpoint_host,
+        endpoint_port=cluster.endpoint_port,
+        project_id=project_id,
+        checkout_repository_root=str(checkout),
+        checkout_git_common_dir=str(checkout / ".git"),
+        adoption_input_fingerprint="f" * 64,
+    )
+
+    def remove(exists: bool) -> tuple[Any, RecordingExecutor]:
+        executor = _executor(exists=exists)
+        result = build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            executor=executor,
+            allow_environment_id=environment_id,
+            allow_environment_backup_id=backup_id,
+            adopted_copy_claim=claim,
+            idempotent_absent=True,
+        ).run()
+        return result, executor
+
+    result, first_executor = remove(False)
+    assert result.database == "feature_db"
+    assert not any(step.step_id.endswith("execute") for step in first_executor.executed)
+    dropped_count = catalog._conn.execute(
+        "SELECT COUNT(*) FROM database_events "
+        "WHERE database_name='feature_db' AND event_type='dropped'"
+    ).fetchone()[0]
+    assert dropped_count == 1
+
+    result, second_executor = remove(False)
+    assert result.database == "feature_db"
+    assert not any(step.step_id.endswith("execute") for step in second_executor.executed)
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events "
+            "WHERE database_name='feature_db' AND event_type='dropped'"
+        ).fetchone()[0]
+        == dropped_count
+    )
+
+    with pytest.raises(ConfigError, match="reappeared"):
+        remove(True)
+
+    catalog._conn.execute(
+        "UPDATE restores SET database_name='stale_feature_db' WHERE database_name='feature_db'"
+    )
+    catalog._conn.commit()
+    with pytest.raises(ConfigError, match="restore identity"):
+        remove(False)
+    catalog.close()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("foreign_binding", [False, True])
 def test_adopted_copy_on_owned_compose_requires_cluster_and_checkout_evidence(
     monkeypatch: pytest.MonkeyPatch,
