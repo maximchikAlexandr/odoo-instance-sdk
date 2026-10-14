@@ -37,9 +37,13 @@ these repository-local rules:
   commands.
 - Use the typed bounded output pipeline for bounded CLI results. Callbacks do
   not write output, select serializers, branch on output mode, or construct
-  subprocess argv. `PublicLeafCase`/`PUBLIC_LEAF_CASES` in
-  `tests/unit/test_cli_output_modes.py` is the single CLI leaf inventory;
-  do not add a second table. Native passthrough, Rich-live, and JSONL cases
+  subprocess argv. Production-owned typed `PUBLIC_LEAF_CASES` is the single
+  canonical CLI leaf/operation inventory and source of leaf paths, classes,
+  and dry-run metadata. Test-only `PublicLeafCase`/E2E cases are its one-to-one
+  projection: test-only `PublicLeafCase`/`PUBLIC_LEAF_CASES` references are
+  projection vectors only; add exactly one E2E disposition and non-empty rationale per
+  production row, reject missing or extra rows, and do not add a second
+  authority or data table. Native passthrough, Rich-live, and JSONL cases
   require a concrete documented exception or transport reason, and an
   eligible spawning leaf still needs command-local dry-run coverage.
 - Use Expression only for pure, sequential, expected-error planning stages

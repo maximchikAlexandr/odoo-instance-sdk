@@ -8,6 +8,12 @@ first catalogue-backed operation migrates legacy platformdirs locations with a
 locked, journaled, retry-safe migration. Repository-local `.odcli` manifests
 are separate project data and are never migrated into that global root.
 
+For the versioned machine-operation boundary, see [machine-operation
+contracts](machine-operation-contracts.md). It documents metadata-only
+contract export, local finite invocation, bounded approval sessions, installed
+Python providers, snapshot-v3 observations, and explicit database
+reconciliation.
+
 ## Create a client and instance
 
 ```python

@@ -2,10 +2,11 @@
 
 This page documents the public inspect-then-run contract implemented by the
 SDK and CLI. The checked `PublicLeafCase`/`PUBLIC_LEAF_CASES` table in
-`tests/unit/test_cli_output_modes.py` is the only leaf inventory; this page is
-an explanatory mirror of that table, not a second source of truth. If a leaf
-changes, update the canonical table and its characterization tests first,
-then update this page.
+`odoo_instance_sdk.operations` is the only production leaf inventory; this
+page is an explanatory mirror, not a second source of truth. Test-only
+invocation and evidence fixtures live in `tests/unit/test_cli_output_modes.py`.
+If a leaf changes, update the production inventory and its characterization
+fixtures first, then update this page.
 
 ## Inspect-then-run contract
 
@@ -212,12 +213,14 @@ launches still go through `internal/proc`, and output-option validation for
 
 ## SDK-first leaf inventory
 
-`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` is the only CLI leaf
-inventory. Every entry records either a public `sdk_primitive` or a concrete
-`cli_only_reason` for transport-only leaves such as `run`, `shell`, `logs
---follow`, and `monitor`. The contract test rejects a leaf without one of
-those two values, and an architecture gate rejects Click callbacks that call
-parallel internal domain builders where a public SDK primitive already exists.
+`odoo_instance_sdk.operations.PUBLIC_LEAF_CASES` is the only CLI leaf
+inventory. It includes the machine-boundary leaves `operation invoke` and
+`operation session`; the test tables are evidence-only. Every entry records
+either a public `sdk_primitive` or a concrete `cli_only_reason` for
+transport-only leaves such as `run`, `shell`, `logs --follow`, and `monitor`.
+The contract test rejects a leaf without one of those two values, and an
+architecture gate rejects Click callbacks that call parallel internal domain
+builders where a public SDK primitive already exists.
 
 ## Checked architectural inventories and allowlists
 
@@ -242,22 +245,27 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:558-559` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:476` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:478` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
+- `src/odoo_instance_sdk/commands/operation.py:89` — bounded JSONL session
+  transport; remove only if session records use a replacement centralized
+  emitter.
 - `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:115` — in-memory Rich serialization
   boundary; it writes only to an in-memory buffer and never to terminal output.
 - `src/odoo_instance_sdk/commands/output.py:289` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:458` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:506` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:460` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:508` — raw JSON export emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:467` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:510` — shared TOON emitter;
+  remove only with a replacement centralized serializer.
+- `src/odoo_instance_sdk/commands/output.py:517` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:469` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:519` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/internal/self_update.py:827-829` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement

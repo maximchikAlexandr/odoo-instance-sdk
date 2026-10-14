@@ -66,15 +66,15 @@ One serial critical-path test SHALL use the public CLI or public SDK for project
 
 ### Requirement: Canonical CLI traceability
 
-`PUBLIC_LEAF_CASES` SHALL remain the sole public CLI leaf inventory. The test-only `PublicLeafCase` record SHALL carry an E2E disposition of `critical`, `focused`, `smoke`, or `not-applicable` with a non-empty rationale, and collection-time assertions SHALL require exactly one disposition for every inventory row. E2E parameterization and the published matrix SHALL be generated from that inventory; no second list of leaf paths SHALL be introduced.
+Production-owned typed `PUBLIC_LEAF_CASES` SHALL remain the sole canonical CLI leaf and operation inventory and the source of leaf paths, classes, and dry-run metadata. Test-only `PublicLeafCase`/E2E cases SHALL be a one-to-one projection of that production inventory which adds exactly one E2E disposition of `critical`, `focused`, `smoke`, or `not-applicable` and a non-empty rationale for every production row. Collection-time assertions SHALL reject missing or extra projection rows, and tests SHALL NOT maintain a second authority or data table.
 
 #### Scenario: New CLI leaf cannot escape classification
-- **WHEN** a public leaf is added to Click registration and `PUBLIC_LEAF_CASES`
-- **THEN** test collection SHALL fail until that same inventory row receives an E2E disposition and rationale
+- **WHEN** a public leaf is added to production `PUBLIC_LEAF_CASES`
+- **THEN** test collection SHALL fail until the test-only projection adds its E2E disposition and non-empty rationale
 
 #### Scenario: Matrix is generated from the canonical inventory
 - **WHEN** the traceability document is checked
-- **THEN** its leaf paths, classes, dry-run requirements, E2E dispositions, and evidence identifiers SHALL equal the generated projection of `PUBLIC_LEAF_CASES`
+- **THEN** its leaf paths, classes, dry-run requirements, E2E dispositions, and evidence identifiers SHALL equal the published matrix generated from production `PUBLIC_LEAF_CASES` joined with the test-only disposition projection
 
 ### Requirement: Focused failures, redaction, and recovery
 

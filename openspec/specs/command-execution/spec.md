@@ -441,6 +441,7 @@ All Git workflow probes and mutations SHALL be captured as immutable process/act
 - **WHEN** any mutating `odcli git` command is requested with `--dry-run`
 - **THEN** output contains every sanitized exact command and precondition while repository and remotes remain unchanged
 
+
 ### Requirement: Ephemeral host-scoped child credentials
 Secret-bearing Git and GitLab execution inputs SHALL be captured privately at command construction, associated with one exact normalized HTTPS host, and supplied only to the intended child process or HTTP request. Public projections SHALL show the credential source and host but SHALL redact token values, authorization headers, credential-helper environment, stdin, scripts, observations, errors, and fingerprints. Parallel commands for different users SHALL have independent immutable private snapshots and SHALL NOT mutate global or repository Git credential configuration.
 
@@ -458,3 +459,36 @@ Caddy validation/reload and native Git passthrough SHALL use `internal/proc`; Gi
 #### Scenario: Inspect a publication plan
 - **WHEN** a caller constructs publish or MR commands
 - **THEN** every possible process and effect appears in execution order with stable step identifiers before mutation
+
+### Requirement: Same-snapshot preview approval and execution
+
+A previewable machine mutation SHALL build exactly one `Command`, retain its private prepared snapshot in one bounded local process, emit only its redacted public plan and fingerprint, and execute that same `Command` only after receiving an approval carrying the identical fingerprint. The public plan SHALL NOT become an executable serialization and a second process SHALL NOT reconstruct the command from preview fields.
+
+#### Scenario: Approved fingerprint executes captured command
+
+- **WHEN** a session receives approval with the fingerprint it just emitted before the deadline
+- **THEN** the original retained `Command` runs once with its captured callbacks and prepared steps
+
+#### Scenario: Mismatched fingerprint is rejected
+
+- **WHEN** approval carries a different fingerprint
+- **THEN** execution does not start, the session emits a typed stale-approval error and all invocation-owned resources are cleaned up
+
+### Requirement: Bounded decision and cancellation lifecycle
+
+An approval session SHALL accept exactly one typed `approve` or `cancel` decision, enforce the descriptor's bounded timeout and maximum input size, and treat EOF, timeout, invalid sequence, explicit cancellation and interrupt as non-execution outcomes with deterministic typed records and exit semantics. Cleanup SHALL terminate only exact invocation-owned children and preserve all existing rollback and process-identity protections.
+
+#### Scenario: Approval times out
+
+- **WHEN** no valid decision arrives before the bounded deadline
+- **THEN** the command is not run, a timeout record is emitted and the process exits without retained invocation-owned work
+
+#### Scenario: Caller cancels preview
+
+- **WHEN** the caller sends a valid cancel decision after preview
+- **THEN** the command is not run, one cancelled terminal record is emitted and cleanup completes
+
+#### Scenario: Execution precondition still fails safely
+
+- **WHEN** approval is valid but an execution-time ownership, Git/config/runtime, port, filesystem, archive, database or lock precondition no longer holds
+- **THEN** the existing prepared command fails through its typed error/rollback path and the transport does not bypass or downgrade the gate
