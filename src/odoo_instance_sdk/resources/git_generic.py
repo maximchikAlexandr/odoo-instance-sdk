@@ -6,13 +6,13 @@ import os
 import re
 import shlex
 import shutil
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 from odoo_instance_sdk.exceptions import (
-    GitLabCredentialError,
     GitRepositoryChangedError,
     GitScopeError,
     GitSyncError,
@@ -30,7 +30,6 @@ from odoo_instance_sdk.internal.git_repository import (
 from odoo_instance_sdk.internal.git_sync import SyncSteps, execute_sync
 from odoo_instance_sdk.internal.gitlab_credentials import (
     https_host,
-    read_gitlab_credential_mappings,
     resolve_gitlab_credential,
 )
 from odoo_instance_sdk.internal.gitlab_identity import verify_gitlab_identity
@@ -213,56 +212,106 @@ def _environment(
     return {"environment": values, "secrets": credential._redaction_secrets(), "helper": None}
 
 
-def _planned_credentials(
-    member_id: str,
+def _mapping_credential_helper() -> str:
+    """Use the owner-only mapping as a lazy, host-scoped Git credential source."""
+    executable = shlex.quote(sys.executable)
+    return f"!exec {executable} -m odoo_instance_sdk.internal.git_credential_helper"
+
+
+def _frontier_environment(
     selected: GitLabCredentialContext,
     *,
+    member_id: str,
+    user_root: Path | str | None,
+    mapping_path: Path | str | None,
+    environment_path: Path | str | None,
+    include_selected: bool,
+) -> _CredentialOptions:
+    """Capture only a lazy host lookup plus an optional selected-host fallback.
+
+    The mapping is deliberately not expanded while the immutable plan is built:
+    the callback validates each frontier first, then Git asks the helper for the
+    exact host it is about to contact.  Consequently an unrelated mapped token
+    never enters any update-step environment.
+    """
+    values: dict[str, str] = {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "ODCLI_GITLAB_MEMBER_ID": member_id,
+    }
+    for name, value in (
+        ("ODCLI_GITLAB_USER_ROOT", user_root),
+        ("ODCLI_GITLAB_MAPPING_PATH", mapping_path),
+        ("ODCLI_GITLAB_ENVIRONMENT_PATH", environment_path),
+    ):
+        if value is not None:
+            values[name] = str(value)
+    secrets: tuple[str, ...] = ()
+    if include_selected:
+        key = _host_key(selected.host)
+        values.update(
+            {
+                "ODCLI_GITLAB_SELECTED_HOST": selected.host,
+                f"ODCLI_GITLAB_LOGIN_{key}": selected.login,
+                f"ODCLI_GITLAB_TOKEN_{key}": selected._token,
+            }
+        )
+        secrets = (selected._token,)
+    return {
+        "environment": values,
+        "secrets": secrets,
+        "helper": _mapping_credential_helper(),
+    }
+
+
+def _frontier_checkouts(
+    root: Path, depth: int
+) -> tuple[tuple[Path, tuple[tuple[str, str, str], ...]], ...]:
+    """Return only populated checkouts exactly at one bounded frontier depth."""
+    checkouts: tuple[Path, ...] = (root.resolve(),)
+    for _ in range(depth):
+        children: list[Path] = []
+        for checkout in checkouts:
+            for path, _url, _host in submodule_urls(checkout):
+                child = (checkout / path).resolve()
+                if child.is_relative_to(root.resolve()) and child.is_dir():
+                    children.append(child)
+        checkouts = tuple(dict.fromkeys(children))
+    return tuple((checkout, submodule_urls(checkout)) for checkout in checkouts)
+
+
+def _validate_frontier(
+    member_id: str,
+    root: Path,
+    depth: int,
+    *,
+    selected: GitLabCredentialContext,
     user_root: Path | str | None,
     mapping_path: Path | str | None,
     environment_path: Path | str | None,
     process_environment: Mapping[str, str] | None,
-) -> tuple[GitLabCredentialContext, ...]:
-    """Capture mapped credentials needed by frozen recursive process steps."""
-    try:
-        mappings = read_gitlab_credential_mappings(mapping_path, user_root=user_root)
-    except GitLabCredentialError as exc:
-        if "unavailable" in str(exc).casefold():
-            return (selected,)
-        raise
-    result = [selected]
-    for mapping in mappings:
-        if mapping.user_id.casefold() != member_id.casefold() or mapping.host == selected.host:
-            continue
-        result.append(
-            resolve_gitlab_credential(
-                member_id,
-                mapping.host,
-                user_root=user_root,
-                mapping_path=mapping_path,
-                environment_path=environment_path,
-                process_environment=process_environment,
-            )
+    identity_transport: GitLabUserTransport | Callable[[str, str], Mapping[str, JsonValue]] | None,
+) -> tuple[str, ...]:
+    hosts: set[str] = set()
+    for checkout, values in _frontier_checkouts(root, depth):
+        checkout_hosts = {
+            host for _path, url, _host in values if (host := https_host(url)) is not None
+        }
+        validate_submodule_configuration(checkout, allowed_hosts=tuple(sorted(checkout_hosts)))
+        hosts.update(checkout_hosts)
+    if hosts:
+        _credentials_for_hosts(
+            member_id,
+            tuple(hosts),
+            selected=selected,
+            user_root=user_root,
+            mapping_path=mapping_path,
+            environment_path=environment_path,
+            process_environment=process_environment,
+            identity_transport=identity_transport,
         )
-    return tuple(result)
-
-
-def _submodule_tree(root: Path) -> tuple[tuple[Path, tuple[str, str, str]], ...]:
-    """Return repository-owned submodule metadata for populated descendants."""
-    result: list[tuple[Path, tuple[str, str, str]]] = []
-    queue = [root.resolve()]
-    visited: set[Path] = set()
-    while queue:
-        checkout = queue.pop(0)
-        if checkout in visited or not checkout.is_dir():
-            continue
-        visited.add(checkout)
-        values = submodule_urls(checkout)
-        result.extend((checkout, value) for value in values)
-        for path, _url, _host in values:
-            child = (checkout / path).resolve()
-            if child.is_relative_to(root.resolve()) and child.is_dir():
-                queue.append(child)
-    return tuple(result)
+    return tuple(sorted(hosts))
 
 
 def _status_missing(value: str | bytes | None) -> tuple[str, ...]:
@@ -304,8 +353,6 @@ def _credentials_for_hosts(
             identity_transport=identity_transport,
         )
         result.append(credential)
-    if not result or not any(credential.host == selected.host for credential in result):
-        raise PlanValidationError("selected GitLab credential is not in the host set")
     return tuple(result)
 
 
@@ -372,39 +419,38 @@ class GenericGitMixin:
             if snapshot.origin != origin:
                 raise GitWorkflowError("clone destination has a different origin")
             if recurse_submodules:
-                hosts = {snapshot.host}
-                hosts.update(item[2] for _checkout, item in _submodule_tree(root))
-                validate_submodule_configuration(root, allowed_hosts=tuple(hosts))
-                credentials = _credentials_for_hosts(
-                    member_id,
-                    tuple(hosts),
-                    selected=selected,
-                    user_root=user_root,
-                    mapping_path=mapping_path,
-                    environment_path=environment_path,
-                    process_environment=process_environment,
-                    identity_transport=identity_transport,
-                )
-        phase_credentials = (
-            _planned_credentials(
-                member_id,
-                selected,
-                user_root=user_root,
-                mapping_path=mapping_path,
-                environment_path=environment_path,
-                process_environment=process_environment,
-            )
-            if recurse_submodules
-            else credentials
-        )
+                for depth in range(3):
+                    _validate_frontier(
+                        member_id,
+                        root,
+                        depth,
+                        selected=selected,
+                        user_root=user_root,
+                        mapping_path=mapping_path,
+                        environment_path=environment_path,
+                        process_environment=process_environment,
+                        identity_transport=identity_transport,
+                    )
         credential_options = _environment(credentials, askpass)
-        phase_options = _environment(phase_credentials, askpass, exact_host=True)
+        direct_options = _frontier_environment(
+            selected,
+            member_id=member_id,
+            user_root=user_root,
+            mapping_path=mapping_path,
+            environment_path=environment_path,
+            include_selected=True,
+        )
+        nested_options = _frontier_environment(
+            selected,
+            member_id=member_id,
+            user_root=user_root,
+            mapping_path=mapping_path,
+            environment_path=environment_path,
+            include_selected=False,
+        )
         environment = credential_options["environment"]
         secrets = credential_options["secrets"]
         credential_helper = credential_options["helper"]
-        phase_environment = phase_options["environment"]
-        phase_secrets = phase_options["secrets"]
-        phase_helper = phase_options["helper"]
         hooks = os.devnull
         steps: list[PreparedStep] = []
         if not reused:
@@ -436,15 +482,15 @@ class GenericGitMixin:
                         root,
                         "git.clone.submodule-update",
                         ("submodule", "update", "--init", "--"),
-                        environment=phase_environment,
-                        secrets=phase_secrets,
+                        environment=direct_options["environment"],
+                        secrets=direct_options["secrets"],
                         hooks_path=hooks,
-                        credential_helper=phase_helper,
+                        credential_helper=direct_options["helper"],
                         mutating=True,
                     ),
                     _step(
                         root,
-                        "git.clone.submodule-status-after",
+                        "git.clone.submodule-status.depth-0",
                         ("submodule", "status", "--recursive"),
                         environment=environment,
                         secrets=secrets,
@@ -453,22 +499,52 @@ class GenericGitMixin:
                     ),
                     _step(
                         root,
-                        "git.clone.submodule-nested-update",
+                        "git.clone.submodule-update.depth-1",
+                        ("submodule", "foreach", "git", "submodule", "update", "--init", "--"),
+                        environment=nested_options["environment"],
+                        secrets=nested_options["secrets"],
+                        hooks_path=hooks,
+                        credential_helper=nested_options["helper"],
+                        mutating=True,
+                    ),
+                    _step(
+                        root,
+                        "git.clone.submodule-status.depth-1",
+                        ("submodule", "status", "--recursive"),
+                        environment=environment,
+                        secrets=secrets,
+                        hooks_path=hooks,
+                        credential_helper=credential_helper,
+                    ),
+                    _step(
+                        root,
+                        "git.clone.submodule-update.depth-2",
                         (
                             "submodule",
                             "foreach",
-                            "--recursive",
+                            "git",
+                            "submodule",
+                            "foreach",
                             "git",
                             "submodule",
                             "update",
                             "--init",
                             "--",
                         ),
-                        environment=phase_environment,
-                        secrets=phase_secrets,
+                        environment=nested_options["environment"],
+                        secrets=nested_options["secrets"],
                         hooks_path=hooks,
-                        credential_helper=phase_helper,
+                        credential_helper=nested_options["helper"],
                         mutating=True,
+                    ),
+                    _step(
+                        root,
+                        "git.clone.submodule-status.depth-2",
+                        ("submodule", "status", "--recursive"),
+                        environment=environment,
+                        secrets=secrets,
+                        hooks_path=hooks,
+                        credential_helper=credential_helper,
                     ),
                 )
             )
@@ -495,6 +571,17 @@ class GenericGitMixin:
                             context.skip_remaining()
                             raise GitWorkflowError("submodule status is unavailable")
                         initialized = _status_missing(status.stdout)
+                        _validate_frontier(
+                            member_id,
+                            root,
+                            0,
+                            selected=selected,
+                            user_root=user_root,
+                            mapping_path=mapping_path,
+                            environment_path=environment_path,
+                            process_environment=process_environment,
+                            identity_transport=identity_transport,
+                        )
                         if initialized:
                             update = cast(
                                 "ProcessResult", context.process("git.clone.submodule-update")
@@ -504,17 +591,29 @@ class GenericGitMixin:
                                 raise GitWorkflowError("submodule initialization failed")
                         else:
                             context.skip("git.clone.submodule-update")
-                        fresh = resolve_repository(root)
-                        grouped: dict[Path, set[str]] = {root: {fresh.host}}
-                        for checkout, (_path, _url, child_host) in _submodule_tree(root):
-                            grouped.setdefault(checkout, {fresh.host}).add(child_host)
-                        for checkout, checkout_hosts in grouped.items():
-                            validate_submodule_configuration(
-                                checkout, allowed_hosts=tuple(checkout_hosts)
-                            )
-                            _credentials_for_hosts(
+                        for depth, (status_id, update_id, status_error) in enumerate(
+                            (
+                                (
+                                    "git.clone.submodule-status.depth-0",
+                                    "git.clone.submodule-update.depth-1",
+                                    "submodule status is unavailable",
+                                ),
+                                (
+                                    "git.clone.submodule-status.depth-1",
+                                    "git.clone.submodule-update.depth-2",
+                                    "submodule status is unavailable",
+                                ),
+                            ),
+                            start=1,
+                        ):
+                            previous = cast("ProcessResult", context.process(status_id))
+                            if previous.returncode != 0:
+                                context.skip_remaining()
+                                raise GitWorkflowError(status_error)
+                            _validate_frontier(
                                 member_id,
-                                tuple(checkout_hosts),
+                                root,
+                                depth,
                                 selected=selected,
                                 user_root=user_root,
                                 mapping_path=mapping_path,
@@ -522,22 +621,24 @@ class GenericGitMixin:
                                 process_environment=process_environment,
                                 identity_transport=identity_transport,
                             )
-                        after = cast(
-                            "ProcessResult",
-                            context.process("git.clone.submodule-status-after"),
+                            if _status_missing(previous.stdout):
+                                nested = cast("ProcessResult", context.process(update_id))
+                                if nested.returncode != 0:
+                                    context.skip_remaining()
+                                    raise GitWorkflowError("nested submodule initialization failed")
+                            else:
+                                context.skip(update_id)
+                        final = cast(
+                            "ProcessResult", context.process("git.clone.submodule-status.depth-2")
                         )
-                        if after.returncode != 0:
-                            context.skip("git.clone.submodule-nested-update")
+                        if final.returncode != 0:
+                            context.skip_remaining()
                             raise GitWorkflowError("submodule status is unavailable")
-                        if _status_missing(after.stdout):
-                            nested = cast(
-                                "ProcessResult",
-                                context.process("git.clone.submodule-nested-update"),
+                        if _status_missing(final.stdout):
+                            context.skip_remaining()
+                            raise GitWorkflowError(
+                                "recursive submodule depth exceeds supported bound"
                             )
-                            if nested.returncode != 0:
-                                raise GitWorkflowError("nested submodule initialization failed")
-                        else:
-                            context.skip("git.clone.submodule-nested-update")
                     except PlanError as exc:
                         context.skip_remaining()
                         raise GitWorkflowError(str(exc)) from None
