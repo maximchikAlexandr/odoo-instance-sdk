@@ -5,19 +5,21 @@ import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
-from odoo_instance_sdk.config import InstanceConfig
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import GitLabPublicationError
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.models import (
     GitLabCredentialContext,
     GitLabCredentialIdentity,
     GitLabIdentity,
 )
 from odoo_instance_sdk.resources.git import GitResource
+from odoo_instance_sdk.resources.gitlab_mr import GitLabPublicationTransport
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 MEMBER = "11111111-1111-4111-8111-111111111111"
 
@@ -46,9 +48,12 @@ def _repo(root: Path) -> None:
 
 
 def _resource(root: Path) -> GitResource:
-    return GitResource(
-        SimpleNamespace(config=InstanceConfig(base_url="http://127.0.0.1:8069", default_cwd=root))
-    )  # type: ignore[arg-type]
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    instance = OdooInstance(
+        config=InstanceConfig(base_url="http://127.0.0.1:8069", default_cwd=root),
+        _client=client,
+    )
+    return GitResource(instance)
 
 
 def _identity() -> tuple[GitLabCredentialContext, GitLabIdentity]:
@@ -70,10 +75,10 @@ def _identity() -> tuple[GitLabCredentialContext, GitLabIdentity]:
     )
 
 
-class _Transport:
+class _Transport(GitLabPublicationTransport):
     def __init__(
         self,
-        matches: tuple[Mapping[str, Any], ...] = (),
+        matches: tuple[Mapping[str, JsonValue], ...] = (),
         *,
         upload_markdown: str = "![image](/uploads/image.png)",
         mutation_error: Exception | None = None,
@@ -84,36 +89,61 @@ class _Transport:
         self.calls: list[str] = []
         self.mutation_descriptions: list[str] = []
 
-    def get_project(self, _credential: object, _project: str) -> Mapping[str, Any]:
+    def get_project(
+        self, _credential: GitLabCredentialContext, _project: str
+    ) -> Mapping[str, JsonValue]:
         self.calls.append("project")
         return {"id": 42}
 
     def list_open_merge_requests(
-        self, _credential: object, _project_id: int, _source: str, _target: str
-    ) -> tuple[Mapping[str, Any], ...]:
+        self,
+        _credential: GitLabCredentialContext,
+        _project_id: int,
+        _source: str,
+        _target: str,
+    ) -> tuple[Mapping[str, JsonValue], ...]:
         self.calls.append("lookup")
         return self.matches
 
     def upload_project_file(
-        self, _credential: object, _project_id: int, _path: Path, _content_type: str
-    ) -> Mapping[str, Any]:
+        self,
+        _credential: GitLabCredentialContext,
+        _project_id: int,
+        _path: Path,
+        _content_type: str,
+    ) -> Mapping[str, JsonValue]:
         self.calls.append("upload")
         return {"markdown": self.upload_markdown}
 
     def create_merge_request(
-        self, _credential: object, _project_id: int, **kwargs: Any
-    ) -> Mapping[str, Any]:
+        self,
+        _credential: GitLabCredentialContext,
+        _project_id: int,
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str,
+    ) -> Mapping[str, JsonValue]:
         self.calls.append("create")
-        self.mutation_descriptions.append(kwargs["description"])
+        self.mutation_descriptions.append(description)
         if self.mutation_error is not None:
             raise self.mutation_error
         return {"iid": 7, "web_url": "https://gitlab.example/team/repo/-/merge_requests/7"}
 
     def update_merge_request(
-        self, _credential: object, _project_id: int, _iid: int, **kwargs: Any
-    ) -> Mapping[str, Any]:
+        self,
+        _credential: GitLabCredentialContext,
+        _project_id: int,
+        _iid: int,
+        *,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str,
+    ) -> Mapping[str, JsonValue]:
         self.calls.append("update")
-        self.mutation_descriptions.append(kwargs["description"])
+        self.mutation_descriptions.append(description)
         if self.mutation_error is not None:
             raise self.mutation_error
         return {"iid": 7, "web_url": "https://gitlab.example/team/repo/-/merge_requests/7"}
@@ -160,7 +190,7 @@ def test_merge_request_same_digest_reuses_owned_link(tmp_path: Path) -> None:
     image = tmp_path / "diagram.png"
     image.write_bytes(b"png bytes")
     digest = __import__("hashlib").sha256(b"png bytes").hexdigest()
-    existing = {
+    existing: Mapping[str, JsonValue] = {
         "iid": 7,
         "description": f"old\n\n<!-- odcli:image sha256={digest} -->\nold-link\n<!-- /odcli:image -->",
     }
@@ -201,7 +231,7 @@ def test_merge_request_changed_digest_replaces_owned_block_and_updates_once(tmp_
     image = tmp_path / "diagram.png"
     image.write_bytes(b"new png bytes")
     new_digest = hashlib.sha256(b"new png bytes").hexdigest()
-    existing = {
+    existing: Mapping[str, JsonValue] = {
         "iid": 7,
         "description": f"existing\n\n<!-- odcli:image sha256={old_digest} -->\n"
         "![old image](/uploads/old.png)\n<!-- /odcli:image -->",
