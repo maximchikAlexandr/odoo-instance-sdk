@@ -147,12 +147,15 @@ CliLeafClass = Literal[
 
 @dataclass(frozen=True)
 class PublicLeafCase:
+    """Test-owned characterization row for one registered public CLI leaf."""
+
     path: tuple[str, ...]
     args: tuple[str, ...]
-    classification: CliLeafClass
-    requires_dry_run: bool
+    classification: CliLeafClass = "bounded-read-only"
+    requires_dry_run: bool = False
     sdk_primitive: str | None = None
     cli_only_reason: str | None = None
+    aliases: tuple[tuple[str, ...], ...] = ()
     exception_reason: str | None = None
     variants: tuple[CliLeafClass, ...] = ()
     e2e_disposition: Literal["critical", "focused", "smoke", "not-applicable"] | None = None
@@ -173,9 +176,7 @@ class PublicLeafCase:
         }
 
 
-# This is the one CLI leaf inventory.  The output parity matrix below filters
-# this data by ``is_bounded``; native, Rich-live, and JSONL leaves remain here
-# with their explicit policy so a new leaf cannot avoid classification.
+# Invocation arguments, variants, and E2E evidence are deliberately test-only.
 _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("init",),
@@ -188,8 +189,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "--dry-run",
             "--project",
         ),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="init_project_command",
         e2e_disposition="smoke",
         e2e_evidence=(
@@ -203,8 +204,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("doctor",),
         ("doctor",),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="run_doctor",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-14",),
@@ -213,8 +214,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("stop",),
         ("stop", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="OdooInstance.stop_runtime_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-13",),
@@ -223,8 +224,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("publish",),
         ("publish", "--project", "/tmp/project", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="publish_command",
         e2e_disposition="not-applicable",
         e2e_rationale="Caddy-backed publication is covered by focused publication resource tests",
@@ -232,8 +233,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("unpublish",),
         ("unpublish", "--project", "/tmp/project", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="unpublish_command",
         e2e_disposition="not-applicable",
         e2e_rationale="Caddy-backed unpublication is covered by focused publication resource tests",
@@ -241,10 +242,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("resource", "ls"),
         ("resource", "ls"),
-        "bounded-read-only",
-        False,
-        cli_only_reason="CLI-only resource inventory projection without a public SDK type",
         exception_reason="CLI-only resource inventory projection without a public SDK type",
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        cli_only_reason="CLI-only resource inventory projection without a public SDK type",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-12",),
         e2e_rationale="run-owned inventory",
@@ -254,10 +255,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("resource", "doctor"),
         ("resource", "doctor"),
-        "bounded-read-only",
-        False,
-        cli_only_reason="CLI-only resource doctor projection without a public SDK type",
         exception_reason="CLI-only resource doctor projection without a public SDK type",
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        cli_only_reason="CLI-only resource doctor projection without a public SDK type",
         e2e_disposition="smoke",
         e2e_evidence=(
             "E2E-SM-05",
@@ -268,8 +269,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("env", "create"),
         ("env", "create", "PROJ-123", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="EnvironmentResource.checkout_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-02",),
@@ -278,10 +279,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("env", "ls"),
         ("env", "ls", "--all-projects"),
-        "bounded-read-only",
-        False,
-        sdk_primitive="EnvironmentResource.checkout_inventory_command",
         variants=("rich-live",),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="EnvironmentResource.checkout_inventory_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-03",),
         e2e_rationale="registered environment identity",
@@ -289,10 +290,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("env", "path"),
         ("env", "path", "env-1"),
-        "bounded-read-only",
-        False,
-        cli_only_reason="CLI-only worktree path resolution for shell substitution",
         exception_reason="CLI-only worktree path resolution for shell substitution",
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        cli_only_reason="CLI-only worktree path resolution for shell substitution",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-03",),
         e2e_rationale="worktree/config/venv paths",
@@ -300,18 +301,18 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("env", "show"),
         ("env", "show", "env-1"),
-        "bounded-read-only",
-        False,
-        cli_only_reason="CLI-only Rich environment detail rendering",
         exception_reason="CLI-only Rich environment detail rendering",
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        cli_only_reason="CLI-only Rich environment detail rendering",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream environment inspection is covered by focused command tests",
     ),
     PublicLeafCase(
         ("env", "rm"),
         ("env", "rm", "env-1", "--yes"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="EnvironmentResource.remove_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-15",),
@@ -320,8 +321,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("env", "sync"),
         ("env", "sync", "env-1"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="EnvironmentResource.sync_python_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-04",),
@@ -330,8 +331,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("remote", "ls"),
         ("remote", "ls"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="list_remote_sources",
         e2e_disposition="not-applicable",
         e2e_rationale="offline project manifest projection",
@@ -350,8 +351,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "staging",
             "--dry-run",
         ),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="configure_remote_source_command",
         e2e_disposition="not-applicable",
         e2e_rationale="manifest-only configuration mutation",
@@ -366,8 +367,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "release",
             "--dry-run",
         ),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="configure_remote_source_command",
         e2e_disposition="not-applicable",
         e2e_rationale="manifest-only configuration mutation",
@@ -375,8 +376,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("remote", "remove"),
         ("remote", "remove", "staging", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="remove_remote_source_command",
         e2e_disposition="not-applicable",
         e2e_rationale="manifest-only configuration mutation",
@@ -384,10 +385,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "ls"),
         ("backup", "ls"),
-        "bounded-read-only",
-        False,
-        cli_only_reason="CLI-only catalogue pagination and project-scope selection",
         exception_reason="CLI-only catalogue pagination and project-scope selection",
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        cli_only_reason="CLI-only catalogue pagination and project-scope selection",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-09",),
         e2e_rationale="downloaded catalog row",
@@ -397,8 +398,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "retention"),
         ("backup", "retention", "--days", "14", "--auto", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="BackupResource.set_retention_command",
         e2e_disposition="not-applicable",
         e2e_rationale="user-level policy projection is outside the Odoo fixture",
@@ -406,8 +407,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "pin"),
         ("backup", "pin", "00000000-0000-0000-0000-000000000007", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="BackupResource.set_pinned_command",
         e2e_disposition="not-applicable",
         e2e_rationale="catalogue retention policy is covered by focused tests",
@@ -415,8 +416,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "unpin"),
         ("backup", "unpin", "00000000-0000-0000-0000-000000000007", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="BackupResource.set_pinned_command",
         e2e_disposition="not-applicable",
         e2e_rationale="catalogue retention policy is covered by focused tests",
@@ -424,8 +425,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "prune"),
         ("backup", "prune", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="BackupResource.prune_command",
         e2e_disposition="not-applicable",
         e2e_rationale="catalogue retention policy is covered by focused tests",
@@ -433,8 +434,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "inspect"),
         ("backup", "inspect", "00000000-0000-0000-0000-000000000007"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="BackupResource.inspect_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-09",),
@@ -443,8 +444,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "validate"),
         ("backup", "validate", "00000000-0000-0000-0000-000000000007"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="BackupResource.validate_command",
         e2e_disposition="smoke",
         e2e_evidence=(
@@ -456,8 +457,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("backup", "rm"),
         ("backup", "rm", "00000000-0000-0000-0000-000000000007", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="BackupResource.delete_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-09",),
@@ -466,8 +467,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "refresh"),
         ("db", "refresh"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="EnvironmentResource.refresh_database_command",
         e2e_disposition="smoke",
         e2e_evidence=(
@@ -479,8 +480,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "restore"),
         ("db", "restore", "00000000-0000-0000-0000-000000000007", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="EnvironmentResource.refresh_database_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-05",),
@@ -489,8 +490,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "ls"),
         ("db", "ls"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="DatabaseResource.list_inventory_command",
         e2e_disposition="smoke",
         e2e_evidence=(
@@ -502,8 +503,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "reset-admin-password"),
         ("db", "reset-admin-password"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="DatabaseResource.reset_admin_password_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-06",),
@@ -512,10 +513,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "rm"),
         ("db", "rm", "demo", "--dry-run"),
-        "mutating-or-spawning",
-        True,
-        cli_only_reason="Guarded PostgreSQL drop uses internal.pg.drop.build_database_drop_command; HTTP drop_command semantics stay separate",
         exception_reason="Guarded PostgreSQL drop uses internal.pg.drop.build_database_drop_command; HTTP drop_command semantics stay separate",
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        cli_only_reason="CLI-only database removal confirmation and lifecycle composition",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-10",),
         e2e_rationale="owned DB deletion, foreign DB refusal, and exact incomplete-binding reconciliation",
@@ -523,8 +524,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("eval",),
         ("eval", "1"),
-        "process-previewable-read-only",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="eval_expression_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-11",),
@@ -533,8 +534,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("exec",),
         ("exec", "-"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="exec_script_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-07",),
@@ -544,8 +545,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("test",),
         ("test", "--changed", "--dry-run"),
-        "process-previewable-read-only",
-        True,
+        classification="process-previewable-read-only",
+        requires_dry_run=True,
         sdk_primitive="run_odoo_tests_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-07",),
@@ -554,8 +555,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "ls"),
         ("module", "ls", "sale"),
-        "process-previewable-read-only",
-        True,
+        classification="process-previewable-read-only",
+        requires_dry_run=True,
         sdk_primitive="list_modules_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-05",),
@@ -564,8 +565,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "update"),
         ("module", "update", "sale", "--yes"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="ModuleResource.update_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-06",),
@@ -574,8 +575,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "test"),
         ("module", "test", "sale", "--test-tags", "/sale"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="run_odoo_tests_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-08",),
@@ -584,8 +585,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "info"),
         ("module", "info", "sale"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="ModuleResource.info",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream module inspection is covered by focused command tests",
@@ -593,8 +594,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "context"),
         ("module", "context"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="ModuleResource.context",
         e2e_disposition="not-applicable",
         e2e_rationale="repository-aware read-only module facts are covered offline",
@@ -602,8 +603,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "where"),
         ("module", "where", "sale"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="ModuleResource.where",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream filesystem inspection is outside the lifecycle fixture",
@@ -611,8 +612,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "deps"),
         ("module", "deps", "sale"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="ModuleResource.dependencies",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream dependency inspection is covered offline",
@@ -620,8 +621,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("module", "install-order"),
         ("module", "install-order", "sale"),
-        "process-previewable-read-only",
-        True,
+        classification="process-previewable-read-only",
+        requires_dry_run=True,
         sdk_primitive="ModuleResource.install_order_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream planning leaf is outside the lifecycle fixture",
@@ -629,8 +630,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("translations", "export"),
         ("translations", "export", "--module", "sale", "--language", "fr_FR"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="export_translations_command",
         e2e_disposition="not-applicable",
         e2e_rationale="Browser/localization/business behavior is outside the `base`-only fixture; existing command-plan tests remain authoritative",
@@ -638,8 +639,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("deps", "verify"),
         ("deps", "verify"),
-        "process-previewable-read-only",
-        True,
+        classification="process-previewable-read-only",
+        requires_dry_run=True,
         sdk_primitive="verify_deps_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-04",),
@@ -648,10 +649,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("vscode", "generate"),
         ("vscode", "generate"),
-        "mutating-or-spawning",
-        True,
-        cli_only_reason="CLI-only VS Code launch.json artifact writer",
         exception_reason="CLI-only VS Code launch.json artifact writer",
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        cli_only_reason="CLI-only editor configuration file generation boundary",
         e2e_disposition="not-applicable",
         e2e_rationale="Editor artifact generation is orthogonal to the server/database lifecycle and remains covered offline",
     ),
@@ -663,8 +664,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "--image-digest",
             "docker.io/library/postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="PostgresCluster.approve_image_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-01",),
@@ -673,8 +674,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("postgres", "ps"),
         ("postgres", "ps"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="PostgresCluster.status_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-01",),
@@ -683,8 +684,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("postgres", "up"),
         ("postgres", "up"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="PostgresCluster.ensure_running_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-01",),
@@ -693,8 +694,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("postgres", "stop"),
         ("postgres", "stop"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="PostgresCluster.stop_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-15",),
@@ -703,8 +704,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "locks"),
         ("db", "locks", "demo"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="DatabaseResource.locks_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
@@ -713,8 +714,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "stats"),
         ("db", "stats", "demo"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="DatabaseResource.stats_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
@@ -723,8 +724,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "bloat"),
         ("db", "bloat", "demo"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="DatabaseResource.bloat_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
@@ -733,8 +734,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("db", "init-monitoring"),
         ("db", "init-monitoring", "demo", "--yes", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="DatabaseResource.init_monitoring_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
@@ -743,10 +744,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("psql",),
         ("psql", "--dry-run", "-c", "SELECT 1"),
-        "native-passthrough",
-        True,
-        cli_only_reason="normal execution owns inherited native psql streams; dry-run uses the shared plan",
         exception_reason="normal execution owns inherited native psql streams; dry-run uses the shared plan",
+        classification="native-passthrough",
+        requires_dry_run=True,
+        cli_only_reason="native psql terminal passthrough boundary",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-12",),
         e2e_rationale="inherited stream and dry-run plan",
@@ -754,10 +755,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("run",),
         ("run",),
-        "native-passthrough",
-        True,
-        cli_only_reason="normal execution owns inherited Odoo TTY streams; dry-run is still required",
         exception_reason="normal execution owns inherited Odoo TTY streams; dry-run is still required",
+        classification="native-passthrough",
+        requires_dry_run=True,
+        cli_only_reason="native Odoo process passthrough boundary",
         e2e_disposition="critical",
         e2e_evidence=(
             "E2E-CP-07",
@@ -768,10 +769,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("logs",),
         ("logs", "--follow"),
-        "jsonl-stream",
-        False,
-        cli_only_reason="read-only logfile subscription has no finite child-process or mutation plan",
         exception_reason="read-only logfile subscription has no finite child-process or mutation plan",
+        classification="jsonl-stream",
+        requires_dry_run=False,
+        cli_only_reason="JSONL streaming process output boundary",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-13",),
         e2e_rationale="bounded subscription/cancellation and redaction",
@@ -779,10 +780,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("shell",),
         ("shell",),
-        "native-passthrough",
-        True,
-        cli_only_reason="normal execution owns interactive Odoo streams; dry-run is still required",
         exception_reason="normal execution owns interactive Odoo streams; dry-run is still required",
+        classification="native-passthrough",
+        requires_dry_run=True,
+        cli_only_reason="interactive shell terminal passthrough boundary",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-06",),
         e2e_rationale="exact target database and exit semantics",
@@ -790,18 +791,18 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("monitor",),
         ("monitor",),
-        "native-passthrough",
-        False,
-        cli_only_reason="long-running monitor server has no finite bounded output plan",
         exception_reason="long-running monitor server has no finite bounded output plan",
+        classification="native-passthrough",
+        requires_dry_run=False,
+        cli_only_reason="live monitor terminal presentation boundary",
         e2e_disposition="not-applicable",
         e2e_rationale="Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle",
     ),
     PublicLeafCase(
         ("git", "commit"),
         ("git", "commit", "fixture", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="GitResource.commit_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream Git workflow is outside the disposable Odoo fixture",
@@ -809,8 +810,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("git", "check"),
         ("git", "check"),
-        "bounded-read-only",
-        False,
+        classification="bounded-read-only",
+        requires_dry_run=False,
         sdk_primitive="GitResource.check_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream Git policy inspection is covered by unit contracts",
@@ -818,8 +819,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("git", "absorb"),
         ("git", "absorb", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="GitResource.absorb_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream Git mutation is outside the disposable Odoo fixture",
@@ -827,8 +828,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("git", "sync"),
         ("git", "sync", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="GitResource.sync_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream remote Git publication is intentionally outside E2E",
@@ -836,10 +837,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("ps",),
         ("ps",),
-        "bounded-read-only",
-        False,
-        sdk_primitive="EnvironmentMonitor.processes_command",
         variants=("rich-live",),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="EnvironmentMonitor.processes_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-12",),
         e2e_rationale="single-snapshot process/resource inventory",
@@ -855,8 +856,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "bug",
             "--dry-run",
         ),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="bug_report_init_command",
         e2e_disposition="not-applicable",
         e2e_rationale="local offline draft creation is covered by focused command tests and publishes no GitHub issue",
@@ -864,8 +865,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("bug-report", "submit"),
         ("bug-report", "submit", "00000000-0000-0000-0000-000000000014", "--dry-run"),
-        "mutating-or-spawning",
-        True,
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
         sdk_primitive="bug_report_submit_command",
         e2e_disposition="not-applicable",
         e2e_rationale="publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture",
@@ -873,10 +874,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("update",),
         ("update", "--dry-run"),
-        "mutating-or-spawning",
-        True,
-        sdk_primitive="update_command",
         variants=("process-previewable-read-only",),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="update_command",
         e2e_disposition="not-applicable",
         e2e_rationale=(
             "mutates the operator uv tool outside the disposable Odoo fixture; "
@@ -886,6 +887,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
 )
 
 PUBLIC_LEAF_CASES = tuple(_PUBLIC_LEAF_DATA)
+
+
+def test_cli_fixture_covers_registered_inventory_exactly() -> None:
+    assert {case.path for case in PUBLIC_LEAF_CASES} == _cli_leaf_paths(cli)
 
 
 def _matrix_environment() -> SimpleNamespace:
@@ -918,7 +923,10 @@ def _cli_leaf_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> set
     }
 
 
-validate_leaf_metadata(PUBLIC_LEAF_CASES, registered_paths=_cli_leaf_paths(cli))
+validate_leaf_metadata(
+    PUBLIC_LEAF_CASES,
+    registered_paths=_cli_leaf_paths(cli),
+)
 
 
 def test_public_leaf_inventory_is_complete_and_classified() -> None:
@@ -1373,7 +1381,6 @@ def _patch_leaf_external(  # noqa: C901
     path = case.path
     if path == ("init",):
         return
-
     if path == ("doctor",):
         project = ProjectConfig(
             repository_root=tmp_path,
@@ -2566,7 +2573,7 @@ def test_public_cli_leaf_rich_scalar_path_remains_unwrapped(
     [
         case
         for case in PUBLIC_LEAF_CASES
-        if case.is_bounded and case.requires_dry_run and case.path != ("module", "install-order")
+        if (case.is_bounded and case.requires_dry_run and case.path != ("module", "install-order"))
     ],
     ids=lambda case: ".".join(case.path),
 )
@@ -2929,6 +2936,31 @@ def test_json_and_toon_emit_the_same_sanitized_envelope(capsys: pytest.CaptureFi
         build_envelope(ok=False, command="test", error_message="token=hidden"),
     )
     assert failure["error"]["message"] == "<redacted>"
+
+
+def test_toon_nested_object_lists_preserve_structured_values(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result: dict[str, JsonValue] = {
+        "argv": ["--workers=2", "--database=odoo"],
+        "rows": [
+            {"label": "plain"},
+            {"values": [{"name": "nested"}]},
+            {"values": ["first", "second"], "label": "primitive-list", "extra": {"ok": True}},
+        ],
+    }
+
+    emit_json_envelope(ok=True, command="test", result=result, mode=OutputMode.TOON)
+    toon_document = capsys.readouterr().out
+
+    assert "argv[2]:" in toon_document
+    assert '- "--workers=2"' in toon_document
+    assert '- "--database=odoo"' in toon_document
+    assert "rows[3]:" in toon_document
+    assert "- label: plain" in toon_document
+    assert "values[1,]{name}:" in toon_document
+    assert "nested" in toon_document
+    assert "values[2]: first,second" in toon_document
 
 
 def test_eval_payload_fields_round_trip_in_json_and_toon(

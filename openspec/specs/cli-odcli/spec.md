@@ -110,7 +110,7 @@ The first two cases produce an environment context; the third produces a project
 
 ### Requirement: SDK-first CLI leaf contract
 
-Every entry in the canonical `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason why the operation stays CLI-only. A generic formulation such as "convenient for CLI" SHALL NOT be accepted. A new CLI leaf SHALL NOT pass contract tests without one of these two values.
+Every entry in the test-owned `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason why the operation stays CLI-only. A generic formulation such as "convenient for CLI" SHALL NOT be accepted. A new CLI leaf SHALL NOT pass contract tests without one of these two values.
 
 CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operation through `internal.*` when a public typed SDK primitive applies. The SDK SHALL own typed inputs/results, `Command`, immutable plans, revalidation, process/actions, cleanup, and failure semantics. Convenience methods SHALL delegate to the corresponding `*_command()` sibling and SHALL NOT rebuild the snapshot. The public SDK SHALL NOT export Click context, Rich renderables, CLI envelopes, or private executor callbacks.
 
@@ -304,19 +304,19 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 #### Scenario: Canonical bounded inventory remains single-source
 
 - **WHEN** the stable machine-output characterization gate compares the documented normal-execution leaves
-- **THEN** they equal canonical `PUBLIC_LEAF_CASES`, including every backup, database, resource, and `ps` leaf added by this change
+- **THEN** they equal test-owned `PUBLIC_LEAF_CASES`, including every backup, database, resource, and `ps` leaf added by this change
 - **AND** no second bounded-leaf table is introduced
 
 #### Scenario: Mutating lifecycle dry-runs are canonical leaves
 
 - **WHEN** the characterization gate exercises `backup delete`, `db restore`, or `db drop` with `--dry-run` in every shared format
-- **THEN** each appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
+- **THEN** each appears exactly once in test-owned `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
 - **AND** no file, database, configuration, process, or catalogue mutation occurs
 
 #### Scenario: Database drop is a canonical bounded leaf
 
 - **WHEN** the stable machine-output characterization gate exercises `db drop DATABASE --dry-run` in every shared format
-- **THEN** `db drop` appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
+- **THEN** `db drop` appears exactly once in test-owned `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
 - **AND** no database, session, or catalogue mutation occurs
 
 ### Requirement: Exit codes
@@ -2486,6 +2486,7 @@ The single shared launcher renderer SHALL produce both `odcli-N` and `odcli-fix-
 #### Scenario: Arguments and exit status are preserved
 - **WHEN** an operator invokes `odcli-N` or `odcli-fix-ISSUE` with an ordinary supported command
  - **THEN** exact argument boundaries and child exit status are preserved and the lifecycle lock remains held until the child exits
+
 
 ### Requirement: Main-checkout automation command surface
 The root `--project PATH` selector SHALL address a main checkout for `db refresh`, `db restore`, `run --detach [--wait-ready]`, runtime status/stop, module context, `publish`, and `unpublish` without creating an environment worktree. Each bounded command SHALL have one public SDK primitive, one canonical machine envelope, project provenance, stable error code, and a typed result containing the identities required by its capability. Environment-only replacement/removal semantics SHALL continue to reject project context.

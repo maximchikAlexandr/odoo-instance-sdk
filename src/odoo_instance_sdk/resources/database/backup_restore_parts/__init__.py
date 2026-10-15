@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.resources.database.backup_restore_parts.backup import _BackupMixin
+from odoo_instance_sdk.resources.database.backup_restore_parts.observations import _ObservationMixin
 from odoo_instance_sdk.resources.database.backup_restore_parts.queries import _QueriesMixin
 
 if TYPE_CHECKING:
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True, kw_only=True)
-class DatabaseResource(_QueriesMixin, _BackupMixin):
+class DatabaseResource(_ObservationMixin, _QueriesMixin, _BackupMixin):
     base_url: str
     master_password: str | None = field(repr=False, default=None)
     _instance: OdooInstance = field(repr=False, hash=False, compare=False)

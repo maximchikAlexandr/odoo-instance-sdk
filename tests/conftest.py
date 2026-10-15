@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -365,8 +366,8 @@ def fake_python(tmp_path: Path) -> Path:
     pybin = bindir / "fakepython"
     pybin.write_text(
         textwrap.dedent(
-            """\
-            #!/usr/bin/env python3
+            f"""\
+            #!{sys.executable}
             import sys
             if len(sys.argv) > 1 and sys.argv[1] == "-c" and "sys.prefix" in sys.argv[2]:
                 print("True")

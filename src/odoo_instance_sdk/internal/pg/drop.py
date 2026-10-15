@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import stat
@@ -19,6 +18,7 @@ from odoo_instance_sdk.execution import (
     _PlanObservation,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
+from odoo_instance_sdk.internal.dbreplace_recovery import recovery_values
 from odoo_instance_sdk.internal.files import open_directory_path_without_symlinks
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
@@ -169,13 +169,9 @@ def _validate_allowed_environment(
     ):
         raise ConfigError("copy environment ownership changed before database drop")
     if expected_rollback_database is not None:
-        raw = row["last_error"]
-        if not isinstance(raw, str) or "copy replacement cleanup_failed" not in raw:
+        retained = recovery_values(row, allow_legacy=True)
+        if not retained:
             raise ConfigError("retained rollback ownership evidence is unavailable")
-        try:
-            retained = json.loads(raw.split("retained=", 1)[1].split(";", 1)[0])
-        except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ConfigError("retained rollback ownership evidence is malformed") from exc
         if (
             not isinstance(retained, dict)
             or retained.get("rollback_database") != expected_rollback_database
@@ -224,7 +220,13 @@ def _drop_ownership_evidence(  # noqa: C901
     allow_environment_backup_id: str | None = None,
     allow_environment_rollback_database: str | None = None,
     adopted_copy_claim: AdoptedCopyDatabaseClaim | None = None,
+    allow_reconciled_absent: bool = False,
 ) -> _DropOwnershipEvidence | None:
+    from odoo_instance_sdk.internal.pg.adopted_drop import (
+        adopted_copy_ownership_evidence,
+        safe_proven_filestore,
+        validate_adopted_copy_claim,
+    )
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -240,9 +242,9 @@ def _drop_ownership_evidence(  # noqa: C901
         if allow_environment_id != adopted_copy_claim.environment_id:
             raise ConfigError("adopted COPY database drop claim does not match environment")
         if isinstance(cluster, PostgresCluster) and cluster.mode == "compose":
-            _validate_adopted_copy_claim(catalog, instance, cluster, database, adopted_copy_claim)
+            validate_adopted_copy_claim(catalog, instance, cluster, database, adopted_copy_claim)
         else:
-            return _adopted_copy_ownership_evidence(
+            return adopted_copy_ownership_evidence(
                 catalog,
                 instance,
                 cluster,
@@ -252,6 +254,7 @@ def _drop_ownership_evidence(  # noqa: C901
                 expected_rollback_database=allow_environment_rollback_database,
                 volume_step_id=volume_step_id,
                 container_step_id=container_step_id,
+                allow_reconciled_absent=allow_reconciled_absent,
             )
     if not isinstance(cluster, PostgresCluster) or cluster.mode != "compose":
         raise ConfigError("database drop requires an SDK-owned Compose cluster")
@@ -366,7 +369,7 @@ def _drop_ownership_evidence(  # noqa: C901
     data_directory_value = (
         binding["data_directory"] if isinstance(binding["data_directory"], str) else None
     )
-    if source_kind == "local_archive" and not _safe_proven_filestore(
+    if source_kind == "local_archive" and not safe_proven_filestore(
         data_directory_value, binding_database
     ):
         raise ConfigError("local archive restore binding lacks contained data-directory evidence")
@@ -382,164 +385,6 @@ def _drop_ownership_evidence(  # noqa: C901
         data_directory=data_directory_value,
         restore_state=str(binding["state"]),
     )
-
-
-def _validate_adopted_copy_claim(
-    catalog: BackupCatalog,
-    instance: OdooInstance,
-    cluster: PostgresCluster,
-    database: str,
-    claim: AdoptedCopyDatabaseClaim,
-) -> None:
-    """Require exact adoption and endpoint identity before either drop path."""
-    if (
-        claim.environment_id == ""
-        or claim.database != database
-        or not claim.project_id
-        or not claim.checkout_repository_root
-        or not claim.checkout_git_common_dir
-        or not claim.adoption_input_fingerprint
-    ):
-        raise ConfigError("adopted COPY database drop claim does not match target")
-    from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
-
-    if (
-        normalize_db_host(claim.endpoint_host) != normalize_db_host(cluster.endpoint_host)
-        or claim.endpoint_port != cluster.endpoint_port
-        or normalize_db_host(claim.endpoint_host)
-        != normalize_db_host(instance.config.db_host or "127.0.0.1")
-        or claim.endpoint_port != (instance.config.db_port or 5432)
-    ):
-        raise ConfigError("adopted COPY database drop endpoint evidence does not match")
-
-    row = catalog.get_environment(claim.environment_id)
-    if (
-        row is None
-        or row["code_ownership"] != "caller_owned"
-        or row["project_id"] != claim.project_id
-        or row["checkout_repository_root"] != claim.checkout_repository_root
-        or row["checkout_git_common_dir"] != claim.checkout_git_common_dir
-        or row["adoption_input_fingerprint"] != claim.adoption_input_fingerprint
-        or row["checkout_repository_root"] != row["worktree_path"]
-        or row["checkout_git_common_dir"] != row["git_common_dir"]
-    ):
-        raise ConfigError("adopted COPY database drop requires adoption ownership evidence")
-    if row["project_id"] != f"project_{cluster._project_id}" or str(row["repository_root"]) != str(
-        cluster._repository_root
-    ):
-        raise ConfigError("adopted COPY database drop project evidence does not match")
-
-
-def _adopted_copy_ownership_evidence(  # noqa: C901 -- bounded external adopted-copy evidence gate
-    catalog: BackupCatalog,
-    instance: OdooInstance,
-    cluster: PostgresCluster,
-    database: str,
-    claim: AdoptedCopyDatabaseClaim,
-    *,
-    expected_backup_id: str | None,
-    expected_rollback_database: str | None,
-    volume_step_id: str | None,
-    container_step_id: str | None,
-) -> _DropOwnershipEvidence:
-    """Validate one adopted COPY target on the project's approved external endpoint."""
-    from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-    if not isinstance(cluster, PostgresCluster) or cluster.mode != "external":
-        raise ConfigError("adopted COPY database drop requires approved shared PostgreSQL")
-    from odoo_instance_sdk.internal.proc import active_context
-
-    context = active_context()
-    if context is not None:
-        for step_id in (volume_step_id, container_step_id):
-            if step_id is not None and context.planned(step_id) and not context.consumed(step_id):
-                context.skip(step_id)
-    _validate_adopted_copy_claim(catalog, instance, cluster, database, claim)
-    row = catalog.get_environment(claim.environment_id)
-    if row is None:
-        raise ConfigError("adopted COPY database drop requires adoption ownership evidence")
-    _validate_allowed_environment(
-        catalog,
-        claim.environment_id,
-        database,
-        expected_backup_id,
-        expected_rollback_database,
-    )
-    if _catalog_database_in_use(catalog, database, allow_environment_id=claim.environment_id):
-        raise ConfigError("database is bound to an active environment or process")
-
-    binding_database = (
-        database if expected_rollback_database is None else str(row["target_db_name"])
-    )
-    event = catalog._latest_database_event(
-        cluster.endpoint_host, cluster.endpoint_port, binding_database
-    )
-    if event is None or event["event_type"] != "restored":
-        raise ConfigError("adopted COPY database drop requires an exact current lifecycle event")
-    binding = catalog._latest_restore_binding(
-        cluster.endpoint_host, cluster.endpoint_port, binding_database
-    )
-    if (
-        binding is None
-        or binding["cluster_id"] is not None
-        or binding["state"] not in {"complete", "incomplete"}
-        or event["cluster_id"] is not None
-        or event["database_name"] != binding_database
-        or event["backup_id"] != binding["backup_id"]
-        or event["source_kind"] != binding["source_kind"]
-        or event["source_sha256"] != binding["source_sha256"]
-        or event["data_directory"] != binding["data_directory"]
-    ):
-        raise ConfigError("adopted COPY database drop restore identity does not match")
-    source_kind = binding["source_kind"]
-    source_sha256 = binding["source_sha256"]
-    backup_id = binding["backup_id"]
-    if source_kind not in {"catalogue", "local_archive"}:
-        raise ConfigError("adopted COPY database drop restore provenance is invalid")
-    if source_kind == "catalogue":
-        if not isinstance(backup_id, str) or not backup_id or source_sha256 is not None:
-            raise ConfigError("adopted COPY database drop restore provenance is invalid")
-    elif (
-        backup_id is not None
-        or not isinstance(source_sha256, str)
-        or len(source_sha256) != 64
-        or any(char not in "0123456789abcdef" for char in source_sha256)
-    ):
-        raise ConfigError("adopted COPY database drop restore provenance is invalid")
-    if expected_backup_id is not None and backup_id != expected_backup_id:
-        raise ConfigError("adopted COPY database drop backup ownership changed")
-    data_directory = binding["data_directory"]
-    if source_kind == "local_archive" and not _safe_proven_filestore(
-        data_directory if isinstance(data_directory, str) else None, binding_database
-    ):
-        raise ConfigError("adopted COPY local archive lacks contained data-directory evidence")
-    return _DropOwnershipEvidence(
-        event_type="restored",
-        event_sequence=int(event["sequence"]),
-        cluster_id=f"external:{cluster.endpoint}",
-        compose_project="",
-        volume_name="",
-        backup_id=backup_id,
-        source_kind=source_kind,
-        source_sha256=source_sha256,
-        data_directory=data_directory if isinstance(data_directory, str) else None,
-        restore_state=str(binding["state"]),
-    )
-
-
-def _safe_proven_filestore(data_directory: str | None, database: str) -> bool:
-    if data_directory is None:
-        return False
-    base = Path(data_directory)
-    root = base / "filestore"
-    if base.is_symlink() or not base.is_dir() or root.is_symlink() or not root.is_dir():
-        return False
-    try:
-        validate_filestore_containment(base, database)
-    except ConfigError:
-        return False
-    candidate = root / database
-    return not candidate.is_symlink()
 
 
 def _safe_bootstrap_data_directory(data_directory: str) -> bool:
@@ -681,6 +526,7 @@ def build_database_drop_command(  # noqa: C901
             allow_environment_backup_id=allow_environment_backup_id,
             allow_environment_rollback_database=allow_environment_rollback_database,
             adopted_copy_claim=adopted_copy_claim,
+            allow_reconciled_absent=idempotent_absent,
         )
         planning_result = process_executor.execute(planning_step)
         if not isinstance(planning_result, ProcessResult):
@@ -720,6 +566,15 @@ def build_database_drop_command(  # noqa: C901
         read_only=True,
         executed_during_planning=not defer_planning,
     )
+
+    if (
+        idempotent_absent
+        and adopted_copy_claim is not None
+        and ownership is not None
+        and ownership.event_type == "dropped"
+        and inspection.exists
+    ):
+        raise ConfigError("reconciled adopted COPY database reappeared")
 
     inspect_prepared_step = _inspect_command_step(
         binding, database=database, step_id=inspect_step_id, timeout=timeout
@@ -820,6 +675,7 @@ def build_database_drop_command(  # noqa: C901
             allow_environment_backup_id=allow_environment_backup_id,
             allow_environment_rollback_database=allow_environment_rollback_database,
             adopted_copy_claim=adopted_copy_claim,
+            allow_reconciled_absent=idempotent_absent,
         )
         expected = expected_restore() if expected_restore is not None else None
         if command_origin == "database-restore-retry":
@@ -849,6 +705,14 @@ def build_database_drop_command(  # noqa: C901
                 command_origin=command_origin,
             )
         planned = _decode_inspection(_process_result(context, inspect_step_id), database)
+        if (
+            idempotent_absent
+            and adopted_copy_claim is not None
+            and current_ownership is not None
+            and current_ownership.event_type == "dropped"
+            and planned.exists
+        ):
+            raise ConfigError("reconciled adopted COPY database reappeared")
         if idempotent_absent and not planned.exists:
             for step_id in (
                 revalidate_terminate_step_id,

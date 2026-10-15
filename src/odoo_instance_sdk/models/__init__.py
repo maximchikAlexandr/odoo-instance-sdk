@@ -12,6 +12,7 @@ from odoo_instance_sdk.models.bug_report import *  # noqa: F403
 from odoo_instance_sdk.models.command import *  # noqa: F403
 from odoo_instance_sdk.models.config import *  # noqa: F403
 from odoo_instance_sdk.models.database_inventory import *  # noqa: F403
+from odoo_instance_sdk.models.database import *  # noqa: F403
 from odoo_instance_sdk.models.deps import *  # noqa: F403
 from odoo_instance_sdk.models.footprint import *  # noqa: F403
 from odoo_instance_sdk.models.git import *  # noqa: F403

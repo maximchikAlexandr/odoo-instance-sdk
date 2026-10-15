@@ -441,6 +441,7 @@ All Git workflow probes and mutations SHALL be captured as immutable process/act
 - **WHEN** any mutating `odcli git` command is requested with `--dry-run`
 - **THEN** output contains every sanitized exact command and precondition while repository and remotes remain unchanged
 
+
 ### Requirement: Ephemeral host-scoped child credentials
 Secret-bearing Git and GitLab execution inputs SHALL be captured privately at command construction, associated with one exact normalized HTTPS host, and supplied only to the intended child process or HTTP request. Public projections SHALL show the credential source and host but SHALL redact token values, authorization headers, credential-helper environment, stdin, scripts, observations, errors, and fingerprints. Parallel commands for different users SHALL have independent immutable private snapshots and SHALL NOT mutate global or repository Git credential configuration.
 

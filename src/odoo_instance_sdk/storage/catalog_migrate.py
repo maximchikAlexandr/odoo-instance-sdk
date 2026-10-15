@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0007"
+CATALOG_REVISION = "0008"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -411,6 +411,7 @@ _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
             "code_ownership",
             "artifact_root",
             "adoption_input_fingerprint",
+            "recovery_json",
         }
     ),
     "backups": frozenset({"source_name", "pinned"}),
@@ -419,6 +420,10 @@ _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
     "restores": frozenset({"source_kind", "source_sha256"}),
     "database_events": frozenset({"source_kind", "source_sha256"}),
 }
+
+
+def _is_historical_common_omission(table: str, column: str) -> bool:
+    return column in _HISTORICAL_COMMON_OMISSIONS.get(table, frozenset())
 
 
 _V16_TABLE_DEFINITIONS = {
@@ -578,15 +583,20 @@ def _historical_ddl_fingerprint(
 ) -> _DdlFingerprint:
     """Build exact known historical DDL semantics from the canonical shape."""
     tables, indexes, foreign_keys, views, _triggers = _reference_ddl_fingerprint()
-    omissions = _HISTORICAL_COMMON_OMISSIONS
     variant_omissions = {
         "restores": frozenset({"state"}) if version == "v16" else frozenset(),
         "database_events": frozenset({"state"}) if version == "v16" else frozenset(),
     }
     historical_tables = []
     for table, columns, keys, checks, collations, generated, options, _definition in tables:
-        omitted = omissions.get(table, frozenset()) | variant_omissions.get(table, frozenset())
-        historical_columns = tuple(column for column in columns if column[0] not in omitted)
+        variant_omitted = variant_omissions.get(table, frozenset())
+        omitted = _HISTORICAL_COMMON_OMISSIONS.get(table, frozenset()) | variant_omitted
+        historical_columns = tuple(
+            column
+            for column in columns
+            if not _is_historical_common_omission(table, column[0])
+            and column[0] not in variant_omitted
+        )
         if table == "restores":
             historical_columns = tuple(
                 (
@@ -646,7 +656,7 @@ def _historical_ddl_fingerprint(
     historical_foreign_keys = tuple(
         (
             table,
-            tuple(fk for fk in rows if fk[1] not in omissions.get(table, frozenset())),
+            tuple(fk for fk in rows if not _is_historical_common_omission(table, fk[1])),
         )
         for table, rows in foreign_keys
     )
@@ -785,16 +795,7 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
             expected_columns = tuple(
                 item
                 for item in expected_columns
-                if item[0]
-                not in {
-                    "project_id",
-                    "checkout_repository_root",
-                    "checkout_git_common_dir",
-                    "checkout_commit_sha",
-                    "code_ownership",
-                    "artifact_root",
-                    "adoption_input_fingerprint",
-                }
+                if not _is_historical_common_omission(table, item[0])
             )
         if table == "runtime":
             expected_columns = _without_runtime_launch_identity(expected_columns)

@@ -635,7 +635,6 @@ cli.add_command(
 cli.add_command(bug_report_group, name="bug-report")
 cli.add_command(_publish, name="publish")
 cli.add_command(_unpublish, name="unpublish")
-
 register_init_command(cli)
 
 
