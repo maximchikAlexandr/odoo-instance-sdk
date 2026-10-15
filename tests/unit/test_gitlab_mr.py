@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from collections.abc import Mapping
@@ -70,9 +71,18 @@ def _identity() -> tuple[GitLabCredentialContext, GitLabIdentity]:
 
 
 class _Transport:
-    def __init__(self, matches: tuple[Mapping[str, Any], ...] = ()) -> None:
+    def __init__(
+        self,
+        matches: tuple[Mapping[str, Any], ...] = (),
+        *,
+        upload_markdown: str = "![image](/uploads/image.png)",
+        mutation_error: Exception | None = None,
+    ) -> None:
         self.matches = matches
+        self.upload_markdown = upload_markdown
+        self.mutation_error = mutation_error
         self.calls: list[str] = []
+        self.mutation_descriptions: list[str] = []
 
     def get_project(self, _credential: object, _project: str) -> Mapping[str, Any]:
         self.calls.append("project")
@@ -88,18 +98,24 @@ class _Transport:
         self, _credential: object, _project_id: int, _path: Path, _content_type: str
     ) -> Mapping[str, Any]:
         self.calls.append("upload")
-        return {"markdown": "![image](/uploads/image.png)"}
+        return {"markdown": self.upload_markdown}
 
     def create_merge_request(
         self, _credential: object, _project_id: int, **kwargs: Any
     ) -> Mapping[str, Any]:
         self.calls.append("create")
+        self.mutation_descriptions.append(kwargs["description"])
+        if self.mutation_error is not None:
+            raise self.mutation_error
         return {"iid": 7, "web_url": "https://gitlab.example/team/repo/-/merge_requests/7"}
 
     def update_merge_request(
         self, _credential: object, _project_id: int, _iid: int, **kwargs: Any
     ) -> Mapping[str, Any]:
         self.calls.append("update")
+        self.mutation_descriptions.append(kwargs["description"])
+        if self.mutation_error is not None:
+            raise self.mutation_error
         return {"iid": 7, "web_url": "https://gitlab.example/team/repo/-/merge_requests/7"}
 
 
@@ -166,6 +182,87 @@ def test_merge_request_same_digest_reuses_owned_link(tmp_path: Path) -> None:
     assert result.outcome == "updated"
     assert "upload" not in transport.calls
     assert transport.calls[-1] == "update"
+
+
+def test_merge_request_changed_digest_replaces_owned_block_and_updates_once(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _repo(root)
+    description = tmp_path / "description.md"
+    old_digest = "a" * 64
+    description.write_text(
+        "User-authored preface\n\n"
+        "![user image](/uploads/user.png)\n\n"
+        f"<!-- odcli:image sha256={old_digest} -->\n"
+        "![old image](/uploads/old.png)\n"
+        "<!-- /odcli:image -->\n\n"
+        "User-authored tail\n",
+        encoding="utf-8",
+    )
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"new png bytes")
+    new_digest = hashlib.sha256(b"new png bytes").hexdigest()
+    existing = {
+        "iid": 7,
+        "description": f"existing\n\n<!-- odcli:image sha256={old_digest} -->\n"
+        "![old image](/uploads/old.png)\n<!-- /odcli:image -->",
+    }
+    credential, identity = _identity()
+    transport = _Transport((existing,), upload_markdown="![new image](/uploads/new.png)")
+
+    result = _resource(root).merge_request(
+        repository=root,
+        member_id=MEMBER,
+        target="main",
+        title="Update feature",
+        description_file=description,
+        image=image,
+        credential=credential,
+        identity=identity,
+        publication_transport=transport,
+    )
+
+    assert result.outcome == "updated"
+    assert transport.calls == ["project", "lookup", "upload", "update"]
+    assert len(transport.mutation_descriptions) == 1
+    updated_description = transport.mutation_descriptions[0]
+    assert "User-authored preface" in updated_description
+    assert "![user image](/uploads/user.png)" in updated_description
+    assert "User-authored tail" in updated_description
+    assert "old image" not in updated_description
+    assert updated_description.count("![new image](/uploads/new.png)") == 1
+    assert updated_description.count("<!-- odcli:image sha256=") == 1
+    assert f"sha256={new_digest}" in updated_description
+
+
+def test_merge_request_upload_failure_reports_possible_orphan_without_retry(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _repo(root)
+    description = tmp_path / "description.md"
+    description.write_text("User-authored body\n", encoding="utf-8")
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"png bytes")
+    credential, identity = _identity()
+    transport = _Transport(mutation_error=RuntimeError("private-token should not escape"))
+    command = _resource(root).merge_request_command(
+        repository=root,
+        member_id=MEMBER,
+        target="main",
+        title="Create feature",
+        description_file=description,
+        image=image,
+        credential=credential,
+        identity=identity,
+        publication_transport=transport,
+    )
+
+    with pytest.raises(GitLabPublicationError, match="possible orphan upload") as error:
+        command.run()
+
+    assert str(error.value) == (
+        "merge-request mutation failed after image upload; possible orphan upload"
+    )
+    assert "private-token" not in str(error.value)
+    assert transport.calls == ["project", "lookup", "upload", "create"]
 
 
 def test_merge_request_ambiguity_precedes_image_upload(tmp_path: Path) -> None:
