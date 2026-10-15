@@ -2,66 +2,20 @@
 
 from __future__ import annotations
 
-import stat
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote
 
 import httpx
 
 from odcli_multica.models import GitLabCredentialContext, MergeRequestPublicationResult
+from odoo_instance_sdk.exceptions import GitLabPublicationError
 from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal.gitlab_publication import (
+    read_description_file,
+    repository_project_path,
+)
 from odoo_instance_sdk.internal.proc.redaction import redacted_projection
-
-_MAX_DESCRIPTION_BYTES = 1_048_576
-
-
-class GitLabPublicationError(ValueError):
-    """Raised for bounded, sanitized GitLab publication failures."""
-
-
-def read_description_file(path: Path | str) -> str:
-    """Read one regular, non-symlink UTF-8 description within the bound."""
-    description = Path(path)
-    try:
-        info = description.stat()
-    except OSError as exc:
-        raise GitLabPublicationError("merge-request description file is unavailable") from exc
-    if description.is_symlink() or not stat.S_ISREG(info.st_mode):
-        raise GitLabPublicationError("merge-request description file must be regular")
-    if info.st_size > _MAX_DESCRIPTION_BYTES:
-        raise GitLabPublicationError("merge-request description file is too large")
-    try:
-        return description.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise GitLabPublicationError("merge-request description file is not valid UTF-8") from exc
-
-
-def repository_project_path(repository_url: str) -> tuple[str, str]:
-    """Return the exact HTTPS host and project path from a GitLab remote."""
-    from urllib.parse import urlsplit
-
-    parsed = urlsplit(repository_url)
-    if (
-        parsed.scheme.casefold() != "https"
-        or not parsed.hostname
-        or not parsed.path
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise GitLabPublicationError("GitLab repository URL must be HTTPS")
-    project = parsed.path.strip("/")
-    if project.endswith(".git"):
-        project = project[:-4]
-    if not project or "//" in project or any(part in {".", ".."} for part in project.split("/")):
-        raise GitLabPublicationError("GitLab project path is invalid")
-    host = parsed.hostname.casefold()
-    if parsed.port is not None:
-        host = f"{host}:{parsed.port}"
-    return host, project
 
 
 def _json(

@@ -188,6 +188,12 @@ class GitLabIdentityError(PlanError):
     code = "gitlab_identity_error"
 
 
+class GitLabPublicationError(PlanError, ValueError):
+    """A GitLab merge-request or project-upload operation failed safely."""
+
+    code = "gitlab_publication_error"
+
+
 class GitRepositoryError(PlanError):
     """A generic repository cannot be resolved or safely revalidated."""
 

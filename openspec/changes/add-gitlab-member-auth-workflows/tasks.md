@@ -14,9 +14,9 @@
 
 ## 3. GitLab merge-request publication
 
-- [ ] 3.1 Promote/adapt the existing exact-project GitLab MR transport into core and implement public `merge_request_command()`/delegating operation for explicit repository, member, target, title, bounded UTF-8 description, unique open-MR create/update, dry-run, and sanitized failure contracts.
-- [ ] 3.2 Add bounded image validation, GitLab project upload, digest marker/link replacement, same-image no-upload idempotency, orphan-upload diagnostics, and tests proving images never enter Git.
-- [ ] 3.3 Retain `odcli-multica` API/CLI behavior through compatibility adapters and update its credential/Git/MR tests to use the shared core policies without adding a core Multica dependency.
+- [x] 3.1 Promote/adapt the existing exact-project GitLab MR transport into core and implement public `merge_request_command()`/delegating operation for explicit repository, member, target, title, bounded UTF-8 description, unique open-MR create/update, dry-run, and sanitized failure contracts.
+- [x] 3.2 Add bounded image validation, GitLab project upload, digest marker/link replacement, same-image no-upload idempotency, orphan-upload diagnostics, and tests proving images never enter Git.
+- [x] 3.3 Retain `odcli-multica` API/CLI behavior through compatibility adapters and update its credential/Git/MR tests to use the shared core policies without adding a core Multica dependency.
 
 ## 4. Self-update and package preservation
 
@@ -26,7 +26,7 @@
 
 ## 5. CLI, documentation, and architecture contracts
 
-- [ ] 5.1 Register `odcli git clone`, explicit `--repo`/`--member-id` commit and sync options, and `odcli git mr create`; add SDK-first `PUBLIC_LEAF_CASES`, help/usage, confirmation, dry-run, and Rich/JSON/TOON contract coverage.
+- [x] 5.1 Register `odcli git clone`, explicit `--repo`/`--member-id` commit and sync options, and `odcli git mr create`; add SDK-first `PUBLIC_LEAF_CASES`, help/usage, confirmation, dry-run, and Rich/JSON/TOON contract coverage.
 - [ ] 5.2 Reconcile README examples and the complete command inventory with executable Click registration, document credential file schema/location and A plus superproject-submodule workflow, and state the no-GitHub/no-implicit-init/no-standalone-push/no-hidden-gitlink boundaries.
 - [ ] 5.3 Update architecture/security inventories and tests so every new process uses `internal/proc`, every HTTP/filesystem mutation is an action step, no new direct launcher/client seam or imprecise production annotation is introduced, and all credential projections remain redacted.
 

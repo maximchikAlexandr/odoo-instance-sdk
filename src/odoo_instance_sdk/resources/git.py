@@ -37,6 +37,7 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import ProjectConfig, effective_ticket_settings
 from odoo_instance_sdk.resources.git_generic import GenericGitMixin
+from odoo_instance_sdk.resources.gitlab_mr import GitLabMergeRequestMixin
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
@@ -398,7 +399,7 @@ def _verified_base_ref(root: Path, candidate: str) -> str:
     return values[0]
 
 
-class GitResource(GenericGitMixin):
+class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
     """One concrete Git resource bound to an :class:`OdooInstance`."""
 
     def __init__(self, instance: OdooInstance) -> None:
