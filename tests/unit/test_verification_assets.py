@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.e2e_gitlab_member_workflow import _sanitize
 from tests.integration.real_odoo.contracts import CANONICAL_LEAF_COUNT
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
 
@@ -41,6 +42,17 @@ def test_gitlab_workflow_assets_are_parameterized_and_sanitized() -> None:
     assert "shutil.rmtree(root" in script
     assert '"git",\n        "mr",\n        "create"' in script
     assert "--recurse-submodules" in script
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ("private-token", "password", "token", "authorization"))
+@pytest.mark.parametrize("separator", (":", "="))
+def test_gitlab_sanitizer_redacts_delimited_secret_values(key: str, separator: str) -> None:
+    canary = f"canary-{key}-{separator}-value"
+    sanitized = _sanitize(f"{key.upper()}{separator} {canary}")
+
+    assert canary not in sanitized
+    assert "<redacted>" in sanitized
 
 
 @pytest.mark.unit

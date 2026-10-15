@@ -24,7 +24,7 @@ _PNG: Final[bytes] = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
 _SECRET_TEXT: Final[re.Pattern[str]] = re.compile(
-    r"(?i)(?:private-token|password|token|authorization)\s*[:=]\s*[^\s,}]+"
+    r"(?i)((?:private-token|password|token|authorization)\s*[:=]\s*)[^\s,}]+"
 )
 _SHA: Final[re.Pattern[str]] = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
 
@@ -89,7 +89,7 @@ def _sanitize(text: str) -> str:
         secret = os.environ.get(key, "")
         if secret:
             text = text.replace(secret, "<redacted>")
-    text = _SECRET_TEXT.sub(lambda match: match.group(0).split("=", 1)[0] + "=<redacted>", text)
+    text = _SECRET_TEXT.sub(r"\1<redacted>", text)
     return _SHA.sub("<sha>", text)
 
 
