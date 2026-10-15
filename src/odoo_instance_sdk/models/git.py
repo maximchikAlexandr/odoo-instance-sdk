@@ -205,6 +205,7 @@ class GitRepositorySnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=T
     staged_paths: tuple[str, ...] = ()
     worktree_dirty: bool = False
     initialized_odoo: bool = False
+    index_tree: str = ""
 
     @property
     def repository_root(self) -> str:
