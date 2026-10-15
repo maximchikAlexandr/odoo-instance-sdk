@@ -6,13 +6,15 @@ import re
 import tomllib
 from importlib.metadata import Distribution
 from pathlib import Path
+from typing import Protocol
 
 from odoo_instance_sdk.exceptions import UnsupportedInstallError, UpdateError
+from odoo_instance_sdk.execution import JsonValue
 
 _EXTRA_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _normalize_extra_set(raw: object) -> tuple[str, ...]:
+def _normalize_extra_set(raw: JsonValue) -> tuple[str, ...]:
     if raw is None:
         return ()
     if not isinstance(raw, list):
@@ -146,7 +148,12 @@ def install_argv(
     )
 
 
-def verify_dashboard_installation(provenance: object) -> None:
+class _DashboardProvenance(Protocol):
+    @property
+    def requested_extras(self) -> tuple[str, ...]: ...
+
+
+def verify_dashboard_installation(provenance: _DashboardProvenance) -> None:
     """Verify dashboard imports and packaged SPA assets in the new interpreter."""
     extras = getattr(provenance, "requested_extras", ())
     if "dashboard" not in extras:

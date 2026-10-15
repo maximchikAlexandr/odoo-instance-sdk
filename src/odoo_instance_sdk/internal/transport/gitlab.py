@@ -3,31 +3,38 @@
 from __future__ import annotations
 
 import io
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
 from odoo_instance_sdk.exceptions import GitLabPublicationError
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.proc.redaction import redacted_projection
-from odoo_instance_sdk.internal.transport.base import BaseHttpClient
+from odoo_instance_sdk.internal.transport.base import (
+    BaseHttpClient,
+    RequestPayload,
+    _RawHttpClient,
+)
 from odoo_instance_sdk.models import GitLabCredentialContext
 
 
 class GitLabHttpClient(BaseHttpClient):
     """Bounded, no-retry `/user` client with token kept private in headers."""
 
-    def __init__(self, *, client_factory: Callable[..., Any] | None = None) -> None:
+    class _ClientFactory(Protocol):
+        def __call__(self, *, timeout: float, trust_env: bool) -> _RawHttpClient: ...
+
+    def __init__(self, *, client_factory: _ClientFactory | None = None) -> None:
         super().__init__(timeout=30.0, trust_env=True)
         self._client_factory = client_factory
 
-    def _ensure_client(self) -> Any:
+    def _ensure_client(self) -> _RawHttpClient:
         if self._client is None:
             import httpx
 
-            factory = self._client_factory or httpx.Client
-            self._client = cast("Any", factory(timeout=30.0, trust_env=True))
+            factory = self._client_factory or cast("GitLabHttpClient._ClientFactory", httpx.Client)
+            self._client = factory(timeout=30.0, trust_env=True)
         return self._client
 
     def get_user(self, host: str, token: str) -> Mapping[str, JsonValue]:
@@ -53,7 +60,7 @@ class GitLabHttpClient(BaseHttpClient):
     def _request_json(
         self,
         credential: GitLabCredentialContext,
-        method: str,
+        method: Literal["GET", "POST", "PUT"],
         path: str,
         *,
         json: JsonValue | None = None,
@@ -63,13 +70,17 @@ class GitLabHttpClient(BaseHttpClient):
         url = f"https://{credential.host}/api/v4{path}"
         try:
             client = self._ensure_client()
-            request = getattr(client, method.lower())
-            kwargs: dict[str, Any] = {"headers": {"PRIVATE-TOKEN": credential._token}}
+            kwargs: dict[str, RequestPayload] = {"headers": {"PRIVATE-TOKEN": credential._token}}
             if json is not None:
                 kwargs["json"] = json
             if files is not None:
                 kwargs["files"] = files
-            response = request(url, **kwargs)
+            if method == "GET":
+                response = client.get(url, **kwargs)
+            elif method == "POST":
+                response = client.post(url, **kwargs)
+            else:
+                response = client.put(url, **kwargs)
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
@@ -77,7 +88,7 @@ class GitLabHttpClient(BaseHttpClient):
                 str(exc), secrets=credential._redaction_secrets(), field="error"
             )
             raise GitLabPublicationError(f"GitLab {operation} failed: {detail}") from None
-        return cast("JsonValue", payload)
+        return payload
 
     def get_project(
         self, credential: GitLabCredentialContext, project: str
@@ -178,7 +189,7 @@ class GitLabHttpClient(BaseHttpClient):
     def _merge_request_mutation(
         self,
         credential: GitLabCredentialContext,
-        method: str,
+        method: Literal["POST", "PUT"],
         path: str,
         *,
         source_branch: str,

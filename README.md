@@ -587,10 +587,10 @@ odcli translations export --module sale --language en_US --dry-run --format json
 ```
 
 Git operations are staged-only where applicable and use the shared immutable
-plan boundary. `git commit` generates a tracker-neutral `[TAG] module:`
-message, `git check` validates history and protected-branch rules, `git absorb`
-is an optional captured `git-absorb` capability, and `git sync` fetches and
-rebases before an optional same-name SSH publication. Use `--dry-run` before
+plan boundary. Project-aware `git commit` retains its Odoo policy; explicit
+`--repo`/`--member-id` selects the generic GitLab workflow without `odcli init`.
+Generic commit subjects are repository-neutral, while `git sync` fetches and
+rebases before an optional same-name HTTPS publication. Use `--dry-run` before
 mutation; a stale remote lease or conflict fails without an automatic retry:
 
 ```bash
@@ -599,6 +599,34 @@ odcli git check --base main --format json
 odcli git absorb --dry-run
 odcli git sync --base main --push --dry-run
 ```
+
+For a generic GitLab repository, credentials are selected by the exact member
+UUID and HTTPS host. Store the non-secret mapping at
+`~/.odcli/credentials/gitlab-credentials.toml` and the owner-only token values
+at `~/.odcli/credentials/.env` (or set `ODCLI_USER_ROOT`). Each TOML mapping
+contains exactly `user_id`, `host`, `login`, and `token_key`; the token key must
+match an `ODCLI_GITLAB_TOKEN_*` entry. The command verifies `/api/v4/user`
+before Git or GitLab mutation and never writes credentials into an origin URL.
+
+```bash
+odcli git clone https://gitlab.example/group/repository ./repository \
+  --member-id 11111111-1111-4111-8111-111111111111 --yes
+odcli git commit "describe the staged change" --repo ./repository \
+  --member-id 11111111-1111-4111-8111-111111111111 --yes
+odcli git sync --repo ./repository --member-id 11111111-1111-4111-8111-111111111111 \
+  --base main --push --yes
+odcli git mr create --repo ./repository \
+  --member-id 11111111-1111-4111-8111-111111111111 --target main \
+  --title "Review the change" --description-file ./description.md --yes
+```
+
+For repository A and a superproject B, clone A directly and clone B with
+`--recurse-submodules`; submodule synchronization operates only on the selected
+checkout. Recursive retry validates every submodule host before issuing a
+credential, initializes only missing submodules, and never stages or commits B's
+gitlink. The workflow intentionally has no GitHub support, no implicit
+initialization, no standalone `push` command, and no hidden superproject
+publication. Uploaded MR images remain outside Git and are digest-idempotent.
 
 ### Automation and shell access
 
@@ -750,7 +778,9 @@ sentence; use the entry's `--help` for exact options.
 - `odcli git commit` — Create one staged Odoo commit with a checked message.
 - `odcli git check` — Validate Odoo commit history and branch safety.
 - `odcli git absorb` — Absorb staged hunks with optional `git-absorb`.
+- `odcli git clone` — Clone or safely retry an authenticated GitLab repository.
 - `odcli git sync` — Fetch, rebase, validate, and optionally publish a branch.
+- `odcli git mr create` — Create or update one exact GitLab merge request.
 - `odcli translations export` — Export translations for a selected module and languages.
 - `odcli deps verify` — Verify Python and add-on dependency readiness.
 - `odcli vscode generate` — Generate VS Code launch configuration from project settings.

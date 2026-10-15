@@ -96,7 +96,7 @@ def _action(
     )
 
 
-def _required_text(value: object, message: str) -> str:
+def _required_text(value: JsonValue | None, message: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise GitLabPublicationError(message)
     return value.strip()
@@ -324,8 +324,42 @@ class GitLabMergeRequestMixin:
 
         return Command.create(plan, callback, tuple(actions))
 
-    def merge_request(self, **kwargs: object) -> GitMergeRequestResult:
-        return self.merge_request_command(**kwargs).run()  # type: ignore[arg-type]
+    def merge_request(
+        self,
+        *,
+        repository: Path | str,
+        member_id: str,
+        target: str,
+        title: str,
+        description_file: Path | str,
+        image: Path | str | None = None,
+        credential: GitLabCredentialContext | None = None,
+        identity: GitLabIdentity | None = None,
+        identity_transport: GitLabUserTransport
+        | Callable[[str, str], Mapping[str, JsonValue]]
+        | None = None,
+        user_root: Path | str | None = None,
+        mapping_path: Path | str | None = None,
+        environment_path: Path | str | None = None,
+        process_environment: Mapping[str, str] | None = None,
+        publication_transport: GitLabPublicationTransport | None = None,
+    ) -> GitMergeRequestResult:
+        return self.merge_request_command(
+            repository=repository,
+            member_id=member_id,
+            target=target,
+            title=title,
+            description_file=description_file,
+            image=image,
+            credential=credential,
+            identity=identity,
+            identity_transport=identity_transport,
+            user_root=user_root,
+            mapping_path=mapping_path,
+            environment_path=environment_path,
+            process_environment=process_environment,
+            publication_transport=publication_transport,
+        ).run()
 
 
 __all__ = ["GitLabMergeRequestMixin", "GitLabPublicationTransport"]

@@ -56,9 +56,13 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 460),
         ("src/odoo_instance_sdk/commands/output.py", 467),
         ("src/odoo_instance_sdk/commands/output.py", 469),
-        ("src/odoo_instance_sdk/internal/self_update.py", 827),
-        ("src/odoo_instance_sdk/internal/self_update.py", 828),
-        ("src/odoo_instance_sdk/internal/self_update.py", 829),
+        ("src/odoo_instance_sdk/internal/self_update.py", 842),
+        ("src/odoo_instance_sdk/internal/self_update.py", 843),
+        ("src/odoo_instance_sdk/internal/self_update.py", 844),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 31),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 32),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 44),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 45),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 511),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 978),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 980),
@@ -91,16 +95,32 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        827,
+        842,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        828,
+        843,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        829,
+        844,
     ): "maintenance child JSON stdout transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        31,
+    ): "Git credential protocol child transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        32,
+    ): "Git credential protocol child transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        44,
+    ): "Git credential protocol child transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        45,
+    ): "Git credential protocol child transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
         511,
@@ -142,10 +162,12 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {}
 
 DIRECT_HTTPX_USAGE: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/internal/transport/base.py", 203),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 208),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 233),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 205),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 210),
         ("src/odoo_instance_sdk/internal/transport/base.py", 235),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 237),
+        ("src/odoo_instance_sdk/internal/transport/gitlab.py", 34),
+        ("src/odoo_instance_sdk/internal/transport/gitlab.py", 36),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 77),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 79),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 156),
