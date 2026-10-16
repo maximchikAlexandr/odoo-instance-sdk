@@ -71,7 +71,7 @@ class _FakeDist:
     def __init__(self, *, version: str = "0.1.0", direct_url: str | None = _VCS_DIRECT_URL) -> None:
         self.version = version
         self._direct_url = direct_url
-        self.files = None
+        self.files: object = None
 
     def read_text(self, filename: str) -> str | None:
         if filename == "direct_url.json":

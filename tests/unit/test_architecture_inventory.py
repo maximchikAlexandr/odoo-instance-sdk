@@ -31,6 +31,8 @@ from tests.fixtures.architecture_inventory import (
 
 _REPO_ROOT = Path(__file__).parents[2]
 _SOURCE_ROOT = _REPO_ROOT / "src" / "odoo_instance_sdk"
+_BUILD_BACKEND = _REPO_ROOT / "build_backend.py"
+_BUILD_SOURCES = tuple(sorted(_REPO_ROOT.glob("build_*.py")))
 _TEST_ROOT = _REPO_ROOT / "tests"
 _PATCH_LINE = re.compile(
     r"(?:monkeypatch\.setattr|patch\()[^\n]*(?:subprocess(?:\.(?:run|Popen)|,\s*['\"](?:run|Popen))|SubprocessComposeRunner[^\n]*['\"]run)",
@@ -46,15 +48,19 @@ def _format_locations(locations: set[tuple[str, int]]) -> str:
 
 
 def _source_modules() -> list[tuple[Path, ast.Module]]:
-    return [
+    modules = [
         (path, ast.parse(path.read_text(encoding="utf-8")))
         for path in sorted(_SOURCE_ROOT.rglob("*.py"))
     ]
+    modules.extend((path, ast.parse(path.read_text(encoding="utf-8"))) for path in _BUILD_SOURCES)
+    return modules
 
 
-def _discover_subprocess_launches() -> set[tuple[str, int]]:
+def _discover_subprocess_launches(
+    modules: list[tuple[Path, ast.Module]] | None = None,
+) -> set[tuple[str, int]]:
     locations: set[tuple[str, int]] = set()
-    for path, module in _source_modules():
+    for path, module in modules if modules is not None else _source_modules():
         if path.is_relative_to(_SOURCE_ROOT / "internal" / "proc"):
             continue
         for node in ast.walk(module):
@@ -150,9 +156,11 @@ def _annotations(node: ast.AST) -> list[ast.expr]:
     return []
 
 
-def _discover_imprecise_annotations() -> dict[str, frozenset[int]]:
+def _discover_imprecise_annotations(
+    modules: list[tuple[Path, ast.Module]] | None = None,
+) -> dict[str, frozenset[int]]:
     locations: dict[str, set[int]] = {}
-    for path, module in _source_modules():
+    for path, module in modules if modules is not None else _source_modules():
         for node in ast.walk(module):
             if any(
                 _annotation_contains_imprecise_type(annotation) for annotation in _annotations(node)
@@ -190,11 +198,16 @@ def _contains_callable_ellipsis(annotation: ast.expr) -> bool:
         is_callable = (isinstance(value, ast.Name) and value.id == "Callable") or (
             isinstance(value, ast.Attribute) and value.attr == "Callable"
         )
-        if is_callable and any(
-            isinstance(child, ast.Constant) and child.value is Ellipsis
-            for child in ast.walk(node.slice)
-        ):
-            return True
+        if is_callable:
+            arguments = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            parameters = arguments[0] if arguments else None
+            if isinstance(parameters, ast.Constant) and parameters.value is Ellipsis:
+                return True
+            if isinstance(parameters, ast.List) and any(
+                isinstance(parameter, ast.Constant) and parameter.value is Ellipsis
+                for parameter in parameters.elts
+            ):
+                return True
     return False
 
 
@@ -378,6 +391,20 @@ def test_direct_subprocess_launch_inventory_is_exact() -> None:
     )
 
 
+def test_root_build_backend_is_in_process_and_annotation_inventory() -> None:
+    unsafe = ast.parse(
+        "import subprocess\n"
+        "subprocess.run(['tool'])\n"
+        "def build(value: object) -> None:\n"
+        "    return None\n"
+    )
+    modules = [(_BUILD_BACKEND, unsafe)]
+    assert _discover_subprocess_launches(modules) == {("build_backend.py", 2)}
+    assert _discover_imprecise_annotations(modules) == {
+        "build_backend.py": frozenset({3}),
+    }
+
+
 def test_direct_output_inventory_is_exact() -> None:
     assert _discover_output_writes() == DIRECT_OUTPUT_WRITES
     assert set(OUTPUT_WRITE_REASONS) == DIRECT_OUTPUT_WRITES
@@ -412,10 +439,10 @@ def test_captured_paths_use_one_internal_pump() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "run_captured_limited"
     )
-    execute = next(
+    materialized = next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_execute"
+        if isinstance(node, ast.FunctionDef) and node.name == "_execute_materialized"
     )
 
     def calls_pump(node: ast.AST) -> int:
@@ -434,7 +461,7 @@ def test_captured_paths_use_one_internal_pump() -> None:
         return count
 
     assert calls_pump(limited) == 1
-    assert calls_pump(execute) == 1
+    assert calls_pump(materialized) == 1
     assert (
         sum(
             isinstance(call, ast.Call)

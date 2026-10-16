@@ -13,12 +13,15 @@ import pytest
 
 from odoo_instance_sdk.exceptions import (
     LockConflictError,
+    UnsupportedInstallError,
     UpdateError,
 )
 from odoo_instance_sdk.execution import ProcessStep
 from odoo_instance_sdk.internal.proc import RecordingExecutor
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
+    _install_argv,
+    _snapshot_metadata,
     assert_direct_update_allowed,
     read_uv_tool_direct_url,
     update,
@@ -487,6 +490,86 @@ def test_read_uv_tool_direct_url_accepts_uv_bare_vcs_url(
 
     assert provenance.source_repo == "https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
     assert provenance.commit_id == _SHA_A
+
+
+def test_read_uv_tool_direct_url_captures_uv_receipt_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    receipt = tmp_path / "uv-receipt.toml"
+    receipt.write_text(
+        "[tool]\n"
+        "requirements = [{ name = 'odoo-instance-sdk', extras = ['dashboard'], "
+        "git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git?rev=main' }]\n",
+        encoding="utf-8",
+    )
+
+    class _ReceiptDist(_FakeDist):
+        files = ()
+
+        def locate_file(self, _name: str) -> Path:
+            return receipt
+
+    _patch_distribution(monkeypatch, _ReceiptDist())
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
+        lambda: executable,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.get_user_root",
+        lambda **_: tmp_path / ".odcli",
+    )
+    (tmp_path / ".odcli").mkdir()
+
+    provenance = read_uv_tool_direct_url()
+
+    assert provenance.direct_requirement == (
+        "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@main"
+    )
+    assert provenance.requested_extras == ("dashboard",)
+    assert _install_argv(_SHA_B, source_repo=provenance.source_repo, extras=provenance.extras)[
+        -1
+    ] == (
+        "odoo-instance-sdk[dashboard] @ "
+        f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{_SHA_B}"
+    )
+    assert _snapshot_metadata(provenance, _SHA_B)["requested_extras"] == ["dashboard"]
+
+
+def test_read_uv_tool_direct_url_rejects_ambiguous_uv_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "uv-receipt.toml"
+    receipt.write_text(
+        "[tool]\n"
+        "requirements = ["
+        "{ name = 'odoo-instance-sdk', extras = ['dashboard'] }, "
+        "{ name = 'odoo-instance-sdk', extras = [] }]\n",
+        encoding="utf-8",
+    )
+
+    class _ReceiptDist(_FakeDist):
+        files = ()
+
+        def locate_file(self, _name: str) -> Path:
+            return receipt
+
+    _patch_distribution(monkeypatch, _ReceiptDist())
+    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
+        lambda: tmp_path / "odcli",
+    )
+    (tmp_path / "odcli").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "odcli").chmod(0o755)
+
+    with pytest.raises(UnsupportedInstallError, match="ambiguous direct requirement"):
+        read_uv_tool_direct_url()
 
 
 def test_mutually_exclusive_check_and_dry_run_cli() -> None:

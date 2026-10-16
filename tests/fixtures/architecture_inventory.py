@@ -48,7 +48,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 558),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 559),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 476),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 477),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
         ("src/odoo_instance_sdk/commands/output.py", 289),
@@ -56,15 +56,20 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 506),
         ("src/odoo_instance_sdk/commands/output.py", 513),
         ("src/odoo_instance_sdk/commands/output.py", 515),
-        ("src/odoo_instance_sdk/internal/self_update.py", 827),
-        ("src/odoo_instance_sdk/internal/self_update.py", 828),
-        ("src/odoo_instance_sdk/internal/self_update.py", 829),
+        ("src/odoo_instance_sdk/internal/self_update.py", 842),
+        ("src/odoo_instance_sdk/internal/self_update.py", 843),
+        ("src/odoo_instance_sdk/internal/self_update.py", 844),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 31),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 32),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 44),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 45),
+        ("src/odoo_instance_sdk/internal/git_askpass.py", 72),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 511),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 978),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 980),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 982),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 988),
-        ("src/odoo_instance_sdk/internal/alternate_tool.py", 991),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 984),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 990),
+        ("src/odoo_instance_sdk/internal/alternate_tool.py", 993),
     }
 )
 
@@ -86,30 +91,47 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        476,
+        477,
     ): "documented --version metadata flag transport",
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        827,
+        842,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        828,
+        843,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        829,
+        844,
     ): "maintenance child JSON stdout transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        31,
+    ): "Git credential protocol child transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        32,
+    ): "Git credential protocol child transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        44,
+    ): "Git credential protocol child transport",
+    (
+        "src/odoo_instance_sdk/internal/git_credential_helper.py",
+        45,
+    ): "Git credential protocol child transport",
+    ("src/odoo_instance_sdk/internal/git_askpass.py", 72): "Git askpass child transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
         511,
     ): "lifecycle cleanup diagnostic transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 978): "alternate lifecycle JSON transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 980): "alternate lifecycle JSON transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 982): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 988): "alternate lifecycle JSON transport",
-    ("src/odoo_instance_sdk/internal/alternate_tool.py", 991): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 984): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 990): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/internal/alternate_tool.py", 993): "alternate lifecycle JSON transport",
 }
 
 
@@ -139,10 +161,12 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {}
 
 DIRECT_HTTPX_USAGE: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/internal/transport/base.py", 203),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 208),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 233),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 205),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 210),
         ("src/odoo_instance_sdk/internal/transport/base.py", 235),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 237),
+        ("src/odoo_instance_sdk/internal/transport/gitlab.py", 33),
+        ("src/odoo_instance_sdk/internal/transport/gitlab.py", 35),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 77),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 79),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 156),

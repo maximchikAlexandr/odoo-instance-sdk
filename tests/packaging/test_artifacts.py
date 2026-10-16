@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 import zipfile
 from email import message_from_bytes
 from pathlib import Path
 
 import pytest
+
+from odoo_instance_sdk.internal import alternate_tool
+from odoo_instance_sdk.internal.gitlab_credentials import (
+    cleanup_askpass_channel,
+    write_askpass_channel,
+)
+from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+from odoo_instance_sdk.models import GitLabCredentialContext, GitLabCredentialIdentity
 
 pytestmark = [pytest.mark.packaging, pytest.mark.timeout(180)]
 
@@ -50,6 +60,7 @@ def test_wheel_contains_package_typed_marker_and_odcli() -> None:
     assert any(n.endswith("odoo_instance_sdk/web/dist/index.html") for n in names)
     assert any("odoo_instance_sdk/web/dist/assets/" in n for n in names)
     assert "odcli = odoo_instance_sdk.cli:cli" in entry
+    assert "odcli-git-askpass = odoo_instance_sdk.internal.git_askpass:main" in entry
 
 
 def test_sdist_contains_package() -> None:
@@ -115,6 +126,24 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
     )
     assert version_result.stdout.strip() == f"odcli, version {metadata}"
     assert version_result.stderr == ""
+    askpass = venv / (
+        "Scripts/odcli-git-askpass.exe" if os.name == "nt" else "bin/odcli-git-askpass"
+    )
+    channel = tmp_path / "askpass.json"
+    channel.write_text(
+        '[{"host":"gitlab.example","login":"test-user","token":"test-token"}]\n',
+        encoding="utf-8",
+    )
+    askpass_result = subprocess.run(
+        [str(askpass), "Password for 'https://gitlab.example/team/repo':"],
+        cwd=empty,
+        env=env | {"ODCLI_GITLAB_ASKPASS_FILE": str(channel)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert askpass_result.returncode == 0
+    assert askpass_result.stdout == "test-token\n"
 
 
 def test_isolated_wheel_import_and_odcli_help(tmp_path: Path) -> None:
@@ -127,6 +156,169 @@ def test_isolated_sdist_import_and_odcli_help(tmp_path: Path) -> None:
     """Allow the isolated sdist install and cold CLI import to finish."""
     _wheel, sdist = _dist()
     _install_and_smoke(sdist, tmp_path)
+
+
+def test_numbered_install_publishes_executable_askpass_after_staging_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = _REPO.resolve().as_uri()
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=_REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setattr(alternate_tool, "REPOSITORY_URL", repository)
+    numbered = alternate_tool.identity("numbered", "1", home=tmp_path)
+    manifest = alternate_tool.install_alternate_tool(numbered, sha, repository=repository)
+    assert manifest.identity == numbered
+    askpass = numbered.tool_bin / "odcli-git-askpass"
+    assert askpass.is_file()
+    assert not askpass.is_symlink()
+    interpreter = alternate_tool._interpreter(askpass)
+    assert interpreter.is_file()
+    assert str(numbered.tool_root) in askpass.read_text(encoding="utf-8")
+    assert not any(".1." in part for part in askpass.read_text(encoding="utf-8").splitlines())
+    package_askpass = numbered.tool_root / "odoo-instance-sdk" / "bin" / "odcli-git-askpass"
+    assert package_askpass.is_file()
+    assert not package_askpass.is_symlink()
+    assert str(numbered.tool_root) in package_askpass.read_text(encoding="utf-8")
+
+    credential = GitLabCredentialContext(
+        GitLabCredentialIdentity(
+            user_id="11111111-1111-4111-8111-111111111111",
+            host="gitlab.example",
+            login="test-user",
+            token_key="ODCLI_GITLAB_TOKEN_TEST",
+        ),
+        "credential-token",
+    )
+    channel = Path(write_askpass_channel(credential))
+    try:
+        result = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=gitlab.example\n\n",
+            cwd=tmp_path,
+            env=_isolated_process_env(tmp_path / "git-home")
+            | dict(credential.askpass_environment(str(askpass), channel_path=str(channel)))
+            | {"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1"},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "username=test-user\n" in result.stdout
+        assert "password=credential-token\n" in result.stdout
+        safe_output = redacted_projection(
+            result.stdout, secrets=("credential-token",), field="stdout"
+        )
+        assert isinstance(safe_output, str)
+        assert "credential-token" not in safe_output
+    finally:
+        cleanup_askpass_channel(str(channel))
+    assert not channel.exists()
+
+
+def test_canonical_numbered_bootstrap_repairs_staged_askpass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cover the pre-fix coordinator that only relocates the main launcher."""
+    repository = _REPO.resolve().as_uri()
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=_REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setattr(alternate_tool, "REPOSITORY_URL", repository)
+    numbered = alternate_tool.identity("numbered", "2", home=tmp_path)
+    numbered.manager_root.parent.mkdir(mode=0o700, parents=True)
+    stage = Path(tempfile.mkdtemp(prefix=".2.bootstrap-", dir=numbered.manager_root.parent))
+    stage_tool = stage / "tool"
+    stage_bin = stage / "bin"
+    environment = _isolated_process_env(tmp_path / "bootstrap-home")
+    environment.update({"UV_TOOL_DIR": str(stage_tool), "UV_TOOL_BIN_DIR": str(stage_bin)})
+    try:
+        subprocess.run(
+            [
+                "uv",
+                "tool",
+                "install",
+                f"odoo-instance-sdk @ git+{repository}@{sha}",
+            ],
+            cwd=_REPO,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        staged_executable = stage_bin / "odcli"
+        staged_interpreter = alternate_tool._interpreter(staged_executable)
+        alternate_tool._materialize_staged_executable(staged_executable, stage_tool)
+        relative_interpreter = staged_interpreter.absolute().relative_to(stage_tool.absolute())
+        lines = staged_executable.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines[0] = f"#!{numbered.tool_root / relative_interpreter}\n"
+        staged_executable.write_text("".join(lines), encoding="utf-8")
+        numbered.manager_root.mkdir(mode=0o700, parents=True)
+        os.replace(stage_tool, numbered.tool_root)
+        os.replace(stage_bin, numbered.tool_bin)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+
+    package_askpass = numbered.tool_root / "odoo-instance-sdk" / "bin" / "odcli-git-askpass"
+    assert package_askpass.is_file()
+    assert not package_askpass.is_symlink()
+    assert ".2.bootstrap-" in package_askpass.read_text(encoding="utf-8")
+    assert (numbered.tool_bin / "odcli-git-askpass").is_symlink()
+    version = subprocess.run(
+        [str(numbered.executable), "--version"],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert version.stdout.startswith("odcli, version ")
+    assert package_askpass.is_file()
+    assert not package_askpass.is_symlink()
+    askpass_lines = package_askpass.read_text(encoding="utf-8").splitlines()
+    assert askpass_lines and Path(askpass_lines[0][2:]).is_file()
+    assert ".2.bootstrap-" not in "\n".join(askpass_lines[:2])
+
+    credential = GitLabCredentialContext(
+        GitLabCredentialIdentity(
+            user_id="22222222-2222-4222-8222-222222222222",
+            host="gitlab.example",
+            login="bootstrap-user",
+            token_key="ODCLI_GITLAB_TOKEN_BOOTSTRAP",
+        ),
+        "bootstrap-token",
+    )
+    channel = Path(write_askpass_channel(credential))
+    try:
+        result = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=gitlab.example\n\n",
+            cwd=tmp_path,
+            env=environment
+            | dict(credential.askpass_environment(str(package_askpass), channel_path=str(channel)))
+            | {"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1"},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "username=bootstrap-user\n" in result.stdout
+        assert "password=bootstrap-token\n" in result.stdout
+        safe = redacted_projection(result.stdout, secrets=("bootstrap-token",), field="stdout")
+        assert isinstance(safe, str)
+        assert "bootstrap-token" not in safe
+    finally:
+        cleanup_askpass_channel(str(channel))
+    assert not channel.exists()
 
 
 def test_isolated_wheel_imports_rich_toon_and_runs_toon_env_list(tmp_path: Path) -> None:
