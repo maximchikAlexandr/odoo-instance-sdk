@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -765,7 +767,7 @@ def remove_remote_source(
     return remove_remote_source_command(project, name).run()
 
 
-def prepare_venv_command(
+def prepare_venv_command(  # noqa: C901
     project: ProjectConfig | str | Path,
     *,
     python: str | Path,
@@ -791,6 +793,7 @@ def prepare_venv_command(
     interpreter = _owned_python_executable(venv_path)
     inputs = discover_dependency_inputs(baseline, root, root)
     lock_path = root / ".odcli" / "requirements.lock"
+    staged_lock_path = lock_path.with_name(f"{lock_path.name}.prepare")
     create_venv = not Path(interpreter).is_file()
     steps: list[PreparedStep | PreparedAction] = []
     if create_venv:
@@ -803,6 +806,19 @@ def prepare_venv_command(
                 mutating=True,
             )
         )
+    steps.append(
+        PreparedStep(
+            step_id="prepare-venv.validate",
+            argv=(
+                interpreter,
+                "-c",
+                "import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)",
+            ),
+            cwd=str(root),
+            mode="captured",
+            read_only=True,
+        )
+    )
     if inputs:
         steps.extend(
             (
@@ -816,7 +832,7 @@ def prepare_venv_command(
                         interpreter,
                         *inputs,
                         "-o",
-                        str(lock_path),
+                        str(staged_lock_path),
                     ),
                     cwd=str(root),
                     mode="captured",
@@ -824,13 +840,23 @@ def prepare_venv_command(
                 ),
                 PreparedStep(
                     step_id="prepare-venv.dependencies.install",
-                    argv=("uv", "pip", "sync", "--python", interpreter, str(lock_path)),
+                    argv=("uv", "pip", "sync", "--python", interpreter, str(staged_lock_path)),
                     cwd=str(root),
                     mode="captured",
                     mutating=True,
                 ),
             )
         )
+        lock_action = PreparedAction(
+            step_id="prepare-venv.dependencies.lock",
+            action="publish-primary-dependency-lock",
+            description="Publish the prepared dependency lock",
+            details={"path": str(lock_path)},
+            mutating=True,
+        )
+        steps.append(lock_action)
+    else:
+        lock_action = None
     manifest_action = PreparedAction(
         step_id="prepare-venv.manifest",
         action="persist-primary-interpreter",
@@ -850,30 +876,51 @@ def prepare_venv_command(
 
     def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:
         lock_id = hashlib.sha256(str(root).encode()).hexdigest()
-        with exclusive_lock(project_manifest_lock_path(lock_id)):
-            current = ProjectConfig.load(root)
-            if current.to_manifest() != baseline.to_manifest():
-                raise ConfigError("project manifest changed before primary venv preparation")
-            from odoo_instance_sdk.internal.locks import python_env_lock_path
+        try:
+            with exclusive_lock(project_manifest_lock_path(lock_id)):
+                current = ProjectConfig.load(root)
+                if current.to_manifest() != baseline.to_manifest():
+                    raise ConfigError("project manifest changed before primary venv preparation")
+                from odoo_instance_sdk.internal.locks import python_env_lock_path
 
-            with exclusive_lock(python_env_lock_path(str(venv_path))):
-                for step in prepared_steps:
-                    if isinstance(step, PreparedAction):
-                        continue
-                    result = cast("ProcessResult", context.process(step.step_id))
-                    if result.returncode != 0:
-                        stderr = (
-                            result.stderr.decode(errors="replace")
-                            if isinstance(result.stderr, bytes)
-                            else result.stderr
-                        )
-                        raise ConfigError(
-                            f"{step.step_id} failed: {(stderr or '').strip()}".strip()
-                        )
-                context.action(manifest_action.step_id)
-                updated = msgspec.structs.replace(current, python=interpreter)
-                write_manifest(root, updated)
-                context.complete_action(manifest_action.step_id)
+                with exclusive_lock(python_env_lock_path(str(venv_path))):
+                    with contextlib.suppress(OSError):
+                        staged_lock_path.unlink()
+                    for step in prepared_steps:
+                        if isinstance(step, PreparedAction):
+                            continue
+                        try:
+                            result = cast("ProcessResult", context.process(step.step_id))
+                        except Exception as error:
+                            if step.step_id == "prepare-venv.validate":
+                                raise ConfigError(
+                                    "prepare-venv.validate failed: valid virtual environment required"
+                                ) from error
+                            raise
+                        if result.returncode != 0:
+                            stderr = (
+                                result.stderr.decode(errors="replace")
+                                if isinstance(result.stderr, bytes)
+                                else result.stderr
+                            )
+                            detail = (stderr or "").strip()
+                            if step.step_id == "prepare-venv.validate":
+                                raise ConfigError(
+                                    "prepare-venv.validate failed: valid virtual environment required"
+                                )
+                            raise ConfigError(f"{step.step_id} failed: {detail}".strip())
+                    if lock_action is not None:
+                        context.action(lock_action.step_id)
+                        os.replace(staged_lock_path, lock_path)
+                        context.complete_action(lock_action.step_id)
+                    context.action(manifest_action.step_id)
+                    updated = msgspec.structs.replace(current, python=interpreter)
+                    write_manifest(root, updated)
+                    context.complete_action(manifest_action.step_id)
+        finally:
+            if lock_action is not None:
+                with contextlib.suppress(OSError):
+                    staged_lock_path.unlink()
         return {
             "python": str(python),
             "venv": str(venv_path),

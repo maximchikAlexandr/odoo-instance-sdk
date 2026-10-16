@@ -1443,16 +1443,16 @@ def _patch_leaf_external(  # noqa: C901
     if path == ("init",):
         return
     if path == ("prepare-venv",):
-        project = tmp_path
-        (project / ".odcli").mkdir(parents=True, exist_ok=True)
-        (project / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
+        project_path = tmp_path
+        (project_path / ".odcli").mkdir(parents=True, exist_ok=True)
+        (project_path / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
         if failing:
             monkeypatch.setattr(
                 "odoo_instance_sdk.commands.prepare_venv.prepare_venv_command", fail_operation
             )
         return
     if path == ("doctor",):
-        project = ProjectConfig(
+        project_cfg = ProjectConfig(
             repository_root=tmp_path,
             python=sys.executable,
             odoo_bin=Path(sys.executable),
@@ -1461,7 +1461,7 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.cli.cli_context._ready_instance_for_doctor",
             lambda _ctx: ResolvedContext(
                 client=cast("Any", MagicMock()),
-                source=project,
+                source=project_cfg,
                 instance=cast("Any", MagicMock()),
                 provenance="explicit",
             ),
@@ -1557,7 +1557,7 @@ def _patch_leaf_external(  # noqa: C901
 
         manifest_dir = tmp_path / ".odcli"
         manifest_dir.mkdir(exist_ok=True)
-        project = ProjectConfig(
+        project_cfg = ProjectConfig(
             repository_root=tmp_path,
             python=sys.executable,
             odoo_bin=Path(sys.executable),
@@ -1570,7 +1570,7 @@ def _patch_leaf_external(  # noqa: C901
                 ),
             ),
         )
-        (manifest_dir / "project.toml").write_text(project.to_manifest(), encoding="utf-8")
+        (manifest_dir / "project.toml").write_text(project_cfg.to_manifest(), encoding="utf-8")
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.remote.resolve_project_path", lambda _ctx: tmp_path
         )
@@ -1647,12 +1647,12 @@ def _patch_leaf_external(  # noqa: C901
 
         manifest_dir = tmp_path / ".odcli"
         manifest_dir.mkdir(exist_ok=True)
-        project = ProjectConfig(
+        project_cfg = ProjectConfig(
             repository_root=tmp_path,
             python=sys.executable,
             odoo_bin=Path(sys.executable),
         )
-        (manifest_dir / "project.toml").write_text(project.to_manifest(), encoding="utf-8")
+        (manifest_dir / "project.toml").write_text(project_cfg.to_manifest(), encoding="utf-8")
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.backup.resolve_project_path", lambda _ctx: tmp_path
         )
