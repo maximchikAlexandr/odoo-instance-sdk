@@ -1,5 +1,3 @@
-"""Concrete, tracker-neutral Git workflow operations."""
-
 from __future__ import annotations
 
 import contextlib
@@ -19,7 +17,9 @@ from odoo_instance_sdk.exceptions import (
     GitWorkflowError,
     PlanValidationError,
 )
+from odoo_instance_sdk.internal import git_repository
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
+from odoo_instance_sdk.internal.git_frontier import RuntimeEnvironmentFactory
 from odoo_instance_sdk.internal.git_policy import (
     check_log as _check_log,
     module_scope as _module_scope,
@@ -33,9 +33,12 @@ from odoo_instance_sdk.models import (
     GitCheckIssue,
     GitCheckResult,
     GitCommitContext,
+    GitRepositorySnapshot,
     GitSyncResult,
 )
 from odoo_instance_sdk.project import ProjectConfig, effective_ticket_settings
+from odoo_instance_sdk.resources.git_generic import GenericGitMixin
+from odoo_instance_sdk.resources.gitlab_mr import GitLabMergeRequestMixin
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
@@ -61,6 +64,7 @@ class _StepOptions(TypedDict):
     environment: Mapping[str, str] | None
     secret_values: Sequence[str]
     hooks_path: str | None
+    runtime_environment: RuntimeEnvironmentFactory | None
 
 
 def _worktree(instance: OdooInstance) -> Path:
@@ -92,13 +96,14 @@ def _credentialed_args(
     environment: Mapping[str, str] | None,
     hooks_path: str | None = None,
 ) -> tuple[str, ...]:
-    native_args = tuple(args)
     controls: list[str] = []
-    if environment is not None and environment.get("ODCLI_GITLAB_TOKEN_FILE"):
+    if hooks_path is not None or (
+        environment is not None and environment.get("ODCLI_GITLAB_TOKEN_FILE")
+    ):
         controls.extend(("-c", "credential.helper=", "-c", "core.fsmonitor=false"))
     if hooks_path is not None:
         controls.extend(("-c", f"core.hooksPath={hooks_path}"))
-    return (*controls, *native_args)
+    return (*controls, *tuple(args))
 
 
 def _command_result(value: ProcessResult, step: PreparedStep) -> CommandResult:
@@ -127,6 +132,8 @@ def _step(
     environment: Mapping[str, str] | None = None,
     secret_values: Sequence[str] = (),
     hooks_path: str | None = None,
+    runtime_environment: RuntimeEnvironmentFactory | None = None,
+    private_stdout_consumer: Callable[[str | bytes | None], None] | None = None,
 ) -> PreparedStep:
     from odoo_instance_sdk.internal.proc import PreparedStep
 
@@ -141,6 +148,8 @@ def _step(
         secret_config_path=(environment or {}).get("ODCLI_GITLAB_TOKEN_FILE"),
         secret_values=tuple(secret_values),
         environment_policy=("explicit" if secret_values else "sanitized-inherit"),
+        runtime_environment_factory=runtime_environment,
+        private_stdout_consumer=private_stdout_consumer,
     )
 
 
@@ -172,7 +181,6 @@ def _planning_observation(scope: str, steps: Sequence[PreparedStep]) -> JsonValu
 
 
 def _capture_probe(step: PreparedStep, *, allow_failure: bool = False) -> ProcessResult:
-    """Capture a read-only planning probe; the same step is retained in the plan."""
     from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
     result = SubprocessExecutor().execute(step)
@@ -182,7 +190,6 @@ def _capture_probe(step: PreparedStep, *, allow_failure: bool = False) -> Proces
 
 
 def _remote_head(value: str) -> str | None:
-    """Decode the exact branch head returned by ``git ls-remote``."""
     for line in value.splitlines():
         sha, separator, ref = line.strip().partition("\t")
         if separator and ref.startswith("refs/heads/") and re.fullmatch(r"[0-9a-fA-F]{40}", sha):
@@ -244,7 +251,6 @@ def _commit_context_from_results(
         first += resolved_ticket + " "
     message = first + description
     if link is not None:
-        # A bare URL is parsed as an `https:` trailer by git interpret-trailers.
         message += "\n\n<" + link + ">"
     return GitCommitContext(
         module=module,
@@ -338,17 +344,7 @@ def _project_settings(root: Path) -> TicketLinkSettings | None:
     return effective_ticket_settings(project)
 
 
-def _resolved_ticket_settings(
-    instance: OdooInstance, worktree_root: Path
-) -> TicketLinkSettings | None:
-    """Resolve ticket settings from the selected project manifest root.
-
-    The environment worktree is a Git artifact, not a project manifest source.
-    Prefer the already-resolved runtime binding's ``repository_root`` (the
-    selected project manifest root) so a worktree without its own
-    ``.odcli/project.toml`` still applies the configured ticket link. Fall
-    back to the worktree root only for manual instances without a binding.
-    """
+def _resolved_ticket_settings(instance: OdooInstance, worktree_root: Path) -> TicketLinkSettings | None:  # fmt: skip
     binding = getattr(instance, "_runtime_binding", None)
     project_root = getattr(binding, "repository_root", None)
     if project_root is not None:
@@ -389,7 +385,6 @@ def _base_ref(instance: OdooInstance, requested: str | None) -> str:  # noqa: C9
 
 
 def _verified_base_ref(root: Path, candidate: str) -> str:
-    """Resolve a configured base before interpolating it into Git revisions."""
     if candidate.startswith("-"):
         raise GitCheckFailedError("Git base ref must not start with '-'")
     probe = _step(
@@ -404,9 +399,7 @@ def _verified_base_ref(root: Path, candidate: str) -> str:
     return values[0]
 
 
-class GitResource:
-    """One concrete Git resource bound to an :class:`OdooInstance`."""
-
+class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
     def __init__(self, instance: OdooInstance) -> None:
         self._instance = instance
 
@@ -418,7 +411,6 @@ class GitResource:
         secret_values: Sequence[str] = (),
         hooks_path: str | None = None,
     ) -> Command[CommandResult]:
-        """Capture one native Git invocation without interpreting its arguments."""
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
 
@@ -458,16 +450,13 @@ class GitResource:
         environment: Mapping[str, str] | None = None,
         secret_values: Sequence[str] = (),
     ) -> CommandResult:
-        """Run one native Git argument vector and return its native exit code."""
         return self.passthrough_command(
             args,
             environment=environment,
             secret_values=secret_values,
         ).run()
 
-    def commit_context_command(
-        self, description: str, *, ticket: str | None = None, tag: str | None = None
-    ) -> Command[GitCommitContext]:
+    def commit_context_command(self, description: str, *, ticket: str | None = None, tag: str | None = None) -> Command[GitCommitContext]:  # fmt: skip
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
@@ -514,14 +503,38 @@ class GitResource:
     ) -> GitCommitContext:
         return self.commit_context_command(description, ticket=ticket, tag=tag).run()
 
-    def commit_command(
+    def commit_command(  # noqa: C901
         self,
         context: GitCommitContext | None = None,
         *,
         description: str | None = None,
         ticket: str | None = None,
         tag: str | None = None,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
     ) -> Command[CommandResult]:
+        identity_environment: Mapping[str, str] | None = None
+        if repository is not None or member_id is not None:
+            if repository is None or member_id is None:
+                raise PlanValidationError("generic commit requires repository and member_id")
+            if context is not None or description is None:
+                raise PlanValidationError(
+                    "generic commit does not accept an Odoo commit context"
+                    if context is not None
+                    else "commit description is required"
+                )
+            from odoo_instance_sdk.internal.git_repository import resolve_repository
+
+            if not (snapshot := resolve_repository(repository)).initialized_odoo:
+                generic = self.generic_commit_command(
+                    description, repository=repository, member_id=member_id, ticket=ticket
+                )
+                return cast("Command[CommandResult]", generic)
+            if snapshot.canonical_root != str(_worktree(self._instance)):
+                raise GitWorkflowError("initialized Odoo root is not the bound Git worktree")
+            from odoo_instance_sdk.internal.git_explicit import explicit_commit_environment
+
+            identity_environment = explicit_commit_environment(member_id, snapshot.host)
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
 
@@ -552,7 +565,7 @@ class GitResource:
             root, "git.commit.verify-staged", ("diff", "--cached", "--name-status", "-z")
         )
         verify_tree = _step(root, "git.commit.verify-index-tree", ("write-tree",))
-        commit_step = _step(root, "git.commit", ("commit", "-m", context.message), mutating=True)
+        commit_step = _step(root, "git.commit", ("commit", "-m", context.message), environment=identity_environment, mutating=True)  # fmt: skip
         all_steps = (
             *capture_steps,
             verify,
@@ -623,9 +636,21 @@ class GitResource:
         )
 
     def commit(
-        self, description: str, *, ticket: str | None = None, tag: str | None = None
+        self,
+        description: str,
+        *,
+        ticket: str | None = None,
+        tag: str | None = None,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
     ) -> CommandResult:
-        return self.commit_command(description=description, ticket=ticket, tag=tag).run()
+        return self.commit_command(
+            description=description,
+            ticket=ticket,
+            tag=tag,
+            repository=repository,
+            member_id=member_id,
+        ).run()
 
     def check_command(self, *, base: str | None = None) -> Command[GitCheckResult]:
         from odoo_instance_sdk.execution import Command
@@ -749,21 +774,29 @@ class GitResource:
         *,
         base: str | None = None,
         push: bool = False,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
         environment: Mapping[str, str] | None = None,
         secret_values: Sequence[str] = (),
         remote_allowed: Callable[[str], bool] | None = None,
         hooks_path: str | None = None,
+        runtime_environment: RuntimeEnvironmentFactory | None = None,
+        repository_snapshot: GitRepositorySnapshot | None = None,
     ) -> Command[GitSyncResult]:
+        from odoo_instance_sdk.internal.git_sync import AuthoritativeProbeCapture
+
+        if repository is not None or member_id is not None:
+            if repository is None or member_id is None or base is None:
+                raise PlanValidationError("generic sync requires repository, member_id, and base")
+            from odoo_instance_sdk.internal.git_explicit import explicit_sync_command
+
+            return explicit_sync_command(repository, member_id, base, push, bound_root=_worktree(self._instance), odoo_command=self.sync_command, generic_command=self.generic_sync_command)  # fmt: skip
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
         root = _worktree(self._instance)
         resolved = _base_ref(self._instance, base)
-        step_options: _StepOptions = {
-            "environment": environment,
-            "secret_values": secret_values,
-            "hooks_path": hooks_path,
-        }
+        step_options: _StepOptions = {"environment": environment, "secret_values": secret_values, "hooks_path": hooks_path, "runtime_environment": runtime_environment}  # fmt: skip
         status = _step(root, "git.sync.status", ("status", "--porcelain=v1"), **step_options)
         branch = _step(
             root,
@@ -784,11 +817,13 @@ class GitResource:
         remote = _step(root, "git.sync.remote", ("remote", "get-url", "origin"), **step_options)
         remote_probe = _capture_probe(remote, allow_failure=True)
         planned_remote_url = _text(remote_probe.stdout).strip()
+        authoritative_capture = AuthoritativeProbeCapture()
         authoritative = _step(
             root,
             "git.sync.authoritative-remote-sha",
             ("ls-remote", "--heads", "origin", f"refs/heads/{actual_branch}"),
             **step_options,
+            private_stdout_consumer=authoritative_capture.capture,
         )
         remote_policy = remote_allowed or _ssh_remote
         authoritative_planned = remote_probe.returncode == 0 and not (
@@ -798,7 +833,7 @@ class GitResource:
             planned_remote_sha = None
         else:
             authoritative_probe = _capture_probe(authoritative, allow_failure=True)
-            planned_remote_sha = _remote_head(_text(authoritative_probe.stdout))
+            planned_remote_sha = authoritative_capture.planned_sha(authoritative_probe)
         fetch = _step(
             root,
             "git.sync.fetch",
@@ -905,6 +940,9 @@ class GitResource:
 
         def callback(context: RunContext[GitSyncResult]) -> GitSyncResult:
             try:
+                if repository_snapshot is not None:
+                    git_repository.revalidate_repository(repository_snapshot, expected_push_origin=repository_snapshot.origin if push else None)  # fmt: skip
+                    git_repository.validate_credentialed_transport_configuration(root)
                 return execute_sync(
                     context,
                     sync_steps,
@@ -938,6 +976,8 @@ class GitResource:
         *,
         base: str | None = None,
         push: bool = False,
+        repository: Path | str | None = None,
+        member_id: str | None = None,
         environment: Mapping[str, str] | None = None,
         secret_values: Sequence[str] = (),
         remote_allowed: Callable[[str], bool] | None = None,
@@ -946,6 +986,8 @@ class GitResource:
         return self.sync_command(
             base=base,
             push=push,
+            repository=repository,
+            member_id=member_id,
             environment=environment,
             secret_values=secret_values,
             remote_allowed=remote_allowed,
@@ -955,13 +997,3 @@ class GitResource:
 
 def _ssh_remote(value: str) -> bool:
     return value.startswith(("git@", "ssh://"))
-
-
-__all__ = [
-    "GitAbsorbResult",
-    "GitCheckIssue",
-    "GitCheckResult",
-    "GitCommitContext",
-    "GitResource",
-    "GitSyncResult",
-]

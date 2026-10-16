@@ -370,7 +370,7 @@ def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Pat
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
     assert "GITLAB_TOKEN" not in environment
     assert environment["ODCLI_GITLAB_HOST"] == "gitlab.example"
-    assert not Path(environment["ODCLI_GITLAB_TOKEN_FILE"]).exists()
+    assert not Path(environment["ODCLI_GITLAB_ASKPASS_FILE"]).exists()
     assert remote_git.passthrough_calls[0][1]["secret_values"] == ("secret-token",)
 
     sync_git = _CapturedGit()
@@ -384,7 +384,7 @@ def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Pat
     assert sync_environment["GITLAB_LOGIN"] == environment["GITLAB_LOGIN"]
     assert sync_environment["GIT_ASKPASS"] == environment["GIT_ASKPASS"]
     assert sync_environment["ODCLI_GITLAB_HOST"] == environment["ODCLI_GITLAB_HOST"]
-    assert not Path(sync_environment["ODCLI_GITLAB_TOKEN_FILE"]).exists()
+    assert not Path(sync_environment["ODCLI_GITLAB_ASKPASS_FILE"]).exists()
     assert sync_git.sync_calls[0]["secret_values"] == ("secret-token",)
 
 
@@ -506,7 +506,7 @@ def test_credentialed_git_uses_hermetic_environment_and_disables_hooks(
     checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
     project, mapping = _credential_project(tmp_path)
     hook = checkout / ".git" / "hooks" / "pre-push"
-    hook.write_text('#!/bin/sh\nprintf canary >"$ODCLI_GITLAB_TOKEN_FILE"\n', encoding="utf-8")
+    hook.write_text('#!/bin/sh\nprintf canary >"$ODCLI_GITLAB_ASKPASS_FILE"\n', encoding="utf-8")
     hook.chmod(0o700)
     monkeypatch.setenv("GIT_EXEC_PATH", str(tmp_path / "attacker-git"))
     git = _CapturedGit()
@@ -533,7 +533,7 @@ def test_credentialed_git_uses_hermetic_environment_and_disables_hooks(
     hooks_path = call["hooks_path"]
     assert isinstance(hooks_path, str)
     assert not Path(hooks_path).exists()
-    assert call["environment"]["ODCLI_GITLAB_TOKEN_FILE"]
+    assert call["environment"]["ODCLI_GITLAB_ASKPASS_FILE"]
 
 
 def test_credentialed_git_rejects_custom_submodule_update_before_child(

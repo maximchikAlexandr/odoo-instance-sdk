@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import stat
 import subprocess
 import sys
-import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
@@ -22,7 +19,9 @@ from odcli_multica.models import (
     RootCreatorContext,
     VerifiedTaskContext,
 )
-from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal.gitlab_credentials import (
+    read_gitlab_credential_mappings as _read_core_gitlab_credential_mappings,
+)
 from odoo_instance_sdk.internal.proc import ProcessResult, SubprocessExecutor, prepared_step
 
 if TYPE_CHECKING:
@@ -225,86 +224,16 @@ def default_mapping_path(project_root: Path) -> Path:
 
 
 def read_gitlab_credential_mappings(path: Path | str) -> tuple[GitLabCredentialMapping, ...]:
-    path = Path(path)
     try:
-        metadata = path.stat()
-    except OSError as exc:
-        raise ContextVerificationError("GitLab credential mapping is unavailable") from exc
-    if path.is_symlink() or not path.is_file() or (stat.S_IMODE(metadata.st_mode) & 0o077):
-        raise ContextVerificationError("GitLab credential mapping requires owner-only access")
-    try:
-        text = path.read_text(encoding="utf-8")
-        raw = json.loads(text) if path.suffix.casefold() == ".json" else tomllib.loads(text)
-    except (OSError, UnicodeError) as exc:
-        raise ContextVerificationError("GitLab credential mapping is unavailable") from exc
-    except (ValueError, tomllib.TOMLDecodeError) as exc:
-        raise ContextVerificationError("GitLab credential mapping is malformed") from exc
-    mappings: list[GitLabCredentialMapping] = []
-    seen: set[tuple[str, str]] = set()
-    for entry in mapping_entries(raw):
-        if not isinstance(entry, Mapping):
-            raise ContextVerificationError("GitLab credential mapping is malformed")
-        try:
-            user_id = mapping_text(entry, "user_id")
-            host = gitlab_host(mapping_text(entry, "host"))
-            login = mapping_text(entry, "login")
-            token_key = mapping_text(entry, "token_key")
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ContextVerificationError("GitLab credential mapping is malformed") from exc
-        if not re.fullmatch(r"ODCLI_GITLAB_TOKEN_[A-Za-z0-9_]+", token_key):
-            raise ContextVerificationError("GitLab credential token key is malformed")
-        if (user_id, host) in seen:
-            raise ContextVerificationError("GitLab credential mapping is ambiguous")
-        seen.add((user_id, host))
-        mappings.append(
-            GitLabCredentialMapping(user_id=user_id, host=host, login=login, token_key=token_key)
+        return _read_core_gitlab_credential_mappings(
+            path,
+            require_owner_only_directory=False,
+            validate_member_ids=False,
         )
-    return tuple(mappings)
-
-
-def mapping_entries(raw: JsonValue) -> tuple[JsonValue, ...]:
-    if isinstance(raw, list):
-        return tuple(raw)
-    if not isinstance(raw, Mapping):
-        raise ContextVerificationError("GitLab credential mapping is malformed")
-    named = named_mapping_entries(raw)
-    if named is not None:
-        return named
-    users = raw.get("users")
-    if isinstance(users, Mapping):
-        return user_mapping_entries(users)
-    if {"user_id", "host", "login", "token_key"}.issubset(raw):
-        return (raw,)
-    raise ContextVerificationError("GitLab credential mapping is malformed")
-
-
-def named_mapping_entries(raw: Mapping[str, JsonValue]) -> tuple[JsonValue, ...] | None:
-    for key in ("mappings", "credentials", "credential", "gitlab"):
-        value = raw.get(key)
-        if isinstance(value, list):
-            return tuple(value)
-        if isinstance(value, Mapping):
-            return (value,)
-    return None
-
-
-def user_mapping_entries(users: Mapping[str, JsonValue]) -> tuple[JsonValue, ...]:
-    values: list[dict[str, JsonValue]] = []
-    for user_id, hosts in users.items():
-        if not isinstance(hosts, Mapping):
-            raise ContextVerificationError("GitLab credential mapping is malformed")
-        for host, details in hosts.items():
-            if not isinstance(details, Mapping):
-                raise ContextVerificationError("GitLab credential mapping is malformed")
-            values.append({"user_id": user_id, "host": host, **details})
-    return tuple(values)
-
-
-def mapping_text(entry: Mapping[str, JsonValue], key: str) -> str:
-    value = entry[key]
-    if not isinstance(value, str) or not value.strip() or any(char in value for char in "\r\n"):
-        raise ValueError(key)
-    return value.strip()
+    except Exception as exc:
+        if isinstance(exc, ContextVerificationError):
+            raise
+        raise ContextVerificationError(str(exc)) from exc
 
 
 def gitlab_host(value: str) -> str:

@@ -808,6 +808,23 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="upstream Git workflow is outside the disposable Odoo fixture",
     ),
     PublicLeafCase(
+        ("git", "clone"),
+        (
+            "git",
+            "clone",
+            "https://gitlab.example/team/repo",
+            "./repo",
+            "--member-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="GitResource.clone_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="authenticated GitLab clone is covered by generic Git contract tests and private E2E",
+    ),
+    PublicLeafCase(
         ("git", "check"),
         ("git", "check"),
         classification="bounded-read-only",
@@ -833,6 +850,30 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         sdk_primitive="GitResource.sync_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream remote Git publication is intentionally outside E2E",
+    ),
+    PublicLeafCase(
+        ("git", "mr", "create"),
+        (
+            "git",
+            "mr",
+            "create",
+            "--repo",
+            "./repo",
+            "--member-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--target",
+            "main",
+            "--title",
+            "Add feature",
+            "--description-file",
+            "description.md",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="GitResource.merge_request_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="GitLab merge-request publication is covered by focused transport tests and private E2E",
     ),
     PublicLeafCase(
         ("ps",),
@@ -1865,11 +1906,21 @@ def _patch_leaf_external(  # noqa: C901
         resource = MagicMock()
         if failing:
             resource.commit_command.side_effect = fail_operation
+            resource.generic_commit_command.side_effect = fail_operation
+            resource.clone_command.side_effect = fail_operation
             resource.absorb_command.side_effect = fail_operation
             resource.sync_command.side_effect = fail_operation
+            resource.generic_sync_command.side_effect = fail_operation
+            resource.merge_request_command.side_effect = fail_operation
         else:
             resource.commit_command.return_value = _matrix_command(
                 _command_result(0, {"result": {"status": "committed"}})
+            )
+            resource.generic_commit_command.return_value = _matrix_command(
+                _command_result(0, {"result": {"status": "committed"}})
+            )
+            resource.clone_command.return_value = _matrix_command(
+                _command_result(0, {"result": {"status": "cloned"}})
             )
         resource.check_command.return_value = _matrix_command(
             __import__("odoo_instance_sdk.models", fromlist=["GitCheckResult"]).GitCheckResult(
@@ -1883,7 +1934,16 @@ def _patch_leaf_external(  # noqa: C901
         resource.sync_command.return_value = _matrix_command(
             _command_result(0, {"result": {"status": "synced"}})
         )
+        resource.generic_sync_command.return_value = _matrix_command(
+            _command_result(0, {"result": {"status": "synced"}})
+        )
+        resource.merge_request_command.return_value = _matrix_command(
+            _command_result(0, {"result": {"status": "published"}})
+        )
         monkeypatch.setattr("odoo_instance_sdk.commands.git._resource", lambda _ctx: resource)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.git._generic_resource", lambda *_args: resource
+        )
         return
 
     if (

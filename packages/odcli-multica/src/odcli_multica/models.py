@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-import os
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from types import MappingProxyType
 from typing import Literal
 
 import msgspec
+
+from odoo_instance_sdk.models import (
+    GitLabCredentialContext as _CoreGitLabCredentialContext,
+    GitLabCredentialIdentity as _CoreGitLabCredentialIdentity,
+    GitLabCredentialMapping as _CoreGitLabCredentialMapping,
+)
+
+GitLabCredentialContext = _CoreGitLabCredentialContext
+GitLabCredentialIdentity = _CoreGitLabCredentialIdentity
+GitLabCredentialMapping = _CoreGitLabCredentialMapping
 
 MULTICA_PY_VERSION = "0.1.0"
 MULTICA_PY_REVISION = "c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed"
@@ -78,73 +85,6 @@ class RootCreatorContext(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     root_issue_id: str
     root_creator_id: str
     workspace_id: str
-
-
-class GitLabCredentialMapping(
-    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
-):
-    """Non-secret mapping from one Multica user and host to a token key."""
-
-    user_id: str
-    host: str
-    login: str
-    token_key: str
-
-
-class GitLabCredentialIdentity(
-    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
-):
-    """Safe public identity for one resolved host-scoped credential."""
-
-    user_id: str
-    host: str
-    login: str
-    token_key: str
-    workspace_id: str
-    issue_id: str
-    root_issue_id: str
-
-
-@dataclass(frozen=True, slots=True, repr=False)
-class GitLabCredentialContext:
-    """Private per-command credential handle with a secret-free representation."""
-
-    identity: GitLabCredentialIdentity
-    _token: str = field(repr=False, compare=False)
-
-    def __repr__(self) -> str:
-        return f"GitLabCredentialContext(identity={self.identity!r})"
-
-    @property
-    def user_id(self) -> str:
-        return self.identity.user_id
-
-    @property
-    def host(self) -> str:
-        return self.identity.host
-
-    @property
-    def login(self) -> str:
-        return self.identity.login
-
-    def child_environment(self) -> Mapping[str, str]:
-        """Return an immutable private child snapshot; never include it in output."""
-        return MappingProxyType({"GITLAB_LOGIN": self.login, "GITLAB_TOKEN": self._token})
-
-    def askpass_environment(self, askpass: str, *, channel_path: str) -> Mapping[str, str]:
-        """Return a secret-free main-process environment for the host-bound helper."""
-        return MappingProxyType(
-            {
-                "GITLAB_LOGIN": self.login,
-                "GIT_ASKPASS": askpass,
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_SYSTEM": os.devnull,
-                "ODCLI_GITLAB_HOST": self.host,
-                "ODCLI_GITLAB_TOKEN_FILE": channel_path,
-            }
-        )
 
 
 class ContextVerificationError(ValueError):
