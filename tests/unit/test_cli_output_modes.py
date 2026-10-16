@@ -202,6 +202,26 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         failure_args=("init", "--no-input"),
     ),
     PublicLeafCase(
+        ("prepare-venv",),
+        (
+            "prepare-venv",
+            "--python",
+            sys.executable,
+            "--venv",
+            ".venv",
+            "--dry-run",
+            "--project",
+        ),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="prepare_venv_command",
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-12",),
+        e2e_rationale="primary project venv creation and refresh",
+        success_path_argument=True,
+        failure_args=("prepare-venv", "--python", sys.executable, "--venv", ".venv", "--dry-run"),
+    ),
+    PublicLeafCase(
         ("doctor",),
         ("doctor",),
         classification="bounded-read-only",
@@ -1422,6 +1442,15 @@ def _patch_leaf_external(  # noqa: C901
     path = case.path
     if path == ("init",):
         return
+    if path == ("prepare-venv",):
+        project = tmp_path
+        (project / ".odcli").mkdir(parents=True, exist_ok=True)
+        (project / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
+        if failing:
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.prepare_venv.prepare_venv_command", fail_operation
+            )
+        return
     if path == ("doctor",):
         project = ProjectConfig(
             repository_root=tmp_path,
@@ -2517,6 +2546,8 @@ def test_ps_formats_execute_one_captured_process_inventory(
 
 def _rich_case_args(case: PublicLeafCase, tmp_path: Path) -> list[str]:
     args = list(case.args)
+    if case.path == ("prepare-venv",):
+        args.append(str(tmp_path))
     if case.path in (("backup", "ls"), ("resource", "ls")):
         args.append("--all-projects")
     if case.path == ("init",):

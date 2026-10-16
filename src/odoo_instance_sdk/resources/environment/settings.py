@@ -67,11 +67,10 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     EnvironmentState,
     T,
     _CheckoutPlan,
-    _find_odoo_requirements,
     _load_project,
     _PgAdminCommandInputs,
     _process_stderr,
-    _rebase_requirement_paths,
+    discover_dependency_inputs,
 )
 from odoo_instance_sdk.resources.environment.inventory import _CheckoutInventoryMixin
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
@@ -534,10 +533,7 @@ class _SettingsMixin(_CheckoutInventoryMixin):
                 raise ConfigError("upgrade cannot be combined with a hash-locked sync")
             inputs: list[str] = []
         else:
-            inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
-            odoo_req = _find_odoo_requirements(worktree)
-            if odoo_req is not None and str(odoo_req) not in inputs:
-                inputs.append(str(odoo_req))
+            inputs = list(discover_dependency_inputs(project, repo_root, worktree))
         steps: list[Step] = []
         if trusted_lock is not None:
             install_argv = build_trusted_sync_argv(

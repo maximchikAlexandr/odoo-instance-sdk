@@ -49,6 +49,35 @@ def test_load_existing_manifest(tmp_path: Path) -> None:
     assert cfg.repository_root == tmp_path.resolve()
 
 
+def test_addon_roots_and_server_modules_roundtrip_in_order(tmp_path: Path) -> None:
+    cfg = ProjectConfig(
+        repository_root=tmp_path,
+        addon_roots=(Path("addons/community"), Path("addons/private"), Path("addons/community")),
+        server_wide_modules=("base", "web", "base"),
+    )
+
+    write_manifest(tmp_path, cfg)
+    loaded = ProjectConfig.load(tmp_path)
+
+    assert loaded.addon_roots == (Path("addons/community"), Path("addons/private"))
+    assert loaded.server_wide_modules == ("base", "web")
+    assert 'addon_roots = ["addons/community", "addons/private"]' in loaded.to_manifest()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"addon_roots": (Path("/tmp/addons"),)},
+        {"addon_roots": (Path("../outside"),)},
+        {"server_wide_modules": ("",)},
+        {"server_wide_modules": ("base,web",)},
+    ],
+)
+def test_new_project_inputs_reject_invalid_values(tmp_path: Path, kwargs: object) -> None:
+    with pytest.raises(ConfigError):
+        ProjectConfig(repository_root=tmp_path, **kwargs)  # type: ignore[arg-type]
+
+
 def test_load_missing_manifest_raises_typed_error(tmp_path: Path) -> None:
     with pytest.raises(ProjectManifestNotFoundError) as exc_info:
         ProjectConfig.load(tmp_path)

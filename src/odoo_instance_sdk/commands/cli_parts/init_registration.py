@@ -76,6 +76,8 @@ class _InitRequest:
     default_source_database: str | None
     preferred_http_port: int | None
     requirements: tuple[str, ...]
+    addon_roots: tuple[str, ...]
+    server_wide_modules: tuple[str, ...]
     run_args: tuple[str, ...]
     runtime_cwd: str | None
     from_vscode: str | None
@@ -106,6 +108,8 @@ def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
         default_source_database=cast("str | None", options["default_source_database"]),
         preferred_http_port=cast("int | None", options["preferred_http_port"]),
         requirements=cast("tuple[str, ...]", options["requirements"]),
+        addon_roots=cast("tuple[str, ...]", options["addon_roots"]),
+        server_wide_modules=cast("tuple[str, ...]", options["server_wide_modules"]),
         run_args=cast("tuple[str, ...]", options["run_args"]),
         runtime_cwd=cast("str | None", options["runtime_cwd"]),
         from_vscode=cast("str | None", options["from_vscode"]),
@@ -225,6 +229,7 @@ def _execute_init(
         test_branch=request.test_branch,
     )
     existing_test_instance = _existing_test_instance(resolved_project)
+    existing_project = _existing_project_config(resolved_project)
     if test_instance_cfg is None and existing_test_instance is not None:
         test_instance_cfg = existing_test_instance
     existing_remote_instances = _existing_remote_instances(resolved_project)
@@ -252,6 +257,16 @@ def _execute_init(
         ),
         preferred_http_port=option_state.preferred_http_port,
         requirements=option_state.requirements,
+        addon_roots=(
+            tuple(Path(value) for value in request.addon_roots)
+            if request.addon_roots
+            else (existing_project.addon_roots if existing_project is not None else ())
+        ),
+        server_wide_modules=(
+            request.server_wide_modules
+            if request.server_wide_modules
+            else (existing_project.server_wide_modules if existing_project is not None else ())
+        ),
         default_run_args=option_state.default_run_args,
         runtime_cwd=option_state.runtime_cwd,
         postgres=postgres_cfg,
@@ -364,6 +379,19 @@ def register_init_command(cli: click.Group) -> None:
         "--http-port", "preferred_http_port", type=int, default=None, help="Preferred HTTP port."
     )
     @click.option("--requirements", "requirements", multiple=True, help="Requirements files.")
+    @click.option(
+        "--addons-root",
+        "addon_roots",
+        type=click.Path(),
+        multiple=True,
+        help="Project-relative addon root; repeat to preserve order.",
+    )
+    @click.option(
+        "--server-wide-module",
+        "server_wide_modules",
+        multiple=True,
+        help="Server-wide module name; repeat to preserve order.",
+    )
     @click.option("--run-arg", "run_args", multiple=True, help="Default run args.")
     @click.option(
         "--runtime-cwd", "runtime_cwd", type=click.Path(), default=None, help="Runtime cwd."
@@ -512,6 +540,16 @@ def _existing_test_instance(project_root: Path) -> TestInstanceProjectConfig | N
     except Exception:
         return None
     return existing_cfg.test_instance
+
+
+def _existing_project_config(project_root: Path) -> ProjectConfig | None:
+    manifest = manifest_path(project_root)
+    if not manifest.is_file():
+        return None
+    try:
+        return ProjectConfig.load(project_root)
+    except Exception:
+        return None
 
 
 def _existing_remote_instances(project_root: Path) -> tuple[RemoteSourceConfig, ...]:

@@ -1,6 +1,7 @@
 from __future__ import annotations  # noqa: I001 -- keep checkout model aliases grouped; remove when Ruff supports grouped aliases.
 
 import re
+import os
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -310,11 +311,108 @@ def _resolve_checkout_dependency_inputs(
 ) -> tuple[str, ...]:
     if hash_lock is not None:
         return ()
-    dependency_paths = list(project_cfg.requirements)
-    odoo_requirements = _find_odoo_requirements(repo_root)
-    if odoo_requirements is not None and str(odoo_requirements) not in dependency_paths:
-        dependency_paths.append(str(odoo_requirements))
-    return tuple(_rebase_requirement_paths(dependency_paths, repo_root, worktree))
+    return discover_dependency_inputs(project_cfg, repo_root, worktree)
+
+
+def _rebase_project_path(path: Path, repo_root: Path, worktree: Path) -> Path:
+    """Rebase a repository-local path from the project checkout to a worktree."""
+    root = repo_root.resolve()
+    candidate = path if path.is_absolute() else root / path
+    resolved = candidate.resolve(strict=False)
+    if resolved.is_relative_to(root):
+        return (worktree / resolved.relative_to(root)).resolve(strict=False)
+    return path
+
+
+def _append_dependency_candidate(
+    output: list[str],
+    seen: set[Path],
+    candidate: Path,
+    *,
+    explicit: bool,
+    source_candidate: Path | None = None,
+) -> None:
+    canonical = candidate.resolve(strict=False)
+    validation_candidate = source_candidate or candidate
+    if explicit and not validation_candidate.is_file():
+        raise ConfigError(
+            f"dependency input is unavailable: explicit input is not a regular file: {candidate}"
+        )
+    if not validation_candidate.is_file():
+        return
+    if canonical in seen:
+        return
+    seen.add(canonical)
+    output.append(str(canonical))
+
+
+def _discover_addon_requirements(root: Path) -> tuple[Path, ...]:
+    """Find module and immediate-parent requirement files in stable walk order."""
+    if not root.is_dir():
+        return ()
+    found: list[Path] = []
+    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        dirs.sort()
+        files.sort()
+        if "__manifest__.py" not in files:
+            continue
+        module = Path(current)
+        found.extend((module / "requirements.txt", module.parent / "requirements.txt"))
+    return tuple(found)
+
+
+def discover_dependency_inputs(
+    project_cfg: ProjectConfig, repo_root: Path, worktree: Path
+) -> tuple[str, ...]:
+    """Return canonical, deterministic dependency files for a project checkout.
+
+    Discovered files are best-effort, while manifest-configured requirement
+    files are explicit inputs and therefore fail closed when unavailable.
+    """
+    output: list[str] = []
+    seen: set[Path] = set()
+    root = repo_root.resolve()
+    checkout = worktree.resolve()
+    scan_root = checkout if checkout.is_dir() else root
+    addon_roots = project_cfg.addon_roots
+    for configured_root in addon_roots:
+        addon_root = _rebase_project_path(configured_root, root, scan_root)
+        for candidate in _discover_addon_requirements(addon_root):
+            rebased = _rebase_project_path(candidate, scan_root, checkout)
+            _append_dependency_candidate(
+                output, seen, rebased, explicit=False, source_candidate=candidate
+            )
+
+    configured_odoo_bin = project_cfg.odoo_bin
+    if configured_odoo_bin is not None:
+        odoo_bin = _rebase_project_path(configured_odoo_bin, root, scan_root)
+        source_candidate = odoo_bin.parent / "requirements.txt"
+        candidate = _rebase_project_path(source_candidate, scan_root, checkout)
+        _append_dependency_candidate(
+            output, seen, candidate, explicit=False, source_candidate=source_candidate
+        )
+    else:
+        for source_candidate in (
+            scan_root / "requirements.txt",
+            scan_root / "odoo" / "requirements.txt",
+        ):
+            candidate = _rebase_project_path(source_candidate, scan_root, checkout)
+            _append_dependency_candidate(
+                output, seen, candidate, explicit=False, source_candidate=source_candidate
+            )
+
+    for configured in project_cfg.requirements:
+        source_candidate = _rebase_project_path(Path(configured), root, root)
+        if not source_candidate.is_file():
+            raise ConfigError(
+                "dependency input is unavailable: explicit input is not a regular file: "
+                f"{source_candidate}"
+            )
+        candidate = _rebase_project_path(source_candidate, root, checkout)
+        _append_dependency_candidate(
+            output, seen, candidate, explicit=False, source_candidate=source_candidate
+        )
+    return tuple(output)
 
 
 def _encode_runtime_json(odoo_bin: str, runtime_cwd: str) -> str:

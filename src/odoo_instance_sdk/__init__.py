@@ -558,6 +558,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "ProjectSummary": ("odoo_instance_sdk.models", "ProjectSummary"),
     "PythonEnvFootprint": ("odoo_instance_sdk.models", "PythonEnvFootprint"),
+    "prepare_venv": ("odoo_instance_sdk.project_init", "prepare_venv"),
+    "prepare_venv_command": ("odoo_instance_sdk.project_init", "prepare_venv_command"),
     "ReadinessResult": ("odoo_instance_sdk.models", "ReadinessResult"),
     "ReadinessTimeoutError": ("odoo_instance_sdk.exceptions", "ReadinessTimeoutError"),
     "RestoreFailedError": ("odoo_instance_sdk.exceptions", "RestoreFailedError"),

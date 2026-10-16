@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 
 import msgspec
 
+from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.project_init import (
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
         PreparedAction,
         PreparedStep,
         PrivateJsonValue,
+        ProcessResult,
         RunContext,
     )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -761,3 +763,136 @@ def remove_remote_source(
     project: ProjectConfig | str | Path, name: str
 ) -> tuple[RemoteSourceConfig, ...]:
     return remove_remote_source_command(project, name).run()
+
+
+def prepare_venv_command(
+    project: ProjectConfig | str | Path,
+    *,
+    python: str | Path,
+    venv: str | Path,
+) -> Command[dict[str, JsonValue]]:
+    """Capture immutable preparation of the initialized project's primary venv."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        SubprocessExecutor,
+        prepared_command,
+    )
+    from odoo_instance_sdk.resources.environment.checkout_artifacts import _owned_python_executable
+    from odoo_instance_sdk.resources.environment.checkout_planning import discover_dependency_inputs
+
+    baseline = project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
+    root = baseline.repository_root.resolve()
+    venv_path = Path(venv)
+    if not venv_path.is_absolute():
+        venv_path = root / venv_path
+    venv_path = venv_path.resolve(strict=False)
+    interpreter = _owned_python_executable(venv_path)
+    inputs = discover_dependency_inputs(baseline, root, root)
+    lock_path = root / ".odcli" / "requirements.lock"
+    create_venv = not Path(interpreter).is_file()
+    steps: list[PreparedStep | PreparedAction] = []
+    if create_venv:
+        steps.append(
+            PreparedStep(
+                step_id="prepare-venv.venv",
+                argv=("uv", "venv", str(venv_path), "--python", str(python)),
+                cwd=str(root),
+                mode="captured",
+                mutating=True,
+            )
+        )
+    if inputs:
+        steps.extend(
+            (
+                PreparedStep(
+                    step_id="prepare-venv.dependencies.compile",
+                    argv=(
+                        "uv",
+                        "pip",
+                        "compile",
+                        "--python",
+                        interpreter,
+                        *inputs,
+                        "-o",
+                        str(lock_path),
+                    ),
+                    cwd=str(root),
+                    mode="captured",
+                    mutating=True,
+                ),
+                PreparedStep(
+                    step_id="prepare-venv.dependencies.install",
+                    argv=("uv", "pip", "sync", "--python", interpreter, str(lock_path)),
+                    cwd=str(root),
+                    mode="captured",
+                    mutating=True,
+                ),
+            )
+        )
+    manifest_action = PreparedAction(
+        step_id="prepare-venv.manifest",
+        action="persist-primary-interpreter",
+        description="Persist the prepared primary venv interpreter",
+        details={
+            "python": str(python),
+            "venv": str(venv_path),
+            "interpreter": interpreter,
+            "dependency_inputs": tuple(inputs),
+            "manifest": str(manifest_path(root)),
+        },
+        mutating=True,
+    )
+    steps.append(manifest_action)
+    prepared_steps = tuple(steps)
+    public_plan = ExecutionPlan(steps=tuple(step.public_projection() for step in prepared_steps))
+
+    def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:
+        lock_id = hashlib.sha256(str(root).encode()).hexdigest()
+        with exclusive_lock(project_manifest_lock_path(lock_id)):
+            current = ProjectConfig.load(root)
+            if current.to_manifest() != baseline.to_manifest():
+                raise ConfigError("project manifest changed before primary venv preparation")
+            from odoo_instance_sdk.internal.locks import python_env_lock_path
+
+            with exclusive_lock(python_env_lock_path(str(venv_path))):
+                for step in prepared_steps:
+                    if isinstance(step, PreparedAction):
+                        continue
+                    result = cast("ProcessResult", context.process(step.step_id))
+                    if result.returncode != 0:
+                        stderr = (
+                            result.stderr.decode(errors="replace")
+                            if isinstance(result.stderr, bytes)
+                            else result.stderr
+                        )
+                        raise ConfigError(
+                            f"{step.step_id} failed: {(stderr or '').strip()}".strip()
+                        )
+                context.action(manifest_action.step_id)
+                updated = msgspec.structs.replace(current, python=interpreter)
+                write_manifest(root, updated)
+                context.complete_action(manifest_action.step_id)
+        return {
+            "python": str(python),
+            "venv": str(venv_path),
+            "interpreter": interpreter,
+            "dependency_inputs": list(inputs),
+            "manifest": str(manifest_path(root)),
+        }
+
+    return Command.from_prepared(
+        public_plan,
+        prepared_command(run, prepared_steps, executor=SubprocessExecutor()),
+    )
+
+
+def prepare_venv(
+    project: ProjectConfig | str | Path,
+    *,
+    python: str | Path,
+    venv: str | Path,
+) -> dict[str, JsonValue]:
+    """Prepare the primary project venv and persist its interpreter on success."""
+    return prepare_venv_command(project, python=python, venv=venv).run()
