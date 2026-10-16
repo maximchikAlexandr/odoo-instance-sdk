@@ -554,6 +554,49 @@ def test_reset_delegates_only_for_exact_recorded_local_binding(
     assert "other" not in rejected.stdout
 
 
+@pytest.mark.parametrize("has_project_password", [True, False])
+def test_refresh_reset_admin_dry_run_uses_project_secret_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    has_project_password: bool,
+) -> None:
+    client = MagicMock()
+    client.environments.refresh_database_command.return_value = _command()
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.delenv("ODCLI_ADMIN_PASSWORD", raising=False)
+    if has_project_password:
+        config_root = tmp_path / ".odcli"
+        config_root.mkdir()
+        (config_root / ".env").write_text("ODCLI_ADMIN_PASSWORD=project-secret\n", encoding="utf-8")
+        (config_root / ".env").chmod(0o600)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "db",
+            "refresh",
+            "--restore",
+            "--reset-admin-password",
+            "--dry-run",
+            "--no-input",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert "Traceback" not in result.output
+    if has_project_password:
+        assert result.exit_code == 0, result.output
+        assert client.environments.refresh_database_command.call_args.kwargs["admin_password"] == (
+            "project-secret"
+        )
+        assert "project-secret" not in result.output
+    else:
+        assert result.exit_code == 1
+        assert "administrator password is required" in result.output
+
+
 @pytest.mark.parametrize("output_format", ["json", "toon", None])
 def test_refresh_failure_renders_typed_retained_context_without_secrets(
     monkeypatch: pytest.MonkeyPatch,

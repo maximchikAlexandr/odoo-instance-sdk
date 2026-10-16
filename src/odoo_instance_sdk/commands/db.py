@@ -156,15 +156,15 @@ def db_refresh(
         raise click.UsageError("--reset-admin-password requires --restore")
     admin_password: str | None = None
     admin_password_provenance = "environment"
-    if reset_admin_password:
-        from odoo_instance_sdk.internal.admin_password import resolve_admin_password_secret
-
-        admin_password, admin_password_provenance = resolve_admin_password_secret(
-            prompt=(output_mode is OutputMode.RICH and not no_input and not dry_run),
-            project_root=resolve_project_path(ctx) if not dry_run else None,
-        )
     try:
         project_path = resolve_project_path(ctx)
+        if reset_admin_password:
+            from odoo_instance_sdk.internal.admin_password import resolve_admin_password_secret
+
+            admin_password, admin_password_provenance = resolve_admin_password_secret(
+                prompt=(output_mode is OutputMode.RICH and not no_input and not dry_run),
+                project_root=project_path,
+            )
         client = _client_class()(config=_client_config_class()(executable="odoo"))
         command: _InspectableCommand[DatabasePreparationResult] = (
             client.environments.refresh_database_command(
