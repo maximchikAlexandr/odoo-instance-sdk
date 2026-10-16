@@ -1,10 +1,3 @@
-"""Shared lifecycle for exact-revision alternate OdCLI launchers.
-
-The numbered and hot-fix adapters deliberately live outside this module.  This
-module owns only the mechanics that must never diverge: installation,
-provenance, selector probing, publication, locking, inspection, and cleanup.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -29,6 +22,7 @@ REPOSITORY = "maximchikAlexandr/odoo-instance-sdk"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}.git"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IDENTITY_RE = re.compile(r"^[1-9][0-9]*$")
+_UV_SHELL_INTERPRETER = re.compile(r"^'''exec' '(?P<path>[^']+)' \"\$0\"")
 MANIFEST_VERSION = 1
 LAUNCHER_KIND_ENV = "ODCLI_LAUNCHER_KIND"
 LAUNCHER_ID_ENV = "ODCLI_LAUNCHER_ID"
@@ -36,13 +30,11 @@ LauncherKind = Literal["numbered", "hotfix"]
 
 
 class AlternateToolError(RuntimeError):
-    """An alternate-tool lifecycle operation cannot be completed safely."""
+    pass
 
 
 @dataclass(frozen=True, slots=True)
 class AlternateIdentity:
-    """One validated launcher identity and its deterministic filesystem layout."""
-
     kind: LauncherKind
     identifier: str
     home: Path
@@ -95,8 +87,6 @@ class AlternateIdentity:
 
 @dataclass(frozen=True, slots=True)
 class AlternateManifest:
-    """The fixed, discriminated metadata published for one launcher."""
-
     identity: AlternateIdentity
     sha: str
     repository: str
@@ -189,12 +179,10 @@ def _validate_identity(identifier: str) -> None:
 
 
 def identity(kind: LauncherKind, identifier: str, *, home: Path | None = None) -> AlternateIdentity:
-    """Build one deterministic identity without creating any filesystem state."""
     return AlternateIdentity(kind, identifier, home or Path.home())
 
 
 def selected_identity(*, home: Path | None = None) -> AlternateIdentity | None:
-    """Read launcher context from trusted shim variables, if present."""
     kind = os.environ.get(LAUNCHER_KIND_ENV)
     identifier = os.environ.get(LAUNCHER_ID_ENV)
     if kind is None and identifier is None:
@@ -237,19 +225,20 @@ def _run(
 
 def _interpreter(executable: Path) -> Path:
     try:
-        first_line = executable.read_text(encoding="utf-8").splitlines()[0]
-    except (OSError, IndexError) as exc:
+        lines = executable.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
         raise AlternateToolError(f"cannot inspect installed executable: {executable}") from exc
-    if not first_line.startswith("#!"):
+    if not lines or not lines[0].startswith("#!"):
         raise AlternateToolError("installed odcli executable has no absolute interpreter")
-    interpreter = Path(first_line[2:].strip().split()[0])
+    first_interpreter = lines[0][2:].strip().split()[0]
+    shell_match = _UV_SHELL_INTERPRETER.match(lines[1]) if len(lines) > 1 else None
+    interpreter = Path(shell_match.group("path") if shell_match else first_interpreter)
     if not interpreter.is_absolute() or not interpreter.is_file():
         raise AlternateToolError("installed odcli executable has no usable absolute interpreter")
     return interpreter
 
 
 def _materialize_staged_executable(executable: Path, stage_tool: Path) -> None:
-    """Accept uv's contained bin symlink, then publish a stable file."""
     if executable.is_symlink():
         try:
             target = executable.resolve(strict=True)
@@ -267,26 +256,19 @@ def _materialize_staged_executable(executable: Path, stage_tool: Path) -> None:
         raise AlternateToolError("uv completed without publishing an odcli executable")
 
 
-def _relocate_staged_interpreter(
-    executable: Path,
-    interpreter: Path,
-    stage_tool: Path,
-    published_tool: Path,
-) -> None:
-    """Keep uv's absolute console-script interpreter valid after the atomic move."""
-    try:
-        stage_root = stage_tool.absolute()
-        staged_interpreter = interpreter.absolute()
-        relative_interpreter = staged_interpreter.relative_to(stage_root)
-    except ValueError:
-        return
-    if not staged_interpreter.is_file():
-        raise AlternateToolError("installed odcli executable has an invalid interpreter")
+def _rewrite_interpreter(executable: Path, old: Path, new: Path) -> None:
     try:
         lines = executable.read_text(encoding="utf-8").splitlines(keepends=True)
         if not lines or not lines[0].startswith("#!"):
             raise AlternateToolError("installed odcli executable has no interpreter line")
-        lines[0] = f"#!{published_tool / relative_interpreter}\n"
+        index = 1 if len(lines) > 1 and _UV_SHELL_INTERPRETER.match(lines[1]) else 0
+        old_text, new_text = str(old), str(new)
+        if old_text in lines[index]:
+            lines[index] = lines[index].replace(old_text, new_text)
+        elif new_text not in lines[index]:
+            if index:
+                raise AlternateToolError("installed executable interpreter does not match uv path")
+            lines[index] = f"#!{new}\n"
         executable.write_text("".join(lines), encoding="utf-8")
     except OSError as exc:
         raise AlternateToolError("cannot relocate the installed odcli interpreter") from exc
@@ -352,7 +334,6 @@ def _probe(identity_value: AlternateIdentity, interpreter: Path, env: Mapping[st
 
 
 def render_launcher(manifest: AlternateManifest) -> str:
-    """Render the sole launcher implementation used by both alternate kinds."""
     identity_value = manifest.identity
     warning = (
         f"    print('WARNING: {identity_value.launcher_name} is experimental ({manifest.sha})', file=sys.stderr)\n"
@@ -396,7 +377,6 @@ def _safe_existing(path: Path, *, directory: bool = False) -> bool:
 
 
 def _reject_symlink_components(path: Path, *, stop: Path) -> None:
-    """Reject symlinked deterministic parents before creating or replacing state."""
     current = path
     stop = stop.resolve()
     while True:
@@ -413,7 +393,6 @@ def _check_install_target(
     replace: bool,
     allow_existing_state_root: bool = False,
 ) -> None:
-    """Recheck all install policy and containment facts at the publication boundary."""
     _reject_symlink_components(identity_value.manager_root.parent, stop=identity_value.home)
     for target in (
         identity_value.manager_root,
@@ -584,7 +563,6 @@ def _read_manifest(path: Path, *, home: Path | None = None) -> AlternateManifest
 def read_alternate_manifest(
     identity_value: AlternateIdentity, *, strict: bool = True
 ) -> AlternateManifest | None:
-    """Read one verified manifest for private policy adapters."""
     try:
         manifest = _read_manifest(identity_value.manifest, home=identity_value.home)
         if manifest.identity != identity_value:
@@ -609,7 +587,6 @@ def publish_alternate_linkage(
     interpreter_path: str,
     hash_lock_sha256: str,
 ) -> AlternateManifest:
-    """Publish the fixed numbered checkout/environment linkage under its lock."""
     if identity_value.kind != "numbered":
         raise AlternateToolError("only numbered identities can publish checkout linkage")
     with lifecycle_lock(identity_value, exclusive=True):
@@ -658,7 +635,6 @@ def _verify_structure(manifest: AlternateManifest) -> None:
 
 @contextlib.contextmanager
 def lifecycle_lock(identity_value: AlternateIdentity, *, exclusive: bool) -> Iterator[int]:
-    """Acquire the same lock used by rendered launchers for a full operation."""
     _reject_symlink_components(identity_value.manager_root.parent, stop=identity_value.home)
     if identity_value.manager_root.is_symlink() or identity_value.lock.is_symlink():
         raise AlternateToolError(f"refusing to use symlink: {identity_value.lock}")
@@ -709,7 +685,6 @@ def install_alternate_tool(  # noqa: C901
     allow_existing_state_root: bool = False,
     repository: str = REPOSITORY_URL,
 ) -> AlternateManifest:
-    """Install, verify, probe, and publish one alternate launcher atomically."""
     if not SHA_RE.fullmatch(sha):
         raise ValueError("revision must be a complete lowercase SHA")
     if repository != REPOSITORY_URL:
@@ -733,16 +708,27 @@ def install_alternate_tool(  # noqa: C901
         )
         executable = stage_bin / "odcli"
         _materialize_staged_executable(executable, stage_tool)
+        askpass_name = "odcli-git-askpass.exe" if os.name == "nt" else "odcli-git-askpass"
+        askpass = stage_bin / askpass_name
+        askpass_target = askpass.resolve() if askpass.is_symlink() else askpass
+        _materialize_staged_executable(askpass, stage_tool)
         interpreter = _interpreter(executable)
         provenance = _provenance(interpreter, environment)
         if provenance != {"repository": REPOSITORY_URL, "sha": sha}:
             raise AlternateToolError("installed package provenance does not match requested SHA")
         _probe(identity_value, interpreter, environment)
-        _relocate_staged_interpreter(
-            executable,
-            interpreter,
-            stage_tool,
-            identity_value.tool_root,
+        staged_interpreters = (interpreter, _interpreter(askpass))
+        stage_root = stage_tool.absolute()
+        relative_interpreters = tuple(
+            item.absolute().relative_to(stage_root)
+            if item.absolute().is_relative_to(stage_root)
+            else None
+            for item in staged_interpreters
+        )
+        relative_askpass = (
+            askpass_target.absolute().relative_to(stage_root)
+            if askpass_target.absolute().is_relative_to(stage_root)
+            else None
         )
         shim = render_launcher(
             AlternateManifest(
@@ -809,6 +795,25 @@ def install_alternate_tool(  # noqa: C901
             try:
                 os.replace(stage_tool, identity_value.tool_root)
                 os.replace(stage_bin, identity_value.tool_bin)
+                relocations = (
+                    (identity_value.executable, relative_interpreters[0]),
+                    (identity_value.tool_bin / askpass_name, relative_interpreters[1]),
+                )
+                for script, relative in relocations:
+                    if relative is None:
+                        continue
+                    _rewrite_interpreter(
+                        script,
+                        stage_tool / relative,
+                        identity_value.tool_root / relative,
+                    )
+                askpass_relative = relative_interpreters[1]
+                if relative_askpass is not None and askpass_relative is not None:
+                    _rewrite_interpreter(
+                        identity_value.tool_root / relative_askpass,
+                        stage_tool / askpass_relative,
+                        identity_value.tool_root / askpass_relative,
+                    )
                 _atomic_text(identity_value.launcher, shim, mode=0o700)
                 _atomic_text(
                     identity_value.manifest,
@@ -844,7 +849,6 @@ def install_alternate_tool(  # noqa: C901
 def inspect_alternate_tool(
     identity_value: AlternateIdentity, *, strict: bool = True
 ) -> dict[str, str | int | bool | None]:
-    """Return a bounded structural projection without executing installed code."""
     try:
         manifest = _read_manifest(identity_value.manifest, home=identity_value.home)
         if manifest.identity != identity_value:
@@ -884,7 +888,6 @@ def inspect_alternate_tool(
 def list_alternate_tools(
     kind: LauncherKind, *, home: Path | None = None, limit: int = 100
 ) -> tuple[dict[str, str | int | bool | None], ...]:
-    """Inspect only the deterministic manager directory, with a hard bound."""
     if limit <= 0:
         raise ValueError("list limit must be positive")
     home_path = (home or Path.home()).expanduser().resolve()
@@ -905,7 +908,6 @@ def list_alternate_tools(
 def remove_alternate_tool(  # noqa: C901 -- fixed selective cleanup sequence
     identity_value: AlternateIdentity, *, _locked: bool = False
 ) -> None:
-    """Remove only a verified, idle identity and its deterministic artifacts."""
     manifest = _read_manifest(identity_value.manifest, home=identity_value.home)
     if manifest.identity != identity_value:
         raise AlternateToolError("alternate manifest identity mismatch")
@@ -953,7 +955,7 @@ def _cli_manifest(args: argparse.Namespace) -> AlternateManifest:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Alternate OdCLI lifecycle.")
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install")
     install.add_argument("--kind", choices=("numbered", "hotfix"), required=True)

@@ -473,8 +473,23 @@ def _vcs_short_commit_from_distribution(dist: Distribution) -> str | None:
 def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -> None:
     if not value or ctx.resilient_parsing:
         return
+    _repair_packaged_askpass()
     click.echo(f"odcli, version {_installed_version_with_vcs()}", color=ctx.color)
     ctx.exit()
+
+
+def _repair_packaged_askpass() -> None:
+    """Repair an old coordinator's staged helper before any Git workflow."""
+    import os
+    import sys
+
+    helper_name = "odcli-git-askpass.exe" if os.name == "nt" else "odcli-git-askpass"
+    helper = Path(sys.executable).with_name(helper_name)
+    if not helper.is_file() and not helper.is_symlink():
+        return
+    from odoo_instance_sdk.internal.gitlab_credentials import ensure_packaged_askpass
+
+    ensure_packaged_askpass(helper)
 
 
 class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
@@ -542,6 +557,7 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
 @click.pass_context
 def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> None:
     """Manage local Odoo projects, environments, databases, and tooling."""
+    _repair_packaged_askpass()
     ctx.obj = CliContext(project=project, env=env_selector)
 
 

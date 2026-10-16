@@ -4,12 +4,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.config import InstanceConfig
+from odoo_instance_sdk.execution import ExecutionPlan
 from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.instance import OdooInstance
 from tests.unit.test_git_resource import _git, _repo
@@ -127,3 +128,82 @@ def test_git_sync_dry_run_does_not_fetch_rebase_or_publish(tmp_path: Path) -> No
         "git.sync.push-fast-forward",
     } <= planned_ids
     assert _git(tmp_path, "rev-parse", "HEAD").strip() == head
+
+
+def test_git_commit_explicit_initialized_repo_uses_odoo_policy(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    _git(tmp_path, "remote", "add", "origin", "https://gitlab.example/team/repo")
+    (tmp_path / ".odcli").mkdir()
+    (tmp_path / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
+    _git(tmp_path, "add", ".odcli/project.toml")
+    _git(tmp_path, "commit", "-qm", "project config")
+    module = tmp_path / "addons" / "sale"
+    module.mkdir(parents=True)
+    (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+    (module / "models.py").write_text("value = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "addons/sale")
+
+    with patch(
+        "odoo_instance_sdk.internal.git_explicit.explicit_commit_environment",
+        return_value={
+            "GIT_AUTHOR_NAME": "Selected Member",
+            "GIT_AUTHOR_EMAIL": "selected@example.test",
+            "GIT_COMMITTER_NAME": "Selected Member",
+            "GIT_COMMITTER_EMAIL": "selected@example.test",
+        },
+    ):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "git",
+                "commit",
+                "add model",
+                "--repo",
+                str(tmp_path),
+                "--member-id",
+                "11111111-1111-4111-8111-111111111111",
+                "--ticket",
+                "PROJ-12",
+                "--yes",
+                "--format",
+                "json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert _git(tmp_path, "log", "-1", "--format=%s").strip() == "[ADD] sale: PROJ-12 add model"
+
+
+def test_git_sync_explicit_repo_passes_selected_member_to_dispatcher(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    fake_resource = Mock()
+    fake_resource.sync_command.return_value = SimpleNamespace(
+        plan=ExecutionPlan(steps=()).with_fingerprint()
+    )
+
+    with patch("odoo_instance_sdk.commands.git._generic_resource", return_value=fake_resource):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "git",
+                "sync",
+                "--repo",
+                str(tmp_path),
+                "--member-id",
+                "11111111-1111-4111-8111-111111111111",
+                "--base",
+                "main",
+                "--dry-run",
+                "--yes",
+                "--format",
+                "json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    fake_resource.sync_command.assert_called_once_with(
+        repository=str(tmp_path),
+        member_id="11111111-1111-4111-8111-111111111111",
+        base="main",
+        push=False,
+    )

@@ -34,6 +34,38 @@ class SyncSteps:
     rewritten: PreparedStep | None
 
 
+@dataclass(slots=True)
+class AuthoritativeProbeCapture:
+    """Keep only the parsed shape of one private authoritative probe."""
+
+    observed: tuple[bool, str | None] | None = None
+
+    def capture(self, value: str | bytes | None) -> None:
+        output = _text(value)
+        self.observed = (bool(output.strip()), _remote_head(output))
+
+    def take(self, result: ProcessResult) -> tuple[bool, str | None]:
+        observed = self.observed
+        self.observed = None
+        if observed is not None:
+            return observed
+        output = _text(result.stdout)
+        return bool(output.strip()), _remote_head(output)
+
+    def planned_sha(self, result: ProcessResult) -> str | None:
+        if result.returncode != 0:
+            raise GitSyncError(
+                "authoritative remote branch probe failed; no fetch or publication was attempted"
+            )
+        has_output, planned = self.take(result)
+        if has_output and planned is None:
+            raise GitSyncError(
+                "authoritative remote branch probe returned malformed output; "
+                "no fetch or publication was attempted"
+            )
+        return planned
+
+
 def _text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
@@ -53,6 +85,39 @@ def _abort(context: RunContext[GitSyncResult], message: str) -> NoReturn:
     raise GitSyncError(message)
 
 
+def _capture_for_step(step: PreparedStep) -> AuthoritativeProbeCapture | None:
+    owner = getattr(step.private_stdout_consumer, "__self__", None)
+    return owner if isinstance(owner, AuthoritativeProbeCapture) else None
+
+
+def _validate_authoritative_probe(
+    context: RunContext[GitSyncResult],
+    result: ProcessResult,
+    *,
+    planned_remote_sha: str | None,
+    capture: AuthoritativeProbeCapture | None,
+) -> None:
+    if result.returncode != 0:
+        _abort(
+            context,
+            "authoritative remote branch probe failed; no fetch or publication was attempted",
+        )
+    has_output, observed_remote_sha = (
+        capture.take(result) if capture is not None else AuthoritativeProbeCapture().take(result)
+    )
+    if has_output and observed_remote_sha is None:
+        _abort(
+            context,
+            "authoritative remote branch probe returned malformed output; "
+            "no fetch or publication was attempted",
+        )
+    if planned_remote_sha is None:
+        if observed_remote_sha is not None:
+            _abort(context, "remote branch changed after sync planning")
+    elif observed_remote_sha != planned_remote_sha:
+        _abort(context, "remote branch changed after sync planning")
+
+
 def _validate_initial_state(
     context: RunContext[GitSyncResult],
     steps: SyncSteps,
@@ -60,6 +125,7 @@ def _validate_initial_state(
     actual_branch: str,
     push: bool,
     ssh_remote: Callable[[str], bool],
+    generic: bool,
 ) -> str:
     status_result = cast("ProcessResult", context.process(steps.status.step_id))
     branch_result = cast("ProcessResult", context.process(steps.branch.step_id))
@@ -80,6 +146,8 @@ def _validate_initial_state(
         _abort(context, "origin remote is unavailable; no fetch or publication was attempted")
     if upstream_name and upstream_name != f"origin/{observed_branch}":
         _abort(context, f"upstream must be origin/{observed_branch}")
+    if generic and not ssh_remote(_text(remote_result.stdout).strip()):
+        _abort(context, "repository origin changed after sync planning")
     if push and not ssh_remote(_text(remote_result.stdout).strip()):
         _abort(context, "publication requires an SSH origin")
     return observed_branch
@@ -92,11 +160,12 @@ def _capture_fetched_state(
     planned_remote_sha: str | None,
 ) -> tuple[str | None, bool]:
     authoritative_result = cast("ProcessResult", context.process(steps.authoritative.step_id))
-    if (
-        authoritative_result.returncode != 0
-        or _remote_head(_text(authoritative_result.stdout)) != planned_remote_sha
-    ):
-        _abort(context, "remote branch changed after sync planning")
+    _validate_authoritative_probe(
+        context,
+        authoritative_result,
+        planned_remote_sha=planned_remote_sha,
+        capture=_capture_for_step(steps.authoritative),
+    )
     fetched = cast("ProcessResult", context.process(steps.fetch.step_id))
     if fetched.returncode != 0:
         _abort(context, "fetch failed; no rebase or publication was attempted")
@@ -130,15 +199,21 @@ def _validate_and_rebase(
     branch: str,
     instance: OdooInstance,
     root: Path,
+    generic: bool,
 ) -> tuple[ProcessResult, GitCheckResult]:
     rebased = cast("ProcessResult", context.process(steps.rebase.step_id))
     if rebased.returncode != 0:
         raise GitSyncError("rebase conflict; run `git rebase --continue` or `git rebase --abort`")
     checked = cast("ProcessResult", context.process(steps.verify.step_id))
-    checked_result = check_log(
-        _text(checked.stdout), base=resolved, branch=branch, instance=instance, root=root
-    )
-    if checked.returncode != 0 or not checked_result.valid:
+    if generic:
+        checked_result = GitCheckResult(base=resolved, branch=branch, valid=checked.returncode == 0)
+    else:
+        checked_result = check_log(
+            _text(checked.stdout), base=resolved, branch=branch, instance=instance, root=root
+        )
+        if checked.returncode != 0 or not checked_result.valid:
+            raise GitSyncError("git check failed before publication")
+    if not checked_result.valid:
         raise GitSyncError("git check failed before publication")
     return rebased, checked_result
 
@@ -189,10 +264,16 @@ def execute_sync(
     instance: OdooInstance,
     root: Path,
     ssh_remote: Callable[[str], bool],
+    generic: bool = False,
 ) -> GitSyncResult:
     """Run captured Git sync phases and return the typed public result."""
     observed_branch = _validate_initial_state(
-        context, steps, actual_branch=actual_branch, push=push, ssh_remote=ssh_remote
+        context,
+        steps,
+        actual_branch=actual_branch,
+        push=push,
+        ssh_remote=ssh_remote,
+        generic=generic,
     )
     remote_sha, integrated = _capture_fetched_state(
         context, steps, planned_remote_sha=planned_remote_sha
@@ -204,6 +285,7 @@ def execute_sync(
         branch=observed_branch,
         instance=instance,
         root=root,
+        generic=generic,
     )
     published = _publish_transition(context, steps, push=push, remote_sha=remote_sha)
     return GitSyncResult(
@@ -215,4 +297,8 @@ def execute_sync(
     )
 
 
-__all__ = ["SyncSteps", "execute_sync"]
+__all__ = [
+    "AuthoritativeProbeCapture",
+    "SyncSteps",
+    "execute_sync",
+]

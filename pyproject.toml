@@ -37,13 +37,15 @@ dashboard = [
 
 [project.scripts]
 odcli = "odoo_instance_sdk.cli:cli"
+odcli-git-askpass = "odoo_instance_sdk.internal.git_askpass:main"
 
 [project.urls]
 Source = "https://github.com/maximchikAlexandr/odoo-instance-sdk"
 
 [build-system]
 requires = ["uv_build>=0.10.8,<0.11.0"]
-build-backend = "uv_build"
+build-backend = "build_backend"
+backend-path = ["."]
 
 [tool.uv.workspace]
 members = ["packages/odcli-multica"]
@@ -53,6 +55,7 @@ members = ["packages/odcli-multica"]
 # automatically in sdist + wheel. Exclude the Node.js dependency tree and
 # sources from the distributions to keep them lean; Node.js is not required
 # at runtime — the built SPA in web/dist/ is all that ships.
+source-include = ["build_backend.py", "build_assets.py", "build_process.py"]
 source-exclude = ["src/odoo_instance_sdk/web/node_modules/**"]
 wheel-exclude = ["src/odoo_instance_sdk/web/node_modules/**"]
 

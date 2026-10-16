@@ -2487,7 +2487,6 @@ The single shared launcher renderer SHALL produce both `odcli-N` and `odcli-fix-
 - **WHEN** an operator invokes `odcli-N` or `odcli-fix-ISSUE` with an ordinary supported command
  - **THEN** exact argument boundaries and child exit status are preserved and the lifecycle lock remains held until the child exits
 
-
 ### Requirement: Main-checkout automation command surface
 The root `--project PATH` selector SHALL address a main checkout for `db refresh`, `db restore`, `run --detach [--wait-ready]`, runtime status/stop, module context, `publish`, and `unpublish` without creating an environment worktree. Each bounded command SHALL have one public SDK primitive, one canonical machine envelope, project provenance, stable error code, and a typed result containing the identities required by its capability. Environment-only replacement/removal semantics SHALL continue to reject project context.
 
@@ -2527,3 +2526,23 @@ The existing `odcli-multica` CLI SHALL expose a `git` group that reserves litera
 #### Scenario: External monitor configuration is incomplete
 - **WHEN** external mode lacks a valid panel host, trusted proxy, Basic Auth, or publication settings
 - **THEN** startup fails before network bind or Caddy mutation
+
+### Requirement: Generic GitLab command surface
+
+The public CLI SHALL register `odcli git clone`, repository/member options on `odcli git commit` and `odcli git sync`, and `odcli git mr create` with the exact argument families specified by this change. These leaves SHALL be represented in `PUBLIC_LEAF_CASES`, expose public typed SDK command siblings for process/mutation work, support the existing bounded Rich/JSON/TOON and dry-run conventions, and work from outside an initialized OdCLI project when their explicit inputs are complete.
+
+#### Scenario: Help outside a project
+- **WHEN** `odcli git --help` and `odcli git mr create --help` run outside any initialized project
+- **THEN** they show the new commands/options without attempting project resolution, credential reads, Git, or network access
+
+#### Scenario: Missing explicit generic context
+- **WHEN** a generic-repository operation lacks its required `--repo` or `--member-id`
+- **THEN** Click returns an actionable usage error before SDK, credential, Git, or GitLab work
+
+### Requirement: README inventory matches executable CLI
+
+README SHALL list every actual top-level and nested command in the executable Click tree, including the new GitLab examples, and SHALL describe explicit-repository use without implying GitHub support, implicit initialization, standalone push, or automatic superproject gitlink publication. A contract test SHALL compare the maintained inventory markers with registered command paths.
+
+#### Scenario: Documentation inventory is checked
+- **WHEN** the CLI/documentation contract test enumerates registered commands
+- **THEN** README contains each public command exactly once and no removed or unregistered command is presented as shipped

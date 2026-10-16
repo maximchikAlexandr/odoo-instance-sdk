@@ -56,7 +56,7 @@ def _read_payload(channel_path: str) -> Mapping[str, str] | None:
 
 def main() -> int:
     prompt = " ".join(sys.argv[1:]).casefold()
-    channel_path = os.environ.get("ODCLI_GITLAB_TOKEN_FILE")
+    channel_path = os.environ.get("ODCLI_GITLAB_ASKPASS_FILE")
     value: str | None = None
     if channel_path:
         payload = _read_payload(channel_path)

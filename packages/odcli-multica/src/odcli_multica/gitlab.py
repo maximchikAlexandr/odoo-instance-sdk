@@ -2,73 +2,60 @@
 
 from __future__ import annotations
 
-import stat
-from collections.abc import Callable, Mapping
-from pathlib import Path
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal, cast
 from urllib.parse import quote
 
 import httpx
 
 from odcli_multica.models import GitLabCredentialContext, MergeRequestPublicationResult
+from odoo_instance_sdk.exceptions import GitLabPublicationError
 from odoo_instance_sdk.execution import JsonValue
-
-_MAX_DESCRIPTION_BYTES = 1_048_576
-
-
-class GitLabPublicationError(ValueError):
-    """Raised for bounded, sanitized GitLab publication failures."""
-
-
-def read_description_file(path: Path | str) -> str:
-    """Read one regular, non-symlink UTF-8 description within the bound."""
-    description = Path(path)
-    try:
-        info = description.stat()
-    except OSError as exc:
-        raise GitLabPublicationError("merge-request description file is unavailable") from exc
-    if description.is_symlink() or not stat.S_ISREG(info.st_mode):
-        raise GitLabPublicationError("merge-request description file must be regular")
-    if info.st_size > _MAX_DESCRIPTION_BYTES:
-        raise GitLabPublicationError("merge-request description file is too large")
-    try:
-        return description.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise GitLabPublicationError("merge-request description file is not valid UTF-8") from exc
+from odoo_instance_sdk.internal.gitlab_publication import (
+    read_description_file,
+    repository_project_path,
+)
+from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 
 
-def repository_project_path(repository_url: str) -> tuple[str, str]:
-    """Return the exact HTTPS host and project path from a GitLab remote."""
-    from urllib.parse import urlsplit
-
-    parsed = urlsplit(repository_url)
-    if (
-        parsed.scheme.casefold() != "https"
-        or not parsed.hostname
-        or not parsed.path
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise GitLabPublicationError("GitLab repository URL must be HTTPS")
-    project = parsed.path.strip("/")
-    if project.endswith(".git"):
-        project = project[:-4]
-    if not project or "//" in project or any(part in {".", ".."} for part in project.split("/")):
-        raise GitLabPublicationError("GitLab project path is invalid")
-    host = parsed.hostname.casefold()
-    if parsed.port is not None:
-        host = f"{host}:{parsed.port}"
-    return host, project
-
-
-def _json(response: httpx.Response, *, operation: str) -> JsonValue:
+def _json(
+    response: httpx.Response,
+    *,
+    operation: str,
+    secrets: Sequence[str] = (),
+) -> JsonValue:
     try:
         response.raise_for_status()
         return cast("JsonValue", response.json())
     except (httpx.HTTPError, ValueError) as exc:
-        raise GitLabPublicationError(f"GitLab {operation} failed") from exc
+        detail = redacted_projection(str(exc), secrets=secrets, field="error")
+        raise GitLabPublicationError(f"GitLab {operation} failed: {detail}") from None
+
+
+def _request(
+    request: Callable[[], httpx.Response],
+    *,
+    operation: str,
+    secrets: Sequence[str],
+) -> httpx.Response:
+    try:
+        return request()
+    except Exception as exc:
+        detail = redacted_projection(str(exc), secrets=secrets, field="error")
+        raise GitLabPublicationError(f"GitLab {operation} failed: {detail}") from None
+
+
+def _request_json(
+    request: Callable[[], httpx.Response],
+    *,
+    operation: str,
+    secrets: Sequence[str],
+) -> JsonValue:
+    return _json(
+        _request(request, operation=operation, secrets=secrets),
+        operation=operation,
+        secrets=secrets,
+    )
 
 
 def _required_text(payload: Mapping[str, JsonValue], key: str, *, operation: str) -> str:
@@ -103,9 +90,12 @@ def publish_merge_request(  # noqa: C901
         final_description = f"{description.rstrip()}\n\nRelated to {issue_url}"
     base = f"https://{credential.host}/api/v4"
     headers = {"PRIVATE-TOKEN": dict(credential.child_environment())["GITLAB_TOKEN"]}
+    secrets = credential._redaction_secrets()
     with client_factory(base_url=base, headers=headers, timeout=30.0) as client:
-        project_payload = _json(
-            client.get(f"/projects/{quote(project_path, safe='')}"), operation="project lookup"
+        project_payload = _request_json(
+            lambda: client.get(f"/projects/{quote(project_path, safe='')}"),
+            operation="project lookup",
+            secrets=secrets,
         )
         if not isinstance(project_payload, Mapping):
             raise GitLabPublicationError("GitLab project lookup returned an invalid response")
@@ -115,8 +105,10 @@ def publish_merge_request(  # noqa: C901
 
         assignee_id: int | None = None
         if assignee is not None:
-            users = _json(
-                client.get("/users", params={"username": assignee}), operation="assignee lookup"
+            users = _request_json(
+                lambda: client.get("/users", params={"username": assignee}),
+                operation="assignee lookup",
+                secrets=secrets,
             )
             if not isinstance(users, list) or len(users) != 1 or not isinstance(users[0], Mapping):
                 raise GitLabPublicationError("GitLab assignee is missing or ambiguous")
@@ -125,8 +117,8 @@ def publish_merge_request(  # noqa: C901
                 raise GitLabPublicationError("GitLab assignee is invalid")
             assignee_id = raw_assignee_id
 
-        raw_matches = _json(
-            client.get(
+        raw_matches = _request_json(
+            lambda: client.get(
                 f"/projects/{project_id}/merge_requests",
                 params={
                     "state": "opened",
@@ -136,6 +128,7 @@ def publish_merge_request(  # noqa: C901
                 },
             ),
             operation="merge-request lookup",
+            secrets=secrets,
         )
         if not isinstance(raw_matches, list) or not all(
             isinstance(item, Mapping) for item in raw_matches
@@ -162,12 +155,24 @@ def publish_merge_request(  # noqa: C901
             iid = match.get("iid")
             if not isinstance(iid, int) or isinstance(iid, bool):
                 raise GitLabPublicationError("GitLab merge-request lookup returned an invalid iid")
-            response = client.put(f"/projects/{project_id}/merge_requests/{iid}", json=payload)
+            response = _request(
+                lambda: client.put(f"/projects/{project_id}/merge_requests/{iid}", json=payload),
+                operation="merge-request update",
+                secrets=secrets,
+            )
             outcome: Literal["created", "updated"] = "updated"
         else:
-            response = client.post(f"/projects/{project_id}/merge_requests", json=payload)
+            response = _request(
+                lambda: client.post(f"/projects/{project_id}/merge_requests", json=payload),
+                operation="merge-request create",
+                secrets=secrets,
+            )
             outcome = "created"
-        result = _json(response, operation=f"merge-request {outcome}")
+        result = _json(
+            response,
+            operation=f"merge-request {outcome}",
+            secrets=secrets,
+        )
         if not isinstance(result, Mapping):
             raise GitLabPublicationError("GitLab merge-request returned an invalid response")
         raw_id = result.get("iid")

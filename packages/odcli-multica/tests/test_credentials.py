@@ -139,7 +139,7 @@ def test_git_askpass_channel_validates_host_without_token_in_parent_environment(
     environment = os.environ | {
         "GIT_ASKPASS": askpass_command(),
         "ODCLI_GITLAB_HOST": "gitlab.example",
-        "ODCLI_GITLAB_TOKEN_FILE": str(channel),
+        "ODCLI_GITLAB_ASKPASS_FILE": str(channel),
     }
     result = subprocess.run(
         [askpass_command(), "Password for 'https://gitlab.example':"],

@@ -86,6 +86,9 @@ def _snapshot_metadata_shape_error(
         return "update recovery snapshot metadata has malformed package_revision"
     if not isinstance(metadata["install_requirement"], str):
         return "update recovery snapshot metadata has malformed install_requirement"
+    direct_requirement = metadata.get("direct_requirement")
+    if direct_requirement is not None and not isinstance(direct_requirement, str):
+        return "update recovery snapshot metadata has malformed direct_requirement"
     if metadata["source_repo"] is not None and not isinstance(metadata["source_repo"], str):
         return "update recovery snapshot metadata has malformed source_repo"
     previous_sha = metadata["previous_sha"]
@@ -94,6 +97,19 @@ def _snapshot_metadata_shape_error(
     ):
         return "update recovery snapshot metadata has malformed previous_sha"
     return None
+
+
+def _requested_extras_error(value: JsonValue) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, list):
+        return True
+    extras = [extra for extra in value if isinstance(extra, str) and extra]
+    return (
+        len(extras) != len(value)
+        or len(set(extras)) != len(extras)
+        or tuple(extras) != tuple(sorted(extras))
+    )
 
 
 def _snapshot_metadata_ref_error(
@@ -124,6 +140,8 @@ def _snapshot_metadata_error(
     shape_error = _snapshot_metadata_shape_error(metadata, journal_version)
     if shape_error is not None:
         return shape_error
+    if _requested_extras_error(metadata.get("requested_extras")):
+        return "update recovery snapshot metadata has malformed requested_extras"
     return _snapshot_metadata_ref_error(metadata, target_ref, snapshot_sha)
 
 
@@ -277,11 +295,20 @@ def journal_snapshot_sha(
     raise UpdateError("unfinished update journal has no immutable snapshot_sha")
 
 
-def recovery_step_for_snapshot(snapshot_sha: str | None) -> PreparedStep:
+def recovery_step_for_snapshot(
+    snapshot_sha: str | None,
+    *,
+    source_repo: str | None = None,
+    extras: tuple[str, ...] = (),
+) -> PreparedStep:
     from odoo_instance_sdk.internal.self_update import _DEFAULT_REF, _install_argv
 
     return PreparedStep(
         step_id="update.recovery",
-        argv=_install_argv(snapshot_sha or _DEFAULT_REF),
+        argv=_install_argv(
+            snapshot_sha or _DEFAULT_REF,
+            source_repo=source_repo,
+            extras=extras,
+        ),
         mutating=True,
     )

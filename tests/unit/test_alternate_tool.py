@@ -97,8 +97,16 @@ class _StagedRunner:
             script_interpreter = interpreter
         binary.write_text(f"#!{script_interpreter}\n", encoding="utf-8")
         binary.chmod(0o700)
+        askpass_name = "odcli-git-askpass.exe" if os.name == "nt" else "odcli-git-askpass"
+        askpass = tool_bin / askpass_name
+        askpass_target = askpass
+        if self.uv_symlink:
+            askpass_target = package_bin / askpass_name
+        askpass_target.write_text(f"#!{script_interpreter}\n", encoding="utf-8")
+        askpass_target.chmod(0o700)
         if self.uv_symlink:
             (tool_bin / "odcli").symlink_to(binary)
+            askpass.symlink_to(askpass_target)
         if self.stage_barrier is not None:
             self.stage_barrier.wait(timeout=5)
         return ""
@@ -283,6 +291,10 @@ def test_install_materializes_uv_tool_bin_symlink(
     assert numbered.executable.read_text(encoding="utf-8").splitlines()[0] == (
         f"#!{expected_interpreter}"
     )
+    askpass = numbered.tool_bin / "odcli-git-askpass"
+    assert askpass.is_file()
+    assert not askpass.is_symlink()
+    assert askpass.read_text(encoding="utf-8").splitlines()[0] == f"#!{expected_interpreter}"
     assert expected_interpreter.is_file()
     assert inspect_alternate_tool(numbered)["healthy"] is True
 

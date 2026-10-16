@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests.unit.test_cli_output_modes::PUBLIC_LEAF_CASES` at test-owned canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. The test-owned rows carry the SDK/CLI boundary metadata, disposition, and evidence fields; the generator SHALL emit this exact provenance, rewrite the complete 65-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 67-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -62,9 +62,11 @@ This is a reviewed projection of `tests.unit.test_cli_output_modes::PUBLIC_LEAF_
 | `shell` | native-passthrough | yes | focused | E2E-FC-06: exact target database and exit semantics |
 | `monitor` | native-passthrough | no | not-applicable | Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle |
 | `git commit` | mutating-or-spawning | yes | not-applicable | upstream Git workflow is outside the disposable Odoo fixture |
+| `git clone` | mutating-or-spawning | yes | not-applicable | authenticated GitLab clone is covered by generic Git contract tests and private E2E |
 | `git check` | bounded-read-only | no | not-applicable | upstream Git policy inspection is covered by unit contracts |
 | `git absorb` | mutating-or-spawning | yes | not-applicable | upstream Git mutation is outside the disposable Odoo fixture |
 | `git sync` | mutating-or-spawning | yes | not-applicable | upstream remote Git publication is intentionally outside E2E |
+| `git mr create` | mutating-or-spawning | yes | not-applicable | GitLab merge-request publication is covered by focused transport tests and private E2E |
 | `ps` | bounded-read-only | no | critical | E2E-CP-12: single-snapshot process/resource inventory |
 | `bug-report init` | mutating-or-spawning | yes | not-applicable | local offline draft creation is covered by focused command tests and publishes no GitHub issue |
 | `bug-report submit` | mutating-or-spawning | yes | not-applicable | publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture |

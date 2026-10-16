@@ -8,6 +8,10 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -17,6 +21,7 @@ from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_
 pytestmark = [pytest.mark.packaging, pytest.mark.timeout(180)]
 
 _REPO = Path(__file__).resolve().parents[2]
+_SOURCE_REPO_URL = "git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
 _V16_CATALOG = _REPO / "tests" / "fixtures" / "catalog_v16.sql"
 _GIT_COMMAND_TIMEOUT_SECONDS = 10
 _INSTALL_CHILD_TIMEOUT_SECONDS = 120
@@ -32,7 +37,60 @@ _CHECK_TEST_TIMEOUT_SECONDS = 300
 _CHECK_CHILD_TIMEOUT_SECONDS = 90
 
 
-def _isolated_home(tmp_path: Path) -> dict[str, str]:
+@dataclass(frozen=True, slots=True)
+class _DashboardReadiness:
+    health_status: int | None
+    openapi_status: int | None
+    error: str | None = None
+
+
+def _run_dashboard_monitor(odcli: Path, *, env: dict[str, str], port: int) -> _DashboardReadiness:
+    monitor = subprocess.Popen(
+        [str(odcli), "monitor", "--headless", "--host", "127.0.0.1", "--port", str(port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    health_status: int | None = None
+    openapi_status: int | None = None
+    error: str | None = None
+    try:
+        for _ in range(120):
+            if monitor.poll() is not None:
+                stdout, stderr = monitor.communicate(timeout=1)
+                error = (
+                    "restarted dashboard monitor exited before readiness: "
+                    f"returncode={monitor.returncode}; stdout={stdout[-1000:]!r}; "
+                    f"stderr={stderr[-1000:]!r}"
+                )
+                break
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/healthz", timeout=1
+                ) as response:
+                    health_status = response.status
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/openapi.json", timeout=1
+                ) as response:
+                    openapi_status = response.status
+                if health_status == 200 and openapi_status == 200:
+                    break
+            except (OSError, urllib.error.URLError):
+                time.sleep(0.25)
+        else:
+            error = "restarted dashboard monitor did not become ready"
+    finally:
+        monitor.terminate()
+        try:
+            monitor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            monitor.kill()
+            monitor.wait(timeout=10)
+    return _DashboardReadiness(health_status, openapi_status, error)
+
+
+def _isolated_home(tmp_path: Path, *, source_repo: Path | None = None) -> dict[str, str]:
     home = tmp_path / "home"
     home.mkdir()
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
@@ -52,7 +110,8 @@ def _isolated_home(tmp_path: Path) -> dict[str, str]:
     # Rewrite that origin to this checkout so packaging E2E never waits on a
     # network fetch after the local fixture install has already succeeded.
     env["GIT_CONFIG_COUNT"] = "1"
-    env["GIT_CONFIG_KEY_0"] = f"url.file://{_REPO.resolve()}/.insteadOf"
+    rewrite_repo = (source_repo or _REPO).resolve()
+    env["GIT_CONFIG_KEY_0"] = f"url.file://{rewrite_repo}/.insteadOf"
     env["GIT_CONFIG_VALUE_0"] = "https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
     # Reuse the package/source cache between the old install and target
     # install. The virtual environments remain isolated, while the expensive
@@ -66,21 +125,132 @@ def _require_uv() -> None:
         pytest.skip("uv is required for update packaging E2E")
 
 
-def _vcs_install_requirement(repo: Path, ref: str) -> str:
-    return f"odoo-instance-sdk @ git+file://{repo.resolve()}@{ref}"
+def _vcs_install_requirement(
+    repo: Path,
+    ref: str,
+    *,
+    extras: tuple[str, ...] = (),
+    source_url: str | None = None,
+) -> str:
+    package = "odoo-instance-sdk"
+    if extras:
+        package += "[" + ",".join(extras) + "]"
+    source = source_url or f"git+file://{repo.resolve()}"
+    return f"{package} @ {source}@{ref}"
 
 
 def _install_uv_tool_vcs(
-    env: dict[str, str], repo: Path, ref: str
+    env: dict[str, str],
+    repo: Path,
+    ref: str,
+    *,
+    extras: tuple[str, ...] = (),
+    source_url: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["uv", "tool", "install", "--force", _vcs_install_requirement(repo, ref)],
+        [
+            "uv",
+            "tool",
+            "install",
+            "--force",
+            _vcs_install_requirement(repo, ref, extras=extras, source_url=source_url),
+        ],
         check=False,
         capture_output=True,
         text=True,
         env=env,
         timeout=_INSTALL_CHILD_TIMEOUT_SECONDS,
     )
+
+
+def _create_dashboard_update_fixture(tmp_path: Path) -> tuple[Path, str, str]:
+    """Create two installable, asset-bearing revisions in an isolated Git repo."""
+    fixture = tmp_path / "dashboard-update-repo"
+
+    def ignore(path: str, names: list[str]) -> list[str]:
+        relative = Path(path).resolve().relative_to(_REPO.resolve())
+        ignored = {".git", ".venv", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+        if not relative.parts:
+            ignored.add("dist")
+        return [name for name in names if name in ignored or name == "node_modules"]
+
+    shutil.copytree(_REPO, fixture, ignore=ignore)
+    web_dist = _REPO / "src" / "odoo_instance_sdk" / "web" / "dist"
+    if not (web_dist / "index.html").is_file() or not any((web_dist / "assets").iterdir()):
+        pytest.skip("built SPA assets are unavailable; run `make package` first")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Multica packaging fixture",
+                "-c",
+                "user.email=packaging-fixture@example.invalid",
+                *args,
+            ],
+            cwd=fixture,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+
+    git("init", "--quiet")
+    git(
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+    )
+    git("add", "--all")
+    git("add", "--force", "src/odoo_instance_sdk/web/dist")
+    git("commit", "--quiet", "-m", "dashboard baseline")
+    baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=fixture, text=True).strip()
+    index = fixture / "src" / "odoo_instance_sdk" / "web" / "dist" / "index.html"
+    index.write_text(index.read_text(encoding="utf-8") + "\n<!-- candidate -->\n", encoding="utf-8")
+    git("add", "--force", str(index.relative_to(fixture)))
+    git("commit", "--quiet", "-m", "dashboard candidate")
+    candidate = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=fixture, text=True
+    ).strip()
+    return fixture, baseline, candidate
+
+
+def _create_clean_vcs_fixture(tmp_path: Path) -> tuple[Path, str]:
+    """Create a VCS source with no prebuilt SPA tree or Node dependency tree."""
+    fixture = tmp_path / "clean-vcs-source"
+
+    def ignore(_path: str, names: list[str]) -> list[str]:
+        ignored = {".git", ".venv", ".mypy_cache", ".pytest_cache", ".ruff_cache", "node_modules"}
+        return [name for name in names if name in ignored or name == "dist"]
+
+    shutil.copytree(_REPO, fixture, ignore=ignore)
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Multica packaging fixture",
+                "-c",
+                "user.email=packaging-fixture@example.invalid",
+                *args,
+            ],
+            cwd=fixture,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+
+    git("init", "--quiet")
+    git("remote", "add", "origin", "https://github.com/maximchikAlexandr/odoo-instance-sdk.git")
+    git("add", "--all")
+    git("commit", "--quiet", "-m", "clean VCS source")
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=fixture, text=True).strip()
+    assert not (fixture / "src/odoo_instance_sdk/web/dist").exists()
+    return fixture, head
 
 
 def _trace_odcli_launcher(
@@ -334,6 +504,141 @@ def test_uv_tool_full_update_from_old_revision(tmp_path: Path) -> None:
     assert doctor.returncode in {0, 1}, doctor.stderr or doctor.stdout
     launches = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
     assert [argv for argv in launches if argv == ["--version"]].count(["--version"]) == 1
+
+
+@pytest.mark.timeout(_FULL_UPDATE_TEST_TIMEOUT_SECONDS)
+def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
+    tmp_path: Path,
+) -> None:
+    """A dashboard uv tool update keeps extras, assets, and the restarted API."""
+    _require_uv()
+    fixture, baseline, candidate = _create_dashboard_update_fixture(tmp_path)
+    env = _isolated_home(tmp_path, source_repo=fixture)
+    install = _install_uv_tool_vcs(
+        env,
+        fixture,
+        baseline,
+        extras=("dashboard",),
+        source_url=_SOURCE_REPO_URL,
+    )
+    if install.returncode != 0:
+        pytest.skip(f"uv dashboard tool install unavailable: {install.stderr}")
+    odcli = Path(env["HOME"]) / ".local" / "bin" / "odcli"
+
+    update = subprocess.run(
+        [str(odcli), "update", "--ref", candidate, "--yes", "--format", "json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=_FULL_UPDATE_CHILD_TIMEOUT_SECONDS,
+    )
+    assert update.returncode == 0, update.stderr or update.stdout
+    payload = json.loads(update.stdout)
+    assert payload["result"]["outcome"] == "updated"
+    assert payload["result"]["target_sha"] == candidate
+    assert payload["result"]["final_sha"] == candidate
+    assert payload["result"]["snapshot_state"] == "cleared"
+    assert payload["result"]["journal_state"] == "cleared"
+
+    tool_root = Path(env["HOME"]) / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    tool_python = tool_root / "bin" / "python"
+    imports = subprocess.run(
+        [
+            str(tool_python),
+            "-c",
+            (
+                "import fastapi, starlette, uvicorn; "
+                "from pathlib import Path; "
+                "root=Path(__import__('odoo_instance_sdk').__file__).parent / 'web' / 'dist'; "
+                "assert (root / 'index.html').is_file(); "
+                "assert any((root / 'assets').iterdir()); "
+                "print(f'{fastapi.__name__}:{starlette.__name__}:{uvicorn.__name__}')"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert imports.returncode == 0, imports.stderr
+    assert imports.stdout.strip() == "fastapi:starlette:uvicorn"
+
+    readiness = _run_dashboard_monitor(odcli, env=env, port=18080 + (os.getpid() % 1000))
+    assert readiness.error is None, readiness.error
+    assert readiness.health_status == 200
+    assert readiness.openapi_status == 200
+
+
+@pytest.mark.timeout(_FULL_UPDATE_TEST_TIMEOUT_SECONDS)
+def test_clean_vcs_install_builds_dashboard_assets_and_keeps_core_only_minimal(
+    tmp_path: Path,
+) -> None:
+    """A clean Git source builds SPA assets while a core-only tool stays minimal."""
+    _require_uv()
+    fixture, head = _create_clean_vcs_fixture(tmp_path)
+
+    dashboard_root = tmp_path / "dashboard"
+    dashboard_root.mkdir()
+    dashboard_env = _isolated_home(dashboard_root, source_repo=fixture)
+    dashboard_install = _install_uv_tool_vcs(
+        dashboard_env,
+        fixture,
+        head,
+        extras=("dashboard",),
+        source_url=_SOURCE_REPO_URL,
+    )
+    assert dashboard_install.returncode == 0, dashboard_install.stderr
+    dashboard_tool_root = (
+        Path(dashboard_env["HOME"]) / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    )
+    dashboard_python = dashboard_tool_root / "bin" / "python"
+    dashboard_probe = subprocess.run(
+        [
+            str(dashboard_python),
+            "-c",
+            (
+                "import fastapi, starlette, uvicorn, odoo_instance_sdk\n"
+                "from pathlib import Path\n"
+                "root = Path(odoo_instance_sdk.__file__).parent / 'web' / 'dist'\n"
+                "assert (root / 'index.html').is_file()\n"
+                "assert any((root / 'assets').iterdir())"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=dashboard_env,
+    )
+    assert dashboard_probe.returncode == 0, dashboard_probe.stderr
+    assert not (fixture / "src/odoo_instance_sdk/web/dist").exists()
+
+    core_root = tmp_path / "core"
+    core_root.mkdir()
+    core_env = _isolated_home(core_root, source_repo=fixture)
+    core_install = _install_uv_tool_vcs(core_env, fixture, head, source_url=_SOURCE_REPO_URL)
+    assert core_install.returncode == 0, core_install.stderr
+    core_tool_root = (
+        Path(core_env["HOME"]) / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
+    )
+    core_python = core_tool_root / "bin" / "python"
+    core_probe = subprocess.run(
+        [
+            str(core_python),
+            "-c",
+            (
+                "import importlib.util\n"
+                "assert importlib.util.find_spec('fastapi') is None\n"
+                "assert importlib.util.find_spec('uvicorn') is None"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=core_env,
+    )
+    assert core_probe.returncode == 0, core_probe.stderr
 
 
 @pytest.mark.timeout(_CHECK_TEST_TIMEOUT_SECONDS)

@@ -161,11 +161,22 @@ execution acquires `get_locks_dir()/odcli-update.lock`, snapshots affected
 metadata under `get_user_root()/update/`, and runs maintenance as a child
 `odcli update --format json` with `ODCLI_MAINTENANCE=1`.
 
-The Git workflow leaves use the same captured-plan boundary: `git commit` and
-`git absorb` require explicit confirmation for mutation, while `git check` is
-read-only and `git sync` captures fetch, integration, validation, and optional
-same-name publication before confirmation. Dry-run emits the complete Git
-plan without launching fetch, rebase, absorb, commit, or publication steps.
+The Git workflow leaves use the same captured-plan boundary: `git clone`,
+`git commit`, `git sync`, and `git mr create` require explicit confirmation for
+mutation, while `git check` is read-only. Clone captures the exact HTTPS
+repository and validated recursive credential frontier; sync captures fetch,
+integration, validation, and optional same-name publication; MR publication
+captures lookup, optional project upload, and one create/update action. Dry-run
+emits the complete Git plan without launching clone, fetch, rebase, commit,
+upload, or publication steps.
+
+Generic GitLab operations resolve a selected member from
+`~/.odcli/credentials/gitlab-credentials.toml` and its owner-only `.env` token
+file. `/api/v4/user` verification binds the configured login to the commit
+identity before a credentialed child or HTTP mutation. Public plans redact
+tokens, askpass paths, authorization values, and secret-derived fingerprints;
+submodule hosts must each have an exact mapping for that same member. MR image
+uploads are action steps and their digest marker is kept outside Git.
 
 Resource inventory and doctor are observation-only projections. They report
 logical versus measured bytes, ownership confidence, retained data, and
@@ -243,7 +254,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:558-559` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:476` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:477` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
@@ -260,21 +271,27 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:515` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/internal/self_update.py:827-829` — maintenance child
-  JSON stdout transport; remove when maintenance output gains a replacement
-  centralized emitter.
+- `src/odoo_instance_sdk/internal/self_update.py:842-844` — maintenance child
+  JSON stdout transport.
+- `src/odoo_instance_sdk/internal/git_credential_helper.py:31-32` — Git
+  credential protocol child transport.
+- `src/odoo_instance_sdk/internal/git_credential_helper.py:44-45` — Git
+  credential protocol child transport.
+- `src/odoo_instance_sdk/internal/git_askpass.py:72` — Git askpass child
+  transport; the value is selected from the owner-only credential channel and
+  is never emitted by the public SDK boundary.
 - `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:978` — shared
-  alternate-tool JSON transport used by the canonical-interpreter bootstrap.
 - `src/odoo_instance_sdk/internal/alternate_tool.py:980` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
 - `src/odoo_instance_sdk/internal/alternate_tool.py:982` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:988` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:984` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap.
-- `src/odoo_instance_sdk/internal/alternate_tool.py:991` — shared
+- `src/odoo_instance_sdk/internal/alternate_tool.py:990` — shared
+  alternate-tool JSON transport used by the canonical-interpreter bootstrap.
+- `src/odoo_instance_sdk/internal/alternate_tool.py:993` — shared
   alternate-tool JSON transport used by the canonical-interpreter bootstrap;
   remove these entries only when lifecycle delegation has a centralized
   machine-output adapter.
@@ -293,10 +310,10 @@ protocol—not to add an exception.
 ### HTTP transport and XML-RPC boundary
 
 `DIRECT_HTTPX_USAGE` is a line-specific allowlist under
-`src/odoo_instance_sdk/internal/transport/` only. Production Odoo HTTP calls
-go through the internal `OdooHttpClient`; `httpx` types and exceptions do not
-leak into public SDK or resource interfaces. `import odoo_instance_sdk.cli`
-remains free of `httpx`. An architecture gate requires zero
+`src/odoo_instance_sdk/internal/transport/` only. Production Odoo and GitLab
+HTTP calls go through their internal bounded clients; `httpx` types and
+exceptions do not leak into public SDK or resource interfaces.
+`import odoo_instance_sdk.cli` remains free of `httpx`. An architecture gate requires zero
 `xmlrpc.client.ServerProxy` call sites in `src/`; XML-RPC verification stays in
 `tests/fixtures/xmlrpc_probe.py` for real-Odoo acceptance only.
 

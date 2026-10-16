@@ -118,7 +118,7 @@ def execute_child(
             environment = snapshot.credential.askpass_environment(
                 askpass(), channel_path=channel_path
             )
-            secret_values = (snapshot.credential._token,)
+            secret_values = snapshot.credential._redaction_secrets()
         child = build_child(environment, secret_values, hooks_path)
         return child.run()
     finally:

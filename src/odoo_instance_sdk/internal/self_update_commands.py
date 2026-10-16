@@ -15,7 +15,7 @@ from odoo_instance_sdk.exceptions import (
     UnsupportedInstallError,
     UpdateError,
 )
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.locks import exclusive_lock
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
@@ -328,6 +328,17 @@ class _UpdateSession:
     maintenance_result_model: UpdateResult | None = None
     source_origin_verified: bool = False
 
+    def _composition_fields(self) -> dict[str, JsonValue]:
+        return {
+            "direct_requirement": self.provenance.direct_requirement,
+            "requested_extras": list(self.provenance.requested_extras),
+            "install_requirement": _install_argv(
+                self.ref,
+                source_repo=self.provenance.source_repo,
+                extras=self.provenance.requested_extras,
+            )[-1],
+        }
+
     def __post_init__(self) -> None:
         self.journal_path = _update_journal_path()
         self.snapshot_dir = _update_snapshot_dir()
@@ -401,6 +412,7 @@ class _UpdateSession:
                 "target_ref": self.ref,
                 "snapshot_sha": self.snapshot_sha,
                 "maintenance_pid": None,
+                **self._composition_fields(),
             },
         )
         self.context.complete_action("update.snapshot")
@@ -415,11 +427,11 @@ class _UpdateSession:
                 "target_ref": self.ref,
                 "snapshot_sha": self.snapshot_sha,
                 "maintenance_pid": None,
+                **self._composition_fields(),
             },
         )
 
     def resume_snapshot(self) -> None:
-        """Resume a snapshot-phase crash without replacing its rollback point."""
         self.context.skip("update.snapshot")
         snapshot_sha = self.snapshot_sha
         target_ref = self.journal_target_ref
@@ -460,9 +472,14 @@ class _UpdateSession:
                 "target_ref": self.ref,
                 "snapshot_sha": self.snapshot_sha,
                 "maintenance_pid": None,
+                **self._composition_fields(),
             },
         )
-        recovery_step = recovery_step_for_snapshot(self.snapshot_sha)
+        recovery_step = recovery_step_for_snapshot(
+            self.snapshot_sha,
+            source_repo=self.provenance.source_repo,
+            extras=self.provenance.requested_extras,
+        )
         self.recovery_step = recovery_step
         result = cast("ProcessResult", self.context.process_prepared(self.maintenance_step))
         self.maintenance_result = result
@@ -483,6 +500,7 @@ class _UpdateSession:
                 "snapshot_sha": self.snapshot_sha,
                 "maintenance_pid": None,
                 "recovery_argv": list(recovery_step.argv),
+                **self._composition_fields(),
             },
         )
         if rollback == "restored":
@@ -684,7 +702,6 @@ def _build_staged_command(
     provenance: InstalledProvenance,
     executor: ProcessExecutor | None,
 ) -> Command[UpdateResult]:
-    """Build the first, read-only stage of the mutable-ref update flow."""
     resolve_step = PreparedStep(
         step_id="update.resolve",
         argv=_resolve_argv(ref),
@@ -760,7 +777,6 @@ def _build_preflight_command(
     allow_downgrade: bool,
     executor: ProcessExecutor | None,
 ) -> Command[UpdateResult]:
-    """Run the read-only checks before a resolved mutation plan is shown."""
     inspect_step = PreparedAction(
         step_id="update.inspect",
         action="inspect",
@@ -873,7 +889,11 @@ def _build_mutating_command(
         )
     install_step = PreparedStep(
         step_id="update.install",
-        argv=_install_argv(ref),
+        argv=_install_argv(
+            ref,
+            source_repo=provenance.source_repo,
+            extras=provenance.requested_extras,
+        ),
         mutating=True,
     )
     executable = provenance.uv_tool_bin_path

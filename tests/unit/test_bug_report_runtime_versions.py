@@ -439,7 +439,7 @@ def test_real_snapshot_and_plan_are_process_free_and_complete(
     assert process_steps[0].timeout == 5.0
     assert process_steps[0].max_combined_output_bytes == 16 * 1024
     assert all(step.timeout == 10.0 for step in process_steps[1:])
-    assert "shell=False" in inspect.getsource(SubprocessExecutor._execute)
+    assert "shell=False" in inspect.getsource(SubprocessExecutor._execute_materialized)
     public_plan = repr(command.plan)
     assert "secret" not in public_plan.lower()
     assert "db_password" not in public_plan
