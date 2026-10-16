@@ -6,7 +6,7 @@ import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
@@ -248,6 +248,16 @@ class PreparedStep:
     text: bool = True
     start_new_session: bool = False
     inherit_stdio: bool = False
+    # Runtime-only environment materialization.  The factory is deliberately
+    # excluded from equality and public projections: a plan captures the
+    # command shape, while a child receives short-lived private values only at
+    # the process boundary.
+    runtime_environment_factory: (
+        Callable[[], tuple[tuple[tuple[str, str], ...], Callable[[], None], tuple[str, ...]]] | None
+    ) = field(default=None, repr=False, compare=False)
+    private_stdout_consumer: Callable[[str | bytes | None], None] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __repr__(self) -> str:
         """Render only the already-redacted public process projection."""
@@ -460,6 +470,32 @@ class RunContext(Generic[T]):
         )
         result = self._executor.execute(
             captured,
+            observer=observer,
+            observe_output=self._observe_output,
+        )
+        self._results[requested.step_id] = result
+        return result
+
+    def process_dynamic(self, requested: PreparedStep) -> ProcessResultLike:
+        """Execute a runtime-discovered process without changing the public plan.
+
+        Some workflows discover an unbounded nested frontier only after the
+        previous child has initialized it.  Those exact private steps still
+        use the common executor and redaction path, but are kept out of the
+        immutable public plan because they do not exist at planning time.
+        """
+        if requested.step_id in self._steps:
+            raise DuplicateStepError(requested.step_id)
+        if requested.step_id in self._consumed:
+            raise DuplicateStepError(requested.step_id)
+        self._consumed.add(requested.step_id)
+        observer = (
+            _StreamingStepObserver(self._observer, requested)
+            if self._observer is not None
+            else None
+        )
+        result = self._executor.execute(
+            requested,
             observer=observer,
             observe_output=self._observe_output,
         )

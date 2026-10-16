@@ -9,8 +9,8 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Literal, cast
 
@@ -30,7 +30,7 @@ from . import (
     event_for_step,
 )
 from .drain import PipeDrain
-from .redaction import IncrementalStreamRedactor
+from .redaction import IncrementalStreamRedactor, redacted_argv, redacted_projection
 
 _CLEANUP_TIMEOUT = 5.0
 _TIMEOUT_TAIL_BYTES = 8192
@@ -111,8 +111,6 @@ class ProcessOutputLimitError(ProcessExecutionError):
 
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
-    """Typed result of one process invocation."""
-
     argv: tuple[str, ...]
     returncode: int
     stdout: str | bytes | None
@@ -205,13 +203,10 @@ def _environment(
     snapshot: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, str]:
     if policy == "explicit":
-        # An explicit policy is hermetic even when the caller supplied no
-        # overrides.  Passing ``None`` here would turn an intentionally empty
-        # environment back into a copy of the ambient process environment.
-        return sanitized_child_environment(dict(overrides))
-    # A non-empty tuple is an exact environment captured by ``prepared_step``
-    # or a resource command.  Do not silently merge a later ambient
-    # environment into an inspected command.
+        # Explicit policy is hermetic, even with no overrides.
+        source = snapshot or overrides
+        return sanitized_child_environment(dict(source))
+    # Never merge ambient environment into an inspected command.
     source = snapshot or overrides
     return sanitized_child_environment(dict(source) if source else None)
 
@@ -231,7 +226,6 @@ def _run_pump(  # noqa: C901
     observe_output: bool,
     max_output_bytes: int | None = None,
 ) -> tuple[int, bytes, bytes, float]:
-    """Run one captured child while pumping stdin and both output pipes."""
     process = subprocess.Popen(
         list(prepared.argv),
         cwd=prepared.cwd,
@@ -471,8 +465,6 @@ def _run_pump(  # noqa: C901
 
 
 class SubprocessExecutor:
-    """Real executor for already-captured process steps."""
-
     def execute(
         self,
         step: PreparedProcess,
@@ -499,7 +491,58 @@ class SubprocessExecutor:
             observe_output=observe_output,
         )
 
-    def _execute(  # noqa: C901
+    def _execute(
+        self,
+        prepared: PreparedStep,
+        *,
+        deadline: ExecutionDeadline | None = None,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResult:
+        runtime_cleanup: Callable[[], None] | None = None
+        runtime_secrets: tuple[str, ...] = ()
+        if prepared.runtime_environment_factory is not None:
+            runtime_environment, runtime_cleanup, runtime_secrets = (
+                prepared.runtime_environment_factory()
+            )
+            prepared = replace(
+                prepared,
+                environment_snapshot=runtime_environment,
+                environment_overrides=runtime_environment,
+                secret_values=tuple(dict.fromkeys((*prepared.secret_values, *runtime_secrets))),
+            )
+        try:
+            result = self._execute_materialized(
+                prepared,
+                deadline=deadline,
+                observer=observer,
+                observe_output=observe_output,
+            )
+            if prepared.private_stdout_consumer is not None:
+                prepared.private_stdout_consumer(result.stdout)
+            if runtime_secrets:
+                result = replace(
+                    result,
+                    stdout=cast(
+                        "str | bytes | None",
+                        redacted_projection(result.stdout, secrets=runtime_secrets, field="stdout"),
+                    ),
+                    stderr=cast(
+                        "str | bytes | None",
+                        redacted_projection(result.stderr, secrets=runtime_secrets, field="stderr"),
+                    ),
+                    argv=redacted_argv(
+                        result.argv,
+                        secrets=runtime_secrets,
+                        sensitive_indices=prepared.sensitive_argv_indices,
+                    ),
+                )
+            return result
+        finally:
+            if runtime_cleanup is not None:
+                runtime_cleanup()
+
+    def _execute_materialized(  # noqa: C901
         self,
         prepared: PreparedStep,
         *,
@@ -754,7 +797,6 @@ class SubprocessExecutor:
 
 
 def _notify(observer: StepObserver | None, event: StepEvent) -> None:
-    """Observers are diagnostics and must never change process semantics."""
     if observer is None:
         return
     try:

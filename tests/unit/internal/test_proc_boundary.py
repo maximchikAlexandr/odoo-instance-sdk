@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -10,6 +12,10 @@ from typing import cast
 import pytest
 
 from odoo_instance_sdk.exceptions import DuplicateStepError, UnplannedStepError
+from odoo_instance_sdk.internal.gitlab_credentials import (
+    cleanup_askpass_channel,
+    write_askpass_channel,
+)
 from odoo_instance_sdk.internal.proc import (
     DeadlineExceeded,
     ExecutionDeadline,
@@ -40,8 +46,74 @@ from odoo_instance_sdk.internal.proc.redaction import (
     IncrementalStreamRedactor,
     redacted_projection,
 )
+from odoo_instance_sdk.models import GitLabCredentialContext, GitLabCredentialIdentity
 
 pytestmark = pytest.mark.serial
+
+
+def test_explicit_runtime_environment_reaches_real_git_and_cleans_askpass(
+    tmp_path: Path,
+) -> None:
+    token = "runtime-credential-token"
+    credential = GitLabCredentialContext(
+        GitLabCredentialIdentity(
+            user_id="11111111-1111-4111-8111-111111111111",
+            host="gitlab.example",
+            login="runtime-user",
+            token_key="ODCLI_GITLAB_TOKEN_RUNTIME",
+        ),
+        token,
+    )
+    askpass = tmp_path / "askpass.py"
+    askpass.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "entries = json.load(open(os.environ['ODCLI_GITLAB_ASKPASS_FILE']))\n"
+        "entry = entries[0]\n"
+        "print(entry['login'] if 'username' in ' '.join(sys.argv).lower() else entry['token'])\n",
+        encoding="utf-8",
+    )
+    askpass.chmod(0o700)
+    channels: list[Path] = []
+    cleanups: list[bool] = []
+
+    def runtime_environment() -> tuple[
+        tuple[tuple[str, str], ...], Callable[[], None], tuple[str, ...]
+    ]:
+        channel = Path(write_askpass_channel(credential))
+        channels.append(channel)
+        values = credential.askpass_environment(str(askpass), channel_path=str(channel))
+
+        def cleanup() -> None:
+            cleanups.append(True)
+            cleanup_askpass_channel(str(channel))
+
+        return tuple(sorted(values.items())), cleanup, (token,)
+
+    step = PreparedStep(
+        step_id="git.credential.runtime",
+        argv=("git", "credential", "fill"),
+        stdin=b"protocol=https\nhost=gitlab.example\n\n",
+        environment=(
+            ("GIT_CONFIG_GLOBAL", os.devnull),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ),
+        environment_policy="explicit",
+        runtime_environment_factory=runtime_environment,
+        secret_values=(token,),
+    )
+    events: list[StepEvent] = []
+
+    result = SubprocessExecutor().execute(step, observer=events.append, observe_output=True)
+
+    assert result.returncode == 0
+    assert "username=runtime-user\n" in str(result.stdout)
+    assert "password=<redacted>\n" in str(result.stdout)
+    assert token not in repr(result)
+    assert all(token not in repr(event) for event in events)
+    assert cleanups == [True]
+    assert channels and not channels[0].exists()
 
 
 def _python(source: str) -> tuple[str, ...]:
