@@ -48,6 +48,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | CLI leaf | canonical classification |
 | --- | --- |
 | `init` | mutating-or-spawning |
+| `prepare-venv` | mutating-or-spawning |
 | `remote add/update/remove` | mutating-or-spawning |
 | `backup retention/pin/unpin/prune` | mutating-or-spawning |
 | `stop` | mutating-or-spawning |
@@ -254,7 +255,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:558-559` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:477` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:478` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation

@@ -12,6 +12,38 @@ The CLI characterization and real-Odoo traceability matrix are test-owned;
 production commands remain direct SDK/resource entrypoints with no runtime
 operation registry or provider-discovery layer.
 
+## Project inputs and the primary virtual environment
+
+`ProjectConfig` optionally stores ordered, repository-relative `addon_roots`
+and ordered `server_wide_modules`. `odcli init --addons-root PATH
+--server-wide-module NAME` repeats these options in the desired order; omitted
+options retain the stored tuples. Compose's generated `.odcli/odoo.conf`
+overlays the resolved addon paths and server-wide modules while preserving the
+source config. A missing or stale generated config is repaired independently
+of an unchanged manifest.
+
+The primary checkout environment is prepared through the same immutable SDK
+boundary used by the CLI:
+
+```python
+from odoo_instance_sdk import prepare_venv_command
+
+command = prepare_venv_command(".", python="3.12", venv=".venv")
+print(command.plan)
+result = command.run()
+print(result["interpreter"])
+```
+
+`odcli prepare-venv --python 3.12 --venv .venv` discovers dependency inputs in
+this exact order: recursive addon modules and each module's immediate-parent
+`requirements.txt`, then requirements beside the configured `odoo-bin`, then
+explicit project requirement files. Paths are canonicalized and the first
+occurrence wins when inputs repeat. It jointly resolves the result with Odoo
+and explicit requirements, refreshes an existing environment without
+recreating it, and records the interpreter only after successful preparation.
+`--dry-run` is mutation-free and supports the normal Rich, JSON, and TOON
+transports.
+
 ## Create a client and instance
 
 ```python
