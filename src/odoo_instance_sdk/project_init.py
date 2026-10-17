@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import hashlib
 import json
-import os
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -18,6 +16,10 @@ import msgspec
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
+from odoo_instance_sdk.internal.primary_venv import (
+    _capture_primary_venv_preparation,
+    _PrimaryVenvPreparation,
+)
 from odoo_instance_sdk.internal.project_init import (
     evaluate_init_completeness,
     fetch_remote_database_names_for_init,
@@ -32,15 +34,6 @@ from odoo_instance_sdk.internal.project_init import (
     write_project_generated_config,
 )
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
-from odoo_instance_sdk.internal.venv_origin import (
-    OriginStage,
-    discard_origin_stage,
-    origin_record_path,
-    publish_origin,
-    read_origin_bytes,
-    restore_persisted_prepare_state,
-    stage_origin_record,
-)
 from odoo_instance_sdk.project import (
     ProjectConfig,
     RemoteSourceConfig,
@@ -50,11 +43,11 @@ from odoo_instance_sdk.project import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
+    from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpPlan
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
         PrivateJsonValue,
-        ProcessResult,
         RunContext,
     )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -63,30 +56,31 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class _ComposeFollowup:
     cluster: PostgresCluster
+    project_root: Path
+    config: ProjectConfig
     temporary_path: Path
+    password_action: PreparedAction | None
+    config_action: PreparedAction | None
+    password_state: list[str | None]
     steps: tuple[PreparedStep | PreparedAction, ...]
+
+    @property
+    def init_steps(self) -> tuple[PreparedAction, ...]:
+        return tuple(
+            step for step in (self.password_action, self.config_action) if step is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class _BootstrapFollowup:
     cluster: PostgresCluster
-    spawn_step: PreparedStep
-    probe_step: PreparedStep
-    ready_step: PreparedStep
-    verify_action: PreparedAction
-    record_action: PreparedAction
+    plan: BootstrapTmpPlan
     project_root: Path
     data_directory: Path
 
     @property
     def steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
-        return (
-            self.spawn_step,
-            self.probe_step,
-            self.ready_step,
-            self.verify_action,
-            self.record_action,
-        )
+        return self.plan.execution_steps
 
 
 def _init_action_details(
@@ -175,6 +169,8 @@ def _execute_manifest_phase(
     confirm_partial: Callable[[list[str], dict[str, str]], None] | None,
     remote_database_names: list[str] | None,
     resume_existing: bool,
+    validate_generated_config: bool,
+    write_generated_config: bool,
 ) -> dict[str, JsonValue]:
     from odoo_instance_sdk.exceptions import InstanceConfigurationError
 
@@ -224,6 +220,8 @@ def _execute_manifest_phase(
         remote_database_names=remote_database_names,
         missing=missing,
         details=details,
+        validate_generated_config=validate_generated_config,
+        write_generated_config=write_generated_config,
     )
     context.complete_action("init")
     return result
@@ -240,37 +238,68 @@ def _execute_compose_followup_phase(
     )
 
 
+def _execute_compose_init_phase(
+    context: RunContext[dict[str, JsonValue]],
+    followup: _ComposeFollowup,
+    repair_action: PreparedAction | None,
+) -> None:
+    from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+
+    password_action = followup.password_action
+    config_action = followup.config_action
+    if password_action is None or config_action is None:
+        return
+    context.action(password_action.step_id)
+    password = ensure_password_file(followup.cluster.password_file)
+    followup.password_state[0] = password
+    context.complete_action(password_action.step_id)
+    if repair_action is not None:
+        context.action(repair_action.step_id)
+        write_project_generated_config(
+            followup.project_root,
+            followup.config,
+            validate_target=False,
+            ensure_password=False,
+            password=password,
+        )
+        context.complete_action(repair_action.step_id)
+    context.action(config_action.step_id)
+    write_project_generated_config(
+        followup.project_root,
+        followup.config,
+        validate_target=False,
+        ensure_password=False,
+        password=password,
+    )
+    context.complete_action(config_action.step_id)
+
+
 def _execute_bootstrap_followup_phase(
     context: RunContext[dict[str, JsonValue]], followup: _BootstrapFollowup
 ) -> None:
     from odoo_instance_sdk.internal.dbprep.bootstrap import (
-        BootstrapOutcome,
+        execute_bootstrap_tmp,
         record_bootstrap_event,
-        run_bootstrap_tmp,
     )
     from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
 
     verify_project_owned_data_dir(
         followup.project_root, followup.data_directory, require_exists=False
     )
-    context.action(followup.verify_action.step_id)
-    outcome = run_bootstrap_tmp(
-        context, followup.spawn_step, followup.probe_step, followup.ready_step
-    )
-    context.complete_action(followup.verify_action.step_id)
-    if outcome is BootstrapOutcome.CREATED:
-        context.action(followup.record_action.step_id)
+
+    def record() -> None:
         data_directory = verify_project_owned_data_dir(
             followup.project_root, followup.data_directory
         )
         record_bootstrap_event(followup.cluster, data_directory)
-        context.complete_action(followup.record_action.step_id)
+
+    execute_bootstrap_tmp(context, followup.plan, on_created=record)
     for step in followup.steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
             context.skip(step.step_id)
 
 
-def init_project_command(
+def init_project_command(  # noqa: C901
     project_path: Path,
     config: ProjectConfig,
     *,
@@ -285,6 +314,8 @@ def init_project_command(
     dry_run: bool = False,
     remote_database_names: list[str] | None = None,
     confirm_partial: Callable[[list[str], dict[str, str]], None] | None = None,
+    venv: str | Path | None = None,
+    repair_generated_config: bool = False,
 ) -> Command[dict[str, JsonValue]]:
     """Capture one immutable init command for preview and execution."""
     from odoo_instance_sdk.execution import Command, ExecutionPlan
@@ -332,6 +363,16 @@ def init_project_command(
             project_generated_config_path(project_path), project_root=project_path.resolve()
         )
 
+    primary_preparation: _PrimaryVenvPreparation | None = None
+    if venv is not None:
+        if effective_config.python is None:
+            raise ConfigError("init --venv requires an effective Python selector; pass --python")
+        primary_preparation = _capture_primary_venv_preparation(
+            effective_config,
+            python=effective_config.python,
+            venv=venv,
+        )
+
     compose_followup: _ComposeFollowup | None = None
     bootstrap_followup: _BootstrapFollowup | None = None
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
@@ -339,6 +380,8 @@ def init_project_command(
             project_path,
             effective_config,
             dry_run=dry_run,
+            python=(primary_preparation.interpreter if primary_preparation is not None else None),
+            defer_actions=venv is not None,
         )
 
     init_action = PreparedAction(
@@ -365,9 +408,29 @@ def init_project_command(
         read_only=resume_existing,
         mutating=not resume_existing,
     )
+    repair_action = (
+        PreparedAction(
+            step_id="init.generated-config.repair",
+            action="repair-generated-config",
+            description="Repair the generated Compose configuration",
+            details={"path": str(project_generated_config_path(project_path.resolve()))},
+            mutating=True,
+        )
+        if (
+            repair_generated_config
+            and venv is not None
+            and effective_config.postgres is not None
+            and effective_config.postgres.mode == "compose"
+        )
+        else None
+    )
     prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (
         *((remote_names_step,) if remote_names_step is not None else ()),
         init_action,
+        *((compose_followup.init_steps[:1]) if compose_followup is not None else ()),
+        *((repair_action,) if repair_action is not None else ()),
+        *((compose_followup.init_steps[1:]) if compose_followup is not None else ()),
+        *(primary_preparation.steps if primary_preparation is not None else ()),
         *(compose_followup.steps if compose_followup is not None else ()),
         *(bootstrap_followup.steps if bootstrap_followup is not None else ()),
     )
@@ -393,7 +456,16 @@ def init_project_command(
             confirm_partial=confirm_partial,
             remote_database_names=resolved_remote_names,
             resume_existing=resume_existing,
+            validate_generated_config=venv is None,
+            write_generated_config=venv is None,
         )
+        if compose_followup is not None and compose_followup.password_action is not None:
+            _execute_compose_init_phase(context, compose_followup, repair_action)
+        if primary_preparation is not None:
+            result = {
+                **result,
+                **primary_preparation.execute(context),
+            }
         if compose_followup is not None:
             _execute_compose_followup_phase(context, compose_followup)
         if bootstrap_followup is not None:
@@ -411,14 +483,16 @@ def _compose_followup_steps(
     config: ProjectConfig,
     *,
     dry_run: bool,
+    python: str | None = None,
+    defer_actions: bool = False,
 ) -> tuple[_ComposeFollowup, _BootstrapFollowup]:
     """Return postgres ensure-running and bootstrap ``tmp`` steps for compose init."""
     from odoo_instance_sdk.internal.dbprep.bootstrap import (
         bootstrap_record_action,
-        bootstrap_tmp_steps,
+        bootstrap_tmp_plan,
     )
     from odoo_instance_sdk.internal.generated_config import project_generated_config_path
-    from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+    from odoo_instance_sdk.internal.proc import PreparedAction
     from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
     from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
     from odoo_instance_sdk.models import StartConfig
@@ -438,10 +512,36 @@ def _compose_followup_steps(
     source_start = (
         StartConfig.from_odoo_config(source_path) if Path(source_path).is_file() else StartConfig()
     )
-    if dry_run and not cluster.password_file.is_file():
-        password = "dry-run-placeholder"
+    if defer_actions:
+        password = (
+            cluster.password_file.read_text(encoding="utf-8").strip()
+            if cluster.password_file.is_file()
+            else "deferred-password"
+        )
+        password_action = PreparedAction(
+            step_id="init.compose.password",
+            action="ensure-postgres-password",
+            description="Ensure the Compose PostgreSQL password file",
+            details={"path": str(cluster.password_file)},
+            mutating=True,
+        )
+        config_action = PreparedAction(
+            step_id="init.compose.config",
+            action="write-generated-config",
+            description="Write the generated Compose configuration",
+            details={"path": str(generated)},
+            mutating=True,
+        )
     else:
-        password = ensure_password_file(cluster.password_file)
+        from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+
+        password = (
+            "dry-run-placeholder"
+            if dry_run and not cluster.password_file.is_file()
+            else ensure_password_file(cluster.password_file)
+        )
+        password_action = None
+        config_action = None
     start_config = copy.deepcopy(source_start)
     start_config.config_path = str(generated)
     start_config.http_port = resolve_project_http_port(
@@ -455,8 +555,8 @@ def _compose_followup_steps(
     data_directory = root / ".odcli" / "filestore"
     verify_project_owned_data_dir(root, data_directory, require_exists=False)
     start_config.data_dir = str(data_directory)
-    command_prefix = _planned_command_prefix(root, config)
-    spawn_step, probe_step, ready_step, ready_action = bootstrap_tmp_steps(
+    command_prefix = _planned_command_prefix(root, config, python=python)
+    bootstrap_plan = bootstrap_tmp_plan(
         command_prefix=command_prefix,
         start_config=start_config,
         db_host=cluster.endpoint_host,
@@ -464,28 +564,62 @@ def _compose_followup_steps(
         db_user=start_config.db_user or "odoo",
         db_password=password,
         default_cwd=root,
+        include_create=defer_actions,
+        project_id=cluster._project_id,
+        record_action=bootstrap_record_action(),
     )
+
+    password_state: list[str | None] = [None]
+    if defer_actions:
+
+        def refresh_password_environment(step: PreparedStep) -> PreparedStep:
+            def environment_factory() -> tuple[
+                tuple[tuple[str, str], ...], Callable[[], None], tuple[str, ...]
+            ]:
+                actual = password_state[0]
+                if actual is None:
+                    raise RuntimeError("Compose password was not materialized before bootstrap")
+                environment = dict(step.environment_snapshot)
+                environment["PGPASSWORD"] = actual
+                return tuple(sorted(environment.items())), lambda: None, (actual,)
+
+            return replace(step, runtime_environment_factory=environment_factory)
+
+        bootstrap_plan = replace(
+            bootstrap_plan,
+            spawn_step=refresh_password_environment(bootstrap_plan.spawn_step),
+            create_step=(
+                refresh_password_environment(bootstrap_plan.create_step)
+                if bootstrap_plan.create_step is not None
+                else None
+            ),
+            probe_step=refresh_password_environment(bootstrap_plan.probe_step),
+            ready_step=refresh_password_environment(bootstrap_plan.ready_step),
+        )
     return (
         _ComposeFollowup(
             cluster=cluster,
+            project_root=root,
+            config=config,
             temporary_path=temporary_path,
-            steps=postgres_steps,
+            password_action=password_action,
+            config_action=config_action,
+            password_state=password_state,
+            steps=tuple(postgres_steps),
         ),
         _BootstrapFollowup(
             cluster=cluster,
-            spawn_step=spawn_step,
-            probe_step=probe_step,
-            ready_step=ready_step,
-            verify_action=ready_action,
-            record_action=bootstrap_record_action(),
+            plan=bootstrap_plan,
             project_root=root,
             data_directory=data_directory,
         ),
     )
 
 
-def _planned_command_prefix(root: Path, config: ProjectConfig) -> tuple[str, ...]:
-    python = str(config.python or "python3")
+def _planned_command_prefix(
+    root: Path, config: ProjectConfig, *, python: str | None = None
+) -> tuple[str, ...]:
+    python = python or str(config.python or "python3")
     odoo_bin = config.odoo_bin if config.odoo_bin is not None else root / "odoo-bin"
     return (python, str(odoo_bin))
 
@@ -501,7 +635,7 @@ def _ensure_project_owned_data_directory(project_path: Path, config: ProjectConf
     verify_project_owned_data_dir(project_path, data_directory)
 
 
-def init_project(
+def init_project(  # noqa: C901
     project_path: Path,
     config: ProjectConfig,
     *,
@@ -516,6 +650,9 @@ def init_project(
     remote_database_names: list[str] | None = None,
     missing: list[str] | None = None,
     details: dict[str, str] | None = None,
+    venv: str | Path | None = None,
+    validate_generated_config: bool = True,
+    write_generated_config: bool = True,
 ) -> dict[str, JsonValue]:
     """Write init artifacts and register the canonical project.
 
@@ -525,6 +662,27 @@ def init_project(
     drop ``test_database`` from the missing set when exactly one name exists.
     """
     from odoo_instance_sdk.exceptions import InstanceConfigurationError
+
+    if venv is not None:
+        command = init_project_command(
+            project_path,
+            config,
+            postgres_allocated=postgres_allocated,
+            local_config=local_config,
+            postgres_image=postgres_image,
+            existing_test_instance=existing_test_instance,
+            remote_instances=remote_instances,
+            allow_partial=allow_partial,
+            no_input=no_input,
+            dry_run=dry_run,
+            remote_database_names=remote_database_names,
+            venv=venv,
+        )
+        if dry_run:
+            result = manifest_dict(config, postgres_allocated=postgres_allocated)
+            result["plan"] = cast("JsonValue", msgspec.to_builtins(command.plan))
+            return result
+        return command.run()
 
     resolved_existing: TestInstanceProjectConfig | None = None
     if isinstance(existing_test_instance, TestInstanceProjectConfig):
@@ -558,7 +716,10 @@ def init_project(
     write_manifest(project_path, effective_config)
     _ensure_project_owned_data_directory(project_path, effective_config)
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
-        write_project_generated_config(project_path, effective_config)
+        if write_generated_config:
+            write_project_generated_config(
+                project_path, effective_config, validate_target=validate_generated_config
+            )
         if effective_config.test_instance is not None:
             existing_env = read_project_env(project_path)
             write_project_env(
@@ -776,7 +937,7 @@ def remove_remote_source(
     return remove_remote_source_command(project, name).run()
 
 
-def prepare_venv_command(  # noqa: C901
+def prepare_venv_command(
     project: ProjectConfig | str | Path,
     *,
     python: str | Path,
@@ -784,209 +945,18 @@ def prepare_venv_command(  # noqa: C901
 ) -> Command[dict[str, JsonValue]]:
     """Capture immutable preparation of the initialized project's primary venv."""
     from odoo_instance_sdk.execution import Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import (
-        PreparedAction,
-        PreparedStep,
-        SubprocessExecutor,
-        prepared_command,
-    )
-    from odoo_instance_sdk.resources.environment.checkout_artifacts import _owned_python_executable
-    from odoo_instance_sdk.resources.environment.checkout_planning import discover_dependency_inputs
+    from odoo_instance_sdk.internal.proc import SubprocessExecutor, prepared_command
 
     baseline = project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
-    root = baseline.repository_root.resolve()
-    venv_path = Path(venv)
-    if not venv_path.is_absolute():
-        venv_path = root / venv_path
-    venv_path = venv_path.resolve(strict=False)
-    interpreter = _owned_python_executable(venv_path)
-    inputs = discover_dependency_inputs(baseline, root, root)
-    lock_path = root / ".odcli" / "requirements.lock"
-    staged_lock_path = lock_path.with_name(f"{lock_path.name}.prepare")
-    create_venv = not Path(interpreter).is_file()
-    steps: list[PreparedStep | PreparedAction] = []
-    if create_venv:
-        steps.append(
-            PreparedStep(
-                step_id="prepare-venv.venv",
-                argv=("uv", "venv", str(venv_path), "--python", str(python)),
-                cwd=str(root),
-                mode="captured",
-                mutating=True,
-            )
-        )
-    steps.append(
-        PreparedStep(
-            step_id="prepare-venv.validate",
-            argv=(
-                interpreter,
-                "-c",
-                "import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)",
-            ),
-            cwd=str(root),
-            mode="captured",
-            read_only=True,
-        )
-    )
-    if inputs:
-        steps.extend(
-            (
-                PreparedStep(
-                    step_id="prepare-venv.dependencies.compile",
-                    argv=(
-                        "uv",
-                        "pip",
-                        "compile",
-                        "--python",
-                        interpreter,
-                        *inputs,
-                        "-o",
-                        str(staged_lock_path),
-                    ),
-                    cwd=str(root),
-                    mode="captured",
-                    mutating=True,
-                ),
-                PreparedStep(
-                    step_id="prepare-venv.dependencies.install",
-                    argv=("uv", "pip", "sync", "--python", interpreter, str(staged_lock_path)),
-                    cwd=str(root),
-                    mode="captured",
-                    mutating=True,
-                ),
-            )
-        )
-        lock_action = PreparedAction(
-            step_id="prepare-venv.dependencies.lock",
-            action="publish-primary-dependency-lock",
-            description="Publish the prepared dependency lock",
-            details={"path": str(lock_path)},
-            mutating=True,
-        )
-    else:
-        lock_action = None
-    manifest_action = PreparedAction(
-        step_id="prepare-venv.manifest",
-        action="persist-primary-interpreter",
-        description="Persist the prepared primary venv interpreter",
-        details={
-            "python": str(python),
-            "venv": str(venv_path),
-            "interpreter": interpreter,
-            "dependency_inputs": tuple(inputs),
-            "manifest": str(manifest_path(root)),
-        },
-        mutating=True,
-    )
-    origin_action = PreparedAction(
-        step_id="prepare-venv.origin",
-        action="publish-primary-venv-origin",
-        description="Publish trusted primary venv provenance",
-        details={"path": str(origin_record_path(root)), "venv": str(venv_path)},
-        mutating=True,
-    )
-    steps.append(origin_action)
-    steps.append(manifest_action)
-    if lock_action is not None:
-        steps.append(lock_action)
-    prepared_steps = tuple(steps)
-    public_plan = ExecutionPlan(steps=tuple(step.public_projection() for step in prepared_steps))
-
-    def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:  # noqa: C901
-        lock_id = hashlib.sha256(str(root).encode()).hexdigest()
-        staged_origin: OriginStage | None = None
-        transaction_started = False
-        with exclusive_lock(project_manifest_lock_path(lock_id)):
-            manifest_before = manifest_path(root).read_bytes()
-            lock_before = lock_path.read_bytes() if lock_path.is_file() else None
-            origin_before = read_origin_bytes(root)
-            try:
-                current = ProjectConfig.load(root)
-                if current.to_manifest() != baseline.to_manifest():
-                    raise ConfigError(  # noqa: TRY301
-                        "project manifest changed before primary venv preparation"
-                    )
-                from odoo_instance_sdk.internal.locks import python_env_lock_path
-
-                with exclusive_lock(python_env_lock_path(str(venv_path))):
-                    with contextlib.suppress(OSError):
-                        staged_lock_path.unlink()
-                    for step in prepared_steps:
-                        if isinstance(step, PreparedAction):
-                            continue
-                        try:
-                            result = cast("ProcessResult", context.process(step.step_id))
-                        except Exception as error:
-                            if step.step_id == "prepare-venv.validate":
-                                raise ConfigError(
-                                    "prepare-venv.validate failed: valid virtual environment required"
-                                ) from error
-                            raise
-                        if result.returncode != 0:
-                            stderr = (
-                                result.stderr.decode(errors="replace")
-                                if isinstance(result.stderr, bytes)
-                                else result.stderr
-                            )
-                            detail = (stderr or "").strip()
-                            if step.step_id == "prepare-venv.validate":
-                                raise ConfigError(  # noqa: TRY301
-                                    "prepare-venv.validate failed: valid virtual environment required"
-                                )
-                            raise ConfigError(  # noqa: TRY301
-                                f"{step.step_id} failed: {detail}".strip()
-                            )
-                    updated = msgspec.structs.replace(current, python=interpreter)
-                    updated_manifest = updated.to_manifest().encode("utf-8")
-                    context.action(origin_action.step_id)
-                    staged_origin = stage_origin_record(
-                        root,
-                        venv_root=venv_path,
-                        requested=python,
-                        interpreter=interpreter,
-                        manifest_bytes=updated_manifest,
-                    )
-                    context.action(manifest_action.step_id)
-                    write_manifest(root, updated)
-                    transaction_started = True
-                    context.complete_action(manifest_action.step_id)
-                    publish_origin(staged_origin)
-                    discard_origin_stage(staged_origin)
-                    staged_origin = None
-                    context.complete_action(origin_action.step_id)
-                    if lock_action is not None:
-                        context.action(lock_action.step_id)
-                        os.replace(staged_lock_path, lock_path)
-                        context.complete_action(lock_action.step_id)
-                    transaction_started = False
-            except BaseException:
-                if transaction_started:
-                    restore_persisted_prepare_state(
-                        root,
-                        manifest_path=manifest_path(root),
-                        manifest_before=manifest_before,
-                        lock_path=lock_path,
-                        lock_before=lock_before,
-                        origin_before=origin_before,
-                    )
-                raise
-            finally:
-                if lock_action is not None:
-                    with contextlib.suppress(OSError):
-                        staged_lock_path.unlink()
-                if staged_origin is not None:
-                    discard_origin_stage(staged_origin)
-        return {
-            "python": str(python),
-            "venv": str(venv_path),
-            "interpreter": interpreter,
-            "dependency_inputs": list(inputs),
-            "manifest": str(manifest_path(root)),
-        }
-
+    preparation = _capture_primary_venv_preparation(baseline, python=python, venv=venv)
+    public_plan = ExecutionPlan(steps=tuple(step.public_projection() for step in preparation.steps))
     return Command.from_prepared(
         public_plan,
-        prepared_command(run, prepared_steps, executor=SubprocessExecutor()),
+        prepared_command(
+            preparation.execute,
+            preparation.steps,
+            executor=SubprocessExecutor(),
+        ),
     )
 
 

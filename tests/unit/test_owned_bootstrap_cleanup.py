@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -14,10 +15,12 @@ from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.internal.dbprep.bootstrap import (
     BootstrapFailedError,
     BootstrapOutcome,
+    BootstrapTmpPlan,
     _record_bootstrap_event,
     bootstrap_record_action,
-    bootstrap_tmp_steps,
+    bootstrap_tmp_plan,
     ensure_project_bootstrap_tmp,
+    execute_bootstrap_tmp,
     run_bootstrap_tmp,
 )
 from odoo_instance_sdk.internal.proc import (
@@ -46,6 +49,19 @@ def _active_claim(catalog: BackupCatalog, *, project: str = "project") -> Postgr
     )
 
 
+def _deny_database_events_insert(
+    action: int,
+    table: str | None,
+    _column: str | None,
+    _database: str | None,
+    _source: str | None,
+) -> int:
+    decisions: dict[tuple[int, str | None], int] = {
+        (sqlite3.SQLITE_INSERT, "database_events"): sqlite3.SQLITE_DENY,
+    }
+    return decisions.get((action, table), sqlite3.SQLITE_OK)
+
+
 def _process_steps() -> tuple[PreparedStep, PreparedStep, PreparedStep]:
     return (
         PreparedStep(step_id="spawn", argv=("odoo",), mutating=True),
@@ -59,10 +75,17 @@ def _bootstrap_context(
     probe_stdout: str = "uninstalled",
     ready_stdout: str = "installed",
     include_actions: bool = False,
-) -> tuple[RunContext[object], RecordingExecutor, tuple[PreparedStep, PreparedStep, PreparedStep]]:
+) -> tuple[RunContext[object], RecordingExecutor, BootstrapTmpPlan]:
     process_steps = _process_steps()
     verify = PreparedAction(step_id="verify", action="verify-bootstrap-tmp-base", read_only=True)
     record = bootstrap_record_action()
+    plan = BootstrapTmpPlan(
+        spawn_step=process_steps[0],
+        probe_step=process_steps[1],
+        ready_step=process_steps[2],
+        verify_action=verify,
+        record_action=record if include_actions else None,
+    )
     steps: tuple[PreparedStep | PreparedAction, ...] = (
         *process_steps,
         *((verify, record) if include_actions else ()),
@@ -86,7 +109,7 @@ def _bootstrap_context(
         )
 
     executor = RecordingExecutor(result_factory=result_factory)
-    return RunContext(steps, executor), executor, process_steps
+    return RunContext(steps, executor), executor, plan
 
 
 def _catalog_with_active_claim(
@@ -252,21 +275,176 @@ def test_catalog_migration_preserves_events_and_refuses_bootstrap_downgrade(
 
 
 def test_bootstrap_executor_distinguishes_created_and_already_ready() -> None:
-    context, executor, steps = _bootstrap_context()
-    assert run_bootstrap_tmp(context, *steps) is BootstrapOutcome.CREATED
+    context, executor, plan = _bootstrap_context()
+    assert run_bootstrap_tmp(context, plan) is BootstrapOutcome.CREATED
     assert [step.step_id for step in executor.executed] == ["probe", "spawn", "ready"]
     context.complete()
 
-    context, executor, steps = _bootstrap_context(probe_stdout="installed")
-    assert run_bootstrap_tmp(context, *steps) is BootstrapOutcome.ALREADY_READY
+    context, executor, plan = _bootstrap_context(probe_stdout="installed")
+    assert run_bootstrap_tmp(context, plan) is BootstrapOutcome.ALREADY_READY
     assert [step.step_id for step in executor.executed] == ["probe"]
     context.complete()
 
 
+def test_bootstrap_creates_missing_database_before_odoo_spawn(tmp_path: Path) -> None:
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "/opt/odoo/odoo-bin"),
+        start_config=StartConfig(config_path=str(tmp_path / "odoo.conf")),
+        db_host="127.0.0.1",
+        db_port=5432,
+        db_user="odoo",
+        db_password="secret",
+    )
+    assert plan.create_step is not None
+    create = plan.create_step
+    assert create.argv[create.argv.index("-d") + 1] == "postgres"
+    assert create.stdin is not None
+    assert b"\\gexec" in create.stdin
+    assert create.mutating is True
+    assert create.read_only is False
+
+    results = {
+        plan.probe_step.step_id: "",
+        plan.create_step.step_id: "",
+        plan.spawn_step.step_id: "",
+        plan.ready_step.step_id: "installed",
+    }
+
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=0,
+            stdout=results[prepared.step_id],
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    context: RunContext[object] = RunContext(
+        (plan.probe_step, create, plan.spawn_step, plan.ready_step), executor
+    )
+    assert run_bootstrap_tmp(context, plan) is BootstrapOutcome.CREATED
+    assert [step.step_id for step in executor.executed] == [
+        plan.probe_step.step_id,
+        create.step_id,
+        plan.spawn_step.step_id,
+        plan.ready_step.step_id,
+    ]
+    context.complete()
+
+
+def test_parallel_bootstrap_callers_share_database_preparation_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.locks import database_preparation_lock_path
+
+    locks = tmp_path / "locks"
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", lambda: locks)
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "/opt/odoo/odoo-bin"),
+        start_config=StartConfig(config_path=str(tmp_path / "odoo.conf")),
+        db_host="127.0.0.1",
+        db_port=5432,
+        db_user="odoo",
+        db_password="secret",
+        project_id="parallel-project",
+        record_action=bootstrap_record_action(),
+    )
+    assert plan.lock_action is not None
+    assert plan.create_step is not None
+    lock_path = database_preparation_lock_path("parallel-project")
+    assert not lock_path.exists()
+
+    first_spawn_started = threading.Event()
+    release_first_spawn = threading.Event()
+    outcomes: list[BootstrapOutcome] = []
+    recorded: list[str] = []
+    executors: dict[str, RecordingExecutor] = {}
+
+    def _noop(_step: PreparedProcess) -> None:
+        return None
+
+    def _block_first_spawn(_step: PreparedProcess) -> None:
+        first_spawn_started.set()
+        assert release_first_spawn.wait(5)
+
+    scripts = {
+        "first": (
+            {
+                plan.probe_step.step_id: "",
+                plan.create_step.step_id: "",
+                plan.spawn_step.step_id: "",
+                plan.ready_step.step_id: "installed",
+            },
+            {plan.spawn_step.step_id: _block_first_spawn},
+        ),
+        "second": (
+            {
+                plan.probe_step.step_id: "installed",
+                plan.create_step.step_id: "",
+                plan.spawn_step.step_id: "",
+                plan.ready_step.step_id: "installed",
+            },
+            {},
+        ),
+    }
+
+    def executor_for(label: str) -> RecordingExecutor:
+        stdout_by_step, before_step = scripts[label]
+
+        def result_factory(step: PreparedProcess) -> ProcessResult:
+            before_step.get(step.step_id, _noop)(step)
+            return ProcessResult(
+                argv=step.argv,
+                returncode=0,
+                stdout=stdout_by_step[step.step_id],
+                stderr="",
+                duration=0.0,
+                cwd=getattr(step, "cwd", None),
+                environment=cast("tuple[tuple[str, str], ...]", getattr(step, "environment", ())),
+            )
+
+        executor = RecordingExecutor(result_factory=result_factory)
+        executors[label] = executor
+        return executor
+
+    def worker(label: str) -> None:
+        executor = executor_for(label)
+        context: RunContext[object] = RunContext(plan.execution_steps, executor)
+        outcome = execute_bootstrap_tmp(
+            context,
+            plan,
+            on_created=lambda: recorded.append(label),
+        )
+        context.complete()
+        outcomes.append(outcome)
+
+    first = threading.Thread(target=worker, args=("first",))
+    second = threading.Thread(target=worker, args=("second",))
+    first.start()
+    assert first_spawn_started.wait(5)
+    second.start()
+    release_first_spawn.set()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert sorted(outcome.value for outcome in outcomes) == ["already_ready", "created"]
+    executed = [step.step_id for executor in executors.values() for step in executor.executed]
+    assert executed.count(plan.create_step.step_id) == 1
+    assert executed.count(plan.spawn_step.step_id) == 1
+    assert recorded == ["first"]
+    assert lock_path.exists()
+
+
 def test_bootstrap_executor_failure_keeps_record_action_unconsumed() -> None:
-    context, _executor, steps = _bootstrap_context(ready_stdout="uninstalled", include_actions=True)
+    context, _executor, plan = _bootstrap_context(ready_stdout="uninstalled", include_actions=True)
     with pytest.raises(BootstrapFailedError, match="base module"):
-        run_bootstrap_tmp(context, *steps[:3])
+        run_bootstrap_tmp(context, plan)
     assert not context.consumed(bootstrap_record_action().step_id)
 
 
@@ -297,26 +475,13 @@ def test_bootstrap_publication_failure_keeps_record_incomplete_and_unwritten(
 
     def deny_bootstrap_insert(self: BackupCatalog, *args: Any, **kwargs: Any) -> None:
         original_init(self, *args, **kwargs)
-
-        def authorize(
-            action: int,
-            table: str | None,
-            _column: str | None,
-            _database: str | None,
-            _source: str | None,
-        ) -> int:
-            if action == sqlite3.SQLITE_INSERT and table == "database_events":
-                return sqlite3.SQLITE_DENY
-            return sqlite3.SQLITE_OK
-
-        self._conn.set_authorizer(authorize)
+        self._conn.set_authorizer(_deny_database_events_insert)
 
     monkeypatch.setattr(BackupCatalog, "__init__", deny_bootstrap_insert)
-    context, _executor, process_steps = _bootstrap_context(include_actions=True)
-    verify = PreparedAction(step_id="verify", read_only=True)
+    context, _executor, plan = _bootstrap_context(include_actions=True)
 
     with pytest.raises(BootstrapFailedError, match="bootstrap lifecycle publication failed"):
-        ensure_project_bootstrap_tmp(instance, context, steps=(*process_steps, verify))
+        ensure_project_bootstrap_tmp(instance, context, plan=plan)
 
     record_step = bootstrap_record_action().step_id
     assert context.consumed(record_step)
@@ -395,22 +560,19 @@ def test_bootstrap_record_action_is_conditional_and_consumed_only_on_creation(
         "odoo_instance_sdk.internal.dbprep.bootstrap._record_bootstrap_event",
         publish,
     )
-    context, _executor, process_steps = _bootstrap_context(include_actions=True)
-    verify = PreparedAction(step_id="verify", read_only=True)
-    ensure_project_bootstrap_tmp(instance, context, steps=(*process_steps, verify))
+    context, _executor, plan = _bootstrap_context(include_actions=True)
+    ensure_project_bootstrap_tmp(instance, context, plan=plan)
     context.complete()
     assert published == [instance]
 
-    context, _executor, process_steps = _bootstrap_context(
-        probe_stdout="installed", include_actions=True
-    )
-    ensure_project_bootstrap_tmp(instance, context, steps=(*process_steps, verify))
+    context, _executor, plan = _bootstrap_context(probe_stdout="installed", include_actions=True)
+    ensure_project_bootstrap_tmp(instance, context, plan=plan)
     context.complete()
     assert published == [instance]
 
 
 def test_bootstrap_plan_is_secret_free_and_public_surface_stays_unchanged(tmp_path: Path) -> None:
-    steps = bootstrap_tmp_steps(
+    plan = bootstrap_tmp_plan(
         command_prefix=("python3", "/opt/odoo/odoo-bin"),
         start_config=StartConfig(config_path=str(tmp_path / "odoo.conf")),
         db_host="127.0.0.1",
@@ -418,7 +580,7 @@ def test_bootstrap_plan_is_secret_free_and_public_surface_stays_unchanged(tmp_pa
         db_user="odoo",
         db_password="bootstrap-password-secret",
     )
-    public = repr(tuple(step.public_projection() for step in steps))
+    public = repr(tuple(step.public_projection() for step in plan.execution_steps))
     assert "bootstrap-password-secret" not in public
     action = bootstrap_record_action().public_projection()
     assert action.step_id == "catalog.bootstrap.tmp.record"

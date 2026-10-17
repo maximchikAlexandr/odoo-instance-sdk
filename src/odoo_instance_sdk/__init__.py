@@ -207,6 +207,7 @@ if TYPE_CHECKING:
         RemoteSourceConfig,
         TestInstanceProjectConfig,
     )
+    from odoo_instance_sdk.project_init import init_project_command
     from odoo_instance_sdk.resources.backup import BackupResource
     from odoo_instance_sdk.resources.database import DatabaseResource
     from odoo_instance_sdk.resources.environment import (
@@ -560,6 +561,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "PythonEnvFootprint": ("odoo_instance_sdk.models", "PythonEnvFootprint"),
     "prepare_venv": ("odoo_instance_sdk.project_init", "prepare_venv"),
     "prepare_venv_command": ("odoo_instance_sdk.project_init", "prepare_venv_command"),
+    "init_project_command": ("odoo_instance_sdk.project_init", "init_project_command"),
     "ReadinessResult": ("odoo_instance_sdk.models", "ReadinessResult"),
     "ReadinessTimeoutError": ("odoo_instance_sdk.exceptions", "ReadinessTimeoutError"),
     "RestoreFailedError": ("odoo_instance_sdk.exceptions", "RestoreFailedError"),
@@ -839,6 +841,7 @@ if TYPE_CHECKING:
         "canonical_plan_bytes",
         "canonical_plan_projection",
         "fingerprint_plan",
+        "init_project_command",
     ]
 else:
     __all__ = list(_LAZY_EXPORTS)
