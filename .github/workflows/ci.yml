@@ -118,6 +118,17 @@ jobs:
       - run: uv sync --frozen --group test
       - run: make compat
 
+  windows-prepare-venv:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --group test
+      - run: uv run pytest -q -o addopts='' -o timeout_method=thread tests/unit/project/test_prepare_venv.py -k real_platform_backend
+
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 15

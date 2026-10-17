@@ -46,8 +46,7 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _APPLIED_CONFIG_BINDINGS,
     _configured_addons,
     _dependency_evidence,
-    _find_odoo_requirements,
-    _rebase_requirement_paths,
+    discover_dependency_inputs,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -849,13 +848,8 @@ def _current_drift_components(
 
     dependency_values: SettingsValue | None = None
     if project is not None:
-        inputs = _rebase_requirement_paths(
-            list(project.requirements), Path(env.repository_root), worktree
-        )
-        odoo_requirements = _find_odoo_requirements(Path(env.repository_root))
-        if odoo_requirements is not None and str(odoo_requirements) not in inputs:
-            inputs.append(str(odoo_requirements))
         try:
+            inputs = discover_dependency_inputs(project, Path(env.repository_root), worktree)
             dependency_values = _dependency_evidence(inputs)
         except (ConfigError, OSError, UnicodeError):
             dependency_values = None

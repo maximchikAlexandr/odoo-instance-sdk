@@ -173,6 +173,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
     assert {param.name for param in cli.params} == {"project", "env_selector", "version"}
     assert set(cli.list_commands(click.Context(cli))) == {
         "init",
+        "prepare-venv",
         "env",
         "backup",
         "bug-report",

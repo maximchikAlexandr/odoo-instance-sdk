@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpSteps
@@ -137,6 +137,14 @@ def test_init_compose_with_image_writes_postgres_section(tmp_path: Path) -> None
             "5468",
             "--postgres-user",
             "odoo",
+            "--addons-root",
+            "addons/community",
+            "--addons-root",
+            "addons/private",
+            "--server-wide-module",
+            "base",
+            "--server-wide-module",
+            "web",
         ],
     )
     assert result.exit_code == 0
@@ -222,9 +230,9 @@ def test_init_compose_user_defaults_from_source_config(tmp_path: Path) -> None:
     assert 'user = "alice"' in content
 
 
-def test_init_compose_generates_private_project_runtime_config(
+def _init_private_runtime_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+) -> tuple[Result, Path, Path, bytes, Path, bytes]:
     data_root = tmp_path / "sdk-data"
     data_root.mkdir()
     monkeypatch.setattr(
@@ -257,9 +265,26 @@ def test_init_compose_generates_private_project_runtime_config(
             "5468",
             "--postgres-user",
             "odoo",
+            "--addons-root",
+            "addons/community",
+            "--addons-root",
+            "addons/private",
+            "--server-wide-module",
+            "base",
+            "--server-wide-module",
+            "web",
         ],
     )
 
+    return result, data_root, root_ignore, root_ignore_before, cfg, source_bytes
+
+
+def test_init_compose_renders_private_runtime_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _data_root, _root_ignore, _root_ignore_before, _cfg, _source_bytes = (
+        _init_private_runtime_config(tmp_path, monkeypatch)
+    )
     assert result.exit_code == 0, result.output
     generated = tmp_path / ".odcli" / "odoo.conf"
     assert generated.is_file()
@@ -272,6 +297,20 @@ def test_init_compose_generates_private_project_runtime_config(
     assert "db_host = 127.0.0.1" in generated_text
     assert "db_port = 5468" in generated_text
     assert "db_user = odoo" in generated_text
+    assert (
+        f"addons_path = {tmp_path / 'addons/community'},{tmp_path / 'addons/private'}"
+        in generated_text
+    )
+    assert "server_wide_modules = base,web" in generated_text
+
+
+def test_init_compose_keeps_runtime_secrets_and_source_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, data_root, _root_ignore, _root_ignore_before, cfg, source_bytes = (
+        _init_private_runtime_config(tmp_path, monkeypatch)
+    )
+    assert result.exit_code == 0, result.output
     secret_files = list(data_root.glob("projects/*/postgres/postgres-password"))
     assert len(secret_files) == 1
     password = secret_files[0].read_text().strip()
@@ -280,6 +319,15 @@ def test_init_compose_generates_private_project_runtime_config(
     assert password not in result.output
     assert password not in (tmp_path / ".odcli" / "project.toml").read_text()
     assert cfg.read_bytes() == source_bytes
+
+
+def test_init_compose_keeps_runtime_ignore_scope_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _data_root, root_ignore, root_ignore_before, _cfg, _source_bytes = (
+        _init_private_runtime_config(tmp_path, monkeypatch)
+    )
+    assert result.exit_code == 0, result.output
     assert (tmp_path / ".odcli" / ".gitignore").read_text().splitlines() == [".env", "odoo.conf"]
     assert root_ignore.read_bytes() == root_ignore_before
     ignored = subprocess.run(
@@ -574,6 +622,72 @@ def test_reinit_repairs_stale_generated_config_without_manifest_changes(
     assert manifest.read_bytes() == manifest_bytes
     assert "custom = drift" not in generated.read_text()
     assert generated.stat().st_mode & 0o777 == 0o600
+
+
+def test_reinit_repairs_generated_config_after_stored_project_inputs_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    runner = CliRunner()
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--allow-partial",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+        "--addons-root",
+        "addons/old",
+        "--server-wide-module",
+        "base",
+    ]
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+
+    import msgspec
+
+    from odoo_instance_sdk.internal.project_manifest import write_manifest
+    from odoo_instance_sdk.project import ProjectConfig
+
+    project = ProjectConfig.load(tmp_path)
+    write_manifest(
+        tmp_path,
+        msgspec.structs.replace(
+            project,
+            addon_roots=(Path("addons/new"),),
+            server_wide_modules=("web",),
+        ),
+    )
+    manifest_bytes = (tmp_path / ".odcli" / "project.toml").read_bytes()
+
+    repaired = runner.invoke(
+        cli,
+        [
+            *_base_args(tmp_path),
+            "--yes",
+            "--postgres",
+            "compose",
+            "--allow-partial",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+        ],
+    )
+
+    assert repaired.exit_code == 0, repaired.output
+    generated = (tmp_path / ".odcli" / "odoo.conf").read_text()
+    assert "addons_path = " in generated
+    assert str((tmp_path / "addons/new").resolve()) in generated
+    assert "server_wide_modules = web" in generated
+    assert (tmp_path / ".odcli" / "project.toml").read_bytes() == manifest_bytes
 
 
 def test_init_compose_fails_closed_when_git_is_unavailable(

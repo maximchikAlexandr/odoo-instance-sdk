@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import os
 import time
@@ -9,15 +8,28 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised by the Windows CI job
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
+
 from odoo_instance_sdk.exceptions import LockConflictError
 from odoo_instance_sdk.internal.db_name import validate_db_name
 
-_LOCK_MODES = {"exclusive": fcntl.LOCK_EX, "shared": fcntl.LOCK_SH}
+_LOCK_MODES = (
+    {"exclusive": fcntl.LOCK_EX, "shared": fcntl.LOCK_SH}
+    if fcntl is not None
+    else {"exclusive": "exclusive", "shared": "shared"}
+)
 
 
 def _release(fd: int) -> None:
     with contextlib.suppress(OSError):
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        else:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
     with contextlib.suppress(OSError):
         os.close(fd)
 
@@ -27,9 +39,15 @@ def _acquire(path: Path, mode: int, mode_name: str) -> Iterator[int]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
+        if fcntl is None and os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
         try:
-            fcntl.flock(fd, mode | fcntl.LOCK_NB)
-        except BlockingIOError as e:
+            if fcntl is not None:
+                fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            else:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except (BlockingIOError, OSError) as e:
             os.close(fd)
             raise LockConflictError(str(path), mode=mode_name) from e
         yield fd
@@ -49,11 +67,17 @@ def exclusive_lock_until(path: Path, deadline: float) -> Iterator[int]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
+        if fcntl is None and os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 break
-            except BlockingIOError as exc:
+            except (BlockingIOError, OSError) as exc:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise LockConflictError(str(path), mode="exclusive") from exc

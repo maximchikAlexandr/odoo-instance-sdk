@@ -16,7 +16,7 @@ from typing import IO, Literal, cast
 
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
-    sanitized_child_environment,
+    prepared_child_environment,
 )
 
 from . import (
@@ -30,7 +30,17 @@ from . import (
     event_for_step,
 )
 from .drain import PipeDrain
-from .redaction import IncrementalStreamRedactor, redacted_argv, redacted_projection
+from .redaction import (
+    IncrementalStreamRedactor,
+    captured_secret_values,
+    redacted_argv,
+    redacted_projection,
+)
+from .windows import run_windows_communicate
+
+# Kept as module-local seams for callers/tests that patch the process boundary.
+_environment = prepared_child_environment
+_captured_error_secrets = captured_secret_values
 
 _CLEANUP_TIMEOUT = 5.0
 _TIMEOUT_TAIL_BYTES = 8192
@@ -196,27 +206,6 @@ def owned_handle(
     )
 
 
-def _environment(
-    overrides: tuple[tuple[str, str], ...],
-    *,
-    policy: str = "sanitized-inherit",
-    snapshot: tuple[tuple[str, str], ...] = (),
-) -> dict[str, str]:
-    if policy == "explicit":
-        # Explicit policy is hermetic, even with no overrides.
-        source = snapshot or overrides
-        return sanitized_child_environment(dict(source))
-    # Never merge ambient environment into an inspected command.
-    source = snapshot or overrides
-    return sanitized_child_environment(dict(source) if source else None)
-
-
-def _captured_error_secrets(step: PreparedStep) -> tuple[str, ...]:
-    from .redaction import captured_secret_values
-
-    return captured_secret_values(step)
-
-
 def _run_pump(  # noqa: C901
     prepared: PreparedStep,
     *,
@@ -245,11 +234,19 @@ def _run_pump(  # noqa: C901
     stderr = process.stderr
     assert stdout is not None
     assert stderr is not None
+    if sys.platform == "win32":
+        return run_windows_communicate(
+            process,
+            prepared,
+            timeout=timeout,
+            observer=observer,
+            observe_output=observe_output,
+            max_output_bytes=max_output_bytes,
+        )
     output_streams = (stdout, stderr)
     full_output = {stream: bytearray() for stream in output_streams}
     tail_output = {stream: bytearray() for stream in output_streams}
     tail_truncated = dict.fromkeys(output_streams, False)
-    selector = selectors.DefaultSelector()
     started = time.perf_counter()
     stdin_offset = 0
     group_cleaned = False
@@ -260,6 +257,7 @@ def _run_pump(  # noqa: C901
             stream: IncrementalStreamRedactor(secrets=secrets, field=stream)
             for stream in ("stdout", "stderr")
         }
+    selector = selectors.DefaultSelector()
 
     def notify_chunk(stream: str, chunk: bytes) -> None:
         if not observe_output or observer is None:

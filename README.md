@@ -50,6 +50,8 @@ an environment only when an isolated feature worktree is useful.
 
 ```bash
 odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
+odcli init --addons-root ./addons --server-wide-module web
+odcli prepare-venv --python 3.12 --venv .venv
 odcli doctor
 odcli run --dry-run
 odcli run
@@ -737,6 +739,7 @@ sentence; use the entry's `--help` for exact options.
 
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
+- `odcli prepare-venv` — Create or refresh the primary project virtual environment.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
 - `odcli remote ls` — List named remote sources without contacting them.
 - `odcli remote add` — Add one named remote source without accepting credentials.

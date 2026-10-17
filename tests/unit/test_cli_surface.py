@@ -12,6 +12,7 @@ def test_top_level_click_surface_exposes_exactly_all_required_commands() -> None
     assert result.exit_code == 0
     assert set(cli.list_commands(click.Context(cli))) == {
         "init",
+        "prepare-venv",
         "env",
         "backup",
         "bug-report",

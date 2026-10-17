@@ -1258,6 +1258,17 @@ def test_captured_stdin_closes_cleanly_when_child_exits_before_consuming_it() ->
     assert result.stderr == ""
 
 
+def test_windows_captured_pump_supports_pipe_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run.sys.platform", "win32")
+
+    result = run_captured(_python("print('windows-pipe-ok')"), timeout=5.0)
+
+    assert result.returncode == 0
+    assert result.stdout == "windows-pipe-ok\n"
+
+
 @pytest.mark.serial
 @pytest.mark.parametrize("returncode", [0, 7])
 def test_child_can_close_stdin_before_exiting(returncode: int) -> None:

@@ -133,6 +133,8 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     default_source_database: str | None = None
     managed_filestore: Path | None = None
     addon_repositories: tuple[Path, ...] = ()
+    addon_roots: tuple[Path, ...] = ()
+    server_wide_modules: tuple[str, ...] = ()
     preferred_http_port: int | None = None
     requirements: tuple[str, ...] = ()
     default_run_args: tuple[str, ...] = ()
@@ -161,6 +163,32 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             repositories.append(repository)
         if tuple(repositories) != self.addon_repositories:
             msgspec.structs.force_setattr(self, "addon_repositories", tuple(repositories))
+        seen_addons: set[Path] = set()
+        addons: list[Path] = []
+        for addon_root in self.addon_roots:
+            if addon_root.is_absolute():
+                raise ConfigError("project.addon_roots must use repository-relative paths")
+            canonical = _validate_project_path(root, addon_root, "addon_roots")
+            if canonical in seen_addons:
+                continue
+            seen_addons.add(canonical)
+            addons.append(addon_root)
+        if tuple(addons) != self.addon_roots:
+            msgspec.structs.force_setattr(self, "addon_roots", tuple(addons))
+        seen_modules: set[str] = set()
+        modules: list[str] = []
+        for module in self.server_wide_modules:
+            if not isinstance(module, str) or not module.strip() or "," in module:
+                raise ConfigError(
+                    "project.server_wide_modules must contain nonblank names without commas"
+                )
+            normalized = module.strip()
+            if normalized in seen_modules:
+                continue
+            seen_modules.add(normalized)
+            modules.append(normalized)
+        if tuple(modules) != self.server_wide_modules:
+            msgspec.structs.force_setattr(self, "server_wide_modules", tuple(modules))
         if self.default_base_ref is not None and not self.default_base_ref.strip():
             raise ConfigError("project.default_base_ref must not be empty")
         if self.refresh_after_hours is not None and (
@@ -262,6 +290,8 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             default_source_database=_str_or_none(data.get("default_source_database")),
             managed_filestore=_path_or_none(data.get("managed_filestore")),
             addon_repositories=tuple(_path_list(data.get("addon_repositories"))),
+            addon_roots=tuple(_path_list(data.get("addon_roots"))),
+            server_wide_modules=tuple(_str_list(data.get("server_wide_modules"))),
             preferred_http_port=_int_or_none(data.get("preferred_http_port")),
             requirements=tuple(_str_list(data.get("requirements"))),
             default_run_args=tuple(_str_list(data.get("default_run_args"))),
@@ -314,6 +344,12 @@ def _append_project_manifest_fields(lines: list[str], config: ProjectConfig) -> 
     if config.addon_repositories:
         repositories = ", ".join(f'"{_toml_path(path)}"' for path in config.addon_repositories)
         lines.append(f"addon_repositories = [{repositories}]")
+    if config.addon_roots:
+        roots = ", ".join(f'"{_toml_path(path)}"' for path in config.addon_roots)
+        lines.append(f"addon_roots = [{roots}]")
+    if config.server_wide_modules:
+        modules = ", ".join(f'"{_toml_str(module)}"' for module in config.server_wide_modules)
+        lines.append(f"server_wide_modules = [{modules}]")
     if config.default_base_ref is not None:
         lines.append(f'default_base_ref = "{_toml_str(config.default_base_ref)}"')
     if config.refresh_after_hours is not None:
