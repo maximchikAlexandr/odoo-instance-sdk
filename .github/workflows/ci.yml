@@ -127,7 +127,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --frozen --group test
-      - run: uv run pytest -q -o addopts='' -o timeout_method=thread tests/unit/project/test_prepare_venv.py -k real_platform_backend
+      - run: uv run pytest -q -o addopts='' -o timeout_method=thread tests/unit/project/test_prepare_venv.py tests/unit/test_integrated_init_venv.py -k 'real_platform_backend or integrated or init_help'
 
   package:
     runs-on: ubuntu-latest

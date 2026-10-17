@@ -147,11 +147,19 @@ def manifest_dict(
     }
 
 
-def write_project_generated_config(project_path: Path, config: ProjectConfig) -> None:
+def write_project_generated_config(
+    project_path: Path,
+    config: ProjectConfig,
+    *,
+    validate_target: bool = True,
+    ensure_password: bool = True,
+    password: str | None = None,
+) -> None:
     """Bind a Compose project config to its existing private cluster secret."""
     root = project_path.resolve()
     destination = project_generated_config_path(root)
-    validate_generated_config_target(destination, project_root=root)
+    if validate_target:
+        validate_generated_config_target(destination, project_root=root)
     source_path = _resolve_source_config_path(root, config.source_config)
     if config.source_config is not None and source_path is None:
         configured = Path(config.source_config).resolve()
@@ -163,7 +171,14 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
     cluster = PostgresCluster.from_project(root)
-    password = ensure_password_file(cluster.password_file)
+    if password is not None:
+        materialized_password = password
+    elif ensure_password:
+        materialized_password = ensure_password_file(cluster.password_file)
+    else:
+        raise InstanceConfigurationError(
+            "generated config password must be materialized before writing"
+        )
     source_start = (
         StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
     )
@@ -180,7 +195,7 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
         db_host=cluster.endpoint_host,
         db_port=cluster.endpoint_port,
         db_user=postgres.user or "odoo",
-        db_password=password,
+        db_password=materialized_password,
         data_dir=project_owned_data_dir(root),
         addon_roots=config.addon_roots,
         server_wide_modules=config.server_wide_modules,
@@ -277,7 +292,10 @@ def _restore_owned_snapshot(path: Path, snapshot: tuple[bytes, int] | None) -> N
             fd = -1
             stream.write(content)
             stream.flush()
-            os.fchmod(stream.fileno(), mode)
+            if hasattr(os, "fchmod"):
+                os.fchmod(stream.fileno(), mode)
+            else:
+                os.chmod(temporary, mode)
         os.replace(temporary, path)
         temporary = ""
     finally:
@@ -323,7 +341,7 @@ def validate_generated_config_target(
         raise InstanceConfigurationError(
             f"generated config target must be a regular file, not a symlink or directory: {path}"
         )
-    if target.st_uid != os.getuid():
+    if hasattr(os, "getuid") and target.st_uid != os.getuid():
         raise InstanceConfigurationError(
             f"generated config is not owned by the current user: {path}"
         )
@@ -355,7 +373,7 @@ def _require_owned_directory(path: Path, metadata: os.stat_result) -> None:
         raise InstanceConfigurationError(
             f"generated config parent must be a project-owned directory: {path}"
         )
-    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+    if hasattr(os, "getuid") and (metadata.st_uid != os.getuid() or metadata.st_mode & 0o022):
         raise InstanceConfigurationError(
             f"generated config parent has unsafe ownership or permissions: {path}"
         )

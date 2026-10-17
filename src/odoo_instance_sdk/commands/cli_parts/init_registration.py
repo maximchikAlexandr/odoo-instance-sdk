@@ -78,6 +78,7 @@ class _InitRunOrPreview(Protocol):
 class _InitRequest:
     odoo_bin: str | None
     python: str | None
+    venv: str | None
     source_config: str | None
     default_source_database: str | None
     preferred_http_port: int | None
@@ -110,6 +111,7 @@ def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
     return _InitRequest(
         odoo_bin=cast("str | None", options["odoo_bin"]),
         python=cast("str | None", options["python"]),
+        venv=cast("str | None", options["venv"]),
         source_config=cast("str | None", options["source_config"]),
         default_source_database=cast("str | None", options["default_source_database"]),
         preferred_http_port=cast("int | None", options["preferred_http_port"]),
@@ -166,7 +168,7 @@ def _confirm_partial_callback(
     return confirm
 
 
-def _execute_init(
+def _execute_init(  # noqa: C901
     request: _InitRequest,
     *,
     output_mode: OutputMode,
@@ -308,6 +310,7 @@ def _execute_init(
             request.yes,
             output_mode,
             dry_run=request.dry_run,
+            integrate_venv=request.venv is not None,
         )
         if (
             decision is _ExistingManifestDecision.NOOP
@@ -321,52 +324,62 @@ def _execute_init(
         }
     from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
 
-    status, _ = run_or_preview(
-        lambda: init_project_command(
-            resolved_project,
-            config,
-            postgres_allocated=postgres_allocated,
-            local_config=request.local_config,
-            postgres_image=request.postgres_image,
-            existing_test_instance=existing_test_instance,
-            allow_partial=request.allow_partial,
-            resume_existing=resume_existing,
-            no_input=effective_no_input,
-            dry_run=request.dry_run,
-            confirm_partial=confirm_partial,
-        ),
-        command_name="init",
-        mode=output_mode,
-        dry_run=request.dry_run,
-        result=lambda value: cast("dict[str, JsonValue]", value),
-        provenance=cast("dict[str, JsonValue]", provenance),
-        preview=lambda command: {
-            **init_completeness_preview(
+    try:
+        status, _ = run_or_preview(
+            lambda: init_project_command(
                 resolved_project,
                 config,
+                postgres_allocated=postgres_allocated,
                 local_config=request.local_config,
                 postgres_image=request.postgres_image,
                 existing_test_instance=existing_test_instance,
-                dry_run=True,
-                remote_database_names=None,
-                postgres_allocated=postgres_allocated,
+                allow_partial=request.allow_partial,
+                resume_existing=resume_existing,
+                no_input=effective_no_input,
+                dry_run=request.dry_run,
+                confirm_partial=confirm_partial,
+                venv=request.venv,
+                repair_generated_config=repaired_existing,
             ),
-            "plan": model_to_dict(command.plan),
-        },
-        rich=lambda _document: (
-            f"Dry run — no files written.\n{config.to_manifest()}"
-            if request.dry_run
-            else (
-                f"Repaired generated config and verified Compose lifecycle: {existing}"
-                if repaired_existing
+            command_name="init",
+            mode=output_mode,
+            dry_run=request.dry_run,
+            result=lambda value: cast("dict[str, JsonValue]", value),
+            provenance=cast("dict[str, JsonValue]", provenance),
+            preview=lambda command: {
+                **init_completeness_preview(
+                    resolved_project,
+                    config,
+                    local_config=request.local_config,
+                    postgres_image=request.postgres_image,
+                    existing_test_instance=existing_test_instance,
+                    dry_run=True,
+                    remote_database_names=None,
+                    postgres_allocated=postgres_allocated,
+                ),
+                "plan": model_to_dict(command.plan),
+            },
+            rich=lambda _document: (
+                f"Dry run — no files written.\n{config.to_manifest()}"
+                if request.dry_run
                 else (
-                    "Manifest already up to date; Compose lifecycle verified; no-op."
-                    if resume_existing
-                    else f"Wrote {existing}"
+                    f"Repaired generated config and verified Compose lifecycle: {existing}"
+                    if repaired_existing
+                    else (
+                        "Manifest already up to date; Compose lifecycle verified; no-op."
+                        if resume_existing
+                        else f"Wrote {existing}"
+                    )
                 )
-            )
-        ),
-    )
+            ),
+        )
+    except Exception as error:
+        # Integrated init is a new opt-in transport contract. Keep legacy
+        # exception behavior when --venv is omitted, while routing its
+        # planning/execution failures through the established envelopes.
+        if request.venv is None:
+            raise
+        fail(output_mode, "init", error, dry_run=request.dry_run)
     sys.exit(status)
 
 
@@ -378,6 +391,13 @@ def register_init_command(cli: click.Group) -> None:
         "--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin."
     )
     @click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
+    @click.option(
+        "--venv",
+        "venv",
+        type=click.Path(),
+        default=None,
+        help="Opt in to primary virtualenv preparation before Compose/Odoo bootstrap.",
+    )
     @click.option(
         "--config", "source_config", type=click.Path(), default=None, help="Source odoo.conf path."
     )

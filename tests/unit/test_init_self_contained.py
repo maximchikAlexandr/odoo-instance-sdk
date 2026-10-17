@@ -810,7 +810,7 @@ def test_origin_publish_failure_restores_manifest_lock_and_origin(
     def _fail_publish(_stage: object) -> None:
         raise OSError("injected origin publish failure")
 
-    monkeypatch.setattr("odoo_instance_sdk.project_init.publish_origin", _fail_publish)
+    monkeypatch.setattr("odoo_instance_sdk.internal.primary_venv.publish_origin", _fail_publish)
     with pytest.raises(OSError, match="injected origin publish failure"):
         _prepare_primary_venv(tmp_path, scenario, monkeypatch)
     assert (manifest.read_bytes(), lock.read_bytes(), origin.read_bytes()) == before

@@ -22,8 +22,27 @@ overlays the resolved addon paths and server-wide modules while preserving the
 source config. A missing or stale generated config is repaired independently
 of an unchanged manifest.
 
-The primary checkout environment is prepared through the same immutable SDK
-boundary used by the CLI:
+Integrated initialization is the primary agent bootstrap. It remains opt-in so
+callers that omit `venv` retain the existing init contract:
+
+```python
+from odoo_instance_sdk import init_project_command
+
+command = init_project_command(".", config, postgres_allocated=False, venv=".venv")
+print(command.plan)
+result = command.run()
+print(result["interpreter"])
+```
+
+`python`/`--python` is the creation selector for a missing venv. An existing
+valid venv is refreshed without recreation; its validated platform-specific
+interpreter is the runtime truth recorded in the manifest and used by Odoo.
+The primary venv preparation is captured before mutation, so dry-run shows the
+manifest, venv, dependency, persistence, and later lifecycle steps without
+side effects.
+
+The standalone preparation operation remains the explicit refresh and recovery
+path, using the same immutable SDK boundary as the CLI:
 
 ```python
 from odoo_instance_sdk import prepare_venv_command

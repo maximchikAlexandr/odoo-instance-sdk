@@ -252,7 +252,7 @@ def ensure_password_file(path: Path) -> str:
     if existing is not None:
         if not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode):
             raise PostgresComposeInvalidError("postgres password file must be a regular file")
-        if existing.st_uid != os.getuid():
+        if hasattr(os, "getuid") and existing.st_uid != os.getuid():
             raise PostgresComposeInvalidError(
                 "postgres password file must be owned by the current user"
             )

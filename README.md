@@ -45,13 +45,16 @@ uv run odcli monitor
 ## CLI-first quick start
 
 Run these commands from the Odoo project repository. `init` writes the project
-manifest. The main checkout can run directly from that project context; create
-an environment only when an isolated feature worktree is useful.
+manifest. For an agent-ready self-contained bootstrap, opt in to primary venv
+preparation with `--venv`; the resolved `--python` value selects creation and
+the validated interpreter inside that venv drives later Compose/Odoo bootstrap.
+The main checkout can still run directly from the project context.
 
 ```bash
 odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
+odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --venv .venv --config ./odoo.conf
 odcli init --addons-root ./addons --server-wide-module web
-odcli prepare-venv --python 3.12 --venv .venv
+odcli prepare-venv --python 3.12 --venv .venv  # refresh/recovery path
 odcli doctor
 odcli run --dry-run
 odcli run
