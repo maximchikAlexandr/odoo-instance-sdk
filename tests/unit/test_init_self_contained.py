@@ -19,7 +19,8 @@ from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.dbprep.bootstrap import (
     BOOTSTRAP_DATABASE,
     BootstrapFailedError,
-    bootstrap_tmp_steps,
+    BootstrapOutcome,
+    bootstrap_tmp_plan,
     tmp_bootstrap_command,
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
@@ -90,14 +91,14 @@ def stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _skip_bootstrap_tmp(
         context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
-        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
-        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
-        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
-        return True
+        plan: object,
+    ) -> BootstrapOutcome:
+        context.skip(plan.spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.ready_step.step_id)  # type: ignore[attr-defined]
+        if plan.create_step is not None:  # type: ignore[attr-defined]
+            context.skip(plan.create_step.step_id)  # type: ignore[attr-defined]
+        return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", _noop_ensure_running)
     monkeypatch.setattr(
@@ -108,6 +109,14 @@ def stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _test_instance(**kwargs: object) -> RemoteTestInstanceConfig:
     return RemoteTestInstanceConfig(**cast("Any", kwargs))
+
+
+def _skip_bootstrap_process_steps(context: object, plan: object) -> None:
+    context.skip(plan.probe_step.step_id)  # type: ignore[attr-defined]
+    if plan.create_step is not None:  # type: ignore[attr-defined]
+        context.skip(plan.create_step.step_id)  # type: ignore[attr-defined]
+    context.skip(plan.spawn_step.step_id)  # type: ignore[attr-defined]
+    context.skip(plan.ready_step.step_id)  # type: ignore[attr-defined]
 
 
 def _base_args(
@@ -844,21 +853,18 @@ def test_failed_compose_init_resumes_without_manifest_rewrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    calls: list[int] = []
 
-    def _fail_once_then_skip(
-        context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
-        calls.append(1)
-        if len(calls) == 1:
-            raise BootstrapFailedError("tmp bootstrap failed")
-        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
-        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
-        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
-        return True
+    def _fail(_context: object, _plan: object) -> BootstrapOutcome:
+        raise BootstrapFailedError("tmp bootstrap failed")
+
+    def _skip(context: object, plan: object) -> BootstrapOutcome:
+        _skip_bootstrap_process_steps(context, plan)
+        return BootstrapOutcome.ALREADY_READY
+
+    actions = iter((_fail, _skip))
+
+    def _fail_once_then_skip(context: object, plan: object) -> BootstrapOutcome:
+        return next(actions)(context, plan)
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
@@ -894,7 +900,6 @@ def test_failed_compose_init_resumes_without_manifest_rewrite(
     second = runner.invoke(cli, args)
     assert second.exit_code == 0, second.output
     assert manifest.read_bytes() == before
-    assert len(calls) == 2
 
 
 def _compose_config_repair_case(tmp_path: Path) -> tuple[CliRunner, list[str], Path]:
@@ -945,15 +950,11 @@ def test_compose_config_repair_resumes_lifecycle_without_premature_output(
 
     def _track_bootstrap(
         context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
+        plan: object,
+    ) -> BootstrapOutcome:
         calls.append("bootstrap")
-        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
-        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
-        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
-        return True
+        _skip_bootstrap_process_steps(context, plan)
+        return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
@@ -995,8 +996,12 @@ def test_complete_compose_retry_skips_tmp_recreation(
         db_user: str,
         db_password: str,
         step_id: str,
+        database: str = "tmp",
+        stdin: bytes = b"",
+        read_only: bool = True,
+        mutating: bool = False,
     ) -> PreparedStep:
-        del db_host, db_port, db_user, db_password
+        del db_host, db_port, db_user, db_password, database, stdin, read_only, mutating
         return PreparedStep(
             step_id=step_id,
             argv=("/usr/bin/printf", "installed"),
@@ -1010,15 +1015,14 @@ def test_complete_compose_retry_skips_tmp_recreation(
 
     def _probe_ready_without_spawn(
         context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
-        result = context.process_prepared(probe_step)  # type: ignore[attr-defined]
+        plan: object,
+    ) -> BootstrapOutcome:
+        assert plan.create_step is None  # type: ignore[attr-defined]
+        result = context.process_prepared(plan.probe_step)  # type: ignore[attr-defined]
         assert getattr(result, "stdout", "").strip() == "installed"
-        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
-        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
-        return True
+        context.skip(plan.spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.ready_step.step_id)  # type: ignore[attr-defined]
+        return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(bootstrap, "run_bootstrap_tmp", _probe_ready_without_spawn)
     retry = runner.invoke(cli, args)
@@ -1049,30 +1053,42 @@ def test_repeated_compose_resume_failure_preserves_boundary_error_and_ledger(
 
     def _fail_after_accounting(
         context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
-        calls.append((spawn_step.step_id, probe_step.step_id, ready_step.step_id))  # type: ignore[attr-defined]
-        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
-        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
-        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
+        plan: object,
+    ) -> BootstrapOutcome:
+        calls.append(tuple(step.step_id for step in plan.execution_steps))  # type: ignore[attr-defined]
+        _skip_bootstrap_process_steps(context, plan)
         raise BootstrapFailedError("tmp bootstrap failed: boundary unavailable")
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
         _fail_after_accounting,
     )
-    for _ in range(2):
-        failed = runner.invoke(cli, args)
-        assert failed.exit_code != 0
-        assert isinstance(failed.exception, BootstrapFailedError)
-        assert failed.exception.error_code == "init_bootstrap_failed"
-        assert "boundary unavailable" in str(failed.exception)
+    failed = runner.invoke(cli, args)
+    assert failed.exit_code != 0
+    assert isinstance(failed.exception, BootstrapFailedError)
+    assert failed.exception.error_code == "init_bootstrap_failed"
+    assert "boundary unavailable" in str(failed.exception)
+    failed_again = runner.invoke(cli, args)
+    assert failed_again.exit_code != 0
+    assert isinstance(failed_again.exception, BootstrapFailedError)
+    assert failed_again.exception.error_code == "init_bootstrap_failed"
+    assert "boundary unavailable" in str(failed_again.exception)
     assert manifest.read_bytes() == before
     assert calls == [
-        ("init.bootstrap.tmp", "init.bootstrap.tmp.probe", "init.bootstrap.tmp.ready"),
-        ("init.bootstrap.tmp", "init.bootstrap.tmp.probe", "init.bootstrap.tmp.ready"),
+        (
+            "init.bootstrap.tmp.verify",
+            "init.bootstrap.tmp.probe",
+            "init.bootstrap.tmp",
+            "init.bootstrap.tmp.ready",
+            "catalog.bootstrap.tmp.record",
+        ),
+        (
+            "init.bootstrap.tmp.verify",
+            "init.bootstrap.tmp.probe",
+            "init.bootstrap.tmp",
+            "init.bootstrap.tmp.ready",
+            "catalog.bootstrap.tmp.record",
+        ),
     ]
 
 
@@ -1418,7 +1434,7 @@ def test_auxiliary_restore_uses_bootstrap_database_in_argv(tmp_path: Path) -> No
     config_path.parent.mkdir(parents=True)
     config_path.write_text("[options]\nhttp_port = 8069\n")
     start_config = StartConfig(config_path=str(config_path), http_port=8069)
-    spawn_step, _, _, _ = bootstrap_tmp_steps(
+    bootstrap_plan = bootstrap_tmp_plan(
         command_prefix=("/usr/bin/python", "/opt/odoo/odoo-bin"),
         start_config=start_config,
         db_host="127.0.0.1",
@@ -1427,9 +1443,9 @@ def test_auxiliary_restore_uses_bootstrap_database_in_argv(tmp_path: Path) -> No
         db_password="secret",
         default_cwd=tmp_path,
     )
-    assert f"--database {BOOTSTRAP_DATABASE}" in " ".join(spawn_step.argv)
-    assert "--database=__odcli_restore__" not in spawn_step.argv
-    assert "--db-filter=^$" not in spawn_step.argv
+    assert f"--database {BOOTSTRAP_DATABASE}" in " ".join(bootstrap_plan.spawn_step.argv)
+    assert "--database=__odcli_restore__" not in bootstrap_plan.spawn_step.argv
+    assert "--db-filter=^$" not in bootstrap_plan.spawn_step.argv
 
 
 def test_verify_project_owned_data_dir_rejects_symlink(tmp_path: Path) -> None:
@@ -1449,12 +1465,7 @@ def test_bootstrap_tmp_command_records_odoo_argv(tmp_path: Path) -> None:
     config_path.write_text("[options]\nhttp_port = 8069\n", encoding="utf-8")
     start_config = StartConfig(config_path=str(config_path), http_port=8069)
 
-    def bootstrap_results(step: object) -> ProcessResult:
-        step_id = step.step_id  # type: ignore[attr-defined]
-        if step_id in {"init.bootstrap.tmp.probe", "init.bootstrap.tmp.ready"}:
-            if step_id == "init.bootstrap.tmp.probe":
-                return _failed_probe_result(step)
-            return _ready_probe_result(step)
+    def success(step: object) -> ProcessResult:
         return ProcessResult(
             argv=step.argv,  # type: ignore[attr-defined]
             returncode=0,
@@ -1468,6 +1479,14 @@ def test_bootstrap_tmp_command_records_odoo_argv(tmp_path: Path) -> None:
             ),
         )
 
+    results = {
+        "init.bootstrap.tmp.probe": _failed_probe_result,
+        "init.bootstrap.tmp.ready": _ready_probe_result,
+    }
+
+    def bootstrap_results(step: object) -> ProcessResult:
+        return results.get(step.step_id, success)(step)  # type: ignore[attr-defined]
+
     executor = RecordingExecutor(result_factory=bootstrap_results)
     command = tmp_bootstrap_command(
         command_prefix=("/usr/bin/python3", "/opt/odoo/odoo-bin"),
@@ -1479,11 +1498,20 @@ def test_bootstrap_tmp_command_records_odoo_argv(tmp_path: Path) -> None:
         default_cwd=tmp_path,
         executor=executor,
     )
-    assert command.plan.steps[0].step_id == "init.bootstrap.tmp"
+    assert [step.step_id for step in command.plan.steps] == [
+        "init.bootstrap.tmp.verify",
+        "init.bootstrap.tmp.probe",
+        "init.bootstrap.tmp",
+        "init.bootstrap.tmp.ready",
+    ]
     assert command.run() is True
-    executed = [step for step in executor.executed if step.step_id == "init.bootstrap.tmp"]
-    assert executed
-    argv = executed[0].argv
+    assert [step.step_id for step in executor.executed] == [
+        "init.bootstrap.tmp.probe",
+        "init.bootstrap.tmp",
+        "init.bootstrap.tmp.ready",
+    ]
+    spawn = next(step for step in executor.executed if step.step_id == "init.bootstrap.tmp")
+    argv = spawn.argv
     assert "--database" in argv and "tmp" in argv
     assert "--init" in argv and "base" in argv
     assert "--stop-after-init" in argv
@@ -1567,10 +1595,8 @@ def test_init_bootstrap_failure_prevents_successful_result(
 
     def _fail_bootstrap(
         context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
+        plan: object,
+    ) -> BootstrapOutcome:
         raise BootstrapFailedError("tmp bootstrap failed: invalid database")
 
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", _noop_ensure_running)
@@ -1613,6 +1639,7 @@ def test_first_run_triggers_bootstrap_when_no_valid_tmp(
     )
     cluster = MagicMock()
     cluster.owned = True
+    cluster._project_id = "project"
     cluster.endpoint_host = "127.0.0.1"
     cluster.endpoint_port = 5468
     instance._postgres_cluster = cluster
@@ -1620,15 +1647,11 @@ def test_first_run_triggers_bootstrap_when_no_valid_tmp(
 
     def _track_bootstrap(
         context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
+        plan: object,
+    ) -> BootstrapOutcome:
         calls.append(True)
-        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
-        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
-        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
-        return True
+        _skip_bootstrap_process_steps(context, plan)
+        return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
@@ -1669,10 +1692,10 @@ def test_first_foreground_run_captures_bootstrap_steps(tmp_path: Path) -> None:
     assert tuple(
         step.step_id for step in command.plan.steps if step.step_id.startswith("init.bootstrap.tmp")
     ) == (
-        "init.bootstrap.tmp",
-        "init.bootstrap.tmp.probe",
-        "init.bootstrap.tmp.ready",
         "init.bootstrap.tmp.verify",
+        "init.bootstrap.tmp.probe",
+        "init.bootstrap.tmp",
+        "init.bootstrap.tmp.ready",
     )
 
 
@@ -1778,15 +1801,11 @@ def _prepare_self_contained_restore_setup(
 
     def _track_bootstrap(
         context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
-    ) -> bool:
+        plan: object,
+    ) -> BootstrapOutcome:
         bootstrap_spawned.append(True)
-        context.skip(spawn_step.step_id)  # type: ignore[attr-defined]
-        context.skip(probe_step.step_id)  # type: ignore[attr-defined]
-        context.skip(ready_step.step_id)  # type: ignore[attr-defined]
-        return True
+        _skip_bootstrap_process_steps(context, plan)
+        return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",

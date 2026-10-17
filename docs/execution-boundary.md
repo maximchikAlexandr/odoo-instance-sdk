@@ -281,7 +281,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/internal/git_askpass.py:72` — Git askpass child
   transport; the value is selected from the owner-only credential channel and
   is never emitted by the public SDK boundary.
-- `src/odoo_instance_sdk/resources/instance/identity.py:511` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:508` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 - `src/odoo_instance_sdk/internal/alternate_tool.py:980` — shared

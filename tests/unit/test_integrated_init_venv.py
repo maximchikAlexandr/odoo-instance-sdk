@@ -178,6 +178,14 @@ def _fake_preparation_result(
     return result
 
 
+def _skip_bootstrap_process_steps(context: object, plan: object) -> None:
+    context.skip(plan.probe_step.step_id)  # type: ignore[attr-defined]
+    if plan.create_step is not None:  # type: ignore[attr-defined]
+        context.skip(plan.create_step.step_id)  # type: ignore[attr-defined]
+    context.skip(plan.spawn_step.step_id)  # type: ignore[attr-defined]
+    context.skip(plan.ready_step.step_id)  # type: ignore[attr-defined]
+
+
 def test_scenario_evidence_covers_every_delta_case() -> None:
     assert set(SCENARIO_EVIDENCE) == EXPECTED_SCENARIO_KEYS
     assert all(_selector_resolves(selector) for selector in SCENARIO_EVIDENCE.values())
@@ -453,9 +461,8 @@ def test_integrated_compose_defers_password_and_repairs_under_ledger(
     executor = RecordingExecutor(result_factory=_fake_preparation_result())
     monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
 
-    def skip_bootstrap(context: object, *steps: PreparedStep) -> BootstrapOutcome:
-        for step in steps:
-            context.skip(step.step_id)  # type: ignore[attr-defined]
+    def skip_bootstrap(context: object, plan: object) -> BootstrapOutcome:
+        _skip_bootstrap_process_steps(context, plan)
         return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(bootstrap, "run_bootstrap_tmp", skip_bootstrap)
@@ -476,6 +483,8 @@ def test_integrated_compose_defers_password_and_repairs_under_ledger(
     assert plan_ids.index("init.compose.password") < plan_ids.index("init.generated-config.repair")
     assert plan_ids.index("init.generated-config.repair") < plan_ids.index("init.compose.config")
     assert plan_ids.index("init.compose.config") < plan_ids.index("prepare-venv.validate")
+    assert "init.bootstrap.tmp.lock" in plan_ids
+    assert plan_ids.index("init.bootstrap.tmp.lock") < plan_ids.index("init.bootstrap.tmp.verify")
     assert not password_file.exists()
     command.run()
     assert generated.is_file()
@@ -517,6 +526,43 @@ def test_integrated_compose_redacts_materialized_password_from_bootstrap_output(
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", lambda *args, **kwargs: None)
 
     class _BootstrapExecutor(RecordingExecutor):
+        def __init__(self) -> None:
+            super().__init__(result_factory=_fake_preparation_result())
+            self._dispatch = {
+                "init.bootstrap.tmp": self._execute_real_child,
+                "default": self._execute_recorded_step,
+            }
+
+        def _execute_real_child(
+            self,
+            step: PreparedProcess,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResult:
+            return SubprocessExecutor().execute(
+                step,
+                observer=observer,
+                observe_output=observe_output,
+            )
+
+        def _execute_recorded_step(
+            self,
+            step: PreparedProcess,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResult:
+            return cast(
+                "ProcessResult",
+                RecordingExecutor.execute(
+                    self,
+                    step,
+                    observer=observer,
+                    observe_output=observe_output,
+                ),
+            )
+
         def execute(
             self,
             step: PreparedProcess,
@@ -525,29 +571,24 @@ def test_integrated_compose_redacts_materialized_password_from_bootstrap_output(
             observe_output: bool = False,
         ) -> ProcessResult:
             captured = cast("PreparedStep", step)
-            if captured.step_id == "init.bootstrap.tmp":
-                return SubprocessExecutor().execute(
-                    captured,
-                    observer=observer,
-                    observe_output=observe_output,
-                )
-            return cast(
-                "ProcessResult",
-                super().execute(step, observer=observer, observe_output=observe_output),
+            return self._dispatch.get(captured.step_id, self._dispatch["default"])(
+                captured,
+                observer=observer,
+                observe_output=observe_output,
             )
 
-    executor = _BootstrapExecutor(result_factory=_fake_preparation_result())
+    executor = _BootstrapExecutor()
     monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
 
-    def inspect_bootstrap(
-        context: object, spawn_step: PreparedStep, *steps: PreparedStep
-    ) -> BootstrapOutcome:
-        result = context.process_prepared(spawn_step)  # type: ignore[attr-defined]
+    def inspect_bootstrap(context: object, plan: object) -> BootstrapOutcome:
+        assert plan.create_step is not None  # type: ignore[attr-defined]
+        result = context.process_prepared(plan.spawn_step)  # type: ignore[attr-defined]
         assert result.returncode == 7
         assert result.stdout.replace(r"\x0d", "\r").splitlines() == ["<redacted>"]
         assert result.stderr.replace(r"\x0d", "\r").splitlines() == ["<redacted>"]
-        for step in steps:
-            context.skip(step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.create_step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.ready_step.step_id)  # type: ignore[attr-defined]
         raise BootstrapFailedError(f"bootstrap output: {result.stdout} {result.stderr}")
 
     monkeypatch.setattr(bootstrap, "run_bootstrap_tmp", inspect_bootstrap)
@@ -593,9 +634,9 @@ def test_omitted_venv_keeps_legacy_compose_plan_and_capture_effects(
     cluster.password_file.unlink(missing_ok=True)
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", lambda *args, **kwargs: None)
 
-    def skip_bootstrap(context: object, *steps: PreparedStep) -> BootstrapOutcome:
-        for step in steps:
-            context.skip(step.step_id)  # type: ignore[attr-defined]
+    def skip_bootstrap(context: object, plan: object) -> BootstrapOutcome:
+        assert plan.create_step is None  # type: ignore[attr-defined]
+        _skip_bootstrap_process_steps(context, plan)
         return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(bootstrap, "run_bootstrap_tmp", skip_bootstrap)
@@ -611,6 +652,7 @@ def test_omitted_venv_keeps_legacy_compose_plan_and_capture_effects(
     plan_ids = [step.step_id for step in command.plan.steps]
     assert "init.compose.password" not in plan_ids
     assert "init.compose.config" not in plan_ids
+    assert "init.bootstrap.tmp.lock" not in plan_ids
     assert "init.bootstrap.tmp" in plan_ids
     assert cluster.password_file.is_file()
     command.run()
@@ -638,9 +680,8 @@ def test_integrated_compose_writes_real_config_before_venv_failure(
     cluster.password_file.unlink(missing_ok=True)
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", lambda *args, **kwargs: None)
 
-    def skip_bootstrap(context: object, *steps: PreparedStep) -> BootstrapOutcome:
-        for step in steps:
-            context.skip(step.step_id)  # type: ignore[attr-defined]
+    def skip_bootstrap(context: object, plan: object) -> BootstrapOutcome:
+        _skip_bootstrap_process_steps(context, plan)
         return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(bootstrap, "run_bootstrap_tmp", skip_bootstrap)

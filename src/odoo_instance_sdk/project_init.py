@@ -43,6 +43,7 @@ from odoo_instance_sdk.project import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
+    from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpPlan
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -73,23 +74,13 @@ class _ComposeFollowup:
 @dataclass(frozen=True, slots=True)
 class _BootstrapFollowup:
     cluster: PostgresCluster
-    spawn_step: PreparedStep
-    probe_step: PreparedStep
-    ready_step: PreparedStep
-    verify_action: PreparedAction
-    record_action: PreparedAction
+    plan: BootstrapTmpPlan
     project_root: Path
     data_directory: Path
 
     @property
     def steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
-        return (
-            self.spawn_step,
-            self.probe_step,
-            self.ready_step,
-            self.verify_action,
-            self.record_action,
-        )
+        return self.plan.execution_steps
 
 
 def _init_action_details(
@@ -287,27 +278,22 @@ def _execute_bootstrap_followup_phase(
     context: RunContext[dict[str, JsonValue]], followup: _BootstrapFollowup
 ) -> None:
     from odoo_instance_sdk.internal.dbprep.bootstrap import (
-        BootstrapOutcome,
+        execute_bootstrap_tmp,
         record_bootstrap_event,
-        run_bootstrap_tmp,
     )
     from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
 
     verify_project_owned_data_dir(
         followup.project_root, followup.data_directory, require_exists=False
     )
-    context.action(followup.verify_action.step_id)
-    outcome = run_bootstrap_tmp(
-        context, followup.spawn_step, followup.probe_step, followup.ready_step
-    )
-    context.complete_action(followup.verify_action.step_id)
-    if outcome is BootstrapOutcome.CREATED:
-        context.action(followup.record_action.step_id)
+
+    def record() -> None:
         data_directory = verify_project_owned_data_dir(
             followup.project_root, followup.data_directory
         )
         record_bootstrap_event(followup.cluster, data_directory)
-        context.complete_action(followup.record_action.step_id)
+
+    execute_bootstrap_tmp(context, followup.plan, on_created=record)
     for step in followup.steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
             context.skip(step.step_id)
@@ -503,7 +489,7 @@ def _compose_followup_steps(
     """Return postgres ensure-running and bootstrap ``tmp`` steps for compose init."""
     from odoo_instance_sdk.internal.dbprep.bootstrap import (
         bootstrap_record_action,
-        bootstrap_tmp_steps,
+        bootstrap_tmp_plan,
     )
     from odoo_instance_sdk.internal.generated_config import project_generated_config_path
     from odoo_instance_sdk.internal.proc import PreparedAction
@@ -570,7 +556,7 @@ def _compose_followup_steps(
     verify_project_owned_data_dir(root, data_directory, require_exists=False)
     start_config.data_dir = str(data_directory)
     command_prefix = _planned_command_prefix(root, config, python=python)
-    spawn_step, probe_step, ready_step, ready_action = bootstrap_tmp_steps(
+    bootstrap_plan = bootstrap_tmp_plan(
         command_prefix=command_prefix,
         start_config=start_config,
         db_host=cluster.endpoint_host,
@@ -578,6 +564,9 @@ def _compose_followup_steps(
         db_user=start_config.db_user or "odoo",
         db_password=password,
         default_cwd=root,
+        include_create=defer_actions,
+        project_id=cluster._project_id,
+        record_action=bootstrap_record_action(),
     )
 
     password_state: list[str | None] = [None]
@@ -596,9 +585,17 @@ def _compose_followup_steps(
 
             return replace(step, runtime_environment_factory=environment_factory)
 
-        spawn_step = refresh_password_environment(spawn_step)
-        probe_step = refresh_password_environment(probe_step)
-        ready_step = refresh_password_environment(ready_step)
+        bootstrap_plan = replace(
+            bootstrap_plan,
+            spawn_step=refresh_password_environment(bootstrap_plan.spawn_step),
+            create_step=(
+                refresh_password_environment(bootstrap_plan.create_step)
+                if bootstrap_plan.create_step is not None
+                else None
+            ),
+            probe_step=refresh_password_environment(bootstrap_plan.probe_step),
+            ready_step=refresh_password_environment(bootstrap_plan.ready_step),
+        )
     return (
         _ComposeFollowup(
             cluster=cluster,
@@ -612,11 +609,7 @@ def _compose_followup_steps(
         ),
         _BootstrapFollowup(
             cluster=cluster,
-            spawn_step=spawn_step,
-            probe_step=probe_step,
-            ready_step=ready_step,
-            verify_action=ready_action,
-            record_action=bootstrap_record_action(),
+            plan=bootstrap_plan,
             project_root=root,
             data_directory=data_directory,
         ),
