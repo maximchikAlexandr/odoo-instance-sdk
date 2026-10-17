@@ -54,6 +54,8 @@ def write_manifest(project_path: str | Path, config: ProjectConfig) -> Path:
 def ensure_project_ignore(project_path: str | Path) -> Path:
     """Ensure init's project-local secrets are explicitly ignored by Git."""
     root = Path(project_path).resolve(strict=True)
+    if os.name == "nt":
+        return _ensure_project_ignore_windows(root)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
     root_fd = os.open(root, directory_flags)
     local_fd: int | None = None
@@ -99,6 +101,57 @@ def ensure_project_ignore(project_path: str | Path) -> Path:
         if local_fd is not None:
             os.close(local_fd)
         os.close(root_fd)
+
+
+def _ensure_project_ignore_windows(root: Path) -> Path:
+    """Maintain the project-local ignore file without POSIX descriptor APIs."""
+    local = root / _MANIFEST_DIR
+    if local.exists() and (_is_reparse_point(local) or not local.is_dir()):
+        raise OSError(errno.ELOOP, f"refusing unsafe project-local directory: {local}")
+    local.mkdir(mode=0o755, exist_ok=True)
+    if _is_reparse_point(local) or not local.is_dir():
+        raise OSError(errno.ELOOP, f"refusing unsafe project-local directory: {local}")
+    ignore = local / ".gitignore"
+    if ignore.exists() and (_is_reparse_point(ignore) or not ignore.is_file()):
+        raise OSError(errno.ELOOP, f"refusing unsafe .gitignore target: {ignore}")
+    content = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    managed = frozenset(_PROJECT_LOCAL_IGNORES)
+    preserved = [
+        line for line in content.splitlines(keepends=True) if line.rstrip("\r\n") not in managed
+    ]
+    base = "".join(preserved)
+    if base and not base.endswith(("\n", "\r")):
+        base += "\n"
+    updated = base + "".join(f"{entry}\n" for entry in _PROJECT_LOCAL_IGNORES)
+    if updated == content:
+        return ignore
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=local,
+            prefix=".gitignore.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_name, 0o644)
+        os.replace(temporary_name, ignore)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary_name)
+    return ignore
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Return whether a Windows path is a symlink or junction/reparse point."""
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
 
 
 def _read_regular_ignore(root_fd: int, display_path: Path) -> tuple[str, os.stat_result | None]:

@@ -59,4 +59,22 @@ def captured_child_environment(
     return tuple(sorted(child.items())), tuple(sorted(public_overrides.items()))
 
 
-__all__ = ["captured_child_environment", "is_secret_environment_key", "sanitized_child_environment"]
+def prepared_child_environment(
+    overrides: tuple[tuple[str, str], ...],
+    *,
+    policy: str = "sanitized-inherit",
+    snapshot: tuple[tuple[str, str], ...] = (),
+) -> dict[str, str]:
+    if policy == "explicit":
+        source = snapshot or overrides
+        return sanitized_child_environment(dict(source))
+    source = snapshot or overrides
+    return sanitized_child_environment(dict(source) if source else None)
+
+
+__all__ = [
+    "captured_child_environment",
+    "is_secret_environment_key",
+    "prepared_child_environment",
+    "sanitized_child_environment",
+]

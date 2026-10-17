@@ -108,6 +108,58 @@ def test_no_input_full_specified_writes(tmp_path: Path) -> None:
     assert not (tmp_path / ".gitignore").exists()
 
 
+def test_init_omitted_inputs_retain_and_supplied_inputs_replace(tmp_path: Path) -> None:
+    runner = CliRunner()
+    base = [
+        "init",
+        "--no-input",
+        "--allow-partial",
+        "--odoo-bin",
+        "/opt/odoo/odoo-bin",
+        "--python",
+        "python3",
+        "--project",
+        str(tmp_path),
+    ]
+    first = runner.invoke(
+        cli,
+        [
+            *base,
+            "--addons-root",
+            "addons/community",
+            "--addons-root",
+            "addons/private",
+            "--server-wide-module",
+            "base",
+            "--server-wide-module",
+            "web",
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    manifest = tmp_path / ".odcli" / "project.toml"
+    assert 'addon_roots = ["addons/community", "addons/private"]' in manifest.read_text()
+
+    retained = runner.invoke(cli, base)
+    assert retained.exit_code == 0, retained.output
+    assert 'server_wide_modules = ["base", "web"]' in manifest.read_text()
+
+    replaced = runner.invoke(
+        cli,
+        [
+            *base,
+            "--yes",
+            "--addons-root",
+            "addons/enterprise",
+            "--server-wide-module",
+            "mail",
+        ],
+    )
+    assert replaced.exit_code == 0, replaced.output
+    content = manifest.read_text()
+    assert 'addon_roots = ["addons/enterprise"]' in content
+    assert 'server_wide_modules = ["mail"]' in content
+
+
 def test_init_preserves_existing_root_gitignore(tmp_path: Path) -> None:
     root_ignore = tmp_path / ".gitignore"
     root_ignore.write_text("project-specific-rule\n")

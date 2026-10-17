@@ -128,6 +128,8 @@ def manifest_dict(
             str(config.managed_filestore) if config.managed_filestore is not None else None
         ),
         "addon_repositories": [str(path) for path in config.addon_repositories],
+        "addon_roots": [str(path) for path in config.addon_roots],
+        "server_wide_modules": list(config.server_wide_modules),
         "default_base_ref": config.default_base_ref,
         "ticket_link_enabled": config.ticket_link_enabled is True,
         "ticket_base_url": config.ticket_base_url,
@@ -180,6 +182,8 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
         db_user=postgres.user or "odoo",
         db_password=password,
         data_dir=project_owned_data_dir(root),
+        addon_roots=config.addon_roots,
+        server_wide_modules=config.server_wide_modules,
     )
 
 
@@ -256,6 +260,8 @@ def _rewrite_project_generated_database(
         db_user=config.postgres.user or "odoo",
         db_password=password,
         data_dir=project_owned_data_dir(root),
+        addon_roots=config.addon_roots,
+        server_wide_modules=config.server_wide_modules,
     )
 
 
@@ -390,6 +396,8 @@ def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> 
             db_user=config.postgres.user or "odoo",
             db_password=password,
             data_dir=project_owned_data_dir(project_path.resolve()),
+            addon_roots=config.addon_roots,
+            server_wide_modules=config.server_wide_modules,
         )
         return destination.read_text(encoding="utf-8") != expected
     except (OSError, UnicodeError, InstanceConfigurationError, ValueError):

@@ -35,6 +35,8 @@ from odoo_instance_sdk.internal.project_init import (
     project_owned_data_dir,
     verify_project_owned_data_dir,
 )
+from odoo_instance_sdk.internal.project_manifest import write_manifest
+from odoo_instance_sdk.internal.venv_origin import origin_record_path
 from odoo_instance_sdk.models import Backup, DatabaseRefreshOptions, StartConfig
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
@@ -176,6 +178,156 @@ def _failed_probe_result(step: object) -> ProcessResult:
             getattr(step, "environment", ()),
         ),
     )
+
+
+@dataclass(frozen=True)
+class _PrimaryVenvScenario:
+    args: list[str]
+    source: Path
+    original_cfg: Path
+    original_interpreter: Path
+    prepared_interpreter: Path
+
+
+def _set_uv_metadata_version(cfg: Path, version: str) -> None:
+    lines = cfg.read_text(encoding="utf-8").splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.startswith("uv = "):
+            lines[index] = f"uv = {version}\n"
+            cfg.write_text("".join(lines), encoding="utf-8")
+            return
+    raise AssertionError(f"uv metadata is missing from {cfg}")
+
+
+def _uv_metadata_version(cfg: Path) -> str:
+    for line in cfg.read_text(encoding="utf-8").splitlines():
+        if line.startswith("uv = "):
+            return line.partition("=")[2].strip()
+    raise AssertionError(f"uv metadata is missing from {cfg}")
+
+
+def _build_primary_venv_scenario(tmp_path: Path) -> _PrimaryVenvScenario:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    runner = CliRunner()
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    original_venv = tmp_path.parent / f"{tmp_path.name}-original-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(original_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    original_interpreter = original_venv / "bin" / "python"
+    assert original_interpreter.is_file()
+    original_cfg = original_venv / "pyvenv.cfg"
+    _set_uv_metadata_version(original_cfg, "0.11.1")
+    source = tmp_path / "local-source.conf"
+    source.write_text("[options]\ncustom_option = retained\n", encoding="utf-8")
+    module_requirements = tmp_path / "addons" / "nested" / "module_a" / "requirements.txt"
+    module_requirements.parent.mkdir(parents=True)
+    module_requirements.write_text("requests==2.32.5\n", encoding="utf-8")
+    explicit_requirements = tmp_path / "explicit.txt"
+    explicit_requirements.write_text("urllib3==2.5.0\n", encoding="utf-8")
+    args = [
+        *_base_args(tmp_path, allow_partial=True),
+        "--config",
+        str(source),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+        "--addons-root",
+        "addons",
+        "--server-wide-module",
+        "base",
+        "--server-wide-module",
+        "web",
+        "--requirements",
+        str(module_requirements),
+        "--requirements",
+        str(explicit_requirements),
+    ]
+    args[args.index("--python") + 1] = str(original_interpreter)
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    prepared_venv = tmp_path / ".myl491-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", str(original_interpreter), str(prepared_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    prepared_interpreter = prepared_venv / "bin" / "python"
+    assert prepared_interpreter.is_file()
+    return _PrimaryVenvScenario(
+        args=args,
+        source=source,
+        original_cfg=original_cfg,
+        original_interpreter=original_interpreter,
+        prepared_interpreter=prepared_interpreter,
+    )
+
+
+def _prepare_primary_venv(
+    tmp_path: Path,
+    scenario: _PrimaryVenvScenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.project_init import prepare_venv_command
+
+    def _prepare_result(step: object) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        if "compile" in prepared.step_id:
+            Path(prepared.argv[-1]).write_text("prepared-lock\n", encoding="utf-8")
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    executor = RecordingExecutor(result_factory=_prepare_result)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
+    prepare_venv_command(
+        tmp_path,
+        python=str(scenario.original_interpreter),
+        venv=".myl491-venv",
+    ).run()
+
+
+def _record_prepared_venv_origin(
+    tmp_path: Path,
+    prepared_interpreter: Path,
+    requested_interpreter: str | Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publish the same private provenance that a successful prepare emits."""
+    from odoo_instance_sdk.project_init import prepare_venv_command
+
+    project = ProjectConfig(repository_root=tmp_path, python=prepared_interpreter)
+    write_manifest(tmp_path, project)
+
+    def _result(step: object) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    executor = RecordingExecutor(result_factory=_result)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
+    prepare_venv_command(
+        tmp_path, python=str(requested_interpreter), venv=prepared_interpreter.parent.parent
+    ).run()
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")
@@ -324,6 +476,367 @@ def test_init_rerun_preserves_existing_test_instance(tmp_path: Path) -> None:
     manifest = (tmp_path / ".odcli" / "project.toml").read_text()
     assert "http://127.0.0.1:18069" in manifest
     assert 'database = "remote_db"' in manifest
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_after_prepare_venv_renders_e2e_inputs(tmp_path: Path) -> None:
+    scenario = _build_primary_venv_scenario(tmp_path)
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    assert generated.stat().st_mode & 0o777 == 0o600
+    assert "custom_option = retained" in generated.read_text(encoding="utf-8")
+    assert "--config" in scenario.args
+    assert "--addons-root" in scenario.args
+    assert scenario.original_interpreter.is_file()
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_after_prepare_venv_persists_real_uv_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _build_primary_venv_scenario(tmp_path)
+    original_uv = _uv_metadata_version(scenario.original_cfg)
+    prepared_cfg = scenario.prepared_interpreter.parent.parent / "pyvenv.cfg"
+    prepared_uv = _uv_metadata_version(prepared_cfg)
+    assert original_uv == "0.11.1"
+    assert prepared_uv != original_uv
+    assert "executable =" not in prepared_cfg.read_text(encoding="utf-8")
+    _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    assert ProjectConfig.load(tmp_path).python == scenario.prepared_interpreter
+    origin = json.loads(origin_record_path(tmp_path).read_text(encoding="utf-8"))
+    assert origin["venv_root"] == str(scenario.prepared_interpreter.parent.parent.resolve())
+    assert origin["requested_path"] == str(scenario.original_interpreter.absolute())
+    manifest_before = (tmp_path / ".odcli" / "project.toml").read_bytes()
+    lock = tmp_path / ".odcli" / "requirements.lock"
+    lock.write_bytes(b"prepared-lock\n")
+    assert lock.read_bytes() == b"prepared-lock\n"
+    assert manifest_before
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_after_prepare_venv_preserves_primary_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeating init with the original runtime inputs keeps the prepared venv."""
+    scenario = _build_primary_venv_scenario(tmp_path)
+    _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    runner = CliRunner()
+    manifest_before = (tmp_path / ".odcli" / "project.toml").read_bytes()
+    lock = tmp_path / ".odcli" / "requirements.lock"
+    lock.write_bytes(b"prepared-lock\n")
+    lock_before = lock.read_bytes()
+    source_before = scenario.source.read_bytes()
+
+    repeated = runner.invoke(cli, [*scenario.args, "--yes"])
+    assert repeated.exit_code == 0, repeated.output
+    assert ProjectConfig.load(tmp_path).python == scenario.prepared_interpreter
+    assert (tmp_path / ".odcli" / "project.toml").read_bytes() == manifest_before
+    assert lock.read_bytes() == lock_before
+    assert scenario.source.read_bytes() == source_before
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_rejects_tampered_prepared_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _build_primary_venv_scenario(tmp_path)
+    _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    candidate = scenario.prepared_interpreter
+    candidate.unlink()
+    candidate.write_text("attacker-controlled\n", encoding="utf-8")
+
+    project = ProjectConfig.load(tmp_path)
+    from odoo_instance_sdk.commands.cli_parts.init_registration import (
+        _preserve_prepared_interpreter,
+    )
+
+    assert (
+        _preserve_prepared_interpreter(tmp_path, scenario.original_interpreter, project)
+        == scenario.original_interpreter
+    )
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_rejects_stale_origin_after_project_recreation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _build_primary_venv_scenario(tmp_path)
+    _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    manifest = tmp_path / ".odcli" / "project.toml"
+    manifest.unlink()
+    replacement = ProjectConfig(
+        repository_root=tmp_path,
+        python=scenario.prepared_interpreter,
+        requirements=("replacement.txt",),
+    )
+    write_manifest(tmp_path, replacement)
+    from odoo_instance_sdk.commands.cli_parts.init_registration import (
+        _preserve_prepared_interpreter,
+    )
+
+    assert (
+        _preserve_prepared_interpreter(tmp_path, scenario.original_interpreter, replacement)
+        == scenario.original_interpreter
+    )
+
+
+def test_prepared_uv_interpreter_allows_explicit_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absolute uv inputs match while explicit replacement inputs remain available."""
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    original_venv = tmp_path.parent / f"{tmp_path.name}-original-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(original_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    original_interpreter = original_venv / "bin" / "python"
+    original_cfg = original_venv / "pyvenv.cfg"
+    _set_uv_metadata_version(original_cfg, "0.11.1")
+    prepared_venv = tmp_path / ".myl491-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", str(original_interpreter), str(prepared_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    prepared_interpreter = prepared_venv / "bin" / "python"
+    original_uv = _uv_metadata_version(original_cfg)
+    prepared_uv = _uv_metadata_version(prepared_venv / "pyvenv.cfg")
+    assert original_uv == "0.11.1"
+    assert prepared_uv != original_uv
+    _record_prepared_venv_origin(tmp_path, prepared_interpreter, original_interpreter, monkeypatch)
+    project = ProjectConfig(repository_root=tmp_path, python=prepared_interpreter)
+    from odoo_instance_sdk.commands.cli_parts.init_registration import (
+        _preserve_prepared_interpreter,
+    )
+
+    assert (
+        _preserve_prepared_interpreter(tmp_path, original_interpreter, project)
+        == prepared_interpreter
+    )
+    alternate_venv = tmp_path.parent / f"{tmp_path.name}-alternate-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(alternate_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    alternate = alternate_venv / "bin" / "python"
+    assert alternate.is_file()
+    assert _preserve_prepared_interpreter(tmp_path, alternate, project) == alternate
+    assert _preserve_prepared_interpreter(tmp_path, "python999", project) == "python999"
+
+
+def test_escaping_venv_root_does_not_preserve_or_mutate_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    external_venv = tmp_path.parent / f"{tmp_path.name}-external-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(external_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    project_venv = tmp_path / ".myl491-venv"
+    project_venv.symlink_to(external_venv, target_is_directory=True)
+    candidate = project_venv / "bin" / "python"
+    venv_cfg = external_venv / "pyvenv.cfg"
+    venv_cfg_before = venv_cfg.read_bytes()
+    replacement = tmp_path / "replacement-python"
+    replacement.write_text("replacement\n", encoding="utf-8")
+    project = ProjectConfig(repository_root=tmp_path, python=candidate)
+    manifest = tmp_path / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_bytes(b"before\n")
+    process_calls: list[object] = []
+
+    def _process_guard() -> None:
+        process_calls.append(object())
+        raise AssertionError("escaping venv must be rejected before process creation")
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", _process_guard)
+    from odoo_instance_sdk.commands.cli_parts.init_registration import (
+        _preserve_prepared_interpreter,
+    )
+
+    assert _preserve_prepared_interpreter(tmp_path, replacement, project) == replacement
+    assert manifest.read_bytes() == b"before\n"
+    assert venv_cfg.read_bytes() == venv_cfg_before
+    assert not process_calls
+    assert not origin_record_path(tmp_path).exists()
+
+
+def test_forged_venv_executable_metadata_does_not_preserve(tmp_path: Path) -> None:
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    requested_venv = tmp_path.parent / f"{tmp_path.name}-requested-venv"
+    prepared_venv = tmp_path / ".myl491-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(requested_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    requested = requested_venv / "bin" / "python"
+    subprocess.run(
+        [uv_executable, "venv", "--python", str(requested), str(prepared_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    cfg = prepared_venv / "pyvenv.cfg"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8") + f"executable = {requested}\n", encoding="utf-8"
+    )
+    project = ProjectConfig(repository_root=tmp_path, python=prepared_venv / "bin" / "python")
+    local_forged = tmp_path / ".odcli" / "primary-venv-origin.json"
+    local_forged.parent.mkdir()
+    local_forged.write_text(
+        json.dumps(
+            {
+                "project_root": str(tmp_path.resolve()),
+                "venv_root": str(prepared_venv.resolve()),
+                "requested": str(requested),
+                "requested_path": str(requested.absolute()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    from odoo_instance_sdk.commands.cli_parts.init_registration import (
+        _preserve_prepared_interpreter,
+    )
+
+    assert _preserve_prepared_interpreter(tmp_path, requested, project) == requested
+    cfg.write_text(
+        "\n".join(
+            line
+            for line in cfg.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("uv =")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert _preserve_prepared_interpreter(tmp_path, requested, project) == requested
+
+
+def test_malformed_prepared_venv_origin_fails_closed(tmp_path: Path) -> None:
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    requested_venv = tmp_path.parent / f"{tmp_path.name}-requested-venv"
+    prepared_venv = tmp_path / ".myl491-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(requested_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    requested = requested_venv / "bin" / "python"
+    subprocess.run(
+        [uv_executable, "venv", "--python", str(requested), str(prepared_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    project = ProjectConfig(repository_root=tmp_path, python=prepared_venv / "bin" / "python")
+    origin = origin_record_path(tmp_path)
+    origin.parent.mkdir(parents=True)
+    from odoo_instance_sdk.commands.cli_parts.init_registration import (
+        _preserve_prepared_interpreter,
+    )
+
+    origin.write_text("[]\n", encoding="utf-8")
+    assert _preserve_prepared_interpreter(tmp_path, requested, project) == requested
+    origin.write_text("{\n", encoding="utf-8")
+    assert _preserve_prepared_interpreter(tmp_path, requested, project) == requested
+    origin.write_text(json.dumps({"venv_root": str(tmp_path)}) + "\n", encoding="utf-8")
+    assert _preserve_prepared_interpreter(tmp_path, requested, project) == requested
+
+
+def test_origin_request_normalizes_tilde_before_project_relative_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    original_venv = home / "original-venv"
+    prepared_venv = tmp_path / ".myl491-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(original_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    original = original_venv / "bin" / "python"
+    subprocess.run(
+        [uv_executable, "venv", "--python", str(original), str(prepared_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    prepared = prepared_venv / "bin" / "python"
+    project = ProjectConfig(repository_root=tmp_path, python=prepared)
+    write_manifest(tmp_path, project)
+    _record_prepared_venv_origin(tmp_path, prepared, original, monkeypatch)
+    from odoo_instance_sdk.commands.cli_parts.init_registration import (
+        _preserve_prepared_interpreter,
+    )
+
+    requested = "~/original-venv/bin/python"
+    assert _preserve_prepared_interpreter(tmp_path, requested, project) == prepared
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_origin_staging_ignores_project_symlink_victim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _build_primary_venv_scenario(tmp_path)
+    victim = tmp_path.parent / f"{tmp_path.name}-origin-victim"
+    victim.write_bytes(b"victim-before\n")
+    staged = tmp_path / ".odcli" / "primary-venv-origin.json.prepare"
+    staged.symlink_to(victim)
+    _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    assert victim.read_bytes() == b"victim-before\n"
+    assert staged.is_symlink()
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_origin_publish_failure_restores_manifest_lock_and_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _build_primary_venv_scenario(tmp_path)
+    _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    manifest = tmp_path / ".odcli" / "project.toml"
+    lock = tmp_path / ".odcli" / "requirements.lock"
+    origin = origin_record_path(tmp_path)
+    before = (manifest.read_bytes(), lock.read_bytes(), origin.read_bytes())
+
+    def _fail_publish(_stage: object) -> None:
+        raise OSError("injected origin publish failure")
+
+    monkeypatch.setattr("odoo_instance_sdk.project_init.publish_origin", _fail_publish)
+    with pytest.raises(OSError, match="injected origin publish failure"):
+        _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    assert (manifest.read_bytes(), lock.read_bytes(), origin.read_bytes()) == before
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_with_distinct_valid_uv_venv_keeps_replacement_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _build_primary_venv_scenario(tmp_path)
+    _prepare_primary_venv(tmp_path, scenario, monkeypatch)
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    alternate_venv = tmp_path.parent / f"{tmp_path.name}-distinct-venv"
+    subprocess.run(
+        [uv_executable, "venv", "--python", "python3", str(alternate_venv)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    alternate = alternate_venv / "bin" / "python"
+    args = [*scenario.args]
+    args[args.index("--python") + 1] = str(alternate)
+    result = CliRunner().invoke(cli, [*args, "--dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert str(alternate) in result.output
+    assert ProjectConfig.load(tmp_path).python == scenario.prepared_interpreter
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")

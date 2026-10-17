@@ -26,6 +26,7 @@ from odoo_instance_sdk.commands.output import (
     run_or_preview,
 )
 from odoo_instance_sdk.commands.cli_parts.init_registration import register_init_command
+from odoo_instance_sdk.commands.prepare_venv import register_prepare_venv_command
 from odoo_instance_sdk.commands.pg import (
     postgres_group as _postgres_group,
     psql as _psql,
@@ -652,6 +653,7 @@ cli.add_command(bug_report_group, name="bug-report")
 cli.add_command(_publish, name="publish")
 cli.add_command(_unpublish, name="unpublish")
 register_init_command(cli)
+register_prepare_venv_command(cli)
 
 
 def _cli_catalog_path(*, ensure_exists: bool = True) -> Path:

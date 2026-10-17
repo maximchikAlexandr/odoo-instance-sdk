@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,6 +35,11 @@ from odoo_instance_sdk.internal.project_init import (
 )
 from odoo_instance_sdk.internal.project_manifest import manifest_path
 from odoo_instance_sdk.internal.urls import normalize_base_url
+from odoo_instance_sdk.internal.venv_origin import (
+    normalize_requested_python,
+    origin_candidate_matches,
+    read_origin_record,
+)
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.project import (
@@ -76,6 +82,8 @@ class _InitRequest:
     default_source_database: str | None
     preferred_http_port: int | None
     requirements: tuple[str, ...]
+    addon_roots: tuple[str, ...]
+    server_wide_modules: tuple[str, ...]
     run_args: tuple[str, ...]
     runtime_cwd: str | None
     from_vscode: str | None
@@ -106,6 +114,8 @@ def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
         default_source_database=cast("str | None", options["default_source_database"]),
         preferred_http_port=cast("int | None", options["preferred_http_port"]),
         requirements=cast("tuple[str, ...]", options["requirements"]),
+        addon_roots=cast("tuple[str, ...]", options["addon_roots"]),
+        server_wide_modules=cast("tuple[str, ...]", options["server_wide_modules"]),
         run_args=cast("tuple[str, ...]", options["run_args"]),
         runtime_cwd=cast("str | None", options["runtime_cwd"]),
         from_vscode=cast("str | None", options["from_vscode"]),
@@ -225,6 +235,10 @@ def _execute_init(
         test_branch=request.test_branch,
     )
     existing_test_instance = _existing_test_instance(resolved_project)
+    existing_project = _existing_project_config(resolved_project)
+    effective_python = _preserve_prepared_interpreter(
+        resolved_project, option_state.python, existing_project
+    )
     if test_instance_cfg is None and existing_test_instance is not None:
         test_instance_cfg = existing_test_instance
     existing_remote_instances = _existing_remote_instances(resolved_project)
@@ -242,7 +256,7 @@ def _execute_init(
     config = ProjectConfig(
         repository_root=resolved_project.resolve(),
         odoo_bin=option_state.odoo_bin,
-        python=option_state.python,
+        python=effective_python,
         source_config=effective_source_config,
         default_source_database=option_state.default_source_database,
         managed_filestore=(
@@ -252,6 +266,16 @@ def _execute_init(
         ),
         preferred_http_port=option_state.preferred_http_port,
         requirements=option_state.requirements,
+        addon_roots=(
+            tuple(Path(value) for value in request.addon_roots)
+            if request.addon_roots
+            else (existing_project.addon_roots if existing_project is not None else ())
+        ),
+        server_wide_modules=(
+            request.server_wide_modules
+            if request.server_wide_modules
+            else (existing_project.server_wide_modules if existing_project is not None else ())
+        ),
         default_run_args=option_state.default_run_args,
         runtime_cwd=option_state.runtime_cwd,
         postgres=postgres_cfg,
@@ -364,6 +388,19 @@ def register_init_command(cli: click.Group) -> None:
         "--http-port", "preferred_http_port", type=int, default=None, help="Preferred HTTP port."
     )
     @click.option("--requirements", "requirements", multiple=True, help="Requirements files.")
+    @click.option(
+        "--addons-root",
+        "addon_roots",
+        type=click.Path(),
+        multiple=True,
+        help="Project-relative addon root; repeat to preserve order.",
+    )
+    @click.option(
+        "--server-wide-module",
+        "server_wide_modules",
+        multiple=True,
+        help="Server-wide module name; repeat to preserve order.",
+    )
     @click.option("--run-arg", "run_args", multiple=True, help="Default run args.")
     @click.option(
         "--runtime-cwd", "runtime_cwd", type=click.Path(), default=None, help="Runtime cwd."
@@ -512,6 +549,117 @@ def _existing_test_instance(project_root: Path) -> TestInstanceProjectConfig | N
     except Exception:
         return None
     return existing_cfg.test_instance
+
+
+def _existing_project_config(project_root: Path) -> ProjectConfig | None:
+    manifest = manifest_path(project_root)
+    if not manifest.is_file():
+        return None
+    try:
+        return ProjectConfig.load(project_root)
+    except Exception:
+        return None
+
+
+def _prepared_venv_metadata(interpreter: Path) -> dict[str, str]:
+    venv_cfg = interpreter.parent.parent / "pyvenv.cfg"
+    metadata: dict[str, str] = {}
+    try:
+        for line in venv_cfg.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if key.strip().lower() == "executable" and separator and value.strip():
+                metadata["executable"] = value.strip()
+            elif key.strip() and separator and value.strip():
+                metadata[key.strip().lower()] = value.strip()
+    except (OSError, RuntimeError):
+        return {}
+    return metadata
+
+
+def _prepared_venv_origin_matches_request(
+    project_root: Path, candidate: Path, requested: str | Path
+) -> bool:
+    """Match SDK-owned prepare provenance, never project-controlled metadata."""
+    try:
+        record = read_origin_record(project_root)
+        if record is None:
+            return False
+        candidate_root = candidate.parent.parent.resolve(strict=True)
+        if not candidate_root.is_relative_to(project_root.resolve(strict=True)):
+            return False
+        recorded_root = Path(str(record["venv_root"])).resolve(strict=True)
+        if recorded_root != candidate_root:
+            return False
+        if not origin_candidate_matches(
+            project_root,
+            candidate,
+            record,
+            manifest_bytes=manifest_path(project_root).read_bytes(),
+        ):
+            return False
+        raw_requested = str(requested)
+        recorded_requested = record.get("requested")
+        if recorded_requested == raw_requested:
+            return True
+        requested_path = normalize_requested_python(project_root, requested)
+        return requested_path is not None and record.get("requested_path") == str(requested_path)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _prepared_venv_matches_request(
+    project_root: Path,
+    candidate: Path,
+    requested: str | Path,
+    metadata: dict[str, str],
+) -> bool:
+    if not metadata.get("uv"):
+        return False
+    # The sidecar is written only after the validated prepare operation.  A
+    # pyvenv.cfg ``executable`` value is therefore never an authority for
+    # preservation, including when it names the requested interpreter.
+    return _prepared_venv_origin_matches_request(project_root, candidate, requested)
+
+
+def _preserve_prepared_interpreter(
+    project_root: Path,
+    requested: str | Path | None,
+    existing: ProjectConfig | None,
+) -> str | Path | None:
+    """Keep a successful project-owned ``prepare-venv`` result on re-init.
+
+    ``prepare-venv`` persists a concrete interpreter and SDK-owned provenance.
+    A later ``init`` may preserve it only for the same canonical venv root and
+    original request; explicit replacements and project-controlled records
+    retain ordinary replacement semantics.
+    """
+    if existing is None or existing.python is None or requested == existing.python:
+        return requested
+    candidate = Path(existing.python)
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return requested
+    try:
+        owned = candidate.is_relative_to(Path(os.path.abspath(project_root)))
+    except OSError:
+        owned = False
+    try:
+        canonical_project_root = Path(os.path.abspath(project_root)).resolve(strict=True)
+        canonical_venv_root = candidate.parent.parent.resolve(strict=True)
+        canonical_root_owned = canonical_venv_root.is_relative_to(canonical_project_root)
+    except (OSError, RuntimeError):
+        canonical_root_owned = False
+    if owned and canonical_root_owned and resolved.is_file():
+        if requested is None:
+            return existing.python
+        metadata = _prepared_venv_metadata(candidate)
+        if _prepared_venv_matches_request(project_root, candidate, requested, metadata):
+            return existing.python
+    return requested
 
 
 def _existing_remote_instances(project_root: Path) -> tuple[RemoteSourceConfig, ...]:

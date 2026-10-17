@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 
 import msgspec
 
+from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.project_init import (
@@ -29,6 +32,15 @@ from odoo_instance_sdk.internal.project_init import (
     write_project_generated_config,
 )
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
+from odoo_instance_sdk.internal.venv_origin import (
+    OriginStage,
+    discard_origin_stage,
+    origin_record_path,
+    publish_origin,
+    read_origin_bytes,
+    restore_persisted_prepare_state,
+    stage_origin_record,
+)
 from odoo_instance_sdk.project import (
     ProjectConfig,
     RemoteSourceConfig,
@@ -42,6 +54,7 @@ if TYPE_CHECKING:
         PreparedAction,
         PreparedStep,
         PrivateJsonValue,
+        ProcessResult,
         RunContext,
     )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -761,3 +774,227 @@ def remove_remote_source(
     project: ProjectConfig | str | Path, name: str
 ) -> tuple[RemoteSourceConfig, ...]:
     return remove_remote_source_command(project, name).run()
+
+
+def prepare_venv_command(  # noqa: C901
+    project: ProjectConfig | str | Path,
+    *,
+    python: str | Path,
+    venv: str | Path,
+) -> Command[dict[str, JsonValue]]:
+    """Capture immutable preparation of the initialized project's primary venv."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        SubprocessExecutor,
+        prepared_command,
+    )
+    from odoo_instance_sdk.resources.environment.checkout_artifacts import _owned_python_executable
+    from odoo_instance_sdk.resources.environment.checkout_planning import discover_dependency_inputs
+
+    baseline = project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
+    root = baseline.repository_root.resolve()
+    venv_path = Path(venv)
+    if not venv_path.is_absolute():
+        venv_path = root / venv_path
+    venv_path = venv_path.resolve(strict=False)
+    interpreter = _owned_python_executable(venv_path)
+    inputs = discover_dependency_inputs(baseline, root, root)
+    lock_path = root / ".odcli" / "requirements.lock"
+    staged_lock_path = lock_path.with_name(f"{lock_path.name}.prepare")
+    create_venv = not Path(interpreter).is_file()
+    steps: list[PreparedStep | PreparedAction] = []
+    if create_venv:
+        steps.append(
+            PreparedStep(
+                step_id="prepare-venv.venv",
+                argv=("uv", "venv", str(venv_path), "--python", str(python)),
+                cwd=str(root),
+                mode="captured",
+                mutating=True,
+            )
+        )
+    steps.append(
+        PreparedStep(
+            step_id="prepare-venv.validate",
+            argv=(
+                interpreter,
+                "-c",
+                "import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)",
+            ),
+            cwd=str(root),
+            mode="captured",
+            read_only=True,
+        )
+    )
+    if inputs:
+        steps.extend(
+            (
+                PreparedStep(
+                    step_id="prepare-venv.dependencies.compile",
+                    argv=(
+                        "uv",
+                        "pip",
+                        "compile",
+                        "--python",
+                        interpreter,
+                        *inputs,
+                        "-o",
+                        str(staged_lock_path),
+                    ),
+                    cwd=str(root),
+                    mode="captured",
+                    mutating=True,
+                ),
+                PreparedStep(
+                    step_id="prepare-venv.dependencies.install",
+                    argv=("uv", "pip", "sync", "--python", interpreter, str(staged_lock_path)),
+                    cwd=str(root),
+                    mode="captured",
+                    mutating=True,
+                ),
+            )
+        )
+        lock_action = PreparedAction(
+            step_id="prepare-venv.dependencies.lock",
+            action="publish-primary-dependency-lock",
+            description="Publish the prepared dependency lock",
+            details={"path": str(lock_path)},
+            mutating=True,
+        )
+    else:
+        lock_action = None
+    manifest_action = PreparedAction(
+        step_id="prepare-venv.manifest",
+        action="persist-primary-interpreter",
+        description="Persist the prepared primary venv interpreter",
+        details={
+            "python": str(python),
+            "venv": str(venv_path),
+            "interpreter": interpreter,
+            "dependency_inputs": tuple(inputs),
+            "manifest": str(manifest_path(root)),
+        },
+        mutating=True,
+    )
+    origin_action = PreparedAction(
+        step_id="prepare-venv.origin",
+        action="publish-primary-venv-origin",
+        description="Publish trusted primary venv provenance",
+        details={"path": str(origin_record_path(root)), "venv": str(venv_path)},
+        mutating=True,
+    )
+    steps.append(origin_action)
+    steps.append(manifest_action)
+    if lock_action is not None:
+        steps.append(lock_action)
+    prepared_steps = tuple(steps)
+    public_plan = ExecutionPlan(steps=tuple(step.public_projection() for step in prepared_steps))
+
+    def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:  # noqa: C901
+        lock_id = hashlib.sha256(str(root).encode()).hexdigest()
+        staged_origin: OriginStage | None = None
+        transaction_started = False
+        with exclusive_lock(project_manifest_lock_path(lock_id)):
+            manifest_before = manifest_path(root).read_bytes()
+            lock_before = lock_path.read_bytes() if lock_path.is_file() else None
+            origin_before = read_origin_bytes(root)
+            try:
+                current = ProjectConfig.load(root)
+                if current.to_manifest() != baseline.to_manifest():
+                    raise ConfigError(  # noqa: TRY301
+                        "project manifest changed before primary venv preparation"
+                    )
+                from odoo_instance_sdk.internal.locks import python_env_lock_path
+
+                with exclusive_lock(python_env_lock_path(str(venv_path))):
+                    with contextlib.suppress(OSError):
+                        staged_lock_path.unlink()
+                    for step in prepared_steps:
+                        if isinstance(step, PreparedAction):
+                            continue
+                        try:
+                            result = cast("ProcessResult", context.process(step.step_id))
+                        except Exception as error:
+                            if step.step_id == "prepare-venv.validate":
+                                raise ConfigError(
+                                    "prepare-venv.validate failed: valid virtual environment required"
+                                ) from error
+                            raise
+                        if result.returncode != 0:
+                            stderr = (
+                                result.stderr.decode(errors="replace")
+                                if isinstance(result.stderr, bytes)
+                                else result.stderr
+                            )
+                            detail = (stderr or "").strip()
+                            if step.step_id == "prepare-venv.validate":
+                                raise ConfigError(  # noqa: TRY301
+                                    "prepare-venv.validate failed: valid virtual environment required"
+                                )
+                            raise ConfigError(  # noqa: TRY301
+                                f"{step.step_id} failed: {detail}".strip()
+                            )
+                    updated = msgspec.structs.replace(current, python=interpreter)
+                    updated_manifest = updated.to_manifest().encode("utf-8")
+                    context.action(origin_action.step_id)
+                    staged_origin = stage_origin_record(
+                        root,
+                        venv_root=venv_path,
+                        requested=python,
+                        interpreter=interpreter,
+                        manifest_bytes=updated_manifest,
+                    )
+                    context.action(manifest_action.step_id)
+                    write_manifest(root, updated)
+                    transaction_started = True
+                    context.complete_action(manifest_action.step_id)
+                    publish_origin(staged_origin)
+                    discard_origin_stage(staged_origin)
+                    staged_origin = None
+                    context.complete_action(origin_action.step_id)
+                    if lock_action is not None:
+                        context.action(lock_action.step_id)
+                        os.replace(staged_lock_path, lock_path)
+                        context.complete_action(lock_action.step_id)
+                    transaction_started = False
+            except BaseException:
+                if transaction_started:
+                    restore_persisted_prepare_state(
+                        root,
+                        manifest_path=manifest_path(root),
+                        manifest_before=manifest_before,
+                        lock_path=lock_path,
+                        lock_before=lock_before,
+                        origin_before=origin_before,
+                    )
+                raise
+            finally:
+                if lock_action is not None:
+                    with contextlib.suppress(OSError):
+                        staged_lock_path.unlink()
+                if staged_origin is not None:
+                    discard_origin_stage(staged_origin)
+        return {
+            "python": str(python),
+            "venv": str(venv_path),
+            "interpreter": interpreter,
+            "dependency_inputs": list(inputs),
+            "manifest": str(manifest_path(root)),
+        }
+
+    return Command.from_prepared(
+        public_plan,
+        prepared_command(run, prepared_steps, executor=SubprocessExecutor()),
+    )
+
+
+def prepare_venv(
+    project: ProjectConfig | str | Path,
+    *,
+    python: str | Path,
+    venv: str | Path,
+) -> dict[str, JsonValue]:
+    """Prepare the primary project venv and persist its interpreter on success."""
+    return prepare_venv_command(project, python=python, venv=venv).run()

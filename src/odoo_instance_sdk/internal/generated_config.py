@@ -34,7 +34,7 @@ def _rebase_path(entry: str, repo_root: Path, worktree: Path) -> str:
     return str((worktree / rel).resolve())
 
 
-def render_config(
+def render_config(  # noqa: C901
     source_config: Path | None,
     dest: Path,
     *,
@@ -48,6 +48,8 @@ def render_config(
     db_user: str | None = None,
     db_password: str | None = None,
     data_dir: str | Path | None = None,
+    addon_roots: tuple[Path, ...] = (),
+    server_wide_modules: tuple[str, ...] = (),
 ) -> str:
     src = configparser.RawConfigParser(interpolation=None)
     if source_config is not None:
@@ -66,6 +68,13 @@ def render_config(
                 for e in _split_list(options[list_key])
             ]
             options[list_key] = _join_list(rebased)
+
+    if addon_roots:
+        options["addons_path"] = _join_list(
+            [str((worktree_resolved / root).resolve()) for root in addon_roots]
+        )
+    if server_wide_modules:
+        options["server_wide_modules"] = _join_list(list(server_wide_modules))
 
     if "http_interface" not in options or not options["http_interface"].strip():
         options["http_interface"] = http_interface
@@ -108,6 +117,8 @@ def generate_config(
     db_user: str | None = None,
     db_password: str | None = None,
     data_dir: str | Path | None = None,
+    addon_roots: tuple[Path, ...] = (),
+    server_wide_modules: tuple[str, ...] = (),
 ) -> None:
     content = render_config(
         source_config,
@@ -122,6 +133,8 @@ def generate_config(
         db_user=db_user,
         db_password=db_password,
         data_dir=data_dir,
+        addon_roots=addon_roots,
+        server_wide_modules=server_wide_modules,
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
