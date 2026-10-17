@@ -111,6 +111,7 @@ def _handle_existing_manifest(  # noqa: C901
     output_mode: OutputMode,
     *,
     dry_run: bool,
+    integrate_venv: bool = False,
 ) -> _ExistingManifestDecision:
     try:
         existing_cfg = ProjectConfig.load(resolved_project)
@@ -124,7 +125,7 @@ def _handle_existing_manifest(  # noqa: C901
         if repair:
             is_compose = config.postgres is not None and config.postgres.mode == "compose"
             if dry_run:
-                if is_compose:
+                if is_compose or integrate_venv:
                     return _ExistingManifestDecision.RESUME
                 result: JsonObject = {
                     **manifest_dict(config),
@@ -147,7 +148,7 @@ def _handle_existing_manifest(  # noqa: C901
             except InstanceConfigurationError as exc:
                 fail(output_mode, "init", str(exc), dry_run=dry_run)
             write_project_generated_config(resolved_project, existing_cfg)
-            if is_compose:
+            if is_compose or integrate_venv:
                 return _ExistingManifestDecision.RESUME_REPAIRED
             register_initialized_project(resolved_project)
             if output_mode is not OutputMode.RICH:
@@ -164,7 +165,7 @@ def _handle_existing_manifest(  # noqa: C901
             else:
                 rich_print(f"Repaired generated config: {target}; manifest unchanged.")
             return _ExistingManifestDecision.REPAIR
-        if config.postgres is not None and config.postgres.mode == "compose":
+        if integrate_venv or (config.postgres is not None and config.postgres.mode == "compose"):
             return _ExistingManifestDecision.RESUME
         if not dry_run:
             register_initialized_project(resolved_project)

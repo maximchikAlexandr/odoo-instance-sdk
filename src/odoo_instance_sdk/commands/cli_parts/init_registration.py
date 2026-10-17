@@ -78,6 +78,7 @@ class _InitRunOrPreview(Protocol):
 class _InitRequest:
     odoo_bin: str | None
     python: str | None
+    venv: str | None
     source_config: str | None
     default_source_database: str | None
     preferred_http_port: int | None
@@ -110,6 +111,7 @@ def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
     return _InitRequest(
         odoo_bin=cast("str | None", options["odoo_bin"]),
         python=cast("str | None", options["python"]),
+        venv=cast("str | None", options["venv"]),
         source_config=cast("str | None", options["source_config"]),
         default_source_database=cast("str | None", options["default_source_database"]),
         preferred_http_port=cast("int | None", options["preferred_http_port"]),
@@ -308,6 +310,7 @@ def _execute_init(
             request.yes,
             output_mode,
             dry_run=request.dry_run,
+            integrate_venv=request.venv is not None,
         )
         if (
             decision is _ExistingManifestDecision.NOOP
@@ -334,6 +337,7 @@ def _execute_init(
             no_input=effective_no_input,
             dry_run=request.dry_run,
             confirm_partial=confirm_partial,
+            venv=request.venv,
         ),
         command_name="init",
         mode=output_mode,
@@ -378,6 +382,13 @@ def register_init_command(cli: click.Group) -> None:
         "--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin."
     )
     @click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
+    @click.option(
+        "--venv",
+        "venv",
+        type=click.Path(),
+        default=None,
+        help="Opt in to primary virtualenv preparation before Compose/Odoo bootstrap.",
+    )
     @click.option(
         "--config", "source_config", type=click.Path(), default=None, help="Source odoo.conf path."
     )
