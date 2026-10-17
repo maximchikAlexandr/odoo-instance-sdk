@@ -168,7 +168,7 @@ def _confirm_partial_callback(
     return confirm
 
 
-def _execute_init(
+def _execute_init(  # noqa: C901
     request: _InitRequest,
     *,
     output_mode: OutputMode,
@@ -324,53 +324,61 @@ def _execute_init(
         }
     from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
 
-    status, _ = run_or_preview(
-        lambda: init_project_command(
-            resolved_project,
-            config,
-            postgres_allocated=postgres_allocated,
-            local_config=request.local_config,
-            postgres_image=request.postgres_image,
-            existing_test_instance=existing_test_instance,
-            allow_partial=request.allow_partial,
-            resume_existing=resume_existing,
-            no_input=effective_no_input,
-            dry_run=request.dry_run,
-            confirm_partial=confirm_partial,
-            venv=request.venv,
-        ),
-        command_name="init",
-        mode=output_mode,
-        dry_run=request.dry_run,
-        result=lambda value: cast("dict[str, JsonValue]", value),
-        provenance=cast("dict[str, JsonValue]", provenance),
-        preview=lambda command: {
-            **init_completeness_preview(
+    try:
+        status, _ = run_or_preview(
+            lambda: init_project_command(
                 resolved_project,
                 config,
+                postgres_allocated=postgres_allocated,
                 local_config=request.local_config,
                 postgres_image=request.postgres_image,
                 existing_test_instance=existing_test_instance,
-                dry_run=True,
-                remote_database_names=None,
-                postgres_allocated=postgres_allocated,
+                allow_partial=request.allow_partial,
+                resume_existing=resume_existing,
+                no_input=effective_no_input,
+                dry_run=request.dry_run,
+                confirm_partial=confirm_partial,
+                venv=request.venv,
             ),
-            "plan": model_to_dict(command.plan),
-        },
-        rich=lambda _document: (
-            f"Dry run — no files written.\n{config.to_manifest()}"
-            if request.dry_run
-            else (
-                f"Repaired generated config and verified Compose lifecycle: {existing}"
-                if repaired_existing
+            command_name="init",
+            mode=output_mode,
+            dry_run=request.dry_run,
+            result=lambda value: cast("dict[str, JsonValue]", value),
+            provenance=cast("dict[str, JsonValue]", provenance),
+            preview=lambda command: {
+                **init_completeness_preview(
+                    resolved_project,
+                    config,
+                    local_config=request.local_config,
+                    postgres_image=request.postgres_image,
+                    existing_test_instance=existing_test_instance,
+                    dry_run=True,
+                    remote_database_names=None,
+                    postgres_allocated=postgres_allocated,
+                ),
+                "plan": model_to_dict(command.plan),
+            },
+            rich=lambda _document: (
+                f"Dry run — no files written.\n{config.to_manifest()}"
+                if request.dry_run
                 else (
-                    "Manifest already up to date; Compose lifecycle verified; no-op."
-                    if resume_existing
-                    else f"Wrote {existing}"
+                    f"Repaired generated config and verified Compose lifecycle: {existing}"
+                    if repaired_existing
+                    else (
+                        "Manifest already up to date; Compose lifecycle verified; no-op."
+                        if resume_existing
+                        else f"Wrote {existing}"
+                    )
                 )
-            )
-        ),
-    )
+            ),
+        )
+    except Exception as error:
+        # Integrated init is a new opt-in transport contract. Keep legacy
+        # exception behavior when --venv is omitted, while routing its
+        # planning/execution failures through the established envelopes.
+        if request.venv is None:
+            raise
+        fail(output_mode, "init", error, dry_run=request.dry_run)
     sys.exit(status)
 
 

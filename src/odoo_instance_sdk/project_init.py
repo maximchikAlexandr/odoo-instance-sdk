@@ -129,7 +129,11 @@ class _PrimaryVenvPreparation:
             origin_before = read_origin_bytes(self.root)
             try:
                 current = ProjectConfig.load(self.root)
-                if current.to_manifest() != self.baseline.to_manifest():
+                # Effective CLI configs may spell out defaults that an
+                # existing manifest intentionally omits. Compare the public
+                # init projection so an opted-in identical-manifest refresh
+                # still passes its semantic snapshot check.
+                if manifest_dict(current) != manifest_dict(self.baseline):
                     raise ConfigError(  # noqa: TRY301
                         "project manifest changed before primary venv preparation"
                     )
