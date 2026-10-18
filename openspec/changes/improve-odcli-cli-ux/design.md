@@ -1,6 +1,6 @@
 ## Context
 
-The current tree already provides lazy Click registration, one typed bounded output pipeline, `PUBLIC_LEAF_CASES`, schema-driven `--fields`, a canonical `EnvironmentMonitor`, local catalogue/configuration readers, and Rich table helpers. The observed gaps sit at the seams between those owners: Click may reject a value before a command callback knows the selected machine mode; `env show` snapshots all projects before selecting one; `commands/output.py` imports a database preparation context at module load; doctor renders internal representations; and selector/field completion is not attached to existing parameters.
+The current tree already provides lazy Click registration, one typed bounded output pipeline, an expanded test-owned `PUBLIC_LEAF_CASES`, schema-driven `--fields`, a canonical `EnvironmentMonitor` split into collection/planning/snapshot mixins, local catalogue/configuration readers, integrated opt-in `init --venv` plus a separate `prepare-venv` recovery command, and Rich table helpers. The observed gaps sit at the seams between those owners: Click may reject a value before a command callback knows the selected machine mode; `env show` snapshots all projects before selecting one; `commands/output.py` imports a database preparation context at module load; doctor renders internal representations; and selector/field completion is not attached to existing parameters.
 
 The active `refactor-cli-output-boundary` change owns shared envelope, serializer, and canonical inventory architecture. This design assumes that owner remains authoritative and limits MYL-431 to additive policy and narrow extensions of those existing seams.
 
@@ -52,7 +52,7 @@ Alternative considered: a new doctor view-model/renderer framework. Rejected bec
 
 ### 6. Put help and `-h` policy on the common Click tree
 
-The shared root context settings will declare `help_option_names=["-h", "--help"]`, allowing inherited Click behavior on lazy groups and leaves. Passthrough commands retain their literal `--` handling, so later `-h` values remain native argv. Command docstrings/help text will carry verified examples and constraints close to registration.
+The shared root context settings will declare `help_option_names=["-h", "--help"]`, allowing inherited Click behavior on lazy groups and leaves. Passthrough commands retain their literal `--` handling, so later `-h` values remain native argv. Command docstrings/help text will carry verified examples and constraints close to registration. The `init` examples will use the current optional `--venv` integration and identify `prepare-venv` as recovery/refresh; `env create` examples will keep its separate optional `--create-venv` contract.
 
 Alternative considered: adding `-h` to each command. Rejected because it duplicates policy and risks missing lazy commands.
 
@@ -70,13 +70,13 @@ Alternative considered: per-command allowed-field lists. Rejected because they w
 
 ### 9. Keep one evidence matrix and one release-contract note
 
-Repeated errors, formats, help locations, and completion cases will extend existing parametrized CLI suites and `PUBLIC_LEAF_CASES`-based characterization. Focused unit tests will assert calls and side effects, not only wall time. `CHANGELOG.md` and executable help will document the intended usage-error boundary; generated reference material remains derived from help.
+Repeated errors, formats, help locations, and completion cases will extend existing parametrized CLI suites and `PUBLIC_LEAF_CASES`-based characterization without freezing a second leaf list in this change. Focused unit tests will assert calls and side effects, not only wall time. `CHANGELOG.md` and executable help will document the intended usage-error boundary; generated reference material remains derived from help.
 
 Alternative considered: new standalone inventories or end-to-end-only checks. Rejected because both would duplicate sources of truth and make failures less local.
 
 ## Ponytail full gate
 
-No new subsystem is necessary. The apparent candidates—machine-usage parser, focused monitor, completion registry, field registry, doctor view-model, lazy-loading package, and timing framework—each have an existing alternative (Click context/error flow, project-scoped canonical monitor, direct `shell_complete`, `_field_paths`, semantic table rows, local imports, and fresh-process/import assertions). All are removed from the design; the retained work is narrow extension of existing owners plus tests and docs.
+No new subsystem is necessary. The apparent candidates—machine-usage parser, focused monitor, completion registry, field registry, doctor view-model, lazy-loading package, venv-help abstraction, and timing framework—each have an existing alternative (Click context/error flow, project-scoped canonical monitor, direct `shell_complete`, `_field_paths`, semantic table rows, local imports, the existing `init`/`prepare-venv` registrations, and fresh-process/import assertions). All are removed from the design; the retained work is narrow extension of existing owners plus tests and docs.
 
 ## Risks / Trade-offs
 
