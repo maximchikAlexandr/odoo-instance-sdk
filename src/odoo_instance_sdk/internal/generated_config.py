@@ -6,6 +6,7 @@ import errno
 import io
 import os
 import stat
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -137,6 +138,28 @@ def generate_config(
         server_wide_modules=server_wide_modules,
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=dest.parent,
+                prefix=f".{dest.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temporary_name = stream.name
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, dest)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary_name)
+        return
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
     parent_fd = os.open(dest.parent, directory_flags)
     tmp_name: str | None = None

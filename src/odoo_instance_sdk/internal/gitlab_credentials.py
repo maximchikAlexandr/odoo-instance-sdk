@@ -368,7 +368,10 @@ def ensure_packaged_askpass(helper: Path) -> None:
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{helper.name}.", dir=helper.parent)
     temporary = Path(temporary_name)
     try:
-        os.fchmod(descriptor, 0o700)
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o700)
+        else:
+            os.chmod(temporary, 0o700)
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = -1
             stream.write(content)

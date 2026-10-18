@@ -11,12 +11,20 @@ not recreated; an invalid same-named database fails with ``init_bootstrap_failed
 
 from __future__ import annotations
 
+import contextlib
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.internal.locks import (
+    database_preparation_lock_path,
+    exclusive_lock_until,
+)
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
 from odoo_instance_sdk.models import StartConfig
@@ -28,17 +36,20 @@ if TYPE_CHECKING:
 
 _ContextT = TypeVar("_ContextT")
 
-type BootstrapTmpSteps = tuple[PreparedStep, PreparedStep, PreparedStep, PreparedAction]
-
 BOOTSTRAP_DATABASE = "tmp"
 _BOOTSTRAP_DATABASE = BOOTSTRAP_DATABASE
 _BOOTSTRAP_INIT_MODULE = "base"
 _BOOTSTRAP_READY_SQL = b"SELECT state FROM ir_module_module WHERE name = 'base'"
+_BOOTSTRAP_CREATE_SQL = (
+    b"SELECT 'CREATE DATABASE tmp' "
+    b"WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'tmp')\\gexec"
+)
 
 _BOOTSTRAP_STEP_ID = "init.bootstrap.tmp"
 _BOOTSTRAP_PROBE_STEP_ID = "init.bootstrap.tmp.probe"
 _BOOTSTRAP_READY_STEP_ID = "init.bootstrap.tmp.ready"
 _BOOTSTRAP_VERIFY_ACTION_ID = "init.bootstrap.tmp.verify"
+_BOOTSTRAP_LOCK_ACTION_ID = "init.bootstrap.tmp.lock"
 _BOOTSTRAP_RECORD_ACTION_ID = "catalog.bootstrap.tmp.record"
 
 
@@ -58,6 +69,33 @@ class BootstrapOutcome(StrEnum):
     ALREADY_READY = "already_ready"
 
 
+@dataclass(frozen=True, slots=True)
+class BootstrapTmpPlan:
+    """Named immutable bootstrap inputs shared by init and foreground callers."""
+
+    spawn_step: PreparedStep
+    probe_step: PreparedStep
+    ready_step: PreparedStep
+    verify_action: PreparedAction
+    lock_action: PreparedAction | None = None
+    create_step: PreparedStep | None = None
+    record_action: PreparedAction | None = None
+    project_id: str | None = None
+
+    @property
+    def execution_steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
+        steps: list[PreparedStep | PreparedAction] = []
+        if self.lock_action is not None:
+            steps.append(self.lock_action)
+        steps.extend((self.verify_action, self.probe_step))
+        if self.create_step is not None:
+            steps.append(self.create_step)
+        steps.extend((self.spawn_step, self.ready_step))
+        if self.record_action is not None:
+            steps.append(self.record_action)
+        return tuple(steps)
+
+
 def _bootstrap_sql_step(
     *,
     db_host: str,
@@ -65,27 +103,31 @@ def _bootstrap_sql_step(
     db_user: str,
     db_password: str,
     step_id: str,
+    database: str = _BOOTSTRAP_DATABASE,
+    stdin: bytes = _BOOTSTRAP_READY_SQL,
+    read_only: bool = True,
+    mutating: bool = False,
 ) -> PreparedStep:
-    """Build one captured SQL probe for bootstrap readiness."""
+    """Build one captured SQL step for bootstrap creation or readiness."""
     specification = build_psql_specification(
         host=db_host,
         port=db_port,
         user=db_user,
         password=db_password,
-        database=_BOOTSTRAP_DATABASE,
-        stdin=_BOOTSTRAP_READY_SQL,
+        database=database,
+        stdin=stdin,
         timeout=30.0,
         mode="captured",
         step_id=step_id,
         _trusted_args=("-q", "-t", "-A", "-v", "ON_ERROR_STOP=1"),
         _require_binary=False,
-        _read_only=True,
-        _mutating=False,
+        _read_only=read_only,
+        _mutating=mutating,
     )
     return specification.prepared_step
 
 
-def bootstrap_tmp_steps(
+def bootstrap_tmp_plan(
     *,
     command_prefix: tuple[str, ...],
     start_config: StartConfig,
@@ -94,8 +136,11 @@ def bootstrap_tmp_steps(
     db_user: str,
     db_password: str,
     default_cwd: Path | None = None,
-) -> tuple[PreparedStep, PreparedStep, PreparedStep, PreparedAction]:
-    """Capture bootstrap spawn, pre/post SQL probes, and verify action.
+    include_create: bool = True,
+    project_id: str | None = None,
+    record_action: PreparedAction | None = None,
+) -> BootstrapTmpPlan:
+    """Capture bootstrap database creation, spawn, SQL probes, and verify action.
 
     The Odoo argv comes from the same runtime builder used by ``run`` plus
     ``--database tmp --init=base --stop-after-init``. Readiness is a SQL probe
@@ -110,6 +155,21 @@ def bootstrap_tmp_steps(
         "--init",
         _BOOTSTRAP_INIT_MODULE,
         "--stop-after-init",
+    )
+    create_step = (
+        _bootstrap_sql_step(
+            db_host=db_host,
+            db_port=db_port,
+            db_user=db_user,
+            db_password=db_password,
+            step_id="init.bootstrap.tmp.create",
+            database="postgres",
+            stdin=_BOOTSTRAP_CREATE_SQL,
+            read_only=False,
+            mutating=True,
+        )
+        if include_create
+        else None
     )
     spawn_step = PreparedStep(
         step_id=_BOOTSTRAP_STEP_ID,
@@ -142,7 +202,27 @@ def bootstrap_tmp_steps(
         description="SQL readiness: base module installed on tmp",
         read_only=True,
     )
-    return spawn_step, probe_step, ready_step, ready_action
+    lock_action = (
+        PreparedAction(
+            step_id=_BOOTSTRAP_LOCK_ACTION_ID,
+            action="acquire-database-preparation-lock",
+            description="Serialize opted-in tmp database preparation",
+            details={"project_id": project_id},
+            mutating=True,
+        )
+        if include_create and project_id is not None
+        else None
+    )
+    return BootstrapTmpPlan(
+        spawn_step=spawn_step,
+        probe_step=probe_step,
+        ready_step=ready_step,
+        verify_action=ready_action,
+        lock_action=lock_action,
+        create_step=create_step,
+        record_action=record_action,
+        project_id=project_id if lock_action is not None else None,
+    )
 
 
 def bootstrap_record_action() -> PreparedAction:
@@ -157,24 +237,62 @@ def bootstrap_record_action() -> PreparedAction:
 
 def run_bootstrap_tmp(
     context: RunContext[_ContextT],
-    spawn_step: PreparedStep,
-    probe_step: PreparedStep,
-    ready_step: PreparedStep,
+    plan: BootstrapTmpPlan,
 ) -> BootstrapOutcome:
     """Execute or skip the bootstrap spawn using an existing run context."""
-    if _probe_tmp_ready(context, probe_step):
-        context.skip(spawn_step.step_id)
-        context.skip(ready_step.step_id)
+    if _probe_tmp_ready(context, plan.probe_step):
+        context.skip(plan.spawn_step.step_id)
+        if plan.create_step is not None:
+            context.skip(plan.create_step.step_id)
+        context.skip(plan.ready_step.step_id)
         return BootstrapOutcome.ALREADY_READY
+    if plan.create_step is not None:
+        result = context.process_prepared(plan.create_step)
+        if getattr(result, "returncode", 1) != 0:
+            raise BootstrapFailedError("tmp bootstrap database creation failed")
     try:
-        context.process_prepared(spawn_step)
+        context.process_prepared(plan.spawn_step)
     except BaseException as error:
         raise BootstrapFailedError(f"tmp bootstrap spawn failed: {error}") from error
-    if not _probe_tmp_ready(context, ready_step):
+    if not _probe_tmp_ready(context, plan.ready_step):
         raise BootstrapFailedError(
             "tmp bootstrap failed: base module is not installed on tmp after --stop-after-init"
         )
     return BootstrapOutcome.CREATED
+
+
+def execute_bootstrap_tmp(
+    context: RunContext[_ContextT],
+    plan: BootstrapTmpPlan,
+    *,
+    on_created: Callable[[], None] | None = None,
+) -> BootstrapOutcome:
+    """Serialize the complete bootstrap boundary, including lifecycle record."""
+    lock = (
+        exclusive_lock_until(
+            database_preparation_lock_path(plan.project_id),
+            time.monotonic() + 300.0,
+        )
+        if plan.lock_action is not None and plan.project_id is not None
+        else contextlib.nullcontext()
+    )
+    with lock:
+        if plan.lock_action is not None:
+            context.action(plan.lock_action.step_id)
+        context.action(plan.verify_action.step_id)
+        outcome = run_bootstrap_tmp(context, plan)
+        context.complete_action(plan.verify_action.step_id)
+        if plan.record_action is not None:
+            if outcome is BootstrapOutcome.CREATED:
+                context.action(plan.record_action.step_id)
+                if on_created is not None:
+                    on_created()
+                context.complete_action(plan.record_action.step_id)
+            else:
+                context.skip(plan.record_action.step_id)
+        if plan.lock_action is not None:
+            context.complete_action(plan.lock_action.step_id)
+    return outcome
 
 
 def tmp_bootstrap_command(
@@ -194,7 +312,7 @@ def tmp_bootstrap_command(
     The command is idempotent — if the SQL readiness probe already succeeds,
     the Odoo spawn step is skipped.
     """
-    spawn_step, probe_step, ready_step, ready_action = bootstrap_tmp_steps(
+    bootstrap_plan = bootstrap_tmp_plan(
         command_prefix=command_prefix,
         start_config=start_config,
         db_host=db_host,
@@ -202,43 +320,37 @@ def tmp_bootstrap_command(
         db_user=db_user,
         db_password=db_password,
         default_cwd=default_cwd,
+        include_create=False,
     )
 
     def run(context: RunContext[bool]) -> bool:
-        context.action(ready_action.step_id)
-        run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
-        context.complete_action(ready_action.step_id)
+        execute_bootstrap_tmp(context, bootstrap_plan)
         return True
 
-    plan = ExecutionPlan(
-        steps=(
-            spawn_step.public_projection(),
-            probe_step.public_projection(),
-            ready_step.public_projection(),
-            ready_action.public_projection(),
-        ),
+    execution_plan = ExecutionPlan(
+        steps=(*(step.public_projection() for step in bootstrap_plan.execution_steps),),
     )
     return Command.create(
-        plan,
+        execution_plan,
         run,
-        (spawn_step, probe_step, ready_step, ready_action),
+        bootstrap_plan.execution_steps,
         executor=executor or SubprocessExecutor(),
     )
 
 
-def project_bootstrap_tmp_steps(instance: OdooInstance) -> BootstrapTmpSteps | tuple[()]:
+def project_bootstrap_tmp_plan(instance: OdooInstance) -> BootstrapTmpPlan | None:
     """Capture bootstrap steps for an owned Compose project."""
     from odoo_instance_sdk.resources.instance import OdooInstance
 
     if not isinstance(instance, OdooInstance):
-        return ()
+        return None
     cluster = instance._postgres_cluster
     if cluster is None or not cluster.owned:
-        return ()
+        return None
     start_config = instance.config.start_config
     if start_config is None:
-        return ()
-    return bootstrap_tmp_steps(
+        return None
+    return bootstrap_tmp_plan(
         command_prefix=instance._executable_prefix(),
         start_config=start_config,
         db_host=cluster.endpoint_host,
@@ -246,6 +358,9 @@ def project_bootstrap_tmp_steps(instance: OdooInstance) -> BootstrapTmpSteps | t
         db_user=start_config.db_user or "odoo",
         db_password=start_config.db_password or "",
         default_cwd=instance.config.default_cwd,
+        include_create=False,
+        project_id=cluster._project_id,
+        record_action=bootstrap_record_action(),
     )
 
 
@@ -253,24 +368,13 @@ def ensure_project_bootstrap_tmp(
     instance: OdooInstance,
     context: RunContext[_ContextT],
     *,
-    steps: BootstrapTmpSteps | tuple[()] | None = None,
+    plan: BootstrapTmpPlan | None = None,
 ) -> None:
     """Ensure owned Compose projects have a valid bootstrap ``tmp`` database."""
-    captured = project_bootstrap_tmp_steps(instance) if steps is None else steps
-    if not captured:
+    captured = project_bootstrap_tmp_plan(instance) if plan is None else plan
+    if captured is None:
         return
-    spawn_step, probe_step, ready_step, ready_action = captured
-    context.action(ready_action.step_id)
-    outcome = run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
-    context.complete_action(ready_action.step_id)
-    record_action = bootstrap_record_action()
-    if outcome is BootstrapOutcome.CREATED:
-        if context.planned(record_action.step_id):
-            context.action(record_action.step_id)
-            _record_bootstrap_event(instance)
-            context.complete_action(record_action.step_id)
-    elif context.planned(record_action.step_id):
-        context.skip(record_action.step_id)
+    execute_bootstrap_tmp(context, captured, on_created=lambda: _record_bootstrap_event(instance))
 
 
 def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -> bool:

@@ -498,14 +498,16 @@ def test_prepare_rollback_is_serialized_before_a_concurrent_retry(
     )
     executor = RecordingExecutor()
     monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
-    project_init = cast("Any", __import__("odoo_instance_sdk.project_init", fromlist=["*"]))
-    script = _RollbackScript(
-        project_init.publish_origin, project_init.restore_persisted_prepare_state
+    primary_venv = cast(
+        "Any", __import__("odoo_instance_sdk.internal.primary_venv", fromlist=["*"])
     )
-    monkeypatch.setattr("odoo_instance_sdk.project_init.exclusive_lock", script.lock)
-    monkeypatch.setattr("odoo_instance_sdk.project_init.publish_origin", script.publish)
+    script = _RollbackScript(
+        primary_venv.publish_origin, primary_venv.restore_persisted_prepare_state
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.primary_venv.exclusive_lock", script.lock)
+    monkeypatch.setattr("odoo_instance_sdk.internal.primary_venv.publish_origin", script.publish)
     monkeypatch.setattr(
-        "odoo_instance_sdk.project_init.restore_persisted_prepare_state", script.restore
+        "odoo_instance_sdk.internal.primary_venv.restore_persisted_prepare_state", script.restore
     )
     first = prepare_venv_command(project, python="first", venv=".venv")
     second = prepare_venv_command(project, python="second", venv=".venv")

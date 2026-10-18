@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import PostgresImageNotTrustedError
-from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpSteps, bootstrap_record_action
-from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
+from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpPlan
+from odoo_instance_sdk.internal.proc import RunContext
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:
@@ -173,26 +173,23 @@ def patch_compose_init_bootstrap_skip(monkeypatch: MonkeyPatch) -> None:
 
     def _skip_bootstrap_tmp(
         context: RunContext[object],
-        spawn_step: PreparedStep,
-        probe_step: PreparedStep,
-        ready_step: PreparedStep,
+        plan: BootstrapTmpPlan,
     ) -> bool:
-        context.skip(spawn_step.step_id)
-        context.skip(probe_step.step_id)
-        context.skip(ready_step.step_id)
+        context.skip(plan.spawn_step.step_id)
+        context.skip(plan.probe_step.step_id)
+        context.skip(plan.ready_step.step_id)
+        if plan.create_step is not None:
+            context.skip(plan.create_step.step_id)
         return True
 
     def _skip_project_bootstrap_tmp(
         _instance: object,
         context: RunContext[object],
         *,
-        steps: BootstrapTmpSteps | tuple[()] | None = None,
+        plan: BootstrapTmpPlan | None = None,
     ) -> None:
-        for step in steps or ():
+        for step in plan.execution_steps if plan is not None else ():
             context.skip(step.step_id)
-        record_action = bootstrap_record_action()
-        if context.planned(record_action.step_id):
-            context.skip(record_action.step_id)
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",

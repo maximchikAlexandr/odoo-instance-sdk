@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpSteps
+from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpPlan
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
@@ -33,22 +33,22 @@ def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _skip_bootstrap_tmp(
         context: RunContext[object],
-        spawn_step: PreparedStep,
-        probe_step: PreparedStep,
-        ready_step: PreparedStep,
+        plan: BootstrapTmpPlan,
     ) -> bool:
-        context.skip(spawn_step.step_id)
-        context.skip(probe_step.step_id)
-        context.skip(ready_step.step_id)
+        context.skip(plan.spawn_step.step_id)
+        context.skip(plan.probe_step.step_id)
+        context.skip(plan.ready_step.step_id)
+        if plan.create_step is not None:
+            context.skip(plan.create_step.step_id)
         return True
 
     def _skip_project_bootstrap_tmp(
         _instance: object,
         context: RunContext[object],
         *,
-        steps: BootstrapTmpSteps | tuple[()] | None = None,
+        plan: BootstrapTmpPlan | None = None,
     ) -> None:
-        for step in steps or ():
+        for step in plan.execution_steps if plan is not None else ():
             context.skip(step.step_id)
 
     def _bootstrap_sql_step_stub(
@@ -58,7 +58,12 @@ def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
         db_user: str,
         db_password: str,
         step_id: str,
+        database: str = "tmp",
+        stdin: bytes = b"",
+        read_only: bool = True,
+        mutating: bool = False,
     ) -> PreparedStep:
+        del database, stdin, read_only, mutating
         return PreparedStep(
             step_id=step_id,
             argv=("true",),
