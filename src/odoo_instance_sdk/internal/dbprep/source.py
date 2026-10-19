@@ -256,7 +256,6 @@ def resolve_test_source(
     if source_name is not None:
         assert isinstance(config, RemoteSourceConfig)
         assert branch is not None
-        assert config.database is not None
     if source_name is not None:
         named_config = cast("RemoteSourceConfig", config)
         resolved_config: RemoteSourceConfig | TestInstanceProjectConfig = RemoteSourceConfig(
@@ -304,11 +303,11 @@ def resolve_remote_database_name(
         ) from exc
     if len(names) == 0:
         raise RemoteDatabaseNoneError(
-            "remote instance exposes no databases; set test_instance.database"
+            "remote instance exposes no databases; set the remote database explicitly"
         )
     if len(names) > 1:
         raise RemoteDatabaseAmbiguousError(
-            "remote instance exposes multiple databases; set test_instance.database",
+            "remote instance exposes multiple databases; set the remote database explicitly",
             details={"available_databases": [cast("PlanJsonValue", n) for n in sorted(names)]},
         )
     return names[0]

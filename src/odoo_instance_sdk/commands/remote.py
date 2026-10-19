@@ -48,7 +48,7 @@ def _rich_sources(document: OutputDocument) -> str:
     if not isinstance(sources, list) or not sources:
         return "No named remote sources configured."
     return "\n".join(
-        f"{item.get('name')}: {item.get('base_url')} / {item.get('database')} / {item.get('git_branch')}"
+        f"{item.get('name')}: {item.get('base_url')} / {item.get('database') or '(auto)'} / {item.get('git_branch')}"
         for item in sources
         if isinstance(item, dict)
     )
@@ -117,7 +117,7 @@ def _run_remote_update(
 @remote_group.command("add", help="Add a named remote source.")
 @click.argument("name")
 @click.option("--url", "base_url", required=True, help="Remote Odoo base URL.")
-@click.option("--database", required=True, help="Remote database name.")
+@click.option("--database", default=None, help="Remote database; omitted = auto-select on refresh.")
 @click.option("--branch", "git_branch", required=True, help="Declared source Git branch.")
 @click.option("--dry-run", is_flag=True, default=False, help="Show the manifest change only.")
 @output_options
@@ -126,7 +126,7 @@ def remote_add(
     ctx: CliContext,
     name: str,
     base_url: str,
-    database: str,
+    database: str | None,
     git_branch: str,
     dry_run: bool,
     output_format: str | None,

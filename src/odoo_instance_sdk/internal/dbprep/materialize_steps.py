@@ -248,7 +248,43 @@ def _preparation_process_steps(
             project_environment=project_environment,
         )
         steps.append(shell_step)
+
+    steps.extend(_default_switch_git_steps(root, cluster.mode))
     return tuple(steps)
+
+
+def _default_switch_git_steps(root: Path, mode: str) -> tuple[PreparedStep, ...]:
+    from odoo_instance_sdk.internal.generated_config import project_generated_config_path
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    generated = project_generated_config_path(root)
+    if mode != "compose" or not (root / ".git").exists() or not generated.is_file():
+        return ()
+    return tuple(
+        PreparedStep(
+            step_id=f"database.prepare.default-switch.git.{name}",
+            argv=argv,
+            timeout=30.0,
+            read_only=True,
+            text=True,
+        )
+        for name, argv in (
+            ("toplevel", ("git", "-C", str(generated.parent), "rev-parse", "--show-toplevel")),
+            (
+                "tracked",
+                (
+                    "git",
+                    "-C",
+                    str(root),
+                    "ls-files",
+                    "--cached",
+                    "--error-unmatch",
+                    "--",
+                    generated.relative_to(root).as_posix(),
+                ),
+            ),
+        )
+    )
 
 
 def _preparation_action_steps(

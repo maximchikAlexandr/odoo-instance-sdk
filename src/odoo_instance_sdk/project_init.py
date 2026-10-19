@@ -316,6 +316,7 @@ def init_project_command(  # noqa: C901
     confirm_partial: Callable[[list[str], dict[str, str]], None] | None = None,
     venv: str | Path | None = None,
     repair_generated_config: bool = False,
+    confirm_postgres_image: Callable[[str, str], None] | None = None,
 ) -> Command[dict[str, JsonValue]]:
     """Capture one immutable init command for preview and execution."""
     from odoo_instance_sdk.execution import Command, ExecutionPlan
@@ -381,7 +382,17 @@ def init_project_command(  # noqa: C901
             effective_config,
             dry_run=dry_run,
             python=(primary_preparation.interpreter if primary_preparation is not None else None),
-            defer_actions=venv is not None,
+            defer_actions=venv is not None or confirm_postgres_image is not None,
+        )
+
+    image_phase = None
+    if compose_followup is not None and confirm_postgres_image is not None:
+        from odoo_instance_sdk.internal.project_init_image import capture_image_consent_phase
+
+        assert effective_config.postgres is not None
+        assert effective_config.postgres.image is not None
+        image_phase = capture_image_consent_phase(
+            compose_followup.cluster, effective_config.postgres.image
         )
 
     init_action = PreparedAction(
@@ -425,6 +436,7 @@ def init_project_command(  # noqa: C901
         else None
     )
     prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (
+        *(image_phase.steps if image_phase is not None else ()),
         *((remote_names_step,) if remote_names_step is not None else ()),
         init_action,
         *((compose_followup.init_steps[:1]) if compose_followup is not None else ()),
@@ -436,6 +448,16 @@ def init_project_command(  # noqa: C901
     )
 
     def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:
+        if image_phase is not None:
+            assert compose_followup is not None and confirm_postgres_image is not None
+            assert effective_config.postgres is not None
+            assert effective_config.postgres.image is not None
+            image_phase.execute(
+                context,
+                cluster=compose_followup.cluster,
+                image=effective_config.postgres.image,
+                confirm=confirm_postgres_image,
+            )
         resolved_remote_names = _execute_remote_database_names_phase(
             context,
             remote_names_step=remote_names_step,
@@ -457,7 +479,9 @@ def init_project_command(  # noqa: C901
             remote_database_names=resolved_remote_names,
             resume_existing=resume_existing,
             validate_generated_config=venv is None,
-            write_generated_config=venv is None,
+            write_generated_config=(
+                compose_followup is None or compose_followup.password_action is None
+            ),
         )
         if compose_followup is not None and compose_followup.password_action is not None:
             _execute_compose_init_phase(context, compose_followup, repair_action)

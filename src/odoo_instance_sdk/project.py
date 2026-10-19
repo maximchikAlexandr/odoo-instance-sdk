@@ -83,12 +83,12 @@ class RemoteSourceConfig(msgspec.Struct, frozen=True, kw_only=True):
 
     name: str
     base_url: str
-    database: str
+    database: str | None = None
     git_branch: str
 
     def __post_init__(self) -> None:
         msgspec.structs.force_setattr(self, "name", normalize_remote_name(self.name))
-        if not self.database.strip():
+        if self.database is not None and not self.database.strip():
             raise ConfigError("remote source database must not be empty")
         if not self.git_branch.strip():
             raise ConfigError("remote source git_branch must not be empty")
@@ -428,7 +428,7 @@ def _remote_instances_from_mapping(value: JsonValue) -> tuple[RemoteSourceConfig
         git_branch = raw_value.get("git_branch")
         if not isinstance(base_url, str):
             raise ConfigError("remote source base_url must be a string")
-        if not isinstance(database, str):
+        if database is not None and not isinstance(database, str):
             raise ConfigError("remote source database must be a string")
         if not isinstance(git_branch, str):
             raise ConfigError("remote source git_branch must be a string")
@@ -446,14 +446,14 @@ def _remote_instances_from_mapping(value: JsonValue) -> tuple[RemoteSourceConfig
 def _remote_source_to_manifest(config: RemoteSourceConfig) -> str:
     name = normalize_remote_name(config.name)
     base_url = normalize_base_url(config.base_url)
-    return "\n".join(
-        (
-            f"[remote_instances.{name}]",
-            f'base_url = "{_toml_str(base_url)}"',
-            f'database = "{_toml_str(config.database)}"',
-            f'git_branch = "{_toml_str(config.git_branch)}"',
-        )
-    )
+    lines = [
+        f"[remote_instances.{name}]",
+        f'base_url = "{_toml_str(base_url)}"',
+    ]
+    if config.database is not None:
+        lines.append(f'database = "{_toml_str(config.database)}"')
+    lines.append(f'git_branch = "{_toml_str(config.git_branch)}"')
+    return "\n".join(lines)
 
 
 def _postgres_from_mapping(value: JsonValue) -> PostgresProjectConfig | None:

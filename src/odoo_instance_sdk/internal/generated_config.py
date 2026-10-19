@@ -35,6 +35,17 @@ def _rebase_path(entry: str, repo_root: Path, worktree: Path) -> str:
     return str((worktree / rel).resolve())
 
 
+def configured_admin_password(source: Path | None, destination: Path) -> str | None:
+    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+    for path in (source, destination):
+        if path is not None and path.is_file():
+            value = parse_odoo_config(path).get("admin_passwd")
+            if value is not None and value.strip():
+                return value
+    return None
+
+
 def render_config(  # noqa: C901
     source_config: Path | None,
     dest: Path,
@@ -48,6 +59,7 @@ def render_config(  # noqa: C901
     db_port: int | None = None,
     db_user: str | None = None,
     db_password: str | None = None,
+    admin_password: str | None = None,
     data_dir: str | Path | None = None,
     addon_roots: tuple[Path, ...] = (),
     server_wide_modules: tuple[str, ...] = (),
@@ -90,6 +102,8 @@ def render_config(  # noqa: C901
     ):
         if value is not None:
             options[key] = value
+    if admin_password is not None:
+        options["admin_passwd"] = admin_password
     # An isolated environment always owns its logfile: rewrite any explicit
     # logfile to <environment-root>/odoo.log, and inject one when the source
     # config had none so detached launch and `logs` share one resolved path.
@@ -117,6 +131,7 @@ def generate_config(
     db_port: int | None = None,
     db_user: str | None = None,
     db_password: str | None = None,
+    admin_password: str | None = None,
     data_dir: str | Path | None = None,
     addon_roots: tuple[Path, ...] = (),
     server_wide_modules: tuple[str, ...] = (),
@@ -133,6 +148,7 @@ def generate_config(
         db_port=db_port,
         db_user=db_user,
         db_password=db_password,
+        admin_password=admin_password,
         data_dir=data_dir,
         addon_roots=addon_roots,
         server_wide_modules=server_wide_modules,

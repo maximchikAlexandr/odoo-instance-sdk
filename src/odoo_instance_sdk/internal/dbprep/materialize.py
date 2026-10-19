@@ -780,6 +780,8 @@ def prepare_restore(  # noqa: C901
                 "database.prepare.local-restore",
                 "database.prepare.odoo-reset",
                 "database.prepare.default-switch",
+                "database.prepare.default-switch.git.toplevel",
+                "database.prepare.default-switch.git.tracked",
                 "database.prepare.rollback",
                 "postgres.ensure.image.pull",
                 "postgres.ensure.image.inspect",

@@ -87,7 +87,11 @@ def _canonical_source(interpreter: Path) -> None:
     vcs_info = payload.get("vcs_info") if isinstance(payload, dict) else None
     commit = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
     if (
-        source != f"https://github.com/{REPOSITORY}.git"
+        source
+        not in {
+            f"https://github.com/{REPOSITORY}.git",
+            f"git+https://github.com/{REPOSITORY}.git@{commit}",
+        }
         or not isinstance(commit, str)
         or not SHA_RE.fullmatch(commit)
         or commit != commit.lower()
