@@ -126,6 +126,20 @@ Public plans, `.commands`, `repr`, exceptions, Rich/JSON/TOON output, observatio
 - **THEN** the plan shows the full redacted source and real Odoo argv/config/database/shell arguments
 - **AND** ordinary in-process Python functions are not rendered as source
 
+### Requirement: Bounded whole-value assignment redaction
+
+Whole-value redaction SHALL scan large key-shaped captured responses without retrying an unbounded secret-bearing pattern at every character. It SHALL preserve ordinary payload bytes and the established assignment secret detection, quoted/unquoted values and multiline whitespace semantics. The existing configured-secret, header, bearer, URI and JWT stages SHALL remain effective.
+
+#### Scenario: Combined translation payload
+
+- **WHEN** a captured response contains a password assignment and several large encoded translation catalogues
+- **THEN** the assignment value is redacted and all ordinary catalogue bytes are preserved within the bounded regression timeout
+
+#### Scenario: Adjacent and nested assignments
+
+- **WHEN** secret assignments occur next to one another or inside an ordinary quoted value
+- **THEN** each detected secret remains redacted without exposing its value
+
 ### Requirement: Planning is non-mutating and observable
 
 Building a command SHALL start none of its planned processes and SHALL perform no filesystem, database, network, catalog, lock, or process mutation. Bounded read-only probes required for resolution MAY execute through the shared process boundary and SHALL be recorded as observations with `read_only=true` and `executed_during_planning=true`. Resolving an initialized project, monitoring it, or producing any dry-run SHALL NOT register/upsert the project or runtime. Successful non-preview init and normal foreground execution/lifecycle MAY perform the registration writes explicitly authorized by their own execution requirements, after planning and outside resolution.
