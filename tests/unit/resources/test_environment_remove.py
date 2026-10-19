@@ -6,10 +6,11 @@ import shutil
 import socket
 import subprocess
 import uuid
+from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 from msgspec.structs import replace
@@ -128,7 +129,188 @@ def _checkout_copy(
     )
 
 
+@pytest.fixture
+def remove_case(
+    request: pytest.FixtureRequest,
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[DevelopmentEnvironment, Path, Path, MagicMock, list[Any], tuple[str, ...]]:
+    publication_configured, worktree_exists = request.param
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/rm-route",
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+    )
+    worktree = Path(env.worktree_path)
+    config = Path(env.generated_config_path)
+    if not worktree_exists:
+        shutil.rmtree(worktree)
+    publication_config = tmp_path / "publication.toml"
+    if publication_configured:
+        publication_config.write_text("[publication]\n")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_publication_config_path",
+        lambda: publication_config,
+    )
+
+    def clean_route(*_args: object, **_kwargs: object) -> None:
+        assert config.is_file()
+        assert worktree.is_dir() is worktree_exists
+
+    clean = MagicMock(side_effect=clean_route)
+    monkeypatch.setattr(env_client.publication, "unpublish_if_configured", clean)
+    expected_calls = (
+        [call(("environment", str(env.id)), executor=ANY)] if publication_configured else []
+    )
+    expected_steps: tuple[str, ...] = ("environment.remove",)
+    if worktree_exists:
+        expected_steps += ("environment.remove.worktree-dirty",)
+    if publication_configured:
+        expected_steps += ("environment.remove.publication",)
+    if worktree_exists:
+        expected_steps += ("environment.remove.worktree",)
+    return env, worktree, config, clean, expected_calls, expected_steps
+
+
+@pytest.fixture
+def publication_failure_case(
+    request: pytest.FixtureRequest,
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[DevelopmentEnvironment, Path, Path, bytes, MagicMock, bool]:
+    worktree_exists = request.param
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/rm-route-failed",
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+    )
+    worktree = Path(env.worktree_path)
+    config = Path(env.generated_config_path)
+    original = config.read_bytes()
+    if not worktree_exists:
+        shutil.rmtree(worktree)
+    publication_config = tmp_path / "publication.toml"
+    publication_config.write_text("[publication]\n")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_publication_config_path",
+        lambda: publication_config,
+    )
+    clean = MagicMock(side_effect=PublicationError("reload rejected"))
+    monkeypatch.setattr(env_client.publication, "unpublish_if_configured", clean)
+    return env, worktree, config, original, clean, worktree_exists
+
+
+@pytest.fixture
+def preflight_case(
+    request: pytest.FixtureRequest,
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[tuple[DevelopmentEnvironment, Path, Path, MagicMock, str], None, None]:
+    blocked_by = request.param
+    listener: socket.socket | None = None
+    if blocked_by == "occupied":
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        free_port = int(listener.getsockname()[1])
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.environment.checkout.find_free_port",
+            lambda *_args, **_kwargs: free_port,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.environment.pgadmin.find_free_port",
+            lambda *_args, **_kwargs: free_port,
+        )
+    else:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            free_port = int(probe.getsockname()[1])
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/rm-route-preflight",
+        options=EnvironmentCheckoutOptions(
+            python=str(fake_python), source_database="comerta", http_port=free_port
+        ),
+    )
+    worktree = Path(env.worktree_path)
+    config = Path(env.generated_config_path)
+    publication_config = tmp_path / "publication.toml"
+    publication_config.write_text("[publication]\n")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_publication_config_path",
+        lambda: publication_config,
+    )
+    clean = MagicMock()
+    monkeypatch.setattr(env_client.publication, "unpublish_if_configured", clean)
+    if blocked_by == "dirty":
+        (worktree / "dirty.txt").write_text("uncommitted")
+    try:
+        yield env, config, worktree, clean, blocked_by
+    finally:
+        if listener is not None:
+            listener.close()
+
+
 class TestEnvRemove:
+    @pytest.mark.parametrize(
+        "remove_case",
+        [(True, True), (True, False), (False, True), (False, False)],
+        indirect=True,
+    )
+    def test_remove_cleans_publication_before_artifacts(
+        self,
+        env_client: OdooClient,
+        remove_case: tuple[
+            DevelopmentEnvironment, Path, Path, MagicMock, list[Any], tuple[str, ...]
+        ],
+    ) -> None:
+        env, worktree, config, clean, expected_calls, expected_steps = remove_case
+        command = env_client.environments.remove_command(env)
+        assert tuple(step.step_id for step in command.plan.steps) == expected_steps
+        command.run()
+
+        assert clean.call_args_list == expected_calls
+        assert env_client.environments.get(str(env.id)).state == EnvironmentState.REMOVED
+        assert not config.exists()
+        assert not worktree.exists()
+
+    @pytest.mark.parametrize("publication_failure_case", [True, False], indirect=True)
+    def test_publication_failure_preserves_sdk_owned_artifacts(
+        self,
+        env_client: OdooClient,
+        publication_failure_case: tuple[DevelopmentEnvironment, Path, Path, bytes, MagicMock, bool],
+    ) -> None:
+        env, worktree, config, original, clean, worktree_exists = publication_failure_case
+        with pytest.raises(EnvironmentConflictError, match="publication cleanup failed"):
+            env_client.environments.remove_command(env).run()
+        clean.assert_called_once()
+        assert config.read_bytes() == original
+        assert worktree.is_dir() == worktree_exists
+        assert env_client.environments.get(str(env.id)).state == EnvironmentState.CLEANUP_FAILED
+
+    @pytest.mark.parametrize("preflight_case", ["dirty", "occupied"], indirect=True)
+    def test_remove_preflight_failure_leaves_publication_untouched(
+        self,
+        env_client: OdooClient,
+        preflight_case: tuple[DevelopmentEnvironment, Path, Path, MagicMock, str],
+    ) -> None:
+        env, config, worktree, clean, blocked_by = preflight_case
+        with pytest.raises(EnvironmentConflictError, match=blocked_by):
+            env_client.environments.remove_command(env).run()
+        clean.assert_not_called()
+        assert config.is_file()
+        assert worktree.is_dir()
+        assert env_client.environments.get(str(env.id)).state == EnvironmentState.READY
+
     def test_dirty_worktree_blocks(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path, git_repo: Path
     ) -> None:

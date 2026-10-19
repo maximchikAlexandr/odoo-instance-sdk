@@ -210,27 +210,21 @@ class _CleanupMixin:
             if isinstance(selector, str)
             else selector
         )
-        steps: tuple[PreparedStep | PreparedAction, ...] = ()
+        preflight_steps: tuple[PreparedStep | PreparedAction, ...] = ()
+        artifact_steps: tuple[PreparedStep | PreparedAction, ...] = ()
         from odoo_instance_sdk.internal.paths import get_publication_config_path
 
-        if get_publication_config_path().is_file():
-            steps = (
-                PreparedAction(
-                    step_id="environment.remove.publication",
-                    action="remove-publication-route",
-                    description="Remove the environment route before deleting its artifacts",
-                    mutating=True,
-                ),
-            )
         worktree = Path(env.worktree_path)
         if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED and worktree.is_dir():
-            steps = (
+            preflight_steps = (
                 PreparedStep(
                     step_id="environment.remove.worktree-dirty",
                     argv=("git", "-C", str(worktree), "status", "--porcelain"),
                     timeout=30.0,
                     read_only=True,
                 ),
+            )
+            artifact_steps = (
                 PreparedStep(
                     step_id="environment.remove.worktree",
                     argv=(
@@ -245,6 +239,17 @@ class _CleanupMixin:
                     mutating=True,
                 ),
             )
+        publication_steps: tuple[PreparedAction, ...] = ()
+        if get_publication_config_path().is_file():
+            publication_steps = (
+                PreparedAction(
+                    step_id="environment.remove.publication",
+                    action="remove-publication-route",
+                    description="Remove the environment route before deleting its artifacts",
+                    mutating=True,
+                ),
+            )
+        steps = (*preflight_steps, *publication_steps, *artifact_steps)
         copy_drop = self._remove_copy_database_command(
             env, executor=executor, force_connections=force_connections
         )
@@ -404,29 +409,7 @@ class _CleanupMixin:
         catalog = self._client.get_catalog()
         with exclusive_lock(environment_lock_path(str(env.id))):
             context = cast("RunContext[None] | None", active_context())
-            publication_step = "environment.remove.publication"
-            if context is not None and context.planned(publication_step):
-                context.action(publication_step)
-                try:
-                    self._client.publication.unpublish_if_configured(
-                        ("environment", str(env.id)),
-                        executor=context.executor,
-                    )
-                except Exception as exc:
-                    reason = sanitize_last_error(str(exc)) or type(exc).__name__
-                    message = f"publication cleanup failed: {reason}"
-                    catalog.update_environment_state(
-                        str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=message
-                    )
-                    catalog.add_environment_event(str(env.id), "remove", "failed", message=message)
-                    raise EnvironmentConflictError("cleanup_failed", message) from exc
-                context.complete_action(publication_step)
-            self._do_remove(
-                catalog,
-                env,
-                context=context,
-                copy_drop=copy_drop,
-            )
+            self._do_remove(catalog, env, context=context, copy_drop=copy_drop)
 
     def _action_command(
         self,
@@ -487,6 +470,23 @@ class _CleanupMixin:
             return
         copy_plan = self._preflight_remove(cat, env, context=context)
         _validate_retained_removal_evidence(cat, env)
+        publication_step = "environment.remove.publication"
+        if context is not None and context.planned(publication_step):
+            context.action(publication_step)
+            try:
+                self._client.publication.unpublish_if_configured(
+                    ("environment", str(env.id)),
+                    executor=context.executor,
+                )
+            except Exception as exc:
+                reason = sanitize_last_error(str(exc)) or type(exc).__name__
+                message = f"publication cleanup failed: {reason}"
+                cat.update_environment_state(
+                    str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=message
+                )
+                cat.add_environment_event(str(env.id), "remove", "failed", message=message)
+                raise EnvironmentConflictError("cleanup_failed", message) from exc
+            context.complete_action(publication_step)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
 

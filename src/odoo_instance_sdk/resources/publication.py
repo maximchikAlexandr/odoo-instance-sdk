@@ -138,7 +138,13 @@ def _proxy_addresses(value: Sequence[str] | None) -> tuple[str, ...]:
             address = ipaddress.ip_address(item.strip())
         except ValueError as exc:
             raise ConfigError("publication trusted proxy address must be an IP") from exc
-        if address.is_unspecified or address.is_multicast or address.is_reserved:
+        if isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None:
+            raise ConfigError("publication trusted proxy address must be an unscoped IP")
+        if (
+            address.is_unspecified
+            or address.is_multicast
+            or (address.is_reserved and not address.is_loopback)
+        ):
             raise ConfigError("publication trusted proxy address must be a specific IP")
         normalized = str(address)
         if normalized in result:
