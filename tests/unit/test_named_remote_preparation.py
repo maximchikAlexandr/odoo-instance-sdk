@@ -13,6 +13,7 @@ from odoo_instance_sdk.exceptions import (
     ConfigError,
     EnvironmentConflictError,
     MasterPasswordRequiredError,
+    RemoteDatabaseResolutionError,
 )
 from odoo_instance_sdk.internal.dbprep import materialize as preparation
 from odoo_instance_sdk.internal.dbprep.source import (
@@ -125,19 +126,27 @@ def test_child_environment_removes_all_named_remote_passwords() -> None:
     assert child == {"SAFE": "kept"}
 
 
-def test_named_download_uses_secret_and_preserves_source_provenance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _named_download_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    database: str | None,
+    listed: tuple[str, ...] | Exception,
+) -> tuple[ProjectConfig, Backup, MagicMock]:
     source = RemoteSourceConfig(
         name="staging",
         base_url="https://staging.example",
-        database="staging_db",
+        database=database,
         git_branch="staging",
     )
     project = _project(source, root=tmp_path)
     backup = _backup(tmp_path, source_name="staging", branch="staging")
     client = MagicMock()
     client.instance.return_value.databases.backup.return_value = backup
+    if isinstance(listed, Exception):
+        client.instance.return_value.databases.names.side_effect = listed
+    else:
+        client.instance.return_value.databases.names.return_value = listed
     monkeypatch.setattr(
         preparation, "canonical_project_identity", lambda _: (tmp_path, tmp_path, "repo")
     )
@@ -145,10 +154,19 @@ def test_named_download_uses_secret_and_preserves_source_provenance(
     monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "staging-secret")
     monkeypatch.setenv("ODCLI_REMOTE_LAB_MASTER_PASSWORD", "lab-secret")
 
+    return project, backup, client
+
+
+def test_named_download_uses_secret_and_preserves_source_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, backup, client = _named_download_case(
+        tmp_path, monkeypatch, database="staging_db", listed=RuntimeError("listing disabled")
+    )
     result = preparation.prepare_download(
         client, project, options=DatabaseRefreshOptions(remote_name="STAGING")
     )
-
+    client.instance.return_value.databases.names.assert_not_called()
     client.instance.assert_called_once_with(
         "https://staging.example", master_password="staging-secret"
     )
@@ -161,6 +179,51 @@ def test_named_download_uses_secret_and_preserves_source_provenance(
     assert result.backup == backup
     assert result.source_git_branch == "staging"
     assert result.branch_origin is BackupBranchOrigin.CONFIGURED
+
+
+def test_named_download_uses_secret_and_preserves_source_provenance_singleton(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, backup, client = _named_download_case(
+        tmp_path, monkeypatch, database=None, listed=("staging_db",)
+    )
+    result = preparation.prepare_download(
+        client, project, options=DatabaseRefreshOptions(remote_name="STAGING")
+    )
+    client.instance.return_value.databases.names.assert_called_once_with()
+    client.instance.return_value.databases.backup.assert_called_once_with(
+        "staging_db",
+        source_git_branch="staging",
+        project_id="project_repo",
+        source_name="staging",
+    )
+    assert result.backup == backup
+    assert result.source_git_branch == "staging"
+
+
+@pytest.mark.parametrize(
+    ("listed", "error"),
+    [
+        ((), "remote_database_none"),
+        (("first", "second"), "remote_database_ambiguous"),
+        (RuntimeError("listing disabled"), "remote_database_list_unavailable"),
+    ],
+)
+def test_named_download_uses_secret_and_preserves_source_provenance_invalid_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    listed: tuple[str, ...] | Exception,
+    error: str,
+) -> None:
+    project, _backup_record, client = _named_download_case(
+        tmp_path, monkeypatch, database=None, listed=listed
+    )
+    with pytest.raises(RemoteDatabaseResolutionError) as failure:
+        preparation.prepare_download(
+            client, project, options=DatabaseRefreshOptions(remote_name="STAGING")
+        )
+    assert failure.value.code == error
+    client.instance.return_value.databases.backup.assert_not_called()
 
 
 @pytest.mark.parametrize(

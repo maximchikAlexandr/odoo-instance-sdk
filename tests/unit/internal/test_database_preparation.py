@@ -1368,6 +1368,7 @@ def _production_restore_command(
     remote_name: str | None = None,
     observed: dict[str, object] | None = None,
     restore_probe_results: tuple[str, str] | None = None,
+    reset_admin_password: bool = True,
 ) -> tuple[
     Command[DatabasePreparationResult],
     RecordingExecutor,
@@ -1471,7 +1472,7 @@ def _production_restore_command(
     if observed is not None:
         observed.update(client=client, cluster=cluster, local=local, remote=remote)
     options = DatabaseRefreshOptions(
-        restore=True, reset_admin_password=True, remote_name=remote_name
+        restore=True, reset_admin_password=reset_admin_password, remote_name=remote_name
     )
     source_resolution = resolve_test_source(project, options)
     runtime = preparation.resolve_runtime_binding(project, tmp_path)
@@ -3384,3 +3385,180 @@ def test_checkout_coalesces_fresh_result_under_preparation_lock(
     assert result.default_switched is False
     assert result.effective_default == "old"
     client.instance.assert_not_called()
+
+
+def _compose_restore_tracking_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracking: str
+) -> tuple[Command[DatabasePreparationResult], RecordingExecutor, Path, str, MagicMock]:
+    from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    (tmp_path / ".git").mkdir()
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    generated.parent.mkdir()
+    original = (
+        "[options]\ndb_name = old\nadmin_passwd = retained-secret\n"
+        "db_host = 127.0.0.1\ndb_port = 5432\ndb_user = odoo\ndb_password = db-secret\n"
+    )
+    generated.write_text(original)
+    observed: dict[str, object] = {}
+    command, executor, _project_config, _backup_record, write = _production_restore_command(
+        tmp_path, monkeypatch, observed=observed, reset_admin_password=False
+    )
+    cluster = PostgresCluster.from_project(tmp_path)
+    cluster.password_file.parent.mkdir(parents=True, exist_ok=True)
+    cluster.password_file.write_text("database-secret")
+    original_factory = executor.result_factory
+    assert original_factory is not None
+
+    def result_for(prepared: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", prepared)
+        if prepared.step_id.startswith("database.prepare.default-switch.git."):
+            toplevel = prepared.step_id.endswith("toplevel")
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=0
+                if toplevel or tracking == "tracked"
+                else (1 if tracking == "untracked" else 128),
+                stdout=str(tmp_path / "other" if tracking == "root-drift" else tmp_path)
+                if toplevel
+                else (".odcli/odoo.conf\n" if tracking == "tracked" else ""),
+                stderr="index unavailable" if tracking == "git-error" else "",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+        return cast("ProcessResult", original_factory(prepared))
+
+    executor.result_factory = result_for
+    assert executor.executed == []
+    guards = [step for step in command.plan.process_steps if ".default-switch.git." in step.step_id]
+    assert len(guards) == 2
+    assert [step.argv for step in guards] == [
+        ("git", "-C", str(generated.parent), "rev-parse", "--show-toplevel"),
+        (
+            "git",
+            "-C",
+            str(tmp_path),
+            "ls-files",
+            "--cached",
+            "--error-unmatch",
+            "--",
+            ".odcli/odoo.conf",
+        ),
+    ]
+    assert all(step.read_only for step in guards)
+    return command, executor, generated, original, write
+
+
+def test_compose_restore_checks_generated_config_tracking_in_captured_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+    command, executor, generated, _original, write = _compose_restore_tracking_case(
+        tmp_path, monkeypatch, "untracked"
+    )
+    result = command.run()
+    assert result.default_switched is True
+    assert parse_odoo_config(generated)["db_name"] == result.restored_database
+    assert parse_odoo_config(generated)["admin_passwd"] == "retained-secret"
+    assert write.call_args.args[1].default_source_database == result.restored_database
+    assert [
+        step.step_id for step in executor.executed if ".default-switch.git." in step.step_id
+    ] == [
+        "database.prepare.default-switch.git.toplevel",
+        "database.prepare.default-switch.git.tracked",
+    ]
+
+
+def test_compose_restore_checks_generated_config_tracking_in_captured_plan_tracked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, executor, generated, original, write = _compose_restore_tracking_case(
+        tmp_path, monkeypatch, "tracked"
+    )
+    with pytest.raises(InstanceConfigurationError, match=r"tracked|tracking"):
+        command.run()
+    assert generated.read_text() == original
+    write.assert_not_called()
+    assert [
+        step.step_id for step in executor.executed if ".default-switch.git." in step.step_id
+    ] == [
+        "database.prepare.default-switch.git.toplevel",
+        "database.prepare.default-switch.git.tracked",
+    ]
+
+
+def test_compose_restore_checks_generated_config_tracking_in_captured_plan_git_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, executor, generated, original, write = _compose_restore_tracking_case(
+        tmp_path, monkeypatch, "git-error"
+    )
+    with pytest.raises(InstanceConfigurationError, match=r"tracked|tracking"):
+        command.run()
+    assert generated.read_text() == original
+    write.assert_not_called()
+    assert [
+        step.step_id for step in executor.executed if ".default-switch.git." in step.step_id
+    ] == [
+        "database.prepare.default-switch.git.toplevel",
+        "database.prepare.default-switch.git.tracked",
+    ]
+
+
+def test_compose_restore_checks_generated_config_tracking_in_captured_plan_root_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, executor, generated, original, write = _compose_restore_tracking_case(
+        tmp_path, monkeypatch, "root-drift"
+    )
+    with pytest.raises(InstanceConfigurationError, match=r"root|tracking"):
+        command.run()
+    assert generated.read_text() == original
+    write.assert_not_called()
+    assert [
+        step.step_id for step in executor.executed if ".default-switch.git." in step.step_id
+    ] == [
+        "database.prepare.default-switch.git.toplevel",
+    ]
+
+
+def test_coalesced_compose_restore_skips_captured_default_publication_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.database_preparation import RestorePreflight
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.internal.dbprep.result_projection import coalesced_restore_result
+
+    (tmp_path / ".git").mkdir()
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    generated.parent.mkdir()
+    content = "[options]\ndb_name = old\nadmin_passwd = local-secret\n"
+    generated.write_text(content)
+    command, executor, project, backup, write = _production_restore_command(tmp_path, monkeypatch)
+    original = cast(
+        "Callable[..., contextlib.AbstractContextManager[RestorePreflight]]",
+        preparation._restore_preflight,
+    )
+
+    @contextlib.contextmanager
+    def cached_preflight(*args: object, **kwargs: object) -> Iterator[RestorePreflight]:
+        with original(*args, **kwargs) as preflight:
+            assert preflight.source is not None
+            result = coalesced_restore_result(
+                backup, preflight.source, project, project_id=preflight.project_id
+            )
+            raise preparation._CoalescedRestore(result)
+            yield preflight
+
+    monkeypatch.setattr(preparation, "_restore_preflight", cached_preflight)
+    result = command.run()
+
+    assert result.default_switched is False
+    assert result.effective_default == "old"
+    assert generated.read_text() == content
+    write.assert_not_called()
+    assert len([s for s in command.plan.process_steps if ".default-switch.git." in s.step_id]) == 2
+    assert not any(".default-switch.git." in s.step_id for s in executor.executed)

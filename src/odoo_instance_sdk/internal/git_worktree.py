@@ -37,17 +37,32 @@ class WorktreeInfo:
 
 
 def _run(
-    args: list[str], *, cwd: str | Path | None = None, check: bool = True
+    args: list[str],
+    *,
+    cwd: str | Path | None = None,
+    check: bool = True,
+    step_id: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+    from odoo_instance_sdk.internal.proc import (
+        ProcessExecutionError,
+        ProcessResult,
+        active_context,
+        run_captured,
+    )
 
     try:
-        result = run_captured(
-            args,
-            cwd=cwd,
-            timeout=30.0,
-            text=True,
-        )
+        context = active_context()
+        if context is not None and step_id is not None:
+            from odoo_instance_sdk.exceptions import UnplannedStepError
+
+            captured = context.prepared(step_id)
+            if captured.argv != tuple(args) or captured.cwd != (
+                str(cwd) if cwd is not None else None
+            ):
+                raise UnplannedStepError(step_id, reason="Git inputs changed after planning")
+            result = cast("ProcessResult", context.process(step_id))
+        else:
+            result = run_captured(args, cwd=cwd, timeout=30.0, text=True)
     except ProcessExecutionError as error:
         if check:
             raise subprocess.CalledProcessError(1, args, stderr=str(error)) from error
@@ -67,8 +82,10 @@ def _run(
     )
 
 
-def rev_parse_toplevel(path: Path) -> Path:
-    proc = _run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], check=False)
+def rev_parse_toplevel(path: Path, *, step_id: str | None = None) -> Path:
+    proc = _run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"], check=False, step_id=step_id
+    )
     if proc.returncode != 0:
         if proc.returncode == 128 and "not a git repository" in proc.stderr.lower():
             raise GitRepositoryNotFoundError(f"not a git repository: {path}")
@@ -182,18 +199,28 @@ def _remote_ref_sha(repo_root: Path, remote: str, ref: str) -> str | None:
     return fields[0]
 
 
-def is_tracked_path(path: Path) -> bool:
+def is_tracked_path(path: Path, *, step_prefix: str | None = None) -> bool:
     """Return whether an enclosing Git index owns this exact path."""
     candidate = Path(path).absolute()
     probe = candidate.parent
     while not os.path.lexists(str(probe)) and probe != probe.parent:
         probe = probe.parent
     try:
-        repo_root = rev_parse_toplevel(probe)
+        repo_root = rev_parse_toplevel(
+            probe, step_id=f"{step_prefix}.toplevel" if step_prefix is not None else None
+        )
     except GitRepositoryNotFoundError:
         if _has_git_marker(candidate.parent):
             raise
         return False
+    if step_prefix is not None:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        if context is not None:
+            tracked = context.prepared(f"{step_prefix}.tracked")
+            if repo_root != Path(tracked.argv[2]):
+                raise GitError("Git root changed while checking runtime config tracking")
     try:
         relative = candidate.relative_to(repo_root)
     except ValueError:
@@ -210,6 +237,7 @@ def is_tracked_path(path: Path) -> bool:
             relative.as_posix(),
         ],
         check=False,
+        step_id=f"{step_prefix}.tracked" if step_prefix is not None else None,
     )
     if proc.returncode == 1:
         return False

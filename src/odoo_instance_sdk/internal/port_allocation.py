@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 
 PortKind = Literal["http", "postgres"]
 
-_HTTP_RANGE_START = 8069
-_HTTP_RANGE_END = 8099
+_HTTP_RANGE_START = 8000
+_HTTP_RANGE_END = 9000
 _PG_RANGE_START = 5468
 _PG_RANGE_END = 65534
 
@@ -52,27 +52,38 @@ def find_free_port(
             )
         return requested
 
-    start, end = _range_for(kind, project)
-    candidate = start
-    while candidate <= end:
-        if candidate not in used and probe_address(host, candidate) is AddressState.FREE:
-            return candidate
-        candidate += 1
-
-    raise EnvironmentConflictError(
-        "no_free_port",
-        f"No free port in range {start}-{end}; pass an explicit port",
-        details={"range": [str(start), str(end)], "kind": kind},
+    start, end = (
+        (_HTTP_RANGE_START, _HTTP_RANGE_END) if kind == "http" else (_PG_RANGE_START, _PG_RANGE_END)
     )
-
-
-def _range_for(kind: PortKind, project: ProjectConfig | None) -> tuple[int, int]:
+    preferred = None
     if kind == "http":
         preferred = project.preferred_http_port if project else None
-        if preferred is not None:
-            return preferred, _HTTP_RANGE_END
-        return _HTTP_RANGE_START, _HTTP_RANGE_END
-    return _PG_RANGE_START, _PG_RANGE_END
+        if preferred is None:
+            preferred = 8069
+        if (
+            start <= preferred <= end
+            and preferred not in used
+            and probe_address(host, preferred) is AddressState.FREE
+        ):
+            return preferred
+
+    for candidate in range(start, end + 1):
+        if candidate == preferred:
+            continue
+        if candidate not in used and probe_address(host, candidate) is AddressState.FREE:
+            return candidate
+
+    message = (
+        f"No available HTTP port in automatic allocation range {start}\u2013{end}; "
+        "all candidates are allocated or unavailable. Pass --http-port explicitly."
+        if kind == "http"
+        else f"No free port in range {start}-{end}; pass an explicit port"
+    )
+    raise EnvironmentConflictError(
+        "no_free_port",
+        message,
+        details={"range": [str(start), str(end)], "kind": kind},
+    )
 
 
 def _collect_used_ports(

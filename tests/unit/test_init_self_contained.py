@@ -292,7 +292,7 @@ def _prepare_primary_venv(
         return ProcessResult(
             argv=prepared.argv,
             returncode=0,
-            stdout="",
+            stdout=("postgres@sha256:" + "a" * 64) if "inspect" in prepared.argv else "",
             stderr="",
             duration=0.0,
             cwd=prepared.cwd,
@@ -325,7 +325,7 @@ def _record_prepared_venv_origin(
         return ProcessResult(
             argv=prepared.argv,
             returncode=0,
-            stdout="",
+            stdout=("postgres@sha256:" + "a" * 64) if "inspect" in prepared.argv else "",
             stderr="",
             duration=0.0,
             cwd=prepared.cwd,
@@ -1144,9 +1144,128 @@ def test_named_remote_init_is_complete_repeatable_and_secret_free(
     assert second.exit_code == 0, second.output
     config = ProjectConfig.load(tmp_path)
     assert [source.name for source in config.remote_instances] == ["prod", "staging"]
+    assert config.remote_instances[1].database == "staging"
+    assert config.remote_instances[1].git_branch == "main"
+    assert config.test_instance is None
     manifest = (tmp_path / ".odcli" / "project.toml").read_text(encoding="utf-8")
     assert "ODCLI_REMOTE_" not in manifest
     assert "remote-secret" not in manifest
+
+    third = runner.invoke(cli, [*common, "--remote", "lab", "https://lab.example", "dev"])
+    assert third.exit_code == 0, third.output
+    updated = ProjectConfig.load(tmp_path)
+    assert [source.name for source in updated.remote_instances] == ["lab", "prod", "staging"]
+    assert updated.remote_instances[1:] == config.remote_instances
+    assert updated.remote_instances[0].database is None
+
+
+def test_named_remote_init_is_complete_repeatable_and_secret_free_without_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: tmp_path / "catalog.sqlite3",
+    )
+    args = [
+        "init",
+        "--no-input",
+        "--yes",
+        "--odoo-bin",
+        "/opt/odoo/odoo-bin",
+        "--python",
+        "python3",
+        "--config",
+        "odoo.conf",
+        "--project",
+        str(tmp_path),
+        "--format",
+        "json",
+        "--remote",
+        "staging",
+        "https://staging.example",
+        "main",
+    ]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    source = ProjectConfig.load(tmp_path).remote_instances[0]
+    assert source.database is None
+    assert source.git_branch == "main"
+    assert "remote-secret" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("database_arg", "expected_database"),
+    [((), None), (("staging",), "staging")],
+)
+def test_named_remote_init_is_complete_repeatable_and_secret_free_inline_syntax(
+    tmp_path: Path, database_arg: tuple[str, ...], expected_database: str | None
+) -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--project",
+            str(tmp_path),
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--config",
+            "odoo.conf",
+            "--remote=lab",
+            "https://lab.example",
+            *database_arg,
+            "dev",
+            "--run-arg",
+            "--remote",
+            "--dry-run",
+            "--format=json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["result"]
+    assert "--remote" in payload["default_run_args"]
+    assert payload["remote_instances"][0]["database"] == expected_database
+    assert not (tmp_path / ".odcli/project.toml").exists()
+
+
+@pytest.mark.parametrize("remote_first", [False, True])
+def test_init_remote_shorthand_preserves_option_values_and_dry_run(
+    tmp_path: Path, remote_first: bool
+) -> None:
+    remote = ["--remote", "lab", "https://lab.example", "dev"]
+    options = ["--run-arg", "--remote", "--format=json"]
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--project",
+            str(tmp_path),
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--config",
+            "odoo.conf",
+            "--no-input",
+            "--dry-run",
+            *(remote + options if remote_first else options + remote),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["result"]
+    assert payload["default_run_args"] == ["--remote"]
+    assert payload["remote_instances"] == [
+        {
+            "name": "lab",
+            "base_url": "https://lab.example",
+            "database": None,
+            "git_branch": "dev",
+            "password_key": "ODCLI_REMOTE_LAB_MASTER_PASSWORD",
+        }
+    ]
+    assert not (tmp_path / ".odcli").exists()
 
 
 def test_named_remote_init_dry_run_is_inert_without_input(tmp_path: Path) -> None:

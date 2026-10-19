@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from rich_click import RichCommand
+
 if TYPE_CHECKING:
     import click
 
@@ -55,6 +57,44 @@ if TYPE_CHECKING:
 
 
 InitOption = str | int | bool | tuple[str, ...] | tuple[tuple[str, str, str, str], ...] | None
+
+
+class _InitCommand(RichCommand):
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        # Click requires fixed tuple arity; expand only the shorthand remote value.
+        options = {
+            flag: param
+            for param in self.get_params(ctx)
+            if isinstance(param, click.Option)
+            for flag in param.opts
+        }
+        normalized: list[str] = []
+        index = 0
+        while index < len(args):
+            raw = args[index]
+            if raw == "--":
+                normalized.extend(args[index:])
+                break
+            flag, separator, value = raw.partition("=")
+            option = options.get(flag)
+            if flag == "--remote":
+                values = [value] if separator else []
+                end = index + 1
+                while end < len(args) and len(values) < 4:
+                    if args[end].partition("=")[0] in options or args[end] == "--":
+                        break
+                    values.append(args[end])
+                    end += 1
+                if len(values) == 3:
+                    name, url, git_ref = values
+                    normalized.extend(("--remote", name, url, "", git_ref))
+                    index = end
+                    continue
+            count = option.nargs if option is not None and not option.is_flag else 0
+            count = max(0, count - bool(separator))
+            normalized.extend(args[index : index + count + 1])
+            index += count + 1
+        return super().parse_args(ctx, normalized)
 
 
 class _InitRunOrPreview(Protocol):
@@ -244,11 +284,11 @@ def _execute_init(  # noqa: C901
     if test_instance_cfg is None and existing_test_instance is not None:
         test_instance_cfg = existing_test_instance
     existing_remote_instances = _existing_remote_instances(resolved_project)
-    remote_instances = (
-        _resolve_remote_entries(request.remote_entries)
-        if request.remote_entries
-        else existing_remote_instances
+    sources = {source.name: source for source in existing_remote_instances}
+    sources.update(
+        {source.name: source for source in _resolve_remote_entries(request.remote_entries)}
     )
+    remote_instances = tuple(sorted(sources.values(), key=lambda source: source.name))
 
     effective_source_config = option_state.source_config
     if request.local_config and postgres_cfg is not None and postgres_cfg.mode == "compose":
@@ -324,6 +364,15 @@ def _execute_init(  # noqa: C901
         }
     from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
 
+    confirm_image: Callable[[str, str], None] | None = None
+    if request.yes or not effective_no_input:
+
+        def confirm_image(image: str, digest: str) -> None:
+            if not request.yes and not click.confirm(
+                f"Approve PostgreSQL image {image} resolved to {digest}?", default=False
+            ):
+                raise InstanceConfigurationError("PostgreSQL image approval declined")
+
     try:
         status, _ = run_or_preview(
             lambda: init_project_command(
@@ -340,6 +389,7 @@ def _execute_init(  # noqa: C901
                 confirm_partial=confirm_partial,
                 venv=request.venv,
                 repair_generated_config=repaired_existing,
+                confirm_postgres_image=confirm_image,
             ),
             command_name="init",
             mode=output_mode,
@@ -386,7 +436,7 @@ def _execute_init(  # noqa: C901
 def register_init_command(cli: click.Group) -> None:
     """Register the ``init`` leaf on the root CLI group."""
 
-    @cli.command(help="Create or update the project manifest.")
+    @cli.command(cls=_InitCommand, help="Create or update the project manifest.")
     @click.option(
         "--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin."
     )
@@ -460,7 +510,13 @@ def register_init_command(cli: click.Group) -> None:
         help="Compose only; default: source db_user or 'odoo'.",
     )
     @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
-    @click.option("--yes", "yes", is_flag=True, default=False, help="Confirm manifest replacement.")
+    @click.option(
+        "--yes",
+        "yes",
+        is_flag=True,
+        default=False,
+        help="Confirm manifest replacement and the selected PostgreSQL image.",
+    )
     @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Do not write.")
     @click.option(
         "--test-url",
@@ -485,8 +541,8 @@ def register_init_command(cli: click.Group) -> None:
         "remote_entries",
         nargs=4,
         multiple=True,
-        metavar="NAME URL DATABASE GIT_REF",
-        help="Named remote source; repeat for multiple sources.",
+        metavar="NAME URL [DATABASE] GIT_REF",
+        help="Named remote source; omit DATABASE to auto-select on refresh. Repeatable.",
     )
     @click.option(
         "--local-config",
@@ -700,7 +756,7 @@ def _resolve_remote_entries(
         RemoteSourceConfig(
             name=normalize_remote_name(name),
             base_url=normalize_base_url(url),
-            database=database,
+            database=database or None,
             git_branch=git_ref,
         )
         for name, url, database, git_ref in entries

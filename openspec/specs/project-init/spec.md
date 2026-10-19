@@ -22,7 +22,27 @@ Secrets и runtime artifacts MUST NOT записываться в repository. Ru
 
 ### Requirement: `ProjectConfig` public type
 
-`ProjectConfig` SHALL make `test_instance.database` optional. The parser and writer SHALL round-trip a config without `database` without adding it. When `database` is explicitly set, it SHALL be used without requiring database list availability. When it is absent, remote-refresh preflight SHALL obtain names through the existing `DatabaseResource.names()` and select exactly one; zero SHALL fail with `remote_database_none`; many SHALL fail with `remote_database_ambiguous` listing names; an unavailable list SHALL fail with `remote_database_list_unavailable`. All three fail before download. The auto-detected name SHALL NOT be written back to `project.toml`.
+`ProjectConfig` SHALL make `test_instance.database` optional. The parser and writer SHALL round-trip a config without `database` without adding it. When it is explicitly set, it SHALL be used without requiring database list availability. When it is absent, remote-refresh preflight SHALL obtain names through the existing `DatabaseResource.names()` and select exactly one; zero SHALL fail with `remote_database_none`; many SHALL fail with `remote_database_ambiguous` listing names; an unavailable list SHALL fail with `remote_database_list_unavailable`. All three fail before download. COPY checkout SHALL refuse an unresolved named source before mutation and direct the caller to `db refresh --remote` or an explicit `--backup`. The auto-detected name SHALL NOT be written back to `project.toml`.
+
+#### Scenario: optional database round-trips
+
+- **WHEN** a `ProjectConfig` without `test_instance.database` is parsed and written back
+- **THEN** the written manifest does not add `database`
+
+#### Scenario: explicit database has priority
+
+- **WHEN** `test_instance.database` is explicitly set
+- **THEN** it is used and database list availability is not required
+
+#### Scenario: absent database is resolved for refresh
+
+- **WHEN** `test_instance.database` is absent and the instance exposes exactly one database
+- **THEN** that database is selected for the current operation and the name is not written to `project.toml`
+
+#### Scenario: COPY refusal is fail-closed
+
+- **WHEN** COPY checkout selects a named source without a database and without an explicit backup
+- **THEN** it fails before download, local database mutation, or manifest mutation with the supported refresh/backup alternative
 
 #### Scenario: Manifest with postgres compose section
 
@@ -54,16 +74,6 @@ Secrets и runtime artifacts MUST NOT записываться в repository. Ru
 - **WHEN** `ProjectConfig.load("/path/to/repo")` вызывается без `.odcli/project.toml`
 - **THEN** поднимается typed error с подсказкой `odcli init`
 
-#### Scenario: optional database round-trips
-
-- **WHEN** a `ProjectConfig` without `test_instance.database` is parsed and written back
-- **THEN** the written manifest does not add `database`
-
-#### Scenario: explicit database has priority
-
-- **WHEN** `test_instance.database` is explicitly set
-- **THEN** it is used and database list availability is not required
-
 #### Scenario: absent database is resolved from the instance
 
 - **WHEN** `test_instance.database` is absent and the instance exposes exactly one database
@@ -76,7 +86,7 @@ Secrets и runtime artifacts MUST NOT записываться в repository. Ru
 
 ### Requirement: Interactive init wizard
 
-`odcli init` в TTY MUST prompts только для unresolved required values. Fully specified values MUST NOT trigger prompts.
+`odcli init` в TTY MUST prompts только для unresolved required values и необходимых подтверждений. Fully specified values MUST NOT trigger value prompts. Одобрение Compose-образа запрашивается отдельно, если digest ещё не одобрен и отсутствует `--yes`.
 
 #### Scenario: Missing values prompt
 
@@ -116,6 +126,34 @@ Secrets и runtime artifacts MUST NOT записываться в repository. Ru
 
 - **WHEN** `odcli init --no-input --yes` runs with a fully-specified setup
 - **THEN** no question is asked and the project is fully initialized
+
+### Requirement: Image consent within Compose init
+
+Compose `init --yes` SHALL resolve the selected image to an exact OCI RepoDigest and persist approval through the existing per-project user-data trust store before writing project configuration or preparing the venv. Interactive Rich init without `--yes` SHALL ask for confirmation displaying the selected reference and resolved digest; a matching existing approval SHALL skip the question. Refusal or failed image resolution SHALL leave project files, venv, PostgreSQL password and existing approval unchanged. This phase SHALL use the same immutable init command plan and process/action ledger as preparation, cluster startup and `tmp` bootstrap, without a nested CLI invocation. Init SHALL continue in the same invocation after approval; callers SHALL NOT need a separate `approve-image` and retry. Noninteractive init without `--yes` SHALL NOT create approval implicitly. External PostgreSQL SHALL NOT resolve or approve an image. Existing lifecycle checks SHALL still reject digest changes after approval.
+
+Compose `init --yes --dry-run` SHALL expose image resolution and approval steps without pulling, inspecting, prompting, or writing approval. `--yes` SHALL NOT bypass completeness, configuration or other safety validations.
+
+#### Scenario: One confirmed initialization
+
+- **WHEN** `init --postgres compose --postgres-image IMAGE --yes` executes with valid inputs and an unapproved image
+- **THEN** it resolves and approves the exact digest, then prepares and bootstraps the project in one invocation
+
+#### Scenario: Declined or unavailable image
+
+- **WHEN** the user declines image confirmation or image pull/inspection fails
+- **THEN** init stops before project/venv/password mutation and preserves any existing approval
+
+#### Scenario: Matching or changed approval
+
+- **WHEN** the resolved digest matches the saved approval
+- **THEN** init continues without asking for image confirmation
+- **WHEN** it differs and the caller supplied `--yes` or confirms interactively
+- **THEN** the newly resolved digest replaces the approval; startup still rechecks it
+
+#### Scenario: Preview has no image effects
+
+- **WHEN** Compose init runs with `--yes --dry-run`
+- **THEN** the plan includes image resolution and approval but executes neither processes nor approval writes
 
 ### Requirement: Idempotent init
 
@@ -422,6 +460,15 @@ Project initialization SHALL ensure `.odcli/.env` is ignored by an ignore file s
 
 A full self-contained `init` with `--local-config` and Compose PostgreSQL SHALL produce: an owned Compose cluster, a generated `.odcli/odoo.conf` as the effective local `source_config`, `data_dir` set to the absolute `{project_root}/.odcli/filestore`, ordered absolute `addons_path` values resolved from stored addon roots, stored `server_wide_modules`, a `.odcli/.env` under `0600` with `ODCLI_TEST_INSTANCE_ORIGIN_PINS` and an empty `ODCLI_TEST_MASTER_PASSWORD=`, a valid `[test_instance]` when `--test-url`/`--test-branch` are provided (and `--test-database` or a uniquely listable remote database), and a valid Odoo bootstrap database `tmp` with `base` installed. The existing generator SHALL accept an absent source config, preserve applicable source options when one exists, and overlay project-owned runtime values. Master password SHALL NOT be accepted as a CLI argument and SHALL NOT be stored in manifest/history. Re-running `init` without test-instance, addon-root, or server-wide-module options SHALL preserve existing valid values. Completeness groups follow design D5. Bootstrap `tmp` follows design D5a.
 
+#### Scenario: Local Database Manager password is initialized and preserved
+
+- **WHEN** Compose init writes or repairs the project-owned generated config
+- **THEN** a nonblank source `admin_passwd` is preserved; otherwise an existing nonblank generated-config value is reused
+- **AND** if both are absent or blank, init generates an independent cryptographically random local master password during execution and writes `admin_passwd` atomically in the owner-only `0600` config
+- **AND** re-init and generated-config repair preserve that password; imported source files remain unchanged
+- **AND** dry-run generates no secret and changes no files; the password is absent from manifest, command snapshots, Rich/JSON/TOON output, errors, logs and fingerprints
+- **AND** legacy generated configs missing a nonblank `admin_passwd` are detected as needing repair
+
 #### Scenario: Imported Compose project is ready after init
 
 - **WHEN** an existing project is initialized from a VS Code launch config and then confirmed with Compose PostgreSQL settings
@@ -526,12 +573,17 @@ The foreground `run` command SHALL capture the bootstrap spawn, probe, readiness
 
 ### Requirement: Named remote sources in project configuration
 
-Project configuration SHALL support multiple named remote entries with normalized URL, explicit database and declared Git branch. Names SHALL match `[a-z][a-z0-9_]*`; invalid or duplicate names, unknown fields, and credential-bearing URLs SHALL fail validation. The public project-init surface SHALL expose listing, one immutable configure operation with explicit replace semantics, and immutable removal using the existing manifest; no additional client facade SHALL be introduced. Configuration commands SHALL capture canonical repository identity and manifest fingerprint, take the existing project lock, reject drift, preserve unrelated project values, and SHALL NOT contact remote servers or delete secrets or operational resources.
+Project configuration SHALL support multiple named remote entries with normalized URL, optional database, and declared Git branch. Names SHALL match `[a-z][a-z0-9_]*`; invalid or duplicate names, unknown fields, and credential-bearing URLs SHALL fail validation. The public project-init surface SHALL expose listing, one immutable configure operation with explicit replace semantics, and immutable removal using the existing manifest; no additional client facade SHALL be introduced. Configuration commands SHALL capture canonical repository identity and manifest fingerprint, take the existing project lock, reject drift, preserve unrelated project values, and SHALL NOT contact remote servers or delete secrets or operational resources.
 
 #### Scenario: Configure lab and staging
 
 - **WHEN** a project adds lab and staging with different URLs, databases and branches
 - **THEN** both entries round-trip independently and can be selected by exact name
+
+#### Scenario: Configure a source without a database
+
+- **WHEN** a project adds a named source without a database
+- **THEN** the entry round-trips with `database` omitted and no remote request is made
 
 #### Scenario: Idempotent and concurrent edits
 
@@ -546,7 +598,22 @@ Project configuration SHALL support multiple named remote entries with normalize
 
 ### Requirement: Initialization accepts named sources
 
-Init SHALL accept multiple typed remote entries in SDK and repeatable `--remote NAME URL DATABASE GIT_REF` in CLI, applying existing validation, no-input, overwrite and dry-run rules. Named entries SHALL satisfy the remote-configuration completeness check without requiring a legacy test entry. Re-init without remote inputs SHALL preserve existing entries. Credential availability SHALL be reported only as derived `ODCLI_REMOTE_<UPPER_NAME>_MASTER_PASSWORD` key names; secrets SHALL NOT be accepted by init, enter the manifest, or be written to `.odcli/.env`.
+Init SHALL accept multiple typed remote entries in SDK and repeatable `--remote NAME URL GIT_REF` or `--remote NAME URL DATABASE GIT_REF` in CLI, applying existing validation, no-input, overwrite and dry-run rules. Named entries SHALL satisfy the remote-configuration completeness check without requiring a legacy test entry. An omitted database SHALL remain omitted and be resolved only by a later refresh operation. Re-init without remote inputs SHALL preserve existing entries. Credential availability SHALL be reported only as derived `ODCLI_REMOTE_<UPPER_NAME>_MASTER_PASSWORD` key names; secrets SHALL NOT be accepted by init, enter the manifest, or be written to `.odcli/.env`.
+
+#### Scenario: Headless initialization with an optional database
+
+- **WHEN** complete local init options and `--remote staging https://staging.example dev` are supplied with no-input
+- **THEN** init writes the named source without a database, without prompting for a legacy source or a password
+
+#### Scenario: Four-value initialization preserves explicit database
+
+- **WHEN** init receives `--remote staging https://staging.example staging_db dev`
+- **THEN** the source stores `staging_db` and the declared branch
+
+#### Scenario: Re-init preserves existing sources
+
+- **WHEN** init is repeated without remote options
+- **THEN** it retains every named and legacy remote entry, including omitted databases
 
 #### Scenario: Headless initialization with two sources
 
@@ -686,3 +753,31 @@ The resolved init Python SHALL be the creation selector for a missing venv. An e
 #### Scenario: Headless replacement retains confirmation safety
 - **WHEN** a changed Python selector makes an existing manifest differ in no-input or machine mode
 - **THEN** init refuses before mutation unless `--yes` is supplied
+
+### Requirement: Generated local administrator password is stable and private
+
+When a self-contained Compose init has no nonblank source or existing generated `admin_passwd`, execution SHALL generate an independent cryptographically random value, write it atomically to the owner-only `0600` generated config, and preserve it across re-init and repair. The value SHALL never appear in the manifest, plan, argv, logs, results, or exceptions.
+
+#### Scenario: Missing local password is generated
+
+- **WHEN** Compose init runs with source and generated configs lacking a nonblank `admin_passwd`
+- **THEN** it writes a new private password and uses it for the owned local runtime
+
+#### Scenario: Re-init preserves generated password
+
+- **WHEN** init or generated-config repair runs again
+- **THEN** the existing nonblank local password remains unchanged and secret-free in outputs
+
+### Requirement: Image consent remains an immutable init phase
+
+Compose init SHALL capture image resolution and approval as explicit steps in the same immutable init plan, execute them before project/venv writes, and preserve existing approval, dry-run, refusal, and external-mode behavior.
+
+#### Scenario: Consent precedes writes
+
+- **WHEN** an unapproved Compose image is initialized
+- **THEN** resolution and consent complete before project configuration or venv mutation
+
+#### Scenario: Dry-run has no approval side effect
+
+- **WHEN** Compose init runs with `--yes --dry-run`
+- **THEN** the image steps are visible in the plan but no image pull, prompt, or trust-store write occurs

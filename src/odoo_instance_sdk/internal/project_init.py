@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import stat
 import tempfile
 from collections.abc import Callable
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.generated_config import (
+    configured_admin_password,
     generate_config,
     project_generated_config_path,
     render_config,
@@ -196,6 +198,8 @@ def write_project_generated_config(
         db_port=cluster.endpoint_port,
         db_user=postgres.user or "odoo",
         db_password=materialized_password,
+        admin_password=configured_admin_password(source_path, destination)
+        or secrets.token_urlsafe(32),
         data_dir=project_owned_data_dir(root),
         addon_roots=config.addon_roots,
         server_wide_modules=config.server_wide_modules,
@@ -357,8 +361,13 @@ def _reject_tracked_generated_config(
 
     if allow_untracked_without_git and not (root / ".git").exists():
         return
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    prefix = "database.prepare.default-switch.git"
+    captured = context is not None and context.planned(f"{prefix}.toplevel")
     try:
-        if is_tracked_path(path):
+        if is_tracked_path(path, step_prefix=prefix if captured else None):
             raise InstanceConfigurationError(
                 "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
             )
@@ -401,6 +410,9 @@ def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> 
         source_start = (
             StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
         )
+        admin_password = configured_admin_password(source_path, destination)
+        if admin_password is None:
+            return True
         expected = render_config(
             source_path,
             destination,
@@ -413,6 +425,7 @@ def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> 
             db_port=cluster.endpoint_port,
             db_user=config.postgres.user or "odoo",
             db_password=password,
+            admin_password=admin_password,
             data_dir=project_owned_data_dir(project_path.resolve()),
             addon_roots=config.addon_roots,
             server_wide_modules=config.server_wide_modules,

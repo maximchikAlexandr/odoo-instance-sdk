@@ -593,10 +593,11 @@ Local-source checkout SHALL infer the source only when the Odoo config contains 
 
 Если `--http-port` не указан, checkout MUST автоматически выбирать свободный port:
 
-1. `socket.bind((http_interface, 8069))` — попробовать preferred_http_port из project manifest (если set), иначе Odoo default 8069.
-2. Если занят — инкрементировать port и retry (8070, 8071, ...). Range: 8069–8099 (31 port). Если весь range занят → `EnvironmentConflictError` с подсказкой указать `--http-port` явно.
-3. Выбранный port MUST быть уникальным среди active environments (constraint в catalog).
-4. Свободный port автоматически выбирается только во время checkout до первого запуска.
+1. Диапазон автоматического выбора HTTP-портов — `8000–9000` включительно. Если `preferred_http_port` из manifest находится внутри диапазона, сначала проверить его. Если preferred отсутствует, сначала проверить Odoo default `8069`. Preferred вне диапазона игнорируется.
+2. Если первая попытка неуспешна, проверить весь диапазон по возрастанию, пропуская уже проверенный порт. Порт MUST быть свободен по catalog, project manifests, generated configs и live `probe_address(http_interface, port)`.
+3. Только после исчерпания кандидатов вернуть `EnvironmentConflictError` с code `no_free_port` и сообщением `No available HTTP port in automatic allocation range 8000–9000; all candidates are allocated or unavailable. Pass --http-port explicitly.`
+4. Явный `--http-port` MUST проверяться отдельно: без ограничения автоматическим диапазоном и без замены другим портом. Занятый или недоступный явный порт возвращает `port_in_use`.
+5. Свободный port автоматически выбирается только во время checkout до первого запуска.
 
 Port registry не гарантирует OS-level reservation между checkout и run. Повторная `socket.bind()`-проверка перед process start обязательна.
 
@@ -605,10 +606,35 @@ Port registry не гарантирует OS-level reservation между checko
 - **WHEN** `checkout` без `--http-port` и port 8069 свободен
 - **THEN** `http_port = 8069` записан в environment
 
-#### Scenario: Auto-increment on occupied port
+#### Scenario: Full-range fallback on occupied port
 
-- **WHEN** `checkout` без `--http-port` и port 8069 занят, 8070 свободен
-- **THEN** `http_port = 8070` записан в environment
+- **WHEN** `checkout` без `--http-port` и port 8069 занят, 8000 свободен
+- **THEN** `http_port = 8000` записан в environment
+
+#### Scenario: Preferred port within automatic range
+
+- **WHEN** `preferred_http_port = 8168`, `--http-port` не указан и 8168 свободен
+- **THEN** checkout выбирает 8168 до остальных кандидатов
+- **WHEN** 8168 занят или зарезервирован, а 8000 свободен
+- **THEN** checkout выбирает 8000
+
+#### Scenario: Preferred port outside automatic range
+
+- **WHEN** preferred находится вне `8000–9000` и `--http-port` не указан
+- **THEN** checkout ищет только в полном автоматическом диапазоне, начиная с 8000
+
+#### Scenario: Automatic range boundaries and exhaustion
+
+- **WHEN** единственный свободный кандидат — 8000 или 9000
+- **THEN** checkout выбирает этот порт
+- **WHEN** все кандидаты заняты или недоступны
+- **THEN** checkout возвращает `no_free_port` только после исчерпания всего диапазона
+
+#### Scenario: Explicit port outside automatic range
+
+- **WHEN** указан `--http-port 19069`
+- **THEN** checkout проверяет только 19069 и выбирает его, если он свободен
+- **THEN** занятый или недоступный 19069 возвращает `port_in_use` без автоматической замены
 
 #### Scenario: Auto-allocated port must be unique
 

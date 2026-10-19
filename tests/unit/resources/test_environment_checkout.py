@@ -249,6 +249,46 @@ def _catalog_backup(
     )
 
 
+@pytest.mark.parametrize(
+    ("requested", "preferred_state", "expected"),
+    [
+        (None, "free", 8168),
+        (None, "occupied", 8000),
+        (None, "unknown", 8000),
+        (19069, "free", 19069),
+    ],
+)
+def test_checkout_http_port_selection(
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested: int | None,
+    preferred_state: str,
+    expected: int,
+) -> None:
+    from odoo_instance_sdk.internal.address import AddressState
+
+    manifest = project_manifest / ".odcli" / "project.toml"
+    manifest.write_text(manifest.read_text() + "preferred_http_port = 8168\n")
+    monkeypatch.setattr("odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_START", 8000)
+    monkeypatch.setattr("odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_END", 9000)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.port_allocation.probe_address",
+        lambda _host, port: AddressState(preferred_state) if port == 8168 else AddressState.FREE,
+    )
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/http-port",
+        options=EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            source_database="comerta",
+            http_port=requested,
+        ),
+    )
+    assert env.http_port == expected
+
+
 class TestCheckoutPreflight:
     @pytest.fixture
     def _fake_auxiliary_lifecycle(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,6 +425,24 @@ class TestCheckoutPreflight:
         assert plan.provenance.source_base_url == "https://staging.example"
         assert plan.provenance.database_name == "staging_db"
         assert plan.provenance.recorded_branch == "main"
+
+    def test_named_copy_without_database_reports_supported_alternative(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        _add_named_remote_config(project_manifest)
+        manifest = project_manifest / ".odcli" / "project.toml"
+        manifest.write_text(manifest.read_text().replace('database = "staging_db"\n', ""))
+        with pytest.raises(ConfigError, match="db refresh --remote first and use --backup"):
+            env_client.environments.plan_checkout(
+                project_manifest,
+                "feat/auto-source",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    remote_name="staging",
+                    target_database="staging_copy",
+                ),
+            )
 
     def _explicit_copy_plan_step_ids(
         self,

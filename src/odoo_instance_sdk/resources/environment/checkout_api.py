@@ -91,7 +91,12 @@ class _CheckoutApiMixin:
             source = resolve_test_source(
                 project, DatabaseRefreshOptions(remote_name=options.remote_name)
             )
-            assert source.config.database is not None
+            if source.config.database is None:
+                raise ConfigError(
+                    "COPY from a named remote requires a selected database; "
+                    "download with db refresh --remote first and use --backup, "
+                    "or set the remote database explicitly"
+                )
             return (
                 source.source_name,
                 source.config.base_url,
