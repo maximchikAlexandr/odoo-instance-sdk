@@ -496,19 +496,39 @@ def test_update_wrapper_reconciles_only_after_success(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.parametrize(
-    "url",
+    "source",
+    [
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+        f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{SHA}",
+    ],
+)
+def test_fix_tool_accepts_trusted_uv_provenance(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    fix_tool = _module("fix_tool")
+    runner = _BootstrapRunner(json.dumps({"url": source, "vcs_info": {"commit_id": SHA}}), "{}")
+    monkeypatch.setattr(fix_tool, "_run", runner)
+
+    fix_tool._canonical_source(Path(sys.executable))
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
     [
         f"git+https://github.com/foreign/odoo-instance-sdk.git@{SHA}",
         f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{'b' * 40}",
         f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{SHA}/extra",
+        f"git+https://evil.example/odoo-instance-sdk.git@{SHA}",
     ],
 )
-def test_fix_tool_rejects_mismatched_pinned_provenance(
-    monkeypatch: pytest.MonkeyPatch, url: str
+def test_fix_tool_rejects_untrusted_uv_provenance(
+    monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
     fix_tool = _module("fix_tool")
-    runner = _BootstrapRunner(json.dumps({"url": url, "vcs_info": {"commit_id": SHA}}), "{}")
+    runner = _BootstrapRunner(json.dumps({"url": source, "vcs_info": {"commit_id": SHA}}), "{}")
     monkeypatch.setattr(fix_tool, "_run", runner)
-    with pytest.raises(RuntimeError, match="trusted repository"):
-        fix_tool._canonical_source(Path("/trusted/python"))
+
+    with pytest.raises(RuntimeError, match="not the trusted repository"):
+        fix_tool._canonical_source(Path(sys.executable))
     assert len(runner.calls) == 1

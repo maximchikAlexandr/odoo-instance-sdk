@@ -2005,3 +2005,37 @@ def test_inherited_stdio_spawn_has_no_drain() -> None:
     assert handle.drain is None
     assert handle.wait() == 0
     assert handle.drain_tails() == {"stdout": "", "stderr": ""}
+
+
+@pytest.mark.timeout(5)
+def test_captured_projection_handles_large_translation_batch_without_corrupting_payload() -> None:
+    # Encoded catalogues are long key-shaped runs; one diagnostic activates assignment scanning.
+    payload = "A" * 200_000
+    raw = f'password=hidden\n{{"exports":[{{"content":"{payload}"}}]}}\n'
+
+    projected = redacted_projection(raw, field="stdout")
+
+    assert projected == f'password=<redacted>\n{{"exports":[{{"content":"{payload}"}}]}}\n'
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("password=x token=y", "password=<redacted> token=<redacted>"),
+        ('public="password=hidden"', 'public="password=<redacted>'),
+        (
+            "prefix_client_secret_suffix : 'hidden value'",
+            "prefix_client_secret_suffix : <redacted>",
+        ),
+        ("refresh=hidden; ordinary=value", "refresh=<redacted>; ordinary=value"),
+        ("password\n \t=\n'private'", "password\n \\x09=\n<redacted>"),
+        (
+            "password without assignment; ordinary=value",
+            "password without assignment; ordinary=value",
+        ),
+    ],
+)
+def test_captured_assignment_projection_preserves_redaction_boundaries(
+    raw: str, expected: str
+) -> None:
+    assert redacted_projection(raw, field="stdout") == expected

@@ -37,47 +37,49 @@ _SECRET_KEY = re.compile(
     r"access[-_ ]?key|auth|refresh|client[-_ ]?secret)(?:$|[-_ .])",
     re.IGNORECASE,
 )
-_ASSIGNMENT = re.compile(
-    r"(?P<prefix>(?:[A-Za-z0-9_. -]*?(?:password|passwd|pwd|secret|token|cookie|jwt|oauth|"
-    r"api[-_ ]?key|dsn|database[-_ ]?url|sentry[-_ ]?dsn|docker[-_ ]?auth[-_ ]?config|"
-    r"authorization|bearer|credential|private[-_ ]?key|access[-_ ]?key|auth|refresh|"
-    r"client[-_ ]?secret)"
-    r"[A-Za-z0-9_. -]*\s*[:=]\s*))"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;]+)",
-    re.IGNORECASE | re.DOTALL,
+_ASSIGNMENT_KEY = re.compile(r"[A-Za-z0-9_. -]+", re.IGNORECASE)
+# The optional token keeps the cheap batch prefilter's existing trigger set;
+# stream marks preserve its intentionally narrower matching semantics.
+_ASSIGNMENT_MARKER_SPECS: tuple[tuple[str, str | None, bool], ...] = (
+    ("password", "password", True),
+    ("passwd", "passwd", True),
+    ("pwd", "pwd", True),
+    ("secret", "secret", True),
+    ("token", "token", True),
+    ("cookie", "cookie", True),
+    ("jwt", "jwt", True),
+    ("oauth", "oauth", True),
+    ("api key", "api", True),
+    ("dsn", "dsn", True),
+    ("database url", None, True),
+    ("sentry dsn", None, True),
+    ("docker auth config", None, True),
+    ("authorization", "authorization", True),
+    ("bearer", "bearer", True),
+    ("credential", "credential", True),
+    ("private key", "private", True),
+    ("access key", "access", True),
+    ("auth", "auth", True),
+    ("refresh", "refresh", False),
+    ("client secret", "client", False),
 )
-_ASSIGNMENT_KEY_MARKERS = (
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "token",
-    "cookie",
-    "jwt",
-    "oauth",
-    "api-key",
-    "api_key",
-    "api key",
-    "dsn",
-    "database-url",
-    "database_url",
-    "database url",
-    "sentry-dsn",
-    "sentry_dsn",
-    "sentry dsn",
-    "docker-auth-config",
-    "docker_auth_config",
-    "docker auth config",
-    "authorization",
-    "bearer",
-    "credential",
-    "private-key",
-    "private_key",
-    "private key",
-    "access-key",
-    "access_key",
-    "access key",
-    "auth",
+_ASSIGNMENT_SECRET = re.compile(
+    "|".join(
+        re.escape(marker).replace(r"\ ", r"[-_ ]?")
+        for marker, _prefilter_token, _stream_marker in _ASSIGNMENT_MARKER_SPECS
+    ),
+    re.IGNORECASE,
+)
+_ASSIGNMENT_VALUE = re.compile(r"\s*[:=]\s*(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;]+)")
+_ASSIGNMENT_KEY_MARKERS = tuple(
+    marker_variant
+    for marker, _prefilter_token, stream_marker in _ASSIGNMENT_MARKER_SPECS
+    if stream_marker
+    for marker_variant in (
+        (marker,)
+        if " " not in marker
+        else tuple(marker.replace(" ", separator) for separator in ("-", "_", " "))
+    )
 )
 _ASSIGNMENT_KEY_MARKER_ENDINGS = frozenset(marker[-1] for marker in _ASSIGNMENT_KEY_MARKERS)
 _ASSIGNMENT_KEY_MARKER_CHARACTERS = frozenset("".join(_ASSIGNMENT_KEY_MARKERS))
@@ -98,25 +100,12 @@ _JWT_VALUE = re.compile(
     r"(?:^|\s)eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:$|\s)",
 )
 _SAFE_ENV_KEY = re.compile(r"^(?:LANG|LC_[A-Z0-9_]+|TERM|TZ|PYTHONUNBUFFERED)$")
-_ASSIGNMENT_TOKENS = (
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "token",
-    "cookie",
-    "jwt",
-    "oauth",
-    "api",
-    "dsn",
-    "authorization",
-    "bearer",
-    "credential",
-    "private",
-    "access",
-    "auth",
-    "refresh",
-    "client",
+_ASSIGNMENT_TOKENS = tuple(
+    dict.fromkeys(
+        prefilter_token
+        for _marker, prefilter_token, _stream_marker in _ASSIGNMENT_MARKER_SPECS
+        if prefilter_token is not None
+    )
 )
 _ASSIGNMENT_KEY_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_. -"
@@ -266,6 +255,24 @@ def _argv_secret_values(
     return tuple(dict.fromkeys(value for value in values if value))
 
 
+def _redact_assignments(text: str) -> str:
+    # Scan maximal key runs once: retrying a secret-bearing regex at every byte
+    # makes large base64 translation responses take superlinear time.
+    parts: list[str] = []
+    cursor = position = 0
+    while (key := _ASSIGNMENT_KEY.search(text, position)) is not None:
+        position = key.end()
+        if _ASSIGNMENT_SECRET.search(key.group()) is None:
+            continue
+        value = _ASSIGNMENT_VALUE.match(text, position)
+        if value is None:
+            continue
+        parts.extend((text[cursor : value.start("value")], REDACTION_MARKER))
+        cursor = position = value.end()
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
     text = value
     for secret in secrets:
@@ -273,7 +280,7 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
             text = text.replace(secret, REDACTION_MARKER)
     lowered = text.casefold()
     if any(token in lowered for token in _ASSIGNMENT_TOKENS):
-        text = _ASSIGNMENT.sub(r"\g<prefix>" + REDACTION_MARKER, text)
+        text = _redact_assignments(text)
     if any(
         header in lowered
         for header in ("authorization:", "proxy-authorization:", "cookie:", "set-cookie:")
