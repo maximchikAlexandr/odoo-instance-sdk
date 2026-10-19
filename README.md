@@ -272,8 +272,11 @@ JSON, and TOON return the same stable error code and safe details.
 
 ### PostgreSQL trust and lifecycle
 
-An SDK-owned cluster will not start an unapproved mutable image. Resolve and
-approve the image digest, then start and inspect the cluster:
+An SDK-owned cluster will not start an unapproved mutable image.
+`odcli init --yes` approves the selected image after resolving its exact digest
+and continues initialization in one invocation. Interactive init asks for consent
+when the digest is not already approved. Dry-run does not resolve or approve images.
+Standalone approval and lifecycle operations remain available:
 
 ```bash
 odcli postgres approve-image
@@ -421,13 +424,27 @@ git_branch = "staging"
 ```
 
 ```bash
+odcli init --remote lab https://lab.example main
 odcli remote ls
-odcli remote add staging --url https://staging.example --database staging --branch staging
+odcli remote add staging --url https://staging.example --branch staging
 ODCLI_REMOTE_STAGING_MASTER_PASSWORD='from-secret-store' \
   odcli --project . db refresh --remote staging --dry-run --format json
 odcli remote update staging --branch release/19
 odcli remote remove staging
 ```
+
+`init --remote NAME URL GIT_REF` registers a named source during initialization,
+so no subsequent `remote add` is needed for that source. The existing explicit
+form `init --remote NAME URL DATABASE GIT_REF` remains supported; forms can be
+mixed for multiple sources. Re-running init without `--remote` preserves them.
+
+The named source's `database` field and `remote add --database` are optional.
+Omitting them defers selection to `db refresh --remote NAME`: a single exposed
+database is selected automatically; an empty, ambiguous or unavailable list
+fails before download. An explicit name bypasses listing. Adding a remote,
+including dry-run, does not contact the server. COPY checkout planning requires
+an explicit database or a retained backup selected with `--backup`; download
+first with `db refresh --remote NAME` when using automatic discovery.
 
 The derived keys are `ODCLI_REMOTE_LAB_MASTER_PASSWORD` and
 `ODCLI_REMOTE_STAGING_MASTER_PASSWORD`; values are never accepted as CLI

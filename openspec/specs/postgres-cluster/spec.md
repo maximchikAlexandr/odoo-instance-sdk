@@ -1,10 +1,8 @@
 # postgres-cluster Specification
 
 ## Purpose
-TBD - created by archiving change add-postgres-cluster-lifecycle. Update Purpose after archive.
-
+Define PostgreSQL cluster ownership, image consent, lifecycle and diagnostics for project-managed Compose clusters and external PostgreSQL endpoints.
 ## Requirements
-
 ### Requirement: `PostgresCluster` public abstraction
 
 `PostgresCluster` MUST быть единственной operational abstraction для project-level PostgreSQL cluster. SDK MUST NOT предоставлять `Resource`-подобный интерфейс, factory hierarchy или `client.postgres` facade.
@@ -191,7 +189,7 @@ snapshot = cluster.resource_snapshot()  # read-only container identity + metrics
 
 ### Requirement: Compose image trust and serialized lifecycle
 
-For compose mode, a manifest image is only a mutable selector. `approve_image(image_digest)` MUST pull and inspect it, accept only an exactly matching OCI `repository@sha256:<64-hex>` RepoDigest, and save a `reference -> digest` approval in user data outside the repository with mode `0600`. Each `ensure_running()` MUST resolve again, fail closed if it differs or approval is corrupt, and render Compose with the immutable approved digest. Standalone public `status()` remains read-only and does not acquire the lifecycle lock. The canonical exclusive project lock MUST cover lifecycle-internal status/rechecks, reconciliation, `up`, polling to terminal health, and `stop`; a concurrent caller rechecks status after acquiring the lock.
+For compose mode, a manifest image is only a mutable selector. `approve_image(image_digest)` MUST pull and inspect it, accept only an exactly matching OCI `repository@sha256:<64-hex>` RepoDigest, and save a `reference -> digest` approval in user data outside the repository with mode `0600`. Compose `init` MAY obtain this explicit consent within its existing command: `--yes` confirms the selected resolved digest, or interactive confirmation displays the reference and digest. It SHALL use the same trust store and preserve the standalone consent operations. Each `ensure_running()` MUST resolve again, fail closed if it differs or approval is corrupt, and render Compose with the immutable approved digest. Standalone public `status()` remains read-only and does not acquire the lifecycle lock. The canonical exclusive project lock MUST cover lifecycle-internal status/rechecks, reconciliation, `up`, polling to terminal health, and `stop`; a concurrent caller rechecks status after acquiring the lock.
 
 #### Scenario: Compose startup uses an approved immutable digest
 
@@ -366,7 +364,7 @@ Port allocation MUST быть централизованной через еди
 3. Live `probe_address` на кандидата.
 4. Возвращать первый свободный порт в kind-специфичном диапазоне, не занятый ни в одном источнике.
 
-`kind` — `"postgres"` (range `[5468, 65535)`) или `"http"` (range `[8069, 8099]`).
+`kind` — `"postgres"` (range `[5468, 65535)`) или `"http"` (range `[8000, 9000]` включительно). HTTP сначала проверяет preferred внутри диапазона (или `8069`, если preferred отсутствует), затем весь диапазон по возрастанию без повторной проверки. Preferred вне диапазона игнорируется. Явный HTTP-порт проверяется отдельно без ограничения диапазоном и без fallback.
 
 `exclude_project` (optional `Path`) — пропускает порты собственного проекта (его manifest), чтобы re-init / checkout не видел собственные `preferred_http_port` / `postgres.port` как collision.
 
@@ -520,3 +518,46 @@ An SDK-owned Compose cluster resource snapshot SHALL expose a stable redacted vo
 
 - **WHEN** volume ownership cannot be proven exclusively from the generated Compose identity
 - **THEN** the volume is preserved and reported as non-reclaimable with unknown or shared ownership
+
+### Requirement: Cross-project HTTP port allocation is bounded and deterministic
+
+The shared HTTP allocator SHALL consider the inclusive range `8000` through `9000`. When a preferred project port is present and in range, it SHALL probe that port first. When no preferred port is present, it SHALL probe `8069` first. When the preferred port is outside the range, it SHALL ignore that value and begin the ascending automatic scan at `8000`; it SHALL not prioritize `8069` in that case. After any first probe, it SHALL scan every remaining candidate in ascending order through `9000` exactly once. It SHALL reject exhaustion after the full scan. An explicit HTTP port SHALL be probed exactly once even when outside the automatic range and SHALL not fall back to another port.
+
+#### Scenario: Preferred HTTP port precedes the full scan
+
+- **WHEN** automatic HTTP allocation has an in-range preferred port
+- **THEN** that port is probed first, followed by each remaining candidate in ascending order without duplicate probes
+
+#### Scenario: Absent preferred HTTP port defaults to 8069
+
+- **WHEN** automatic HTTP allocation has no preferred port
+- **THEN** port `8069` is probed first and the remaining `8000..9000` candidates are scanned once
+
+#### Scenario: Out-of-range preferred HTTP port starts the ascending scan
+
+- **WHEN** automatic HTTP allocation has a preferred port outside `8000..9000`
+- **THEN** the preferred value is ignored and the scan starts at `8000` in ascending order, without giving `8069` special priority
+
+#### Scenario: HTTP allocation reports exhaustion
+
+- **WHEN** every candidate in `8000..9000` is occupied
+- **THEN** allocation fails after probing the complete range and does not wrap or silently choose an outside port
+
+#### Scenario: Explicit HTTP port is exact
+
+- **WHEN** an explicit HTTP port is supplied, including one outside `8000..9000`
+- **THEN** only that exact port is probed and no automatic fallback is attempted
+
+### Requirement: Compose init keeps local administrator credentials private
+
+Self-contained Compose initialization SHALL preserve a nonblank source or generated `admin_passwd`, generate a cryptographically random local value only when neither exists, and write it atomically to the owner-only `0600` generated configuration. The credential SHALL remain separate from the PostgreSQL master password and SHALL not appear in manifests, immutable plans, process arguments, logs, results, or exceptions.
+
+#### Scenario: Existing source credential is preserved
+
+- **WHEN** a source config contains a nonblank `admin_passwd`
+- **THEN** generated Compose configuration preserves that value without changing the source file
+
+#### Scenario: Missing credential is generated once
+
+- **WHEN** source and generated configs do not contain a nonblank `admin_passwd`
+- **THEN** init generates and writes a private local credential, and a later repair/re-init preserves it
