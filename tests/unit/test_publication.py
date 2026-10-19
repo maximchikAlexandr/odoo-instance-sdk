@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 from click.testing import CliRunner
+from msgspec.structs import replace
 
 import odoo_instance_sdk.commands.publication as publication_commands
 import odoo_instance_sdk.internal.publication_routes as publication_routes
@@ -97,6 +98,30 @@ def test_settings_reject_plaintext_and_non_loopback_control(tmp_path: Path) -> N
         values[field] = value
         with pytest.raises(ConfigError):
             PublicationSettings(**cast("dict[str, Any]", values))
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "::1"])
+def test_settings_accept_loopback_trusted_proxy(address: str) -> None:
+    settings = replace(_settings(), trusted_proxy_addresses=(address,))
+    assert settings.trusted_proxy_addresses == (address,)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "0.0.0.0",
+        "::",
+        "224.0.0.1",
+        "ff02::1",
+        "240.0.0.1",
+        "100::",
+        "::1%lo0\n    respond 200",
+        "fe80::1%lo0\n    respond 200",
+    ],
+)
+def test_settings_reject_unsafe_trusted_proxy(address: str) -> None:
+    with pytest.raises(ConfigError, match=r"must be (?:an unscoped|a specific) IP"):
+        replace(_settings(), trusted_proxy_addresses=(address,))
 
 
 def test_publish_is_stable_and_unpublish_is_idempotent(
