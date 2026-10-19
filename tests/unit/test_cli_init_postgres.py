@@ -9,9 +9,14 @@ import pytest
 from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpPlan
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
+from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
+    RecordingExecutor,
+    RunContext,
+)
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -71,6 +76,15 @@ def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
             read_only=True,
         )
 
+    def _resolved_image(self: PostgresCluster, timeout: float) -> Command[str]:
+        return Command.create(
+            ExecutionPlan(steps=()),
+            lambda _context: "postgres@sha256:" + "a" * 64,
+            steps=(),
+            executor=RecordingExecutor(),
+        )
+
+    monkeypatch.setattr(PostgresCluster, "resolve_image_digest_command", _resolved_image)
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", _noop_ensure_running)
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap._bootstrap_sql_step",
@@ -775,7 +789,7 @@ def test_init_compose_fails_closed_on_rev_parse_failure_with_git_marker(
 
     from odoo_instance_sdk.internal import git_worktree
 
-    def fail_rev_parse(_path: Path) -> Path:
+    def fail_rev_parse(_path: Path, *, step_id: str | None = None) -> Path:
         raise git_worktree.GitError("rev-parse failed")
 
     monkeypatch.setattr(git_worktree, "rev_parse_toplevel", fail_rev_parse)
@@ -988,3 +1002,127 @@ def test_init_postgres_provenance_recorded(tmp_path: Path) -> None:
     )
     envelope = json.loads(result.output)
     assert "postgres" in envelope["provenance"]["option"]
+
+
+@pytest.mark.parametrize("output_format", ["rich", "json", "toon"])
+def test_init_generates_stable_private_local_master_password(
+    tmp_path: Path,
+    output_format: str,
+) -> None:
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "postgres:16",
+        "--postgres-port",
+        "5468",
+        "--local-config",
+        "--format",
+        output_format,
+    ]
+    runner = CliRunner()
+    preview = runner.invoke(cli, [*args, "--dry-run"])
+    assert preview.exit_code == 0, preview.output
+    generated_path = tmp_path / ".odcli" / "odoo.conf"
+    assert not generated_path.exists()
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    generated = parse_odoo_config(generated_path)
+    secret = generated["admin_passwd"]
+    assert len(secret) >= 40
+    assert secret != generated["db_password"]
+    assert generated_path.stat().st_mode & 0o777 == 0o600
+    manifest = tmp_path / ".odcli" / "project.toml"
+    assert secret not in manifest.read_text()
+    assert secret not in first.output
+    before = generated_path.read_bytes()
+    second = runner.invoke(cli, args)
+    assert second.exit_code == 0, second.output
+    assert generated_path.read_bytes() == before
+    assert secret not in second.output
+    generated_path.write_text(
+        generated_path.read_text().replace("db_port = 5468", "db_port = 5499")
+    )
+    repaired = runner.invoke(cli, args)
+    assert repaired.exit_code == 0, repaired.output
+    assert parse_odoo_config(generated_path)["admin_passwd"] == secret
+    assert parse_odoo_config(generated_path)["db_port"] == "5468"
+    assert secret not in repaired.output
+    before = generated_path.read_bytes()
+    preview = runner.invoke(cli, [*args, "--dry-run"])
+    assert preview.exit_code == 0, preview.output
+    assert secret not in preview.output
+    assert generated_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("legacy_value", [None, "", "   "])
+def test_reinit_repairs_missing_local_master_password(
+    tmp_path: Path,
+    legacy_value: str | None,
+) -> None:
+    import configparser
+
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "postgres:16",
+        "--postgres-port",
+        "5468",
+        "--local-config",
+    ]
+    runner = CliRunner()
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    parser = configparser.RawConfigParser(interpolation=None)
+    parser.read(generated)
+    parser.remove_option("options", "admin_passwd")
+    if legacy_value is not None:
+        parser.set("options", "admin_passwd", legacy_value)
+    with generated.open("w") as stream:
+        parser.write(stream)
+    manifest = tmp_path / ".odcli" / "project.toml"
+    manifest_before = manifest.read_bytes()
+    legacy_bytes = generated.read_bytes()
+    preview = runner.invoke(cli, [*args, "--dry-run"])
+    assert preview.exit_code == 0, preview.output
+    assert generated.read_bytes() == legacy_bytes
+    repaired = runner.invoke(cli, args)
+    assert repaired.exit_code == 0, repaired.output
+    assert len(parse_odoo_config(generated)["admin_passwd"]) >= 40
+    assert manifest.read_bytes() == manifest_before
+    stable = generated.read_bytes()
+    assert runner.invoke(cli, args).exit_code == 0
+    assert generated.read_bytes() == stable
+
+
+def test_init_preserves_source_master_password_during_regeneration(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    source = tmp_path / "odoo.conf"
+    source_bytes = b"[options]\nadmin_passwd = supplied-local-secret\n"
+    source.write_bytes(source_bytes)
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "postgres:16",
+        "--postgres-port",
+        "5468",
+        "--config",
+        str(source),
+    ]
+    runner = CliRunner()
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    assert parse_odoo_config(generated)["admin_passwd"] == "supplied-local-secret"
+    generated.unlink()
+    regenerated = runner.invoke(cli, args)
+    assert regenerated.exit_code == 0, regenerated.output
+    assert parse_odoo_config(generated)["admin_passwd"] == "supplied-local-secret"
+    assert "supplied-local-secret" not in first.output + regenerated.output
+    assert source.read_bytes() == source_bytes

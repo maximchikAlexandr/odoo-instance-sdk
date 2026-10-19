@@ -249,9 +249,9 @@ def test_fix_tool_requires_exact_compatibility_and_retires_only_merged_fix(
     assert ["remove", "--kind", "hotfix", "--identifier", "118"] in engine_calls
 
 
-def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def _bootstrap_fix_tool_case(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provenance_url: str
+) -> tuple[ModuleType, _BootstrapRunner, Path]:
     fix_tool = _module("fix_tool")
     home = tmp_path / "home"
     tool_root = home / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
@@ -269,7 +269,7 @@ def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
     runner = _BootstrapRunner(
         json.dumps(
             {
-                "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                "url": provenance_url,
                 "vcs_info": {"commit_id": SHA},
             }
         ),
@@ -298,8 +298,19 @@ def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
         },
     )
 
-    assert fix_tool._canonical_interpreter() == interpreter
     fix_tool._install(42, SHA, 119, review_path, None)
+    return fix_tool, runner, interpreter
+
+
+def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fix_tool, runner, interpreter = _bootstrap_fix_tool_case(
+        monkeypatch,
+        tmp_path,
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+    )
+    assert fix_tool._canonical_interpreter() == interpreter
     assert runner.calls == [
         [
             str(interpreter),
@@ -327,6 +338,18 @@ def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter(
             "session",
         ],
     ]
+
+
+def test_fix_tool_bootstraps_shared_engine_with_validated_canonical_interpreter_pinned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fix_tool, runner, interpreter = _bootstrap_fix_tool_case(
+        monkeypatch,
+        tmp_path,
+        f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{SHA}",
+    )
+    assert fix_tool._canonical_interpreter() == interpreter
+    assert runner.calls[1][4:8] == ["install", "--kind", "hotfix", "--identifier"]
 
 
 def test_fix_tool_accepts_uv_tool_launcher_symlinks(
@@ -470,3 +493,22 @@ def test_update_wrapper_reconciles_only_after_success(monkeypatch: pytest.Monkey
     with pytest.raises(RuntimeError, match="did not report success"):
         fix_tool._update("main")
     assert reconciled == [SHA]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"git+https://github.com/foreign/odoo-instance-sdk.git@{SHA}",
+        f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{'b' * 40}",
+        f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{SHA}/extra",
+    ],
+)
+def test_fix_tool_rejects_mismatched_pinned_provenance(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    fix_tool = _module("fix_tool")
+    runner = _BootstrapRunner(json.dumps({"url": url, "vcs_info": {"commit_id": SHA}}), "{}")
+    monkeypatch.setattr(fix_tool, "_run", runner)
+    with pytest.raises(RuntimeError, match="trusted repository"):
+        fix_tool._canonical_source(Path("/trusted/python"))
+    assert len(runner.calls) == 1
