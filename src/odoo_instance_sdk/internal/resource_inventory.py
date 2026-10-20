@@ -41,6 +41,9 @@ class ResourceType(StrEnum):
     VOLUME = "volume"
     LOG = "log"
     FILESTORE = "filestore"
+    CONFIG = "config"
+    SECRET = "secret"
+    TEMPORARY = "temporary"
     OTHER = "other"
 
 
@@ -140,6 +143,11 @@ class EnvironmentResourceSource:
     storage: StorageFootprint | None = None
     backup_id: str | None = None
     last_error: str | None = None
+    generated_config_path: Path | None = None
+    log_paths: tuple[Path, ...] = ()
+    temp_paths: tuple[Path, ...] = ()
+    worktree_ownership: OwnershipConfidence = OwnershipConfidence.PROVEN
+    worktree_symlink_escape: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +156,11 @@ class ProjectResourceSource:
     repository_root: Path
     runtime_database: str | None = None
     database_cluster: str | None = None
+    config_paths: tuple[Path, ...] = ()
+    secret_paths: tuple[Path, ...] = ()
+    primary_python_environment_path: Path | None = None
+    log_paths: tuple[Path, ...] = ()
+    temp_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,9 +185,10 @@ class VolumeResourceSource:
 @dataclass(frozen=True, slots=True)
 class FileResourceSource:
     path: Path
-    kind: Literal["log", "filestore", "owned_file", "part"]
+    kind: Literal["log", "filestore", "config", "secret", "temporary", "owned_file", "part"]
     owner_identity: str | None = None
     ownership: OwnershipConfidence = OwnershipConfidence.UNKNOWN
+    symlink_escape: bool = False
 
 
 def stable_resource_identity(kind: str, value: str) -> str:
@@ -227,7 +241,7 @@ def _safe_message(message: str | None, fallback: str) -> str:
 
 def _file_size(path: Path) -> int | None:
     try:
-        return path.stat().st_size if path.is_file() else None
+        return path.stat().st_size if path.is_file() and not path.is_symlink() else None
     except OSError:
         return None
 
@@ -363,7 +377,11 @@ def _environment_items(
             type=ResourceType.WORKTREE,
             name=source.worktree_path.name or "worktree",
             relationships=(env_id,),
-            ownership_confidence=OwnershipConfidence.PROVEN,
+            ownership_confidence=(
+                OwnershipConfidence.UNKNOWN
+                if source.worktree_symlink_escape
+                else source.worktree_ownership
+            ),
             active_use=active,
             measured_bytes=worktree_bytes,
             measured_bytes_semantics="filesystem bytes" if worktree_bytes is not None else None,
@@ -375,7 +393,11 @@ def _environment_items(
             completeness_reason=None
             if worktree_bytes is not None
             else "worktree measurement unavailable",
-            reclaimability_reason="environment removal is evidence-gated",
+            reclaimability_reason=(
+                "worktree path crosses a symlink boundary"
+                if source.worktree_symlink_escape
+                else "environment removal is evidence-gated"
+            ),
             sanitized_path=_path_display(source.worktree_path, roots),
         ),
         ResourceInventoryItem(
@@ -405,6 +427,28 @@ def _environment_items(
             sanitized_path=_path_display(source.python_environment_path, roots),
         ),
     ]
+    if source.generated_config_path is not None:
+        items.append(
+            _file_item(
+                FileResourceSource(
+                    path=source.generated_config_path,
+                    kind="config",
+                    owner_identity=env_id,
+                    ownership=OwnershipConfidence.PROVEN,
+                ),
+                roots,
+            )
+        )
+    for path in source.log_paths:
+        items.append(
+            _file_item(FileResourceSource(path=path, kind="log", owner_identity=env_id), roots)
+        )
+    for path in source.temp_paths:
+        items.append(
+            _file_item(
+                FileResourceSource(path=path, kind="temporary", owner_identity=env_id), roots
+            )
+        )
     return tuple(items)
 
 
@@ -447,6 +491,7 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
 def _file_item(source: FileResourceSource, roots: Sequence[Path]) -> ResourceInventoryItem:
     measured = _file_size(source.path)
     identity = stable_resource_identity(source.kind, str(source.path.resolve(strict=False)))
+    ownership = OwnershipConfidence.UNKNOWN if source.symlink_escape else source.ownership
     return ResourceInventoryItem(
         stable_identity=identity,
         type=(
@@ -454,11 +499,17 @@ def _file_item(source: FileResourceSource, roots: Sequence[Path]) -> ResourceInv
             if source.kind == "filestore"
             else ResourceType.LOG
             if source.kind == "log"
+            else ResourceType.CONFIG
+            if source.kind == "config"
+            else ResourceType.SECRET
+            if source.kind == "secret"
+            else ResourceType.TEMPORARY
+            if source.kind == "temporary"
             else ResourceType.OTHER
         ),
         name=source.path.name or source.kind,
         relationships=((source.owner_identity,) if source.owner_identity else ()),
-        ownership_confidence=source.ownership,
+        ownership_confidence=ownership,
         measured_bytes=measured,
         measured_bytes_semantics="filesystem bytes" if measured is not None else None,
         completeness=(
@@ -467,7 +518,11 @@ def _file_item(source: FileResourceSource, roots: Sequence[Path]) -> ResourceInv
             else MeasurementCompleteness.UNAVAILABLE
         ),
         completeness_reason=None if measured is not None else "filesystem measurement unavailable",
-        reclaimability_reason="preserved until ownership is proven",
+        reclaimability_reason=(
+            "symlink escape is never traversed"
+            if source.symlink_escape
+            else "preserved until ownership is proven"
+        ),
         sanitized_path=_path_display(source.path, roots),
     )
 
@@ -477,14 +532,35 @@ def _read_only_files(roots: Iterable[Path], known: set[Path]) -> tuple[FileResou
     result: list[FileResourceSource] = []
     for root in roots:
         try:
-            for directory, _directories, filenames in os.walk(root, followlinks=False):
+            for directory, directories, filenames in os.walk(root, followlinks=False):
+                for dirname in directories:
+                    path = Path(directory, dirname)
+                    if path.is_symlink():
+                        result.append(
+                            FileResourceSource(
+                                path=path,
+                                kind="owned_file",
+                                ownership=OwnershipConfidence.UNKNOWN,
+                                symlink_escape=True,
+                            )
+                        )
                 for filename in filenames:
                     path = Path(directory, filename)
                     try:
                         resolved = path.resolve(strict=False)
                     except OSError:
                         continue
-                    if resolved in known or path.is_symlink():
+                    if resolved in known:
+                        continue
+                    if path.is_symlink():
+                        result.append(
+                            FileResourceSource(
+                                path=path,
+                                kind="owned_file",
+                                ownership=OwnershipConfidence.UNKNOWN,
+                                symlink_escape=True,
+                            )
+                        )
                         continue
                     result.append(
                         FileResourceSource(
@@ -520,10 +596,38 @@ def build_resource_inventory(  # noqa: C901
         if current is None:
             resources[item.stable_identity] = item
             return
-        relationships = tuple(dict.fromkeys((*current.relationships, *item.relationships)))
-        resources[item.stable_identity] = current.__class__(
-            **{**msgspec.structs.asdict(current), "relationships": relationships}
+        relationships = tuple(sorted(set(current.relationships).union(item.relationships)))
+        ownership = current.ownership_confidence
+        if ownership is not item.ownership_confidence:
+            if OwnershipConfidence.SHARED in {ownership, item.ownership_confidence}:
+                ownership = OwnershipConfidence.SHARED
+            elif OwnershipConfidence.UNKNOWN in {ownership, item.ownership_confidence}:
+                ownership = OwnershipConfidence.UNKNOWN
+            else:
+                ownership = OwnershipConfidence.EXTERNAL
+        active_use = current.active_use
+        if ActiveUse.ACTIVE in {active_use, item.active_use}:
+            active_use = ActiveUse.ACTIVE
+        elif ActiveUse.UNKNOWN in {active_use, item.active_use}:
+            active_use = ActiveUse.UNKNOWN
+        completeness = current.completeness
+        if MeasurementCompleteness.UNAVAILABLE in {completeness, item.completeness}:
+            completeness = MeasurementCompleteness.UNAVAILABLE
+        elif MeasurementCompleteness.PARTIAL in {completeness, item.completeness}:
+            completeness = MeasurementCompleteness.PARTIAL
+        values = msgspec.structs.asdict(current)
+        values.update(
+            relationships=relationships,
+            ownership_confidence=ownership,
+            active_use=active_use,
+            completeness=completeness,
+            reclaimable=current.reclaimable
+            and item.reclaimable
+            and ownership is OwnershipConfidence.PROVEN,
         )
+        if ownership is not OwnershipConfidence.PROVEN:
+            values["reclaimability_reason"] = "ownership evidence conflicts or is shared"
+        resources[item.stable_identity] = current.__class__(**values)
 
     for projection in backups:
         item, finding = _backup_item(projection, roots, by_cluster_name)
@@ -593,6 +697,60 @@ def build_resource_inventory(  # noqa: C901
                 sanitized_path=_path_display(project.repository_root, roots),
             )
         )
+        for path in project.config_paths:
+            add(
+                _file_item(
+                    FileResourceSource(
+                        path=path,
+                        kind="config",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
+                )
+            )
+        for path in project.secret_paths:
+            add(
+                _file_item(
+                    FileResourceSource(
+                        path=path,
+                        kind="secret",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
+                )
+            )
+        if project.primary_python_environment_path is not None:
+            add(
+                ResourceInventoryItem(
+                    stable_identity=stable_resource_identity(
+                        "python_environment", str(project.primary_python_environment_path.resolve())
+                    ),
+                    type=ResourceType.PYTHON_ENVIRONMENT,
+                    name=project.primary_python_environment_path.name or "python-environment",
+                    relationships=(identity,),
+                    ownership_confidence=OwnershipConfidence.PROVEN,
+                    active_use=ActiveUse.INACTIVE,
+                    completeness=MeasurementCompleteness.UNAVAILABLE,
+                    completeness_reason="Python environment measurement unavailable",
+                    sanitized_path=_path_display(project.primary_python_environment_path, roots),
+                    reclaimability_reason="primary project Python environment",
+                )
+            )
+        for path in project.log_paths:
+            add(
+                _file_item(
+                    FileResourceSource(path=path, kind="log", owner_identity=identity), roots
+                )
+            )
+        for path in project.temp_paths:
+            add(
+                _file_item(
+                    FileResourceSource(path=path, kind="temporary", owner_identity=identity),
+                    roots,
+                )
+            )
 
     for environment in environments:
         for item in _environment_items(environment, roots):
@@ -653,6 +811,18 @@ def build_resource_inventory(  # noqa: C901
                 message="filestore was preserved because ownership is unknown",
                 sanitized_path=_path_display(file_source.path, roots),
                 recommendation=None,
+            )
+            findings[(finding.code, finding.stable_identity)] = finding
+        if file_source.symlink_escape:
+            finding = ResourceFinding(
+                code="symlink_escape_retained",
+                severity="error",
+                stable_identity=stable_resource_identity(
+                    file_source.kind, str(file_source.path.resolve(strict=False))
+                ),
+                message="symlink escape was retained without following its target",
+                sanitized_path=_path_display(file_source.path, roots),
+                recommendation="inspect the link before removing its containing directory",
             )
             findings[(finding.code, finding.stable_identity)] = finding
 
