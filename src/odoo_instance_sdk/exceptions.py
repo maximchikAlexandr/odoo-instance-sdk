@@ -129,6 +129,12 @@ class PlanValidationError(PlanError):
     code = "plan_validation"
 
 
+class ProjectRemovalError(PlanError):
+    """A project removal plan or one of its guarded actions failed."""
+
+    code = "project_removal_failed"
+
+
 class PublicationError(PlanError):
     """A publication setting, runtime, or owned-route operation failed."""
 

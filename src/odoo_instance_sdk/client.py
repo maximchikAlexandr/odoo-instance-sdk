@@ -5,6 +5,7 @@ import contextlib
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import ProcessNotFoundError
@@ -14,6 +15,9 @@ from odoo_instance_sdk.resources.environment import EnvironmentResource
 from odoo_instance_sdk.resources.instance import InstanceFactory
 from odoo_instance_sdk.resources.publication import PublicationResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.resources.project import ProjectResource
 
 
 @dataclass(slots=True, kw_only=True)
@@ -29,12 +33,16 @@ class OdooClient:
     backups: BackupResource = field(init=False)
     environments: EnvironmentResource = field(init=False)
     publication: PublicationResource = field(init=False)
+    projects: ProjectResource = field(init=False)
 
     def __post_init__(self) -> None:
         self.instance = InstanceFactory(_client=self)
         self.backups = BackupResource(_client=self)
         self.environments = EnvironmentResource(_client=self)
         self.publication = PublicationResource(_client=self)
+        from odoo_instance_sdk.resources.project import ProjectResource
+
+        self.projects = ProjectResource(_client=self)
         atexit.register(self._cleanup_secret_configs)
 
     def __repr__(self) -> str:
