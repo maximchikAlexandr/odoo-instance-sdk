@@ -271,14 +271,25 @@ class _EnvironmentMixin:
         clauses: list[str] = []
         if git_common_dir is not None:
             if project_id is None:
-                clauses.append("git_common_dir = ?")
+                clauses.append(
+                    "git_common_dir = ? AND (project_id IS NULL OR EXISTS ("
+                    "SELECT 1 FROM projects p WHERE p.project_id = environments.project_id "
+                    "AND p.registration_state = 'registered'))"
+                )
                 params.append(git_common_dir)
             else:
-                clauses.append("(project_id = ? OR (project_id IS NULL AND git_common_dir = ?))")
-                params.extend((project_id, git_common_dir))
+                clauses.append(
+                    "(project_id = ? OR (project_id IS NULL AND git_common_dir = ?)) "
+                    "AND EXISTS (SELECT 1 FROM projects p WHERE p.project_id = ? "
+                    "AND p.registration_state = 'registered')"
+                )
+                params.extend((project_id, git_common_dir, project_id))
         elif project_id is not None:
-            clauses.append("project_id = ?")
-            params.append(project_id)
+            clauses.append(
+                "project_id = ? AND EXISTS (SELECT 1 FROM projects p "
+                "WHERE p.project_id = ? AND p.registration_state = 'registered')"
+            )
+            params.extend((project_id, project_id))
         if not include_removed:
             clauses.append("state != 'removed'")
         if clauses:
@@ -423,11 +434,15 @@ class _EnvironmentMixin:
 
     @_translate_sqlite_error
     def get_project(self, project_id: str) -> sqlite3.Row | None:
-        """Resolve an already registered project without accepting a caller path."""
+        """Resolve a project by exact full id, including forgotten lifecycle rows."""
         row: sqlite3.Row | None = self._conn.execute(
             "SELECT * FROM projects WHERE project_id = ?", (project_id,)
         ).fetchone()
         return row
+
+    def get_project_for_lifecycle(self, project_id: str) -> sqlite3.Row | None:
+        """Explicit full-id lifecycle lookup that includes forgotten projects."""
+        return self.get_project(project_id)
 
     @_translate_sqlite_error
     def _monitor_snapshot_rows(
@@ -438,6 +453,11 @@ class _EnvironmentMixin:
         try:
             clauses: list[str] = []
             params: list[str] = []
+            clauses.append(
+                "(e.project_id IS NULL OR EXISTS ("
+                "SELECT 1 FROM projects p WHERE p.project_id = e.project_id "
+                "AND p.registration_state = 'registered'))"
+            )
             if not include_removed:
                 clauses.append("e.state != 'removed'")
             if project_id is not None:
@@ -445,7 +465,8 @@ class _EnvironmentMixin:
                     "(e.project_id = ? OR (e.project_id IS NULL AND EXISTS ("
                     "SELECT 1 FROM projects p "
                     "WHERE p.project_id = ? AND p.repository_root = e.repository_root "
-                    "AND p.git_common_dir = e.git_common_dir"
+                    "AND p.git_common_dir = e.git_common_dir "
+                    "AND p.registration_state = 'registered'"
                     ")))"
                 )
                 params.extend((project_id, project_id))
@@ -462,13 +483,20 @@ class _EnvironmentMixin:
             )
             if project_id is None:
                 runtimes = self._conn.execute(
-                    "SELECT * FROM runtime WHERE owner_kind = 'environment' ORDER BY owner_id"
+                    "SELECT r.* FROM runtime r "
+                    "LEFT JOIN environments e ON e.id = r.owner_id "
+                    "WHERE r.owner_kind = 'environment' AND (e.project_id IS NULL OR EXISTS ("
+                    "SELECT 1 FROM projects p WHERE p.project_id = e.project_id "
+                    "AND p.registration_state = 'registered')) ORDER BY r.owner_id"
                 ).fetchall()
                 projects = self._conn.execute(
-                    "SELECT * FROM projects ORDER BY project_id"
+                    "SELECT * FROM projects WHERE registration_state = 'registered' "
+                    "ORDER BY project_id"
                 ).fetchall()
                 project_runtimes = self._conn.execute(
-                    "SELECT * FROM runtime WHERE owner_kind = 'project' ORDER BY owner_id"
+                    "SELECT r.* FROM runtime r JOIN projects p ON p.project_id = r.owner_id "
+                    "WHERE r.owner_kind = 'project' AND p.registration_state = 'registered' "
+                    "ORDER BY r.owner_id"
                 ).fetchall()
             else:
                 environment_ids = [str(row["id"]) for row in environments]
@@ -482,11 +510,14 @@ class _EnvironmentMixin:
                 else:
                     runtimes = []
                 projects = self._conn.execute(
-                    "SELECT * FROM projects WHERE project_id = ? ORDER BY project_id",
+                    "SELECT * FROM projects WHERE project_id = ? "
+                    "AND registration_state = 'registered' ORDER BY project_id",
                     (project_id,),
                 ).fetchall()
                 project_runtimes = self._conn.execute(
-                    "SELECT * FROM runtime WHERE owner_kind = 'project' AND owner_id = ?",
+                    "SELECT r.* FROM runtime r JOIN projects p ON p.project_id = r.owner_id "
+                    "WHERE r.owner_kind = 'project' AND r.owner_id = ? "
+                    "AND p.registration_state = 'registered'",
                     (project_id,),
                 ).fetchall()
             self._conn.execute("COMMIT")

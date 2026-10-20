@@ -28,6 +28,13 @@ projects = Table(
     Column("git_common_dir", Text, nullable=False),
     Column("registered_at", Text, nullable=False),
     Column("updated_at", Text, nullable=False),
+    Column(
+        "registration_state",
+        Text,
+        CheckConstraint("registration_state IN ('registered', 'forgotten')"),
+        nullable=False,
+        server_default="registered",
+    ),
     Index("projects_identity_idx", "repository_root", "git_common_dir", unique=True),
 )
 
