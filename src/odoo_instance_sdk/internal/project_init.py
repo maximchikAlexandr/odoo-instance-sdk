@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
-from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.generated_config import (
     configured_admin_password,
     generate_config,
@@ -94,6 +93,8 @@ def project_owned_data_dir(project_root: Path) -> Path:
 
 @contextlib.contextmanager
 def project_lifecycle_lock(project_path: Path) -> Iterator[None]:
+    from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
+
     _, _, identity = _planned_project_identity(project_path)
     with exclusive_lock(project_manifest_lock_path(f"project_{identity}")):
         yield
@@ -445,6 +446,8 @@ def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> 
 
 def register_initialized_project(project_path: Path, *, _lock_held: bool = False) -> None:
     """Register a project after successful init postconditions under its lifecycle lock."""
+    from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
+
     root, common, identity = _planned_project_identity(project_path)
     project_id = f"project_{identity}"
     lock = contextlib.nullcontext() if _lock_held else project_lifecycle_lock(project_path)

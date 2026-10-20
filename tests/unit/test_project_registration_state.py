@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import cast
@@ -21,6 +24,25 @@ def _project(tmp_path: Path, name: str) -> tuple[str, Path, Path]:
     common = root / ".git"
     common.mkdir(parents=True)
     return f"project_{repo_key(root, common)}", root, common
+
+
+def test_public_import_order_does_not_cycle() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from odoo_instance_sdk.storage.backup_catalog import BackupCatalog; "
+                "from odoo_instance_sdk.project_init import init_project; "
+                "assert BackupCatalog and init_project"
+            ),
+        ],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_forget_and_reactivation_keep_one_row_and_existing_timestamps(tmp_path: Path) -> None:
