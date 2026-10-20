@@ -40,7 +40,7 @@ def _result_text(result: ProcessResultLike) -> str:
     if not isinstance(result, ProcessResult):
         raise ConfigError("project cleanup process returned no result")
     value = result.stdout
-    return value.decode(errors="replace") if isinstance(value, bytes) else value
+    return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
 
 
 def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, object] | None:
@@ -65,7 +65,7 @@ def _adapt_child(
     prepared = child._prepared()
 
     def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
-        prepared.callback(context)
+        prepared.callback(cast("RunContext[object]", context))
         return decision
 
     return Command.from_prepared(
@@ -234,14 +234,18 @@ class BackupPurgeAdapter:
         if row is None or row["project_id"] != project_id:
             return None
         projection = self._catalog._resolve_backup_projection(backup_id)
+        child: Command[object]
         if self._command_factory is not None:
             child = self._command_factory(projection.backup)
         else:
-            child = self._client.backups.delete_command(
-                projection.backup,
-                executor=self._executor,
+            child = cast(
+                "Command[object]",
+                self._client.backups.delete_command(
+                    projection.backup,
+                    executor=self._executor,
+                ),
             )
-        return _adapt_child(cast("Command[object]", child), decision)
+        return _adapt_child(child, decision)
 
 
 def _identity_labels(
