@@ -232,6 +232,30 @@ replacements, so the next init or preparation repairs detectable drift.
 this delivery. Use `odcli env show` for a focused selected-environment
 projection, and use `odcli doctor` for read-only drift diagnosis.
 
+### Forget or purge a project
+
+`odcli remove` (also `odcli rm`) removes a project registration without deleting
+anything. It refuses while a runtime, publication, active environment, or
+cleanup-in-progress resource would become hidden; stopped databases, backups,
+source, configuration, secrets, and Compose volumes remain owned and can be
+recovered by the full project id.
+
+Use `--project PATH` for an existing canonical checkout or `--project-id ID`
+when the source directory is missing. A purge requires `--purge` and the exact
+token `<project-root-name>:<full-project-id>` through `--confirm-project`;
+`--yes` is not a substitute. `--dry-run` never prompts or mutates and shows the
+same bounded delete/retain plan later consumed by execution.
+
+Purge stops and unpublishes owned runtimes first, then removes environments and
+only deletes resources with proven exclusive SDK ownership. Shared or remote
+databases, filestores, backups, Python environments, repositories, Docker
+images, external clusters, caller-managed checkouts, unknown files, and
+symlink escapes are retained with a reason. Partial failures leave the project
+registered with completed, retained, and remaining actions; retry with the
+full id. The project is marked forgotten only after required actions finish.
+Successful `odcli init` on the retained canonical project reactivates the same
+catalogue identity instead of creating a duplicate.
+
 `odcli env create` (also spelled `odcli env checkout`) accepts a Ticket key
 (for example `PROJ-123`) rather than a branch name. It reserves `PROJ-123` or
 the next unused `PROJ-123_N` from local refs, retained catalogue history
@@ -764,6 +788,7 @@ sentence; use the entry's `--help` for exact options.
 
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
+- `odcli remove` / `odcli rm` — Forget or ownership-safely purge one project.
 - `odcli prepare-venv` — Create or refresh the primary project virtual environment.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
 - `odcli remote ls` — List named remote sources without contacting them.

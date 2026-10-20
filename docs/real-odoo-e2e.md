@@ -50,3 +50,20 @@ only.
 Troubleshooting starts with `.artifacts/real-odoo-e2e/bootstrap.json`. Verify
 the recorded platform, runner image metadata, exact image digests, cache
 class, and missing prerequisite list before inspecting bounded logs.
+
+### Project-removal coverage
+
+The full tier includes a disposable project-removal scenario with its own
+catalogue identity and Compose resources. It exercises the public lifecycle in
+this order: active-resource forget refusal, cleanup to an inert project,
+successful forget, re-init, exact-token purge, and repeated full-id purge.
+The assertions cover registration/monitor visibility, same-id reactivation,
+retained ownership, exact deletion of eligible local resources, unrelated
+Compose/image preservation, bounded JSON metadata, and the cleanup ledger.
+
+The local deterministic integration matrix injects failures only through
+`RecordingExecutor(result_factory=...)` for captured process steps and the
+existing guarded filesystem/data adapter callbacks for in-process actions. It
+asserts the public structured failure and retry ledger; production code has no
+failure flag or test-only CLI option. Runtime evidence stays in the disposable
+`.artifacts/real-odoo-e2e` directory and is not committed.

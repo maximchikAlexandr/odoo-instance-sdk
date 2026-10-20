@@ -48,6 +48,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | CLI leaf | canonical classification |
 | --- | --- |
 | `init` | mutating-or-spawning |
+| `remove` (`rm` alias) | mutating-or-spawning; exact project confirmation for purge |
 | `prepare-venv` | mutating-or-spawning |
 | `remote add/update/remove` | mutating-or-spawning |
 | `backup retention/pin/unpin/prune` | mutating-or-spawning |
