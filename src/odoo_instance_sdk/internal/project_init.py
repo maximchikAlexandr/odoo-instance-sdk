@@ -7,7 +7,7 @@ import os
 import secrets
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -90,6 +90,13 @@ def project_owned_data_dir(project_root: Path) -> Path:
     the exact contained filestore without guessing by database name.
     """
     return project_root.resolve() / ".odcli" / "filestore"
+
+
+@contextlib.contextmanager
+def project_lifecycle_lock(project_path: Path) -> Iterator[None]:
+    _, _, identity = _planned_project_identity(project_path)
+    with exclusive_lock(project_manifest_lock_path(f"project_{identity}")):
+        yield
 
 
 def manifest_dict(
@@ -440,11 +447,7 @@ def register_initialized_project(project_path: Path, *, _lock_held: bool = False
     """Register a project after successful init postconditions under its lifecycle lock."""
     root, common, identity = _planned_project_identity(project_path)
     project_id = f"project_{identity}"
-    lock = (
-        contextlib.nullcontext()
-        if _lock_held
-        else exclusive_lock(project_manifest_lock_path(project_id))
-    )
+    lock = contextlib.nullcontext() if _lock_held else project_lifecycle_lock(project_path)
     from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 

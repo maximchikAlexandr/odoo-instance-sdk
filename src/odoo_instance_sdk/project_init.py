@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -14,7 +15,6 @@ from typing import TYPE_CHECKING, cast
 import msgspec
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.primary_venv import (
     _capture_primary_venv_preparation,
@@ -25,6 +25,7 @@ from odoo_instance_sdk.internal.project_init import (
     fetch_remote_database_names_for_init,
     manifest_dict,
     merge_preserved_test_instance,
+    project_lifecycle_lock,
     read_project_env,
     register_initialized_project,
     remote_database_names_action,
@@ -192,20 +193,17 @@ def _execute_manifest_phase(
     if resume_existing:
         from odoo_instance_sdk.exceptions import StalePlanError
 
-        root, _, identity = _planned_project_identity(project_path)
-        project_id = f"project_{identity}"
-        with exclusive_lock(project_manifest_lock_path(project_id)):
-            current = ProjectConfig.load(root)
-            if manifest_dict(current) != manifest_dict(effective_config):
-                raise StalePlanError(
-                    "project manifest changed before Compose init resume",
-                    expected=manifest_dict(effective_config),
-                    actual=manifest_dict(current),
-                )
-            context.action("init")
-            register_initialized_project(root, _lock_held=True)
-            context.complete_action("init")
-            return manifest_dict(current)
+        root = project_path.resolve()
+        current = ProjectConfig.load(root)
+        if manifest_dict(current) != manifest_dict(effective_config):
+            raise StalePlanError(
+                "project manifest changed before Compose init resume",
+                expected=manifest_dict(effective_config),
+                actual=manifest_dict(current),
+            )
+        context.action("init")
+        context.complete_action("init")
+        return manifest_dict(current)
     context.action("init")
     result = init_project(
         project_path,
@@ -222,6 +220,8 @@ def _execute_manifest_phase(
         details=details,
         validate_generated_config=validate_generated_config,
         write_generated_config=write_generated_config,
+        _lifecycle_lock_held=True,
+        _defer_registration=True,
     )
     context.complete_action("init")
     return result
@@ -448,53 +448,56 @@ def init_project_command(  # noqa: C901
     )
 
     def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:
-        if image_phase is not None:
-            assert compose_followup is not None and confirm_postgres_image is not None
-            assert effective_config.postgres is not None
-            assert effective_config.postgres.image is not None
-            image_phase.execute(
+        with contextlib.nullcontext() if dry_run else project_lifecycle_lock(project_path):
+            if image_phase is not None:
+                assert compose_followup is not None and confirm_postgres_image is not None
+                assert effective_config.postgres is not None
+                assert effective_config.postgres.image is not None
+                image_phase.execute(
+                    context,
+                    cluster=compose_followup.cluster,
+                    image=effective_config.postgres.image,
+                    confirm=confirm_postgres_image,
+                )
+            resolved_remote_names = _execute_remote_database_names_phase(
                 context,
-                cluster=compose_followup.cluster,
-                image=effective_config.postgres.image,
-                confirm=confirm_postgres_image,
+                remote_names_step=remote_names_step,
+                effective_config=effective_config,
+                resolved_existing=resolved_existing,
+                remote_database_names=remote_database_names,
             )
-        resolved_remote_names = _execute_remote_database_names_phase(
-            context,
-            remote_names_step=remote_names_step,
-            effective_config=effective_config,
-            resolved_existing=resolved_existing,
-            remote_database_names=remote_database_names,
-        )
-        result = _execute_manifest_phase(
-            context,
-            project_path=project_path,
-            effective_config=effective_config,
-            postgres_allocated=postgres_allocated,
-            local_config=local_config,
-            postgres_image=postgres_image,
-            resolved_existing=resolved_existing,
-            allow_partial=allow_partial,
-            no_input=no_input,
-            confirm_partial=confirm_partial,
-            remote_database_names=resolved_remote_names,
-            resume_existing=resume_existing,
-            validate_generated_config=venv is None,
-            write_generated_config=(
-                compose_followup is None or compose_followup.password_action is None
-            ),
-        )
-        if compose_followup is not None and compose_followup.password_action is not None:
-            _execute_compose_init_phase(context, compose_followup, repair_action)
-        if primary_preparation is not None:
-            result = {
-                **result,
-                **primary_preparation.execute(context),
-            }
-        if compose_followup is not None:
-            _execute_compose_followup_phase(context, compose_followup)
-        if bootstrap_followup is not None:
-            _execute_bootstrap_followup_phase(context, bootstrap_followup)
-        return result
+            result = _execute_manifest_phase(
+                context,
+                project_path=project_path,
+                effective_config=effective_config,
+                postgres_allocated=postgres_allocated,
+                local_config=local_config,
+                postgres_image=postgres_image,
+                resolved_existing=resolved_existing,
+                allow_partial=allow_partial,
+                no_input=no_input,
+                confirm_partial=confirm_partial,
+                remote_database_names=resolved_remote_names,
+                resume_existing=resume_existing,
+                validate_generated_config=venv is None,
+                write_generated_config=(
+                    compose_followup is None or compose_followup.password_action is None
+                ),
+            )
+            if compose_followup is not None and compose_followup.password_action is not None:
+                _execute_compose_init_phase(context, compose_followup, repair_action)
+            if primary_preparation is not None:
+                result = {
+                    **result,
+                    **primary_preparation.execute(context),
+                }
+            if compose_followup is not None:
+                _execute_compose_followup_phase(context, compose_followup)
+            if bootstrap_followup is not None:
+                _execute_bootstrap_followup_phase(context, bootstrap_followup)
+            if not dry_run:
+                register_initialized_project(project_path, _lock_held=True)
+            return result
 
     return Command.from_prepared(
         ExecutionPlan(steps=tuple(item.public_projection() for item in prepared_steps)),
@@ -510,7 +513,6 @@ def _compose_followup_steps(
     python: str | None = None,
     defer_actions: bool = False,
 ) -> tuple[_ComposeFollowup, _BootstrapFollowup]:
-    """Return postgres ensure-running and bootstrap ``tmp`` steps for compose init."""
     from odoo_instance_sdk.internal.dbprep.bootstrap import (
         bootstrap_record_action,
         bootstrap_tmp_plan,
@@ -530,7 +532,6 @@ def _compose_followup_steps(
     )
     temporary_path = cluster.compose_file.parent / f".compose-{uuid.uuid4().hex}.yaml.tmp"
     postgres_steps = cluster._ensure_running_steps(60.0, temporary_path=temporary_path)
-
     generated = project_generated_config_path(root)
     source_path = config.source_config if config.source_config is not None else root / "odoo.conf"
     source_start = (
@@ -677,6 +678,8 @@ def init_project(  # noqa: C901
     venv: str | Path | None = None,
     validate_generated_config: bool = True,
     write_generated_config: bool = True,
+    _lifecycle_lock_held: bool = False,
+    _defer_registration: bool = False,
 ) -> dict[str, JsonValue]:
     """Write init artifacts and register the canonical project.
 
@@ -737,20 +740,22 @@ def init_project(  # noqa: C901
             result["missing_details"] = dict(details)
         return result
 
-    write_manifest(project_path, effective_config)
-    _ensure_project_owned_data_directory(project_path, effective_config)
-    if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
-        if write_generated_config:
-            write_project_generated_config(
-                project_path, effective_config, validate_target=validate_generated_config
-            )
-        if effective_config.test_instance is not None:
-            existing_env = read_project_env(project_path)
-            write_project_env(
-                project_path,
-                master_password=existing_env.get("ODCLI_TEST_MASTER_PASSWORD"),
-            )
-    register_initialized_project(project_path)
+    with contextlib.nullcontext() if _lifecycle_lock_held else project_lifecycle_lock(project_path):
+        write_manifest(project_path, effective_config)
+        _ensure_project_owned_data_directory(project_path, effective_config)
+        if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
+            if write_generated_config:
+                write_project_generated_config(
+                    project_path, effective_config, validate_target=validate_generated_config
+                )
+            if effective_config.test_instance is not None:
+                existing_env = read_project_env(project_path)
+                write_project_env(
+                    project_path,
+                    master_password=existing_env.get("ODCLI_TEST_MASTER_PASSWORD"),
+                )
+        if not _defer_registration:
+            register_initialized_project(project_path, _lock_held=True)
     result = manifest_dict(effective_config, postgres_allocated=postgres_allocated)
     if missing:
         result["partial"] = True
