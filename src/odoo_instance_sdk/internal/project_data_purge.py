@@ -43,18 +43,57 @@ def _result_text(result: ProcessResultLike) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
 
 
+def _docker_not_found(result: ProcessResult, *, label: str) -> bool:
+    """Return true only for Docker's verified object-absent response."""
+    if result.returncode == 0:
+        return False
+    error = _result_text(result).lower()
+    stderr = result.stderr
+    if isinstance(stderr, bytes):
+        error += "\n" + stderr.decode(errors="replace").lower()
+    elif stderr:
+        error += "\n" + str(stderr).lower()
+    # Docker's inspect API uses these stable phrases for an absent object.
+    # Generic non-zero results (daemon, permission, transport, and malformed
+    # invocations) are intentionally not treated as an idempotent absence.
+    object_name = label.lower()
+    return any(
+        marker in error
+        for marker in (
+            "no such object",
+            "no such container",
+            "no such volume",
+            f"{object_name} not found",
+        )
+    )
+
+
 def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, object] | None:
     if not isinstance(result, ProcessResult):
         raise ConfigError(f"{label} inspection returned no result")
     if result.returncode != 0:
-        return None
+        if _docker_not_found(result, label=label):
+            return None
+        raise ConfigError(f"{label} inspection failed; object absence is unproven")
     try:
         value: object = json.loads(_result_text(result))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ConfigError(f"{label} inspection returned invalid identity") from exc
     if isinstance(value, list):
         value = value[0] if value else None
-    return value if isinstance(value, Mapping) else None
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{label} inspection returned invalid identity")
+    return value
+
+
+def _require_absent(result: ProcessResultLike, *, label: str) -> None:
+    """Require a postcondition to be either a successful not-found result or fail."""
+    if not isinstance(result, ProcessResult):
+        raise ConfigError(f"{label} postcondition returned no result")
+    if result.returncode == 0:
+        raise ConfigError(f"Compose {label} removal postcondition failed")
+    if not _docker_not_found(result, label=label):
+        raise ConfigError(f"{label} postcondition failed; object absence is unproven")
 
 
 def _adapt_child(
@@ -94,6 +133,7 @@ class FilestorePurgeTarget:
     path: Path
     allowed_root: Path
     ownership_check: Callable[[], bool] | None = None
+    database_provenance_check: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +155,12 @@ class ComposeClusterPurgeTarget:
 def _delete_contained_filestore(target: FilestorePurgeTarget) -> None:
     path = target.path
     root = target.allowed_root.resolve(strict=False)
-    if target.ownership_check is not None and not target.ownership_check():
-        raise ConfigError("filestore ownership evidence changed before deletion")
+    checks = (target.ownership_check, target.database_provenance_check)
+    if not any(check is not None for check in checks):
+        raise ConfigError("filestore database provenance is unavailable")
+    for check in checks:
+        if check is not None and not check():
+            raise ConfigError("filestore database provenance changed before deletion")
     if path.is_symlink() or path.resolve(strict=False).parent != root:
         raise ConfigError("filestore path is outside its proven containment root")
     if not path.exists():
@@ -137,6 +181,8 @@ class FilestorePurgeAdapter:
     ) -> Command[ProjectResourceDecision] | None:
         target = self._targets.get(decision.identity)
         if target is None or target.project_id != project_id:
+            return None
+        if target.ownership_check is None and target.database_provenance_check is None:
             return None
         action = PreparedAction(
             step_id=f"project-removal:filestore:{decision.identity}",
@@ -231,7 +277,12 @@ class BackupPurgeAdapter:
             return None
         backup_id = decision.identity.removeprefix("backup:")
         row = self._catalog.get_by_id(backup_id)
-        if row is None or row["project_id"] != project_id:
+        if (
+            row is None
+            or row["project_id"] != project_id
+            or row["state"] != "available"
+            or self._catalog.deletion_protection_reason(backup_id) is not None
+        ):
             return None
         projection = self._catalog._resolve_backup_projection(backup_id)
         child: Command[object]
@@ -258,6 +309,7 @@ def _identity_labels(
         return (
             value.get("Name") in {f"/{target.container_name}", target.container_name}
             and isinstance(labels, Mapping)
+            and labels.get("com.docker.compose.project") == target.compose_project
             and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
             and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
             and isinstance(mounts, list)
@@ -272,6 +324,7 @@ def _identity_labels(
     return (
         value.get("Name") == target.volume_name
         and isinstance(labels, Mapping)
+        and labels.get("com.docker.compose.project") == target.compose_project
         and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
         and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
     )
@@ -310,9 +363,9 @@ class ComposeClusterPurgeAdapter:
             return None
         if not self._claim_matches(target):
             return None
-        if target.dependencies or (
-            target.dependency_check is not None and target.dependency_check()
-        ):
+        if target.dependency_check is None:
+            return None
+        if target.dependencies or target.dependency_check():
             return None
 
         prefix = f"project-removal:compose:{target.identity}"
@@ -386,7 +439,9 @@ class ComposeClusterPurgeAdapter:
             context.action(action.step_id)
             if not self._claim_matches(target):
                 raise ConfigError("Compose cluster claim changed before destruction")
-            if target.dependency_check is not None and target.dependency_check():
+            if target.dependency_check is None:
+                raise ConfigError("Compose cluster exclusive-use evidence is unavailable")
+            if target.dependency_check():
                 raise ConfigError("Compose cluster has a retained or active dependency")
             volume = _json_object(context.process(volume_inspect.step_id), label="volume")
             container = _json_object(context.process(container_inspect.step_id), label="container")
@@ -396,6 +451,13 @@ class ComposeClusterPurgeAdapter:
                 container, container=True, target=target
             ):
                 raise ConfigError("Compose container labels or volume mount do not match the claim")
+            # Recheck immediately after both live Docker identities are known;
+            # the capture-time and pre-inspection checks are not sufficient to
+            # authorize a mutation if a dependent resource appeared meanwhile.
+            if not self._claim_matches(target):
+                raise ConfigError("Compose cluster claim changed before destruction")
+            if target.dependency_check():
+                raise ConfigError("Compose cluster has a retained or active dependency")
             if container is not None:
                 stop_result = context.process(stop.step_id)
                 if isinstance(stop_result, ProcessResult) and stop_result.returncode != 0:
@@ -414,10 +476,8 @@ class ComposeClusterPurgeAdapter:
                 skip(context, remove_volume)
             verified_volume = context.process(verify_volume.step_id)
             verified_container = context.process(verify_container.step_id)
-            if isinstance(verified_volume, ProcessResult) and verified_volume.returncode == 0:
-                raise ConfigError("Compose volume removal postcondition failed")
-            if isinstance(verified_container, ProcessResult) and verified_container.returncode == 0:
-                raise ConfigError("Compose container removal postcondition failed")
+            _require_absent(verified_volume, label="volume")
+            _require_absent(verified_container, label="container")
             context.complete_action(action.step_id)
             return decision
 
