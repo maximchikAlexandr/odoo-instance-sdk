@@ -8,6 +8,7 @@ runtime and data packages can consume the same captured decisions later.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -32,6 +33,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResultLike,
     RunContext,
     StepObserver,
+    SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.project_removal import (
     ProjectRegistration,
@@ -47,8 +49,10 @@ from odoo_instance_sdk.internal.resource_inventory import (
     EnvironmentResourceSource,
     OwnershipConfidence,
     ProjectResourceSource,
+    VolumeResourceSource,
     collect_resource_inventory,
 )
+from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 from odoo_instance_sdk.models.project_removal import (
     ProjectRemovalErrorDetails,
     ProjectRemovalResult,
@@ -138,14 +142,14 @@ def set_project_confirmation(command: Command[ProjectRemovalResult], confirmatio
         raise ValueError("project removal command has no confirmation transport") from exc
 
 
-def _row_registration(row: object) -> ProjectRegistration:
+def _row_registration(row: sqlite3.Row) -> ProjectRegistration:
     return ProjectRegistration(
-        project_id=str(row["project_id"]),  # type: ignore[index]
-        repository_root=Path(str(row["repository_root"])),  # type: ignore[index]
-        git_common_dir=Path(str(row["git_common_dir"])),  # type: ignore[index]
+        project_id=str(row["project_id"]),
+        repository_root=Path(str(row["repository_root"])),
+        git_common_dir=Path(str(row["git_common_dir"])),
         registration_state=cast(
             "Literal['registered', 'forgotten']",
-            str(row["registration_state"]),  # type: ignore[index]
+            str(row["registration_state"]),
         ),
     )
 
@@ -234,12 +238,65 @@ def _projection(
     owned_paths = project_owned_paths(
         registration.repository_root, managed_filestore=managed_filestore
     )
+    database_inventory = None
+    database_name: str | None = None
+    with suppress(ConfigError, OSError, ValueError):
+        config = ProjectConfig.load(registration.repository_root)
+        database_name = config.default_source_database
+    claim = catalog._get_postgres_cluster(registration.project_id)
+    if database_name is not None:
+        from odoo_instance_sdk.models.database_inventory import (
+            DatabaseInventoryItem,
+            DatabaseInventoryResult,
+        )
+
+        database_cluster = (
+            str(claim.cluster_id)
+            if claim is not None and claim.state == "active"
+            else "project-database"
+        )
+        database_inventory = DatabaseInventoryResult(
+            cluster=database_cluster,
+            databases=(
+                DatabaseInventoryItem(
+                    cluster=database_cluster,
+                    cluster_id=(
+                        str(claim.cluster_id)
+                        if claim is not None and claim.state == "active"
+                        else None
+                    ),
+                    name=database_name,
+                    logical_size_bytes=None,
+                    active_sessions=0,
+                    is_default=True,
+                    origin="unknown",
+                ),
+            ),
+        )
+    volumes: tuple[VolumeResourceSource, ...] = ()
+    if claim is not None and claim.state == "active":
+        volumes = (
+            VolumeResourceSource(
+                project_id=registration.project_id,
+                volume_name=claim.volume_name,
+                cluster_id=str(claim.cluster_id),
+                owned=True,
+                available=False,
+                usage_bytes=None,
+                active=None,
+                reason="live Compose volume observation unavailable during removal planning",
+            ),
+        )
     inventory = collect_resource_inventory(
         catalog=catalog,
+        database_inventory=database_inventory,
+        database_measurement_complete=False,
         projects=(
             ProjectResourceSource(
                 project_id=registration.project_id,
                 repository_root=registration.repository_root,
+                runtime_database=database_name,
+                database_cluster=(str(claim.cluster_id) if claim is not None else None),
                 config_paths=tuple(path for kind, path in owned_paths if kind == "config"),
                 secret_paths=tuple(path for kind, path in owned_paths if kind == "secret"),
                 filestore_paths=tuple(path for kind, path in owned_paths if kind == "filestore"),
@@ -251,6 +308,7 @@ def _projection(
             ),
         ),
         environments=environments,
+        volumes=volumes,
         project_id=registration.project_id,
         roots=(registration.repository_root,),
     )
@@ -333,6 +391,18 @@ def _error(
     retained: tuple[ProjectResourceDecision, ...] | None = None,
     remaining: tuple[ProjectResourceDecision, ...] | None = None,
 ) -> ProjectRemovalError:
+    limit = 100
+    public = projection.public_decisions if decisions is None else decisions
+    completed_total = len(completed)
+    if retained is None:
+        retained = tuple(item for item in public if item.action == "retain")
+    if remaining is None:
+        remaining = tuple(item for item in public if item.action != "retain")
+    retained_total = len(retained)
+    remaining_total = len(remaining)
+    completed = completed[:limit]
+    retained = retained[:limit]
+    remaining = remaining[:limit]
     details = _error_details(
         projection,
         mode=mode,
@@ -343,11 +413,14 @@ def _error(
         remaining=remaining,
     )
     builtins = cast("dict[str, JsonValue]", msgspec.to_builtins(details))
-    builtins["completed_total"] = details.completed_total
-    builtins["retained_total"] = details.retained_total
-    builtins["remaining_total"] = details.remaining_total
-    builtins["truncated"] = False
-    return ProjectRemovalError(message, details={"removal": builtins})
+    builtins["completed_total"] = completed_total
+    builtins["retained_total"] = retained_total
+    builtins["remaining_total"] = remaining_total
+    builtins["truncated"] = any(
+        value > limit for value in (completed_total, retained_total, remaining_total)
+    )
+    safe_message = sanitize_event_message(message) or "project removal failed"
+    return ProjectRemovalError(safe_message, details={"removal": builtins})
 
 
 def _catalogue_forget_command(
@@ -412,7 +485,18 @@ def capture_project_removal_command(  # noqa: C901
         )
     else:
         decisions = (
-            *projection.public_decisions,
+            *tuple(
+                decision.public()
+                for decision in projection.decisions
+                if not (
+                    decision.action == "delete"
+                    and decision.resource_type in {"worktree", "python_environment"}
+                    and any(
+                        relationship.startswith("environment:")
+                        for relationship in decision.relationships
+                    )
+                )
+            ),
             ProjectResourceDecision(
                 identity=f"project-forget:{registration.project_id}",
                 resource_type="project",
@@ -427,6 +511,25 @@ def capture_project_removal_command(  # noqa: C901
     child_executors: dict[str, ProcessExecutor] = {}
     for decision in decisions:
         child: Command[ProjectResourceDecision] | None
+        if (
+            decision.action == "delete"
+            and decision.resource_type == "source"
+            and (registration.repository_root / ".git" / "HEAD").is_file()
+        ):
+            status = PreparedStep(
+                step_id=f"project-removal:revalidate-git:{registration.project_id}",
+                argv=(
+                    "git",
+                    "-C",
+                    str(registration.repository_root),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ),
+                read_only=True,
+            )
+            flattened_steps.append(status)
+            child_executors[status.step_id] = SubprocessExecutor()
         if not purge or decision.action == "retain":
             flattened_steps.append(_action_step(decision))
             continue
@@ -556,8 +659,23 @@ def capture_project_removal_command(  # noqa: C901
                         child.callback,
                     )
                     completed.append(callback(context))
-                except ProjectRemovalError:
-                    raise
+                except ProjectRemovalError as exc:
+                    remaining.extend(
+                        item
+                        for item in decisions
+                        if item.action != "retain"
+                        and item.identity not in {value.identity for value in completed}
+                    )
+                    raise _error(
+                        f"project removal step failed: {sanitize_event_message(str(exc)) or 'operation failed'}",
+                        projection,
+                        mode=mode,
+                        failed_step=decision.identity,
+                        decisions=decisions,
+                        completed=tuple(completed),
+                        retained=tuple(retained),
+                        remaining=tuple(remaining),
+                    ) from exc
                 except Exception as exc:
                     remaining.extend(
                         item

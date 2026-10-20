@@ -109,8 +109,7 @@ def _process_child(
     )
 
 
-@pytest.mark.parametrize("failure_mode", ["captured-process", "in-process-action"])
-def test_partial_purge_failure_is_publicly_truthful_and_retryable(
+def _run_partial_purge_failure_is_publicly_truthful_and_retryable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
@@ -254,3 +253,19 @@ def test_partial_purge_failure_is_publicly_truthful_and_retryable(
     if failure_mode == "in-process-action":
         assert not failed_resource.exists()
     catalog.close()
+
+
+def test_partial_purge_failure_captured_process_is_publicly_truthful_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run_partial_purge_failure_is_publicly_truthful_and_retryable(
+        tmp_path, monkeypatch, "captured-process"
+    )
+
+
+def test_partial_purge_failure_in_process_action_is_publicly_truthful_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run_partial_purge_failure_is_publicly_truthful_and_retryable(
+        tmp_path, monkeypatch, "in-process-action"
+    )

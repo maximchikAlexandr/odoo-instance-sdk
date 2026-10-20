@@ -420,8 +420,12 @@ def worktree_remove(repo_root: Path, worktree: Path) -> None:
         raise GitError(f"git worktree remove failed: {stderr}")
 
 
-def worktree_is_dirty(worktree: Path) -> bool:
-    proc = _run(["git", "-C", str(worktree), "status", "--porcelain"], check=False)
+def worktree_is_dirty(worktree: Path, *, step_id: str | None = None) -> bool:
+    proc = _run(
+        ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"],
+        check=False,
+        step_id=step_id,
+    )
     if proc.returncode != 0:
         return True
     return bool(proc.stdout.strip())

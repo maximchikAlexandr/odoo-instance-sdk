@@ -874,6 +874,7 @@ def collect_resource_inventory(
     backup_root: Path | None = None,
     owned_directories: Sequence[Path] = (),
     database_measurement_reason: str | None = None,
+    database_measurement_complete: bool | None = None,
     project_id: str | None = None,
     all_projects: bool = False,
 ) -> ResourceInventory:
@@ -944,7 +945,11 @@ def collect_resource_inventory(
         volumes=volumes,
         files=(*supplied_files, *discovered_files),
         roots=roots,
-        database_measurement_complete=database_inventory is not None,
+        database_measurement_complete=(
+            database_inventory is not None
+            if database_measurement_complete is None
+            else database_measurement_complete
+        ),
         database_measurement_reason=(
             None
             if database_inventory is not None

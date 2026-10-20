@@ -796,7 +796,8 @@ sentence; use the entry's `--help` for exact options.
 
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
-- `odcli remove` / `odcli rm` — Forget or ownership-safely purge one project.
+- `odcli remove` — Forget or ownership-safely purge one project by its canonical lifecycle command.
+- `odcli rm` — Short alias for the same project forget/purge operation.
 - `odcli prepare-venv` — Create or refresh the primary project virtual environment.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
 - `odcli remote ls` — List named remote sources without contacting them.

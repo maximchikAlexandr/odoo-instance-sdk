@@ -19,6 +19,7 @@ from typing import Literal
 from odoo_instance_sdk.internal.repo_key import parse_git_common_dir
 from odoo_instance_sdk.internal.resource_inventory import (
     ActiveUse,
+    MeasurementCompleteness,
     OwnershipConfidence,
     ResourceInventory,
     ResourceInventoryItem,
@@ -34,6 +35,7 @@ from odoo_instance_sdk.models.project_removal import (
 )
 
 RemovalReason = str
+RegistrationValue = str | Path | bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +135,9 @@ class InternalRemovalDecision:
             target=self.target,
         )
 
-    def canonical(self) -> tuple[object, ...]:
+    def canonical(
+        self,
+    ) -> tuple[str | tuple[str, ...] | tuple[tuple[str, str], ...], ...]:
         return (
             self.identity,
             self.resource_type,
@@ -238,7 +242,9 @@ def expected_confirmation_token(repository_root: Path, project_id: str) -> str:
     return f"{name}:{project_id}"
 
 
-def _registration(value: ProjectRegistration | Mapping[str, object]) -> ProjectRegistration:
+def _registration(
+    value: ProjectRegistration | Mapping[str, RegistrationValue],
+) -> ProjectRegistration:
     if isinstance(value, ProjectRegistration):
         return value
     root = value.get("repository_root")
@@ -259,7 +265,7 @@ def _registration(value: ProjectRegistration | Mapping[str, object]) -> ProjectR
         project_id=project_id,
         repository_root=Path(root),
         git_common_dir=Path(common) if isinstance(common, str | Path) else None,
-        registration_state=state,
+        registration_state=state,  # type: ignore[arg-type]
         source_ownership=ownership,
         linked_checkout=bool(value.get("linked_checkout", False)),
         caller_owned_checkout=bool(value.get("caller_owned_checkout", False)),
@@ -269,7 +275,7 @@ def _registration(value: ProjectRegistration | Mapping[str, object]) -> ProjectR
 
 def resolve_project_selector(
     selector: ProjectSelector,
-    registrations: Iterable[ProjectRegistration | Mapping[str, object]],
+    registrations: Iterable[ProjectRegistration | Mapping[str, RegistrationValue]],
 ) -> ProjectRegistration:
     """Resolve only exact full ids or exact canonical roots.
 
@@ -412,6 +418,16 @@ def _inventory_decision(  # noqa: C901
         action, reason = "retain", "ownership_unproven"
     elif item.active_use is ActiveUse.ACTIVE:
         action, reason = "retain", "active_use"
+    elif (
+        item.type in {ResourceType.DATABASE, ResourceType.VOLUME}
+        and item.active_use is ActiveUse.UNKNOWN
+    ):
+        action, reason = "retain", "active_use_unproven"
+    elif (
+        item.type in {ResourceType.DATABASE, ResourceType.VOLUME}
+        and item.completeness is not MeasurementCompleteness.COMPLETE
+    ):
+        action, reason = "retain", "observation_incomplete"
     elif item.type is ResourceType.PROJECT:
         action, reason = "retain", "source_ownership_requires_git_provenance"
     elif item.type in {ResourceType.ENVIRONMENT, ResourceType.WORKTREE}:
@@ -449,6 +465,23 @@ def _project_source_decision(
     """Allow source deletion only when the registered Git identity still matches."""
     root = _canonical_path(project.repository_root)
     common = parse_git_common_dir(root) if root.is_dir() else None
+    clean = False
+    if (
+        root.is_dir()
+        and common is not None
+        and common == (_canonical_path(project.git_common_dir) if project.git_common_dir else None)
+    ):
+        if (root / ".git" / "HEAD").is_file():
+            from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
+
+            clean = not worktree_is_dirty(
+                root, step_id=f"project-removal:revalidate-git:{project.project_id}"
+            )
+        else:
+            # The guarded source adapter performs the execution-time check;
+            # an incomplete test/durable identity must not be treated as a
+            # capture-time dirty result.
+            clean = True
     proven = (
         root.is_dir()
         and not project.repository_root.is_symlink()
@@ -458,6 +491,7 @@ def _project_source_decision(
         and not project.other_tool_managed_checkout
         and project.git_common_dir is not None
         and common == _canonical_path(project.git_common_dir)
+        and clean
     )
     action: ProjectResourceAction
     if proven:
@@ -604,7 +638,7 @@ def removal_fingerprint(
 
 def build_project_removal_projection(  # noqa: C901
     *,
-    registration: ProjectRegistration | Mapping[str, object],
+    registration: ProjectRegistration | Mapping[str, RegistrationValue],
     inventory: ResourceInventory,
     runtimes: Iterable[RemovalRuntimeSource] = (),
     publications: Iterable[RemovalPublicationSource] = (),
@@ -646,14 +680,33 @@ def build_project_removal_projection(  # noqa: C901
         if compose_source.project_id == project.project_id:
             decisions[compose_source.identity] = _compose_decision(compose_source)
 
+    def phase(decision: InternalRemovalDecision) -> int:
+        """D7 phase rank; identity remains the stable tie breaker."""
+        if decision.action == "stop":
+            return 10
+        if decision.action == "unpublish":
+            return 20
+        if decision.action == "forget":
+            return 70
+        ranks = {
+            "environment": 30,
+            "worktree": 30,
+            "python_environment": 30,
+            "database": 40,
+            "filestore": 40,
+            "backup": 50,
+            "compose": 60,
+            "volume": 60,
+            "source": 65,
+        }
+        return ranks.get(decision.resource_type, 55)
+
     ordered = tuple(
         decisions[key]
         for key in sorted(
             decisions,
             key=lambda identity: (
-                {"stop": 0, "unpublish": 1, "delete": 2, "retain": 3, "forget": 4}.get(
-                    decisions[identity].action, 9
-                ),
+                phase(decisions[identity]),
                 identity,
             ),
         )
