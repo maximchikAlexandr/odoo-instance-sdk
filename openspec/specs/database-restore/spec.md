@@ -26,6 +26,8 @@ Target DB NEVER перезаписывается и не удаляется дл
 
 После ответа Odoo метод MUST подтвердить `exists(target_name) == True`. HTTP 200 или redirect сам по себе MUST NOT считаться успехом.
 
+HTTP transport failure, timeout или HTTP 4xx/5xx MUST завершать restore ошибкой независимо от существования target DB, включая внутренний путь с уже подтверждённым отсутствием target. Частично созданная БД MUST NOT считаться успешным восстановлением; успешные restore provenance и переключение default DB MUST NOT выполняться. Существующие механизмы фиксации incomplete target, cleanup и согласованного retry сохраняются.
+
 Mapping write (шаги 1-2 ниже) MUST выполняться ТОЛЬКО после успешного `exists(target_name) == True` postcondition. Если postcondition fails (база не создалась), mapping MUST NOT быть записан.
 
 После успешного postcondition, если инстанс имеет cluster-ключ (`db_port is not None`), метод MUST:
@@ -153,6 +155,8 @@ Restore execution SHALL emit typed lifecycle events for logical plan-step start,
 ### Requirement: Restore from a registered local backup
 
 Restore SHALL record `data_dir` `{project_root}/.odcli/filestore` from the effective self-contained config in the restore binding alongside cluster/database/backup identity. Before restore, that path SHALL be verified to be a regular directory inside the project tree and not a symlink. `db rm` SHALL delete only the exact contained non-symlink filestore and SHALL return `deleted` or `absent` with the path. External config without a provable `data_dir` SHALL stay fail-closed `unknown`; no directory SHALL be deleted by database name or platform default.
+
+An OdCLI-spawned auxiliary restore runtime SHALL use threaded mode (`--workers=0`) with disabled CPU and real-time request limits (`--limit-time-cpu=0`, `--limit-time-real=0`) in the same immutable preview/execution argv. These overrides SHALL NOT alter normal project runtime settings or a reused existing runtime. Readiness and HTTP transport budgets SHALL remain bounded.
 
 For a self-contained project, auxiliary restore SHALL use bootstrap database `tmp` and SHALL NOT add hidden `--database=__odcli_restore__` or `--db-filter=^$`. After a successful restore, the project default SHALL switch to the restored database; `tmp` SHALL remain the bootstrap database and SHALL NOT be treated as a working backup copy. The regression flow (fresh owned Compose cluster → `tmp` init → stopped-project `db restore` → Database Manager `303` → PostgreSQL postcondition → default DB switch) SHALL be covered for Odoo 13 and Odoo 19.
 
@@ -528,3 +532,17 @@ Main-checkout Compose restore SHALL capture the exact read-only Git checks for t
 
 - **WHEN** the captured check fails or the repository root/argv differs at execution
 - **THEN** restore fails closed without changing the project default or exposing secrets
+
+### Requirement: Long restore completion is explicit
+
+Restore SHALL require a successful HTTP operation and target postconditions; existence alone SHALL NOT override a transport failure.
+
+#### Scenario: Restore HTTP disconnect leaves partial database
+
+- **WHEN** the restore connection fails or returns HTTP 4xx/5xx and PostgreSQL already contains the target
+- **THEN** restore fails without successful audit/default switch, preserving existing incomplete-target handling
+
+#### Scenario: Auxiliary import exceeds ordinary Odoo time limits
+
+- **WHEN** a stopped-project restore takes longer than normal Odoo request limits
+- **THEN** its spawned helper uses disabled request time limits and cleans up only its owned process after completion or failure

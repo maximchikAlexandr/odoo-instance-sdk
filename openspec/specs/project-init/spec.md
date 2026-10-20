@@ -664,7 +664,7 @@ The bootstrap executor SHALL distinguish a database created by its captured spaw
 
 ### Requirement: Stored project addon and server-module inputs
 
-`ProjectConfig` SHALL store ordered project-relative `addon_roots` and ordered `server_wide_modules` in `.odcli/project.toml`. Addon roots SHALL reject absolute paths and paths that escape the repository root after resolution and SHALL retain only the first canonical occurrence. Module names SHALL reject blank or comma-containing values and SHALL retain first occurrence. On repeated init, an omitted option SHALL retain its stored tuple, while one or more supplied values SHALL replace the corresponding stored tuple.
+`ProjectConfig` SHALL store ordered project-relative or absolute `addon_roots` and ordered `server_wide_modules` in `.odcli/project.toml`. Absolute addon roots SHALL be accepted outside the project and preserved as absolute manifest inputs. Relative addon roots SHALL remain confined to the project after resolution. Addon roots SHALL retain only the first canonical occurrence. This source-path permission SHALL NOT relax containment or ownership checks for managed filestore, generated configuration, addon repositories, or resource deletion. Module names SHALL reject blank or comma-containing values and SHALL retain first occurrence. On repeated init, an omitted option SHALL retain its stored tuple, while one or more supplied values SHALL replace the corresponding stored tuple.
 
 #### Scenario: Ordered settings round-trip
 
@@ -683,7 +683,7 @@ The bootstrap executor SHALL distinguish a database created by its captured spaw
 
 #### Scenario: Invalid input is rejected before mutation
 
-- **WHEN** an addon root is absolute or escapes the repository, or a module name is blank or contains a comma
+- **WHEN** a relative addon root escapes the repository, or a module name is blank or contains a comma
 - **THEN** init fails before writing the manifest or generated config
 
 ### Requirement: Opt-in initialization prepares the primary virtual environment
@@ -781,3 +781,18 @@ Compose init SHALL capture image resolution and approval as explicit steps in th
 
 - **WHEN** Compose init runs with `--yes --dry-run`
 - **THEN** the image steps are visible in the plan but no image pull, prompt, or trust-store write occurs
+
+### Requirement: Explicit external addon sources
+
+Initialization and generated configuration SHALL accept absolute addon roots outside the project checkout. An external root SHALL remain external when a managed worktree is selected. Dependency discovery SHALL collect requirements beside manifests and in their immediate parents within that declared root; a requirements symlink escaping that root SHALL fail before dependency installation.
+
+#### Scenario: Client checkout uses a sibling platform
+
+- **WHEN** init runs in a client Git checkout with absolute addon roots in a sibling platform checkout
+- **THEN** its manifest and generated config reference the supplied platform paths and dependency preparation includes their discovered requirements
+- **AND** no platform files are copied into or treated as owned by the client checkout
+
+#### Scenario: External dependency escape is rejected
+
+- **WHEN** a discovered requirements file resolves outside its declared absolute addon root
+- **THEN** preparation fails before installing dependencies or writing a prepared environment

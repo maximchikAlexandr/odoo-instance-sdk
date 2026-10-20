@@ -67,7 +67,6 @@ def test_addon_roots_and_server_modules_roundtrip_in_order(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"addon_roots": (Path("/tmp/addons"),)},
         {"addon_roots": (Path("../outside"),)},
         {"server_wide_modules": ("",)},
         {"server_wide_modules": ("base,web",)},
@@ -82,6 +81,21 @@ def test_load_missing_manifest_raises_typed_error(tmp_path: Path) -> None:
     with pytest.raises(ProjectManifestNotFoundError) as exc_info:
         ProjectConfig.load(tmp_path)
     assert "odcli init" in str(exc_info.value)
+
+
+def test_absolute_addon_roots_roundtrip_and_deduplicate(tmp_path: Path) -> None:
+    project = tmp_path / "client"
+    project.mkdir()
+    external = tmp_path / "platform" / "addons"
+    external.mkdir(parents=True)
+    config = ProjectConfig(
+        repository_root=project,
+        addon_roots=(external, Path("addons"), external, project / "addons"),
+    )
+
+    write_manifest(project, config)
+
+    assert ProjectConfig.load(project).addon_roots == (external, Path("addons"))
 
 
 def test_roundtrip_write_read_secrets_free(tmp_path: Path) -> None:

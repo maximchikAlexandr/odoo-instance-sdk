@@ -5,11 +5,28 @@ Define safe, member-authenticated GitLab operations for explicit repositories, i
 ## Requirements
 ### Requirement: Generic authenticated clone and safe retry
 
-`odcli git clone --member-id MEMBER_ID [--recurse-submodules] URL DESTINATION` SHALL operate without `odcli init`, accept only an allowed absolute GitLab HTTPS repository URL without userinfo/query/fragment, verify the selected member credential before Git, and clone through `internal/proc`. If the destination already contains a Git worktree whose normalized origin matches URL, the command SHALL be idempotent: it SHALL NOT reclone, reset, switch, pull, or change the current branch. With `--recurse-submodules`, it SHALL initialize only unpopulated submodules recursively after validating all resolved submodule URLs and credential hosts.
+`odcli git clone --member-id MEMBER_ID [--branch BRANCH] [--recurse-submodules] URL DESTINATION` SHALL operate without `odcli init`, accept only an allowed absolute GitLab HTTPS repository URL without userinfo/query/fragment, verify the selected member credential before Git, and clone through `internal/proc`. If the destination already contains a Git worktree whose normalized origin matches URL, the command SHALL be idempotent: it SHALL NOT reclone, reset, switch, pull, or change the current branch. With `--recurse-submodules`, it SHALL initialize only unpopulated submodules recursively after validating all resolved submodule URLs and credential hosts.
 
 #### Scenario: Clone a standalone repository
 - **WHEN** the destination is absent and the selected member owns valid credentials for URL's host
 - **THEN** OdCLI clones the exact URL into the exact destination and the origin remains credential-free
+
+#### Scenario: Clone a selected branch with its pinned submodules
+- **WHEN** a new destination is cloned with `--branch dev --recurse-submodules`
+- **THEN** the immutable Git clone command selects `dev` before submodule discovery and initializes that revision's pinned submodules through the existing credential validation
+- **AND** clone retains full history and other remote branches; it does not add `--depth` or `--single-branch`
+
+#### Scenario: Existing destination has another branch
+- **WHEN** `--branch` is supplied for an existing matching-origin checkout whose attached branch differs, including a detached checkout
+- **THEN** OdCLI fails without switching branches or initializing submodules; matching branch retries remain idempotent
+
+#### Scenario: Selected branch is unavailable
+- **WHEN** the requested branch does not exist on the remote
+- **THEN** clone fails and no submodule mutation starts
+
+#### Scenario: Branch selection is previewed without cloning
+- **WHEN** a caller plans a clone with `--branch` or uses CLI dry-run
+- **THEN** the selected branch is captured in the immutable clone argv without creating the destination or delivering credentials to a child
 
 #### Scenario: Retry a recursive clone
 - **WHEN** the destination already has the matching origin, a local feature branch is checked out, and one declared submodule is unpopulated
@@ -22,6 +39,14 @@ Define safe, member-authenticated GitLab operations for explicit repositories, i
 #### Scenario: Submodule host is unapproved
 - **WHEN** any resolved recursive submodule URL lacks an exact mapping for the selected member or violates transport policy
 - **THEN** OdCLI fails before starting clone/submodule mutation and does not expose a credential to that host
+
+#### Scenario: SSH submodule URLs use the selected member over HTTPS
+- **WHEN** a direct or nested submodule declares `git@HOST:GROUP/REPO.git` or `ssh://git@HOST/GROUP/REPO.git`, with an absent SSH port or port 22
+- **THEN** OdCLI validates the equivalent HTTPS repository identity and requires that host's verified credential mapping for the same selected member before updating the frontier
+- **AND** Git receives a command-local HTTPS submodule URL override, including logical names different from directory paths; `.gitmodules` and global Git configuration remain unchanged
+- **AND** nested relative URLs resolve against their parent repository, retries preserve populated submodules, and cached SSH origins use command-local HTTPS rewrites; credentialed Git children explicitly disable SSH and external-command transport fallback
+- **AND** unsupported SSH users/ports, filesystem/home-relative SSH paths, or unmapped hosts fail before that frontier is updated
+- **AND** first-level updates, like nested updates, are captured as runtime-discovered process snapshots after source/configuration validation; dry-run reports deferred initialization without fetching or delivering credentials
 
 ### Requirement: Explicit generic repository commit
 

@@ -571,12 +571,11 @@ class _BackupMixin:
         if restore_http_failure is not None:
             http_failure = restore_http_failure
 
+        if http_failure is not None:
+            status_code, message = http_failure
+            raise DatabaseError(status_code=status_code or 0, message=message, body=b"") from None
+
         if not skip_existence_checks and not target_exists(after_step_id):
-            if http_failure is not None:
-                status_code, message = http_failure
-                raise DatabaseError(
-                    status_code=status_code or 0, message=message, body=b""
-                ) from None
             raise RestoreFailedError(
                 f"Database {target_database_name!r} was not created after restore"
             )

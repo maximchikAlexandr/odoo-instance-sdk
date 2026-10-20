@@ -35,7 +35,7 @@ def _force_database_manager_probe_failure(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("httpx.Client", fake_httpx_client)
 
 
-_PublicRestoreCase = Literal["success", "spawn_failure", "foreign_listener"]
+_PublicRestoreCase = Literal["success", "spawn_failure", "foreign_listener", "restore_failure"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +208,12 @@ def _build_public_restore_runtime(
             ok=True
         ),
     )
+    if case == "restore_failure":
+        from odoo_instance_sdk.exceptions import DatabaseError
+
+        client_fixture.restore.side_effect = DatabaseError(
+            status_code=0, message="Database restore request failed", body=b""
+        )
     monkeypatch.setattr(DatabaseResource, "restore", client_fixture.restore)
     response = MagicMock()
     response.raise_for_status.return_value = None
@@ -547,6 +553,18 @@ class TestRestore:
         assert [step.step_id for step in harness.runtime.executor.spawned] == [
             harness.runtime.session.start_step.step_id
         ]
+        harness.client.client.unregister_process.assert_called_once()
+
+    def test_public_stopped_restore_http_failure_does_not_switch_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = self._run_public_stopped_restore_case("restore_failure", tmp_path, monkeypatch)
+
+        assert harness.result.exit_code == 1, harness.result.output
+        assert "Database restore request failed" in harness.result.stdout
+        assert '"default_switched": true' not in harness.result.stdout
+        manifest = (harness.project.path / ".odcli" / "project.toml").read_text()
+        assert 'default_source_database = "old"' in manifest
         harness.client.client.unregister_process.assert_called_once()
 
     def test_public_stopped_restore_spawn_failure_is_clean(

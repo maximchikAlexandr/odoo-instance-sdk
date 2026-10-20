@@ -399,7 +399,7 @@ def discover_dependency_inputs(
                 explicit=False,
                 source_candidate=candidate,
                 allowed_root=addon_root,
-                worktree_root=checkout,
+                worktree_root=checkout if addon_root.is_relative_to(scan_root) else None,
             )
 
     configured_odoo_bin = project_cfg.odoo_bin

@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
-from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     GitLabCredentialError,
     GitRepositoryError,
@@ -19,107 +17,203 @@ from odoo_instance_sdk.exceptions import (
     GitWorkflowError,
     PlanValidationError,
 )
-from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal import git_frontier, git_repository, proc
 from odoo_instance_sdk.internal.git_sync import AuthoritativeProbeCapture
-from odoo_instance_sdk.internal.gitlab_credentials import ensure_credential_directory
-from odoo_instance_sdk.models import (
-    GitLabCredentialContext,
-    GitLabCredentialIdentity,
-    GitLabIdentity,
-    StartConfig,
-)
+from odoo_instance_sdk.models import GitLabCredentialContext
 from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.git_generic import _planned_remote_sha, _remote_head
-from odoo_instance_sdk.resources.instance import OdooInstance
-from odoo_instance_sdk.resources.module import ModuleResource
-
-MEMBER = "11111111-1111-4111-8111-111111111111"
-HOST = "gitlab.example"
-OTHER_HOST = "gitlab.other.example"
-THIRD_HOST = "gitlab.third.example"
-
-
-def _git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=os.environ | {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull},
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout
+from tests.unit.git_test_support import (
+    HOST,
+    MEMBER,
+    OTHER_HOST,
+    OTHER_MEMBER,
+    THIRD_HOST,
+    _add_local_submodule,
+    _credential,
+    _git,
+    _identity_transport,
+    _instance,
+    _mapping,
+    _real_clone_executor,
+    _recursive_sources,
+    _repo,
+    _two_level_sources,
+)
 
 
-def _repo(root: Path, *, origin: str = "https://gitlab.example/team/repo") -> None:
-    root.mkdir(parents=True)
-    _git(root, "init", "-q", "-b", "feature")
-    _git(root, "config", "user.email", "tests@example.test")
-    _git(root, "config", "user.name", "tests")
-    _git(root, "remote", "add", "origin", origin)
-    (root / "README.md").write_text("base\n", encoding="utf-8")
-    _git(root, "add", "README.md")
-    _git(root, "commit", "-qm", "base")
+class _MultiSiblingExecutor:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
-
-def _instance(root: Path) -> OdooInstance:
-    config = InstanceConfig(
-        base_url="http://127.0.0.1:8069",
-        default_cwd=root,
-        start_config=StartConfig(addons_path=["addons"]),
-    )
-    instance = cast("OdooInstance", SimpleNamespace(config=config))
-    instance.modules = ModuleResource(instance)
-    return instance
-
-
-def _credential(
-    host: str = HOST, *, login: str = "alice", token: str = "token"
-) -> tuple[GitLabCredentialContext, GitLabIdentity]:
-    credential = GitLabCredentialContext(
-        identity=GitLabCredentialIdentity(
-            user_id=MEMBER,
-            host=host,
-            login=login,
-            token_key="ODCLI_GITLAB_TOKEN_TEST",
-        ),
-        _token=token,
-    )
-    identity = GitLabIdentity(
-        user_id=7, username=login, name="Alice Example", email="alice@example.test", host=host
-    )
-    return credential, identity
-
-
-def _mapping(root: Path, hosts: tuple[str, ...]) -> None:
-    directory = ensure_credential_directory(root)
-    entries = []
-    values = []
-    for index, host in enumerate(hosts):
-        key = f"ODCLI_GITLAB_TOKEN_{index}"
-        entries.append(
-            "[[mappings]]\n"
-            f'user_id = "{MEMBER}"\n'
-            f'host = "{host}"\n'
-            f'login = "user-{index}"\n'
-            f'token_key = "{key}"\n'
+    def execute(self, step: object, **_kwargs: object) -> proc.ProcessResult:
+        step_id = getattr(step, "step_id")
+        self.calls.append(step_id)
+        stdout_by_step = {
+            "git.clone.submodule-status": "-abc first\n-def nested/second\n",
+            "git.clone.submodule-status-final": " abc first\n def nested/second\n",
+        }
+        return proc.ProcessResult(
+            argv=tuple(getattr(step, "argv")),
+            returncode=0,
+            stdout=stdout_by_step.get(step_id, ""),
+            stderr="",
+            duration=0.0,
+            cwd=getattr(step, "cwd"),
+            environment=(),
         )
-        values.append(f"{key}=token-{index}")
-    (directory / "gitlab-credentials.toml").write_text("\n".join(entries), encoding="utf-8")
-    (directory / "gitlab-credentials.toml").chmod(0o600)
-    (directory / ".env").write_text("\n".join(values) + "\n", encoding="utf-8")
-    (directory / ".env").chmod(0o600)
 
 
-def _identity_transport(host: str, _token: str) -> dict[str, JsonValue]:
-    usernames = {HOST: "user-0", OTHER_HOST: "user-1", THIRD_HOST: "user-2"}
-    return {
-        "id": 7,
-        "username": usernames[host],
-        "name": "Selected Member",
-        "commit_email": "selected@example.test",
-    }
+def _generic_nested_result_policy(
+    step_id: str,
+    command_args: Sequence[str],
+    checkout_root: Path,
+    leaf_source: Path,
+    deepest_source: Path | None,
+    after_result: bool,
+) -> subprocess.CompletedProcess[str] | None:
+    if deepest_source is None:
+        return None
+    nested_policy = (leaf_source / ".gitmodules").read_text()
+    if after_result:
+        if "gitlab.third.example" not in command_args and step_id == "git.clone.submodule-frontier":
+            shutil.rmtree(checkout_root / "child" / "leaf" / "vendor" / "lib", ignore_errors=True)
+        return None
+    if "evil.example" in nested_policy and step_id in {
+        "git.clone.submodule-frontier",
+        "git.clone.submodule-update-recursive",
+    }:
+        return subprocess.CompletedProcess((), 1, "", "unsafe nested frontier")
+    if (
+        "gitlab.third.example" not in command_args
+        and step_id == "git.clone.submodule-update-recursive"
+    ):
+        return subprocess.CompletedProcess((), 1, "", "submodule frontier unavailable")
+    return None
+
+
+def test_recursive_clone_ignores_other_member_mapping_hosts(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    _repo(root)
+    _mapping(tmp_path, (HOST,))
+    _mapping(tmp_path, (OTHER_HOST,), member_id=OTHER_MEMBER, append=True)
+    credential, identity = _credential()
+
+    command = GitResource(_instance(tmp_path)).clone_command(
+        "https://gitlab.example/team/repo",
+        root,
+        member_id=MEMBER,
+        recurse_submodules=True,
+        credential=credential,
+        identity=identity,
+        user_root=tmp_path,
+        identity_transport=_identity_transport,
+    )
+
+    assert [step.step_id for step in command.plan.process_steps] == [
+        "git.clone.submodule-status",
+        "git.clone.submodule-update",
+        "git.clone.submodule-frontier",
+        "git.clone.submodule-update-recursive",
+        "git.clone.submodule-status-final",
+    ]
+    assert "gitlab.other.example" not in repr(command.plan)
+
+
+def test_reused_recursive_clone_updates_all_missing_sibling_submodules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repository"
+    _repo(root)
+    _mapping(tmp_path, (HOST,))
+    credential, identity = _credential()
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.git_generic.missing_submodules",
+        lambda _root: ("first", "nested/second"),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.git_generic.submodule_recursive_update_arguments",
+        lambda _root, *paths, allowed_hosts: (
+            "submodule",
+            "update",
+            "--init",
+            "--",
+            *paths,
+        ),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.git_generic.validate_frontier", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.git_generic.validated_frontier_credentials",
+        lambda *_args, **_kwargs: (credential,),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.git_generic.validate_submodule_cache",
+        lambda *_args, **_kwargs: None,
+    )
+
+    executor = _MultiSiblingExecutor()
+    monkeypatch.setattr(proc, "SubprocessExecutor", lambda: executor)
+    command = GitResource(_instance(tmp_path)).clone_command(
+        "https://gitlab.example/team/repo",
+        root,
+        member_id=MEMBER,
+        recurse_submodules=True,
+        credential=credential,
+        identity=identity,
+        user_root=tmp_path,
+        identity_transport=_identity_transport,
+    )
+
+    update_steps = [
+        step
+        for step in command.plan.process_steps
+        if step.step_id.startswith("git.clone.submodule-update.")
+    ]
+    assert [step.argv[-1] for step in update_steps] == ["first", "nested/second"]
+    result = command.run()
+    assert result.initialized_submodules == ("first", "nested/second")
+    assert executor.calls == [
+        "git.clone.submodule-status",
+        "git.clone.submodule-update.0",
+        "git.clone.submodule-update.1",
+        "git.clone.submodule-status-final",
+    ]
+
+
+def test_reused_recursive_clone_falls_back_after_missing_paths_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repository"
+    _repo(root)
+    _mapping(tmp_path, (HOST,))
+    credential, identity = _credential()
+
+    def fail_missing(_root: Path) -> tuple[str, ...]:
+        raise GitRepositoryError("status unavailable")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.git_generic.missing_submodules",
+        fail_missing,
+    )
+
+    command = GitResource(_instance(tmp_path)).clone_command(
+        "https://gitlab.example/team/repo",
+        root,
+        member_id=MEMBER,
+        recurse_submodules=True,
+        credential=credential,
+        identity=identity,
+        user_root=tmp_path,
+        identity_transport=_identity_transport,
+    )
+
+    assert any(step.step_id == "git.clone.submodule-update" for step in command.plan.process_steps)
+    assert not any(
+        step.step_id.startswith("git.clone.submodule-update.")
+        for step in command.plan.process_steps
+    )
 
 
 def test_real_runtime_probe_parses_before_redaction_and_cleans_channel(
@@ -192,202 +286,6 @@ def test_runtime_non_probe_does_not_retain_unredacted_stdout() -> None:
     assert token not in repr([asdict(event) for event in events])
 
 
-def _add_local_submodule(
-    parent: Path, source: Path, path: str, url: str, *, logical_name: str | None = None
-) -> None:
-    _git(
-        parent,
-        "-c",
-        "protocol.file.allow=always",
-        "submodule",
-        "add",
-        str(source),
-        path,
-    )
-    _git(parent, "config", "-f", ".gitmodules", f"submodule.{path}.url", url)
-    if logical_name is not None:
-        _git(
-            parent,
-            "config",
-            "-f",
-            ".gitmodules",
-            "--rename-section",
-            f"submodule.{path}",
-            f"submodule.{logical_name}",
-        )
-    _git(parent, "add", ".gitmodules", path)
-    _git(parent, "commit", "-qm", f"add {path}")
-
-
-def _recursive_sources(
-    tmp_path: Path, *, hostile: bool = False
-) -> tuple[Path, Path, Path, Path, Path]:
-    leaf = tmp_path / "leaf-source"
-    _repo(leaf, origin="https://gitlab.example/team/leaf")
-
-    deepest = tmp_path / "deepest-source"
-    _repo(deepest, origin="https://gitlab.third.example/team/deepest")
-    ultimate = tmp_path / "ultimate-source"
-    _repo(ultimate, origin="https://gitlab.third.example/team/ultimate")
-    _add_local_submodule(
-        deepest,
-        ultimate,
-        "ultimate",
-        "https://gitlab.third.example/team/ultimate",
-    )
-    _add_local_submodule(
-        leaf,
-        deepest,
-        "vendor/lib",
-        "https://gitlab.third.example/team/deepest",
-        logical_name="nested-deep",
-    )
-    if hostile:
-        _git(
-            leaf,
-            "config",
-            "-f",
-            ".gitmodules",
-            "url.https://evil.example/.insteadOf",
-            "https://gitlab.third.example/",
-        )
-        _git(leaf, "add", ".gitmodules")
-        _git(leaf, "commit", "-qm", "hostile deepest policy")
-
-    child = tmp_path / "child-source"
-    _repo(child, origin="https://gitlab.other.example/team/child")
-    _add_local_submodule(
-        child,
-        leaf,
-        "leaf",
-        "https://gitlab.example/team/leaf",
-    )
-    root = tmp_path / "root-source"
-    _repo(root, origin="https://gitlab.example/team/root")
-    _add_local_submodule(
-        root,
-        child,
-        "child",
-        "https://gitlab.other.example/team/child",
-    )
-    return root, child, leaf, deepest, ultimate
-
-
-def _two_level_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Build a small real-Git cross-host root -> child -> leaf topology."""
-    leaf = tmp_path / "two-level-leaf-source"
-    _repo(leaf, origin="https://gitlab.example/team/leaf")
-    child = tmp_path / "two-level-child-source"
-    _repo(child, origin="https://gitlab.other.example/team/child")
-    _add_local_submodule(
-        child,
-        leaf,
-        "leaf",
-        "https://gitlab.example/team/leaf",
-    )
-    root = tmp_path / "two-level-root-source"
-    _repo(root, origin="https://gitlab.example/team/root")
-    _add_local_submodule(
-        root,
-        child,
-        "child",
-        "https://gitlab.other.example/team/child",
-    )
-    return root, child, leaf
-
-
-def _real_clone_executor(
-    root_source: Path,
-    child_source: Path,
-    leaf_source: Path,
-    deepest_source: Path | None = None,
-    ultimate_source: Path | None = None,
-) -> tuple[type[object], list[str], list[dict[str, str]]]:
-    urls = {
-        "https://gitlab.other.example/team/child": child_source,
-        "https://gitlab.example/team/leaf": leaf_source,
-    }
-    if deepest_source is not None and ultimate_source is not None:
-        urls.update(
-            {
-                "https://gitlab.third.example/team/deepest": deepest_source,
-                "https://gitlab.third.example/team/ultimate": ultimate_source,
-            }
-        )
-    calls: list[str] = []
-    environments: list[dict[str, str]] = []
-
-    class RealExecutor:
-        def execute(self, step: object, **_kwargs: object) -> proc.ProcessResult:
-            step_id = getattr(step, "step_id")
-            calls.append(step_id)
-            argv = tuple(getattr(step, "argv"))
-            if step_id == "git.clone":
-                destination = Path(argv[-1])
-                result = subprocess.run(
-                    ["git", "clone", str(root_source), str(destination)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    _git(
-                        destination,
-                        "remote",
-                        "set-url",
-                        "origin",
-                        "https://gitlab.example/team/root",
-                    )
-            else:
-                factory = getattr(step, "runtime_environment_factory", None)
-                if callable(factory):
-                    runtime_environment, cleanup, _secrets = factory()
-                else:
-                    runtime_environment = tuple(getattr(step, "environment_overrides"))
-
-                    def cleanup() -> None:
-                        return None
-
-                try:
-                    runtime_values = dict(runtime_environment)
-                    environments.append(runtime_values)
-                    command = ["git", "-c", "protocol.file.allow=always"]
-                    for url, source in urls.items():
-                        command.extend(["-c", f"url.{source.as_uri()}.insteadOf={url}"])
-                    command_args = list(argv[1:])
-                    for foreach_index in reversed(
-                        [index for index, value in enumerate(command_args) if value == "foreach"]
-                    ):
-                        inner_git = foreach_index + 1
-                        for url, source in reversed(tuple(urls.items())):
-                            command_args[inner_git + 1 : inner_git + 1] = [
-                                "-c",
-                                f"url.{source.as_uri()}.insteadOf={url}",
-                            ]
-                    command.extend(command_args)
-                    result = subprocess.run(
-                        command,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        env=os.environ | runtime_values,
-                    )
-                    assert result.returncode == 0, (step_id, command, result.stderr)
-                finally:
-                    cleanup()
-            return proc.ProcessResult(
-                argv=argv,
-                returncode=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                duration=0.0,
-                cwd=getattr(step, "cwd"),
-                environment=(),
-            )
-
-    return RealExecutor, calls, environments
-
-
 def test_absent_clone_plan_is_dry_and_redacts_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -422,6 +320,14 @@ def test_absent_clone_plan_is_dry_and_redacts_credentials(
 
     assert not (tmp_path / "recursive-repository").exists()
     assert "ODCLI_GITLAB_ASKPASS_FILE" not in repr(recursive.plan)
+    assert [step.step_id for step in recursive.plan.process_steps] == [
+        "git.clone",
+        "git.clone.submodule-status",
+        "git.clone.submodule-update",
+        "git.clone.submodule-frontier",
+        "git.clone.submodule-update-recursive",
+        "git.clone.submodule-status-final",
+    ]
 
 
 def test_existing_clone_reuses_branch_without_reclone_or_effect(tmp_path: Path) -> None:
@@ -522,10 +428,15 @@ def test_recursive_clone_requires_mapping_for_each_cross_host_submodule(tmp_path
         user_root=tmp_path,
         identity_transport=_identity_transport,
     )
-    update = next(
-        step for step in command.plan.process_steps if step.step_id == "git.clone.submodule-update"
+    assert command.plan.observations
+    assert any(step.step_id == "git.clone.submodule-update" for step in command.plan.process_steps)
+    assert any(
+        step.step_id == "git.clone.submodule-frontier" for step in command.plan.process_steps
     )
-    assert "--recursive" not in update.argv
+    assert any(
+        step.step_id == "git.clone.submodule-update-recursive"
+        for step in command.plan.process_steps
+    )
     assert not any(
         step.step_id.startswith("git.clone.submodule-update.dynamic")
         for step in command.plan.process_steps
@@ -562,17 +473,19 @@ def test_absent_recursive_clone_uses_real_git_for_two_level_cross_host_topology(
         "git.clone",
         "git.clone.submodule-status",
         "git.clone.submodule-update",
-        "git.clone.submodule-status.dynamic-0",
-        "git.clone.submodule-update.dynamic-0",
-        "git.clone.submodule-status.dynamic-1",
+        "git.clone.submodule-frontier",
+        "git.clone.submodule-update-recursive",
+        "git.clone.submodule-status-final",
     ]
     planned = {
         step.step_id: step
         for step in command.plan.process_steps
         if step.step_id.startswith("git.clone.submodule-update")
     }
-    assert tuple(planned) == ("git.clone.submodule-update",)
-    assert "git.clone.submodule-update.depth-1" not in calls
+    assert set(planned) == {
+        "git.clone.submodule-update",
+        "git.clone.submodule-update-recursive",
+    }
     for environment in environments:
         assert "token-1" not in environment.values()
         assert "token-2" not in environment.values()
@@ -591,7 +504,12 @@ def test_absent_recursive_clone_rejects_nested_hostile_config_before_real_nested
     credential, identity = _credential()
     _mapping(tmp_path, (HOST, OTHER_HOST, THIRD_HOST))
     executor, calls, _environments = _real_clone_executor(
-        root_source, child_source, leaf_source, deepest_source, ultimate_source
+        root_source,
+        child_source,
+        leaf_source,
+        deepest_source,
+        ultimate_source,
+        result_policy=_generic_nested_result_policy,
     )
     monkeypatch.setattr(proc, "SubprocessExecutor", executor)
 
@@ -611,8 +529,8 @@ def test_absent_recursive_clone_rejects_nested_hostile_config_before_real_nested
     assert (checkout / "child" / ".git").exists()
     assert not (checkout / "child" / "leaf" / "vendor" / "lib" / ".git").exists()
     assert "git.clone.submodule-update" in calls
-    assert "git.clone.submodule-update.dynamic-0" in calls
-    assert "git.clone.submodule-update.dynamic-1" not in calls
+    assert "git.clone.submodule-frontier" in calls
+    assert "git.clone.submodule-update-recursive" not in calls
 
 
 def test_absent_recursive_clone_rejects_unmapped_deepest_frontier_before_update(
@@ -624,7 +542,12 @@ def test_absent_recursive_clone_rejects_unmapped_deepest_frontier_before_update(
     credential, identity = _credential()
     _mapping(tmp_path, (HOST, OTHER_HOST))
     executor, calls, _environments = _real_clone_executor(
-        root_source, child_source, leaf_source, deepest_source, ultimate_source
+        root_source,
+        child_source,
+        leaf_source,
+        deepest_source,
+        ultimate_source,
+        result_policy=_generic_nested_result_policy,
     )
     monkeypatch.setattr(proc, "SubprocessExecutor", executor)
 
@@ -643,8 +566,8 @@ def test_absent_recursive_clone_rejects_unmapped_deepest_frontier_before_update(
     checkout = tmp_path / "checkout"
     assert (checkout / "child" / "leaf" / ".git").exists()
     assert not (checkout / "child" / "leaf" / "vendor" / "lib" / ".git").exists()
-    assert "git.clone.submodule-update.dynamic-0" in calls
-    assert "git.clone.submodule-update.dynamic-1" not in calls
+    assert "git.clone.submodule-frontier" in calls
+    assert "git.clone.submodule-update-recursive" not in calls
 
 
 def test_recursive_clone_accepts_git_relative_sibling_override_and_rejects_project_drift(
@@ -700,6 +623,54 @@ def test_recursive_clone_accepts_git_relative_sibling_override_and_rejects_proje
             identity_transport=_identity_transport,
         )
     assert channel_calls == []
+
+
+def test_submodule_name_cannot_inject_a_command_config_value(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    child = tmp_path / "child"
+    _repo(root)
+    _repo(child)
+    _add_local_submodule(
+        root,
+        child,
+        "child",
+        "https://gitlab.example/team/child",
+        logical_name="other.url=https://unmapped.example",
+    )
+    _git(root, "config", "--unset-all", "submodule.child.url")
+    with pytest.raises(GitRepositoryError, match="logical name"):
+        git_repository.submodule_update_arguments(root, "child", allowed_hosts=(HOST,))
+
+
+@pytest.mark.parametrize("target", ["directory", "config"])
+def test_cached_submodule_symlinks_are_rejected(tmp_path: Path, target: str) -> None:
+    root, _child, _leaf = _two_level_sources(tmp_path)
+    _git(root, "submodule", "deinit", "-f", "child")
+    cached = root / _git(root, "rev-parse", "--git-path", "modules/child").strip()
+    selected = cached if target == "directory" else cached / "config"
+    moved = tmp_path / "external-cache-target"
+    selected.rename(moved)
+    selected.symlink_to(moved, target_is_directory=target == "directory")
+    with pytest.raises(GitRepositoryError, match="cached submodule directory is unsafe"):
+        git_repository.submodule_update_arguments(root, "child", allowed_hosts=(HOST, OTHER_HOST))
+
+
+def test_cached_submodule_origin_must_be_unambiguous(tmp_path: Path) -> None:
+    root, _child, _leaf = _two_level_sources(tmp_path)
+    _git(root, "submodule", "deinit", "-f", "child")
+    cached = root / _git(root, "rev-parse", "--git-path", "modules/child").strip()
+    _git(
+        root,
+        "--git-dir",
+        str(cached),
+        "config",
+        "--local",
+        "--add",
+        "remote.origin.url",
+        "https://gitlab.other.example/team/child",
+    )
+    with pytest.raises(GitRepositoryError, match="ambiguous"):
+        git_repository.submodule_update_arguments(root, "child", allowed_hosts=(HOST, OTHER_HOST))
 
 
 def test_generic_commit_uses_staged_scope_and_verified_identity(tmp_path: Path) -> None:

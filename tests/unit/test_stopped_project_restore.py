@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from odoo_instance_sdk.internal.proc import (
 from odoo_instance_sdk.models import Backup, BackupFormat, StartConfig
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
+from odoo_instance_sdk.resources.instance.runtime import _build_cli_args
 
 
 def _instance(tmp_path: Path) -> OdooInstance:
@@ -88,6 +90,7 @@ def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_pro
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     instance = _instance(tmp_path)
+    original_config = copy.deepcopy(instance.config.start_config)
     session = auxiliary_restore_session(instance)
     handle = ProcessHandle(
         process=MagicMock(),
@@ -113,6 +116,11 @@ def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_pro
 
     run_session(session, callback, executor)
 
+    assert "--limit-time-real=0" in session.start_step.argv
+    assert "--limit-time-cpu=0" in session.start_step.argv
+    assert "--workers=0" in session.start_step.argv
+    assert instance.config.start_config is not None
+    assert instance.config.start_config == original_config
     assert session.start_step.long_running is True
     assert session.start_step.inherit_stdio is True
     assert "--database=__odcli_restore__" not in session.start_step.argv
@@ -201,7 +209,11 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
     process.status.return_value = "running"
     process.create_time.return_value = 123.5
     process.exe.return_value = instance._executable_prefix()[0]
-    process.cmdline.return_value = list(session.start_step.argv)
+    assert instance.config.start_config is not None
+    process.cmdline.return_value = [
+        *instance._executable_prefix(),
+        *_build_cli_args(instance.config.start_config),
+    ]
     process.cwd.return_value = str(tmp_path)
     process.net_connections.return_value = (
         SimpleNamespace(status="LISTEN", laddr=("127.0.0.1", 0)),
@@ -262,13 +274,16 @@ def test_recorded_runtime_requires_unambiguous_exact_socket_owner(
         repository_root=tmp_path,
         git_common_dir=tmp_path / ".git",
     )
-    session = auxiliary_restore_session(instance)
     process = MagicMock()
     process.is_running.return_value = True
     process.status.return_value = "running"
     process.create_time.return_value = 123.5
     process.exe.return_value = instance._executable_prefix()[0]
-    process.cmdline.return_value = list(session.start_step.argv)
+    assert instance.config.start_config is not None
+    process.cmdline.return_value = [
+        *instance._executable_prefix(),
+        *_build_cli_args(instance.config.start_config),
+    ]
     process.cwd.return_value = str(tmp_path)
     process.net_connections.return_value = (
         SimpleNamespace(status="LISTEN", laddr=("127.0.0.1", listener_port)),
@@ -358,13 +373,16 @@ def test_uninspectable_socket_rejects_recorded_runtime(
         repository_root=tmp_path,
         git_common_dir=tmp_path / ".git",
     )
-    session = auxiliary_restore_session(instance)
     process = MagicMock()
     process.is_running.return_value = True
     process.status.return_value = "running"
     process.create_time.return_value = 123.5
     process.exe.return_value = instance._executable_prefix()[0]
-    process.cmdline.return_value = list(session.start_step.argv)
+    assert instance.config.start_config is not None
+    process.cmdline.return_value = [
+        *instance._executable_prefix(),
+        *_build_cli_args(instance.config.start_config),
+    ]
     process.cwd.return_value = str(tmp_path)
     process.net_connections.side_effect = PermissionError("socket inspection denied")
     monkeypatch.setattr(

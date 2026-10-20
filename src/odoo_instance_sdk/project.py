@@ -166,9 +166,11 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         seen_addons: set[Path] = set()
         addons: list[Path] = []
         for addon_root in self.addon_roots:
-            if addon_root.is_absolute():
-                raise ConfigError("project.addon_roots must use repository-relative paths")
-            canonical = _validate_project_path(root, addon_root, "addon_roots")
+            canonical = (
+                addon_root.resolve()
+                if addon_root.is_absolute()
+                else _validate_project_path(root, addon_root, "addon_roots")
+            )
             if canonical in seen_addons:
                 continue
             seen_addons.add(canonical)

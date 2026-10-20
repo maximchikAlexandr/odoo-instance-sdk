@@ -586,3 +586,31 @@ def test_dry_run_rejects_control_byte_database_before_manifest_or_spawn(
     assert isinstance(result.exception, ConfigError)
     assert not (tmp_path / ".odcli" / "project.toml").exists()
     spawn.assert_not_called()
+
+
+def test_init_accepts_absolute_external_addon_root(tmp_path: Path) -> None:
+    from odoo_instance_sdk.project import ProjectConfig
+
+    client = tmp_path / "client"
+    client.mkdir()
+    addons = tmp_path / "platform" / "addons"
+    addons.mkdir(parents=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--project",
+            str(client),
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--addons-root",
+            str(addons),
+            "--no-input",
+            "--allow-partial",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ProjectConfig.load(client).addon_roots == (addons,)

@@ -14,12 +14,14 @@ operation registry or provider-discovery layer.
 
 ## Project inputs and the primary virtual environment
 
-`ProjectConfig` optionally stores ordered, repository-relative `addon_roots`
+`ProjectConfig` optionally stores ordered project-relative or absolute `addon_roots`
 and ordered `server_wide_modules`. `odcli init --addons-root PATH
 --server-wide-module NAME` repeats these options in the desired order; omitted
 options retain the stored tuples. Compose's generated `.odcli/odoo.conf`
 overlays the resolved addon paths and server-wide modules while preserving the
-source config. A missing or stale generated config is repaired independently
+source config. Absolute external addon roots remain external in managed checkouts;
+their module and immediate-parent requirements are discovered within the declared
+root. Relative roots remain confined to the project. A missing or stale generated config is repaired independently
 of an unchanged manifest.
 
 Integrated initialization is the primary agent bootstrap. It remains opt-in so

@@ -263,3 +263,25 @@ class TestGenerateConfig:
         # An isolated environment always owns its logfile, even when the source
         # config had none.
         assert _read_config(dest)["logfile"] == str((dest.parent / "odoo.log").resolve())
+
+
+def test_declared_absolute_addons_stay_external_in_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "client"
+    worktree = tmp_path / "checkout"
+    external = tmp_path / "platform" / "addons"
+    for path in (repo, worktree, external):
+        path.mkdir(parents=True)
+    dest = tmp_path / "generated.conf"
+
+    generate_config(
+        None,
+        dest,
+        repo_root=repo,
+        worktree=worktree,
+        http_interface="127.0.0.1",
+        http_port=8069,
+        db_name="test",
+        addon_roots=(Path("addons"), external),
+    )
+
+    assert _read_config(dest)["addons_path"].split(",") == [str(worktree / "addons"), str(external)]
