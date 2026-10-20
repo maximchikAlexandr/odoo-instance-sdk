@@ -88,6 +88,24 @@ def test_purge_requires_exact_confirmation_at_execution_and_dry_run_is_inert(
     catalog.close()
 
 
+def test_purge_fails_closed_when_mutating_adapter_is_missing(tmp_path: Path) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    command = capture_project_removal_command(
+        catalog,
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    with pytest.raises(ProjectRemovalError, match="captured adapter") as error:
+        command.run()
+    details = error.value.details["removal"]
+    assert details["registration_state"] == "registered"
+    assert details["remaining_total"] >= 1
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
 def test_forget_refuses_an_active_project_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,9 +165,12 @@ def test_purge_flattens_captured_child_plan_and_runs_its_callback(tmp_path: Path
         adapters=Adapters(),
     )
     assert captured == [project_id]
-    assert tuple(step.step_id for step in command.plan.steps) == ("child.project.delete",)
+    assert command.plan.steps[-1].action == "forget"
+    assert tuple(step.step_id for step in command.plan.steps[:-1]) == ("child.project.delete",)
 
     set_project_confirmation(command, expected_project_confirmation_for_command(command))
     result = command.run()
     assert result.completed[0].identity == f"project:{project_id}"
+    assert result.completed[-1].action == "forget"
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     catalog.close()
