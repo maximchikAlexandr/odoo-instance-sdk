@@ -16,8 +16,13 @@ from odoo_instance_sdk import (
     ProjectResourceDecision,
     ProjectSelector,
 )
+from odoo_instance_sdk.internal.project_removal_coordinator import (
+    capture_project_removal_command,
+)
 from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.resource_inventory import stable_resource_identity
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from tests.unit.monitor_support import make_env
 
 
 def _decision() -> ProjectResourceDecision:
@@ -190,4 +195,68 @@ def test_public_project_resource_composes_backup_and_terminal_catalogue_actions(
     assert "delete-filestore" in actions
     assert actions[-1] == "forget"
     assert command.plan.steps[-1].step_id == f"project-removal:forget:project-forget:{project_id}"
+    catalog.close()
+
+
+def test_public_project_resource_refuses_compose_when_catalogue_dependency_remains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    (root / ".odcli").mkdir()
+    (root / ".odcli" / "project.toml").write_text(
+        '[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8"
+    )
+    project_id = f"project_{repo_key(root, root / '.git')}"
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    catalog._register_project(project_id, root, root / ".git")
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "owned-compose", "owned-volume")
+    catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        project_id,
+        claim.compose_project,
+        claim.volume_name,
+    )
+    catalog.create_environment(
+        make_env(
+            "retained-environment",
+            project_id=project_id,
+            repository_root=str(root),
+            git_common_dir=str(root / ".git"),
+        )
+    )
+
+    client = OdooClient(config=OdooClientConfig(executable="python3"))
+    client._catalog = catalog
+    compose_decision = ProjectResourceDecision(
+        identity=stable_resource_identity("volume", f"{project_id}\x00{claim.volume_name}"),
+        resource_type="compose",
+        action="delete",
+        reason="exclusive_sdk_ownership",
+        target="compose cluster",
+    )
+    captured: dict[str, object] = {}
+    real_capture = capture_project_removal_command
+
+    def capture_with_compose_probe(*args: object, **kwargs: object) -> object:
+        adapters = kwargs["adapters"]
+        captured["compose"] = adapters.for_decision(compose_decision)  # type: ignore[attr-defined]
+        captured["child"] = captured["compose"].capture(  # type: ignore[union-attr]
+            compose_decision, project_id=project_id
+        )
+        return real_capture(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_removal_coordinator.capture_project_removal_command",
+        capture_with_compose_probe,
+    )
+    client.projects.remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    assert captured["compose"] is not None
+    assert captured["child"] is None
     catalog.close()
