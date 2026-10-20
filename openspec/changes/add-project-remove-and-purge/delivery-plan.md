@@ -76,7 +76,7 @@ Stages are contiguous topological layers and SHALL be materialized as the `stage
 ## WP-04-coordinator-forget-cli
 
 - **Stage:** 3
-- **Depends on:** `WP-01-registration-foundation`, `WP-02-public-project-contract`, `WP-03-resource-projection`
+- **Depends on:** `WP-03-resource-projection`
 - **OpenSpec task coverage:** `2.4`, `3.1`, `5.1`
 - **Deliverable:** the shared immutable coordinator skeleton, complete non-purge forget behavior, root CLI parsing/interactive token transport, and sealed adapter interfaces for later purge packages.
 - **Owned responsibility scope:** project `remove_command` coordinator and prepared action ledger; project-lock/fingerprint revalidation; forget blockers/transition/idempotence; root `commands/remove.py` registration and selector/format/confirmation parsing; coordinator/forget/CLI-focused tests. Critical shared surfaces include the new project resource implementation, root CLI registration, execution/action helpers used for composition, and catalogue transition APIs.
@@ -123,9 +123,9 @@ Stages are contiguous topological layers and SHALL be materialized as the `stage
 - **Depends on:** `WP-07-finalization-output`
 - **OpenSpec task coverage:** `5.3`, `6.1`, `6.2`, `6.3`
 - **Deliverable:** complete user documentation, consolidated safety/regression matrices, real-Odoo/Compose CI coverage, generated evidence metadata, and all repository acceptance gates green locally where prerequisites exist.
-- **Owned responsibility scope:** user/project lifecycle documentation; remaining cross-cutting unit/integration/compatibility tests; real-Odoo test module/fixtures/command matrix/evidence metadata/workflow selection; generated API/client contract checks; directly related snapshots and test service files. It does not include Tester-owned GitLab scripts or runtime evidence.
+- **Owned responsibility scope:** user/project lifecycle documentation; remaining cross-cutting unit/integration/compatibility tests, including `tests/integration/test_project_removal.py` deterministic fail-after-action coverage using `odoo_instance_sdk.internal.proc.RecordingExecutor(result_factory=...)` for captured process steps and pytest `monkeypatch` of the specific guarded adapter callback for in-process action steps; real-Odoo test module/fixtures/command matrix/evidence metadata/workflow selection; generated API/client contract checks; directly related snapshots and test service files. It does not include Tester-owned GitLab scripts, runtime evidence, a production failure-injection seam, or a test-only CLI option.
 - **Contract surface:** docs state exact behavior/exclusions; CI exercises public init → forget → re-init → purge and isolation; cleanup ledger proves no leaks; canonical leaf/evidence metadata names the new operation; no test-only ownership bypass enters production.
-- **DoD / evidence:** focused and full test matrices cover every OpenSpec scenario; migration/equivalence, format, lint, typing, offline, compatibility, architecture, generated-contract and available real-Odoo gates pass; missing opt-in infrastructure is reported honestly; strict OpenSpec validation passes; Tester can execute the E2E contract below without editing product CI.
+- **DoD / evidence:** focused and full test matrices cover every OpenSpec scenario; `pytest tests/integration/test_project_removal.py -k 'partial_failure or retry'` injects each deterministic failure through `RecordingExecutor.result_factory` or a named adapter monkeypatch, asserts the public result/ledger, and exposes neither mechanism through the CLI; migration/equivalence, format, lint, typing, offline, compatibility, architecture, generated-contract and available real-Odoo gates pass; missing opt-in infrastructure is reported honestly; strict OpenSpec validation passes; Tester can execute the E2E contract below without editing product CI.
 - **Parallel safety:** final package begins after all implementation packages, so its cross-cutting test/doc write zones have no active sibling. Tester work remains in the separate GitLab repository and evidence channel.
 
 ## Estimation Evidence and Assumptions
@@ -153,7 +153,94 @@ Planning does not run the tests. The test repository is the project-description 
 | `E02-confirm-dry-run` | `project-removal`: exact confirmation and immutable projection; `cli-odcli`: machine non-prompt behavior | TTY/non-TTY and plan/execution parity are observable public-boundary behavior; selected as a focused live CLI case, no second stand | None | Same script, `--case confirm-dry-run` | Capture dry-run in Rich/JSON/TOON; try absent, shortened, mismatched and `--yes`-only confirmation; then inspect that no resource changed | Parametrized CLI/output/unit tests are sufficient for exhaustive negative matrix; CI real-Odoo node checks one machine refusal and one dry-run | Exact token shown; no prompt in machine modes; every refusal exits nonzero with zero mutations; dry-run actions equal later execution actions | Base/candidate help and candidate dry-run/error text; corresponding rendered PNGs; JSON assertions reported in Multica only |
 | `E03-isolated-purge` | `project-removal`: complete isolated purge, ordering, bounded result; `local-resource-lifecycle`: complete projection and exclusive ownership | Only a real disposable project can prove coordinated filesystem, PostgreSQL, Docker and catalogue postconditions; selected | Monitor snapshot only; no new API | Same script, `--case isolated-purge` | Build a dedicated project clone with own Compose project, database, filestore, backup, env, venv/log/temp and route; run exact purge; independently inspect absence in filesystem/psql/docker/catalogue/monitor | Implementer extends full real-Odoo/Compose CI and its cleanup ledger; not smoke because volume destruction and full init exceed smoke scope | Ordered plan consumed once; owned resources absent; project forgotten last; Docker image remains; repeat by full id is idempotent | Plan/result text, exit codes, psql/docker/catalogue assertions, cleanup ledger, candidate before/after summary PNGs in Multica |
 | `E04-cross-project-isolation` | `project-removal`: other project/shared retention, unproven database/volume retention; projection deduplication | Cross-provider exclusive-use proof needs a live control project; selected and shares E03 setup | Monitor snapshot must retain the control project | Same script, `--case cross-project-isolation` | Create a second disposable control clone with distinct DB/port/catalogue relationships plus a deliberately shared/borrowed input; purge only target; inspect control SHA/files/DB/volume/snapshot and retained reasons | Focused ownership matrices plus the same full-tier real-Odoo node | Control project and shared/external/caller-owned resources are unchanged; no remote repo/image deletion; retained reasons are exact | Before/after control hashes and inventories, assertion summary, one sanitized retention table render attached in Multica |
-| `E05-partial-retry` | `project-removal`: drift refusal, partial failure, missing-source retry | Deterministic injected failures belong in integration tests; one manual filesystem-loss retry closes the real missing-root gap without destructive fault injection into persistent services | None | Same script, `--case missing-source-retry` | On a new fixture, make source deletion the last completed filesystem action, inject a test-owned catalogue finalization failure through the documented test seam, retry by full id, and inspect truthful completed/remaining state | Implementer owns exhaustive failure injection, resource-drift and retry tests; CI full node checks one fail-after-mutation retry | First run stays registered and reports failure; retry resolves absent source by full id, does not repeat unrelated effects, and finishes once | Sanitized failure/result text, action-ledger assertions and revision provenance in Multica; no diagnostic JSON committed |
+| `E05-missing-source-recovery` | `project-removal`: missing-source full-id selection and recovery | A disposable source can be removed safely by the Tester-owned fixture setup before the product invocation; deterministic mid-command failure and retry stay in product integration tests, so the live case needs no unavailable failure-injection seam | None | Same script, `--case missing-source-recovery` | Let the harness initialize a disposable target, stop its owned runtime, remove only that fixture's captured source root during setup, then invoke `odcli-N remove --project-id <full-id> --purge --confirm-project <basename>:<full-id>` and inspect retained/deleted decisions through public output and read-only stores | Implementer-owned integration tests substitute the in-process executor/action callback to fail after each phase and cover drift, partial result, terminal-forget refusal, and retry; no production flag, environment switch, or public test seam is added | Full-id lookup succeeds with an absent source; the absent source is reported idempotently; eligible remaining resources are handled once; terminal state and bounded output are truthful | Sanitized setup provenance, public command/result text, catalogue/resource assertions, and revision provenance in Multica; no diagnostic JSON committed |
+
+## Scenario Traceability
+
+Every delta-spec scenario has exactly one primary verification disposition below. `E01`–`E05` refer to the live cases above. `Lower-level` means Implementer-owned product-repository coverage under tasks `6.1`/`6.2`; the stated reason explains why no additional local E2E case is warranted.
+
+### `project-removal`
+
+| Scenario | Primary disposition | Coverage or reasoned local-E2E exclusion |
+|---|---|---|
+| Path selector resolves canonical registration | `E01` | Live initialization supplies the canonical path and registration. |
+| Missing source resolves by full id | `E05` | Public full-id purge is executed after fixture-owned source removal. |
+| Invalid selector is inert | Lower-level | Pure selector/zero-mutation invariant is exhaustive and deterministic in unit/integration matrices. |
+| Mixed ownership plan | `E04` | Target/control/shared inputs exercise delete/retain projection. |
+| Dry-run and execution share a snapshot | `E02` | Public dry-run and later execution plans are compared; drift variants remain deterministic integration coverage. |
+| Secrets stay absent | `E02` | Live bounded outputs are inspected; exhaustive field/redaction permutations stay in serializer tests. |
+| Safe forget | `E01` | Live preserved bytes, rows, identities, and hidden registration are inspected. |
+| Active resource blocks forget | `E01` | The public forget refusal is demonstrated before blockers are removed. |
+| Repeated forget is idempotent | `E01` | The same full id is forgotten twice with unchanged resources. |
+| Exact interactive confirmation | `E02` | Rich-mode exact-token collection is captured on the disposable fixture. |
+| Generic or shortened confirmation is refused | `E02` | Absent, generic, shortened, and mismatched tokens are public negative cases. |
+| Non-interactive confirmation is mandatory | `E02` | JSON/TOON invocations prove non-prompt refusal without the exact option. |
+| Dry-run is inert | `E02` | Store/resource hashes before and after all dry-run formats prove no mutation. |
+| Complete isolated purge | `E03` | Full disposable filesystem/PostgreSQL/Docker/catalogue postconditions are inspected. |
+| Another project and shared resources are unchanged | `E04` | A live control project and shared input remain byte/identity stable. |
+| Other-tool checkout is retained | `E04` | The disposable retention fixture includes an independently owned checkout. |
+| Unproven database or volume is retained | `E04` | Ambiguous ownership is represented in the live control fixture and must retain. |
+| Resource set changes after preview | Lower-level | A deterministic between-plan-and-lock mutation is required; live timing would be flaky and add no boundary evidence. |
+| Concurrent init cannot race final forget | Lower-level | A barrier-controlled concurrency integration test proves lock ordering; a manual race cannot prove the invariant. |
+| Failure before terminal forget | Lower-level | Task `6.1` uses `RecordingExecutor.result_factory` or a named guarded-adapter monkeypatch after each phase; no public failure hook is permitted. |
+| Retry after missing source | `E05` + lower-level | E05 proves public absent-source recovery; deterministic fail-then-retry ledger semantics use the in-process test double. |
+| Repeated successful purge | `E03` | The second public full-id purge is asserted idempotent after the live purge. |
+| Machine partial failure | Lower-level | CLI integration invokes the real renderer with the injected structured failure; faulting a live persistent service is unsafe and less deterministic. |
+| Bounded large plan | Lower-level | Synthetic high-cardinality projection tests can prove exact truncation limits without provisioning wasteful live resources. |
+
+### `local-resource-lifecycle`
+
+| Scenario | Primary disposition | Coverage or reasoned local-E2E exclusion |
+|---|---|---|
+| Complete project projection | `E03` | The isolated fixture instantiates every supported resource class. |
+| Shared identity is deduplicated | `E04` | One shared input is referenced by target and control and appears once. |
+| Planning does not repair evidence | Lower-level | Read-only malformed/stale evidence fixtures prove zero catalogue/filesystem writes deterministically. |
+| Symlink escape is retained | `E04` | A disposable contained symlink targets outside the declared root and must retain without touching its target. |
+| Borrowed or referenced backup is retained | `E04` | The live shared fixture includes a referenced/borrowed backup. |
+| Exact owned Compose volume is deletable | `E03` | Captured labels and post-purge Docker inspection prove exact volume deletion. |
+
+### `project-init`
+
+| Scenario | Primary disposition | Coverage or reasoned local-E2E exclusion |
+|---|---|---|
+| Successful re-init restores visibility | `E01` | Public re-init restores the same id and monitor visibility. |
+| Failed re-init remains forgotten | Lower-level | Deterministic init-postcondition failure is injected in integration; breaking a live init adds no contract evidence. |
+| Dry-run does not reactivate | `E01` | A dry-run init is issued while forgotten before the successful re-init. |
+
+### `environment-monitor`
+
+| Scenario | Primary disposition | Coverage or reasoned local-E2E exclusion |
+|---|---|---|
+| Forgotten project disappears from snapshot | `E01` | Live global and project-filtered snapshots omit the forgotten row. |
+| Retained ownership does not imply visibility | `E01` | Preserved database/files remain while the project is absent from the snapshot. |
+| Reactivation restores one project | `E01` | Re-init yields one entry with the original id and no duplicate. |
+
+### `cli-odcli`
+
+| Scenario | Primary disposition | Coverage or reasoned local-E2E exclusion |
+|---|---|---|
+| Help shows full command surface | `E02` | Base/candidate root and remove help are captured and rendered. |
+| JSON envelope | `E02` | Live remove dry-run/result is parsed as the versioned envelope. |
+| JSON alias preserves envelope v1 | `E02` | The alias and canonical format are compared on the same dry-run. |
+| TOON is semantically equal to JSON | `E02` | Decoded TOON and JSON graphs are compared for the same plan. |
+| Conflicting alias is usage error | Lower-level | Click parser matrix proves the deterministic pre-domain usage error. |
+| Machine diagnostics stay on stderr | Lower-level | Subprocess integration can assert exact stdout/stderr separation across failures. |
+| Structured failure details preserve the failure variant | Lower-level | Renderer integration consumes each typed failure injected by the task `6.1` test mechanisms. |
+| Machine mutation requires explicit confirmation | `E02` | Public machine calls without an exact token refuse without prompting. |
+| Explicit machine mutation executes | `E03` | The isolated purge uses explicit machine confirmation and executes. |
+| Machine remove requires exact project confirmation | `E02` | Exact/absent/mismatched machine tokens are exercised. |
+| Explicit machine project purge executes | `E03` | The public machine purge completes on the disposable target. |
+| Secrets redacted | `E02` | Live outputs are scanned; serializer tests own exhaustive secret-shaped values. |
+| Diagnostic machine formats share one result graph | Lower-level | One injected typed diagnostic is rendered through both serializers and compared exactly. |
+| Native command dry-run supports every bounded format | `E02` | Rich, JSON, JSON alias, and TOON dry-runs use the same fixture. |
+| Normal native command stays raw | Lower-level | Existing native-command characterization plus focused regression tests prove unchanged raw mode. |
+| Normal native command rejects machine options | Lower-level | Parser-only negative cases require no live stand and precede domain execution. |
+| Canonical bounded inventory remains single-source | Lower-level | Architecture/generated-contract tests compare the authoritative inventory mechanically. |
+| Mutating lifecycle dry-runs are canonical leaves | Lower-level | Generated leaf metadata and command-matrix tests cover all commands without replaying unrelated live mutations. |
+| Database drop is a canonical bounded leaf | Lower-level | Existing database command architecture/metadata tests verify this unchanged leaf. |
+| Selector exclusivity | `E02` | Public CLI supplies both selectors and proves a pre-mutation usage error. |
+| Forget output | `E01` | Rich and machine forget results are captured around monitor inspection. |
+| Rich purge confirmation | `E02` | Actual Rich prompt/token behavior is captured with stated TTY limitations. |
 
 ## Local Script and Stand Contract
 
