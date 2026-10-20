@@ -17,8 +17,12 @@ from odoo_instance_sdk.internal.project_removal import (
 )
 from odoo_instance_sdk.internal.resource_inventory import (
     ActiveUse,
+    MeasurementCompleteness,
     OwnershipConfidence,
     ProjectResourceSource,
+    ResourceInventory,
+    ResourceInventoryItem,
+    ResourceType,
     build_resource_inventory,
 )
 from odoo_instance_sdk.models.project_removal import ProjectSelector
@@ -46,10 +50,8 @@ def test_selector_requires_exact_full_id_or_canonical_path(tmp_path: Path) -> No
 def test_missing_source_is_recoverable_only_by_full_id(tmp_path: Path) -> None:
     missing = tmp_path / "removed-project"
     registration = ProjectRegistration("project-full-id", missing)
-    assert (
+    with pytest.raises(ValueError, match="unknown canonical project path"):
         resolve_project_selector(ProjectSelector.from_path(str(missing)), (registration,))
-        == registration
-    )
     assert (
         resolve_project_selector(
             ProjectSelector.from_project_id("project-full-id"), (registration,)
@@ -214,6 +216,86 @@ def test_primary_source_requires_matching_git_common_dir(tmp_path: Path) -> None
     )
     assert source.action == "delete"
     assert source.reason == "registered_primary_source"
+
+
+def test_shared_resource_matrix_is_fail_closed_without_cross_project_scope(tmp_path: Path) -> None:
+    root = tmp_path / "project-a"
+    root.mkdir()
+
+    def item(
+        identity: str,
+        resource_type: ResourceType,
+        relationships: tuple[str, ...],
+    ) -> ResourceInventoryItem:
+        return ResourceInventoryItem(
+            stable_identity=identity,
+            type=resource_type,
+            name=identity,
+            relationships=relationships,
+            ownership_confidence=OwnershipConfidence.PROVEN,
+            active_use=ActiveUse.INACTIVE,
+            completeness=MeasurementCompleteness.COMPLETE,
+            sanitized_path="<local>/resource",
+        )
+
+    inventory = ResourceInventory(
+        resources=(
+            item("project:project-a", ResourceType.PROJECT, ()),
+            item("project:project-b", ResourceType.PROJECT, ()),
+            item("environment:env-a", ResourceType.ENVIRONMENT, ("project:project-a",)),
+            item("environment:env-b", ResourceType.ENVIRONMENT, ("project:project-b",)),
+            item(
+                "worktree:shared",
+                ResourceType.WORKTREE,
+                ("environment:env-a", "environment:env-b"),
+            ),
+            item(
+                "python_environment:shared",
+                ResourceType.PYTHON_ENVIRONMENT,
+                ("environment:env-a", "environment:env-b"),
+            ),
+            item(
+                "database:shared",
+                ResourceType.DATABASE,
+                ("environment:env-a", "environment:env-b"),
+            ),
+            item(
+                "backup:shared",
+                ResourceType.BACKUP,
+                ("environment:env-a", "environment:env-b"),
+            ),
+            item(
+                "volume:shared",
+                ResourceType.VOLUME,
+                ("project:project-a", "project:project-b"),
+            ),
+            item("worktree:project-b-only", ResourceType.WORKTREE, ("environment:env-b",)),
+        ),
+        findings=(),
+        complete=True,
+    )
+
+    projection = build_project_removal_projection(
+        registration=ProjectRegistration("project-a", root),
+        inventory=inventory,
+    )
+    by_id = {decision.identity: decision for decision in projection.decisions}
+
+    for identity in (
+        "worktree:shared",
+        "python_environment:shared",
+        "database:shared",
+        "backup:shared",
+        "volume:shared",
+    ):
+        assert by_id[identity].action == "retain"
+        assert by_id[identity].reason == "shared_resource"
+
+    assert "worktree:project-b-only" not in by_id
+    assert not any(
+        decision.identity.endswith("project-b-only") and decision.action == "delete"
+        for decision in projection.decisions
+    )
 
 
 def test_symlink_escape_is_never_contained_or_deletable(tmp_path: Path) -> None:

@@ -286,6 +286,8 @@ def resolve_project_selector(
     requested = Path(selector.path)
     if requested.is_symlink():
         raise ValueError("project path must not be a symlink")
+    if not requested.exists():
+        raise ValueError("unknown canonical project path")
     canonical = _canonical_path(requested)
     matches = tuple(
         value for value in values if _canonical_path(value.repository_root) == canonical
@@ -295,27 +297,56 @@ def resolve_project_selector(
     return matches[0]
 
 
-def _scope_ids(inventory: ResourceInventory, project_id: str) -> set[str]:
-    """Find environment/resource identities transitively related to a project."""
-    scoped = {f"project:{project_id}"}
-    changed = True
-    while changed:
-        changed = False
-        for item in inventory.resources:
-            if item.stable_identity in scoped or scoped.intersection(item.relationships):
-                if item.stable_identity not in scoped:
-                    scoped.add(item.stable_identity)
-                    changed = True
-                for relationship in item.relationships:
-                    if (
-                        relationship.startswith("project:")
-                        and relationship != f"project:{project_id}"
-                    ):
-                        continue
-                    if relationship not in scoped:
-                        scoped.add(relationship)
-                        changed = True
-    return scoped
+def _owner_projects(inventory: ResourceInventory) -> dict[str, frozenset[str]]:
+    """Map resources to direct project owners without crossing shared nodes.
+
+    Project and environment edges are ownership evidence.  A project edge is
+    also projected onto its direct resource targets so the normal inventory
+    shape (project -> database, environment -> backup) remains useful.  The
+    projection deliberately does not walk arbitrary resource edges: doing so
+    would turn a shared venv or database into a bridge to another project's
+    worktree.  Shared nodes are classified, but never used as traversal
+    sources.
+    """
+    direct_projects: dict[str, set[str]] = {}
+    for item in inventory.resources:
+        owners = {
+            relationship.removeprefix("project:")
+            for relationship in item.relationships
+            if relationship.startswith("project:")
+        }
+        if item.stable_identity.startswith("project:"):
+            owners.add(item.stable_identity.removeprefix("project:"))
+        direct_projects[item.stable_identity] = owners
+
+    owners_by_identity: dict[str, set[str]] = {
+        identity: set(owners) for identity, owners in direct_projects.items()
+    }
+    for item in inventory.resources:
+        owners = owners_by_identity[item.stable_identity]
+        for relationship in item.relationships:
+            if relationship.startswith("environment:"):
+                owners.update(direct_projects.get(relationship, ()))
+
+    # Preserve the existing project -> direct resource ownership edges, but
+    # never propagate from an environment/resource that has multiple owners.
+    for item in inventory.resources:
+        owners = owners_by_identity[item.stable_identity]
+        if item.type is ResourceType.PROJECT and len(owners) == 1:
+            for relationship in item.relationships:
+                owners_by_identity.setdefault(relationship, set()).update(owners)
+
+    return {identity: frozenset(owners) for identity, owners in owners_by_identity.items()}
+
+
+def _scope_ids(
+    inventory: ResourceInventory,
+    project_id: str,
+    owner_projects: Mapping[str, frozenset[str]] | None = None,
+) -> set[str]:
+    """Return only resources directly owned by, or shared with, a project."""
+    owners = owner_projects if owner_projects is not None else _owner_projects(inventory)
+    return {identity for identity, project_ids in owners.items() if project_id in project_ids}
 
 
 def _inventory_decision(  # noqa: C901
@@ -323,9 +354,10 @@ def _inventory_decision(  # noqa: C901
     *,
     scoped: set[str],
     project_id: str,
+    owner_projects: frozenset[str] = frozenset(),
 ) -> InternalRemovalDecision | None:
     relationships = tuple(sorted(set(item.relationships)))
-    related = item.stable_identity in scoped or bool(scoped.intersection(relationships))
+    related = item.stable_identity in scoped
     if not related:
         return None
     reason: str
@@ -334,7 +366,11 @@ def _inventory_decision(  # noqa: C901
         relationship.startswith("project:") and relationship != f"project:{project_id}"
         for relationship in relationships
     )
-    if cross_project or item.ownership_confidence is OwnershipConfidence.SHARED:
+    if (
+        len(owner_projects) > 1
+        or cross_project
+        or item.ownership_confidence is OwnershipConfidence.SHARED
+    ):
         action, reason = "retain", "shared_resource"
     elif item.ownership_confidence is OwnershipConfidence.EXTERNAL:
         action, reason = "retain", "external_resource"
@@ -547,11 +583,17 @@ def build_project_removal_projection(  # noqa: C901
     them; it never repairs catalogue rows, adopts paths, or follows a symlink.
     """
     project = _registration(registration)
-    scoped = _scope_ids(inventory, project.project_id)
+    owner_projects = _owner_projects(inventory)
+    scoped = _scope_ids(inventory, project.project_id, owner_projects)
     decisions: dict[str, InternalRemovalDecision] = {}
 
     for item in inventory.resources:
-        decision = _inventory_decision(item, scoped=scoped, project_id=project.project_id)
+        decision = _inventory_decision(
+            item,
+            scoped=scoped,
+            project_id=project.project_id,
+            owner_projects=owner_projects.get(item.stable_identity, frozenset()),
+        )
         if decision is not None:
             decisions[decision.identity] = decision
     decisions[f"project:{project.project_id}"] = _project_source_decision(
