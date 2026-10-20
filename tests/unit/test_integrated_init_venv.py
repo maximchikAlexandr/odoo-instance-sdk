@@ -22,12 +22,14 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.project_manifest import write_manifest
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
     ProjectConfig,
     TestInstanceProjectConfig as _TestInstanceProjectConfig,
 )
 from odoo_instance_sdk.project_init import init_project, init_project_command
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 # This is deliberately kept next to the focused matrix rather than in the
 # private E2E repository.  It makes the 27 delta scenarios auditable even when
@@ -363,6 +365,15 @@ def test_integrated_init_process_failures_stop_before_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_step: str
 ) -> None:
     config = _bare_project(tmp_path, requirements="dependencies" in failed_step)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_: catalog_path
+    )
+    project_id = f"project_{repo_key(tmp_path, tmp_path / '.git')}"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog._register_project(project_id, tmp_path, tmp_path / ".git")
+    assert catalog.forget_project(project_id)
+    catalog.close()
     executor = RecordingExecutor(result_factory=_fake_preparation_result(failed_step))
     monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
 
@@ -378,6 +389,9 @@ def test_integrated_init_process_failures_stop_before_persistence(
         command.run()
 
     assert executor.executed[-1].step_id == failed_step
+    catalog = BackupCatalog(db_path=catalog_path)
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
     assert not (tmp_path / ".odcli" / "primary-venv-origin.json").exists()
     assert ProjectConfig.load(tmp_path).python == "3.12"
 

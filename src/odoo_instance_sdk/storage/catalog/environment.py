@@ -269,13 +269,20 @@ class _EnvironmentMixin:
         query = "SELECT * FROM environments"
         params: list[str] = []
         clauses: list[str] = []
+        clauses.append(
+            "((project_id IS NOT NULL AND EXISTS ("
+            "SELECT 1 FROM projects p WHERE p.project_id = environments.project_id "
+            "AND p.registration_state = 'registered')) OR ("
+            "project_id IS NULL AND (NOT EXISTS ("
+            "SELECT 1 FROM projects p WHERE p.repository_root = environments.repository_root "
+            "AND p.git_common_dir = environments.git_common_dir) OR EXISTS ("
+            "SELECT 1 FROM projects p WHERE p.repository_root = environments.repository_root "
+            "AND p.git_common_dir = environments.git_common_dir "
+            "AND p.registration_state = 'registered'))))"
+        )
         if git_common_dir is not None:
             if project_id is None:
-                clauses.append(
-                    "git_common_dir = ? AND (project_id IS NULL OR EXISTS ("
-                    "SELECT 1 FROM projects p WHERE p.project_id = environments.project_id "
-                    "AND p.registration_state = 'registered'))"
-                )
+                clauses.append("git_common_dir = ?")
                 params.append(git_common_dir)
             else:
                 clauses.append(
@@ -454,9 +461,15 @@ class _EnvironmentMixin:
             clauses: list[str] = []
             params: list[str] = []
             clauses.append(
-                "(e.project_id IS NULL OR EXISTS ("
+                "((e.project_id IS NOT NULL AND EXISTS ("
                 "SELECT 1 FROM projects p WHERE p.project_id = e.project_id "
-                "AND p.registration_state = 'registered'))"
+                "AND p.registration_state = 'registered')) OR ("
+                "e.project_id IS NULL AND (NOT EXISTS ("
+                "SELECT 1 FROM projects p WHERE p.repository_root = e.repository_root "
+                "AND p.git_common_dir = e.git_common_dir) OR EXISTS ("
+                "SELECT 1 FROM projects p WHERE p.repository_root = e.repository_root "
+                "AND p.git_common_dir = e.git_common_dir "
+                "AND p.registration_state = 'registered'))))"
             )
             if not include_removed:
                 clauses.append("e.state != 'removed'")
@@ -485,9 +498,16 @@ class _EnvironmentMixin:
                 runtimes = self._conn.execute(
                     "SELECT r.* FROM runtime r "
                     "LEFT JOIN environments e ON e.id = r.owner_id "
-                    "WHERE r.owner_kind = 'environment' AND (e.project_id IS NULL OR EXISTS ("
+                    "WHERE r.owner_kind = 'environment' AND ("
+                    "(e.project_id IS NOT NULL AND EXISTS ("
                     "SELECT 1 FROM projects p WHERE p.project_id = e.project_id "
-                    "AND p.registration_state = 'registered')) ORDER BY r.owner_id"
+                    "AND p.registration_state = 'registered')) OR ("
+                    "e.project_id IS NULL AND (NOT EXISTS ("
+                    "SELECT 1 FROM projects p WHERE p.repository_root = e.repository_root "
+                    "AND p.git_common_dir = e.git_common_dir) OR EXISTS ("
+                    "SELECT 1 FROM projects p WHERE p.repository_root = e.repository_root "
+                    "AND p.git_common_dir = e.git_common_dir "
+                    "AND p.registration_state = 'registered')))) ORDER BY r.owner_id"
                 ).fetchall()
                 projects = self._conn.execute(
                     "SELECT * FROM projects WHERE registration_state = 'registered' "
