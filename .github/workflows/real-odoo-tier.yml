@@ -151,7 +151,7 @@ jobs:
           ODCLI_E2E_UV_CACHE_KEY: ${{ steps.uv-key.outputs.key }}
         run: |
           if [[ "${{ inputs.mode }}" == "targeted" ]]; then
-            uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo/test_critical_path.py tests/integration/real_odoo/test_focused_auth_archive.py -k 'source_backed_full_critical_path or remote_auth_and_unreachable_source_fail_closed or archive_and_restore_boundaries_publish_no_unowned_state and truncated'
+            uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo/test_critical_path.py tests/integration/real_odoo/test_focused_auth_archive.py tests/integration/real_odoo/test_project_removal.py -k 'source_backed_full_critical_path or remote_auth_and_unreachable_source_fail_closed or archive_and_restore_boundaries_publish_no_unowned_state and truncated or public_project_forget_reinit_and_purge'
           else
             uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo
           fi

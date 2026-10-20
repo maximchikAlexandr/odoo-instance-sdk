@@ -6,7 +6,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | --- | --- | ---: | --- | --- |
 | `init` | mutating-or-spawning | yes | smoke | E2E-SM-01 / E2E-CP-01: manifest/target project, resumable Compose postconditions, and truthful no-op metadata |
 | `prepare-venv` | mutating-or-spawning | yes | focused | E2E-FC-12: primary project venv creation and refresh |
-| `remove` | mutating-or-spawning | yes | not-applicable | cross-provider purge walkthrough is owned by the later project-removal E2E package |
+| `remove` | mutating-or-spawning | yes | critical | E2E-CP-16: public forget, re-init, exact-token purge, and full-id retry lifecycle |
 | `doctor` | bounded-read-only | no | critical | E2E-CP-14: final project diagnosis |
 | `stop` | mutating-or-spawning | yes | critical | E2E-CP-13: owned target process stop and repeat |
 | `publish` | mutating-or-spawning | yes | not-applicable | Caddy-backed publication is covered by focused publication resource tests |
