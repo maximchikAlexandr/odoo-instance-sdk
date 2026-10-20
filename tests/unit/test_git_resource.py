@@ -205,6 +205,26 @@ def test_commit_runs_only_the_captured_staged_scope(tmp_path: Path) -> None:
     assert _git(tmp_path, "log", "-1", "--format=%s").strip() == "[IMP] sale: PROJ-123 add a model"
 
 
+@pytest.mark.parametrize("tag", ["VIEW", "DEMO", "DATA", "ACC", "UI"])
+def test_commit_policy_prefixes_create_and_validate_history(tmp_path: Path, tag: str) -> None:
+    _repo(tmp_path)
+    _git(tmp_path, "checkout", "-qb", "PROJ-123")
+    module = tmp_path / "addons" / "sale"
+    module.mkdir(parents=True)
+    (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+    (module / "models.py").write_text("value = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "addons/sale")
+    resource = GitResource(_instance(tmp_path))
+
+    result = resource.commit("adapt module", ticket="PROJ-123", tag=tag)
+
+    assert result.returncode == 0, result.stderr
+    assert _git(tmp_path, "log", "-1", "--format=%s").strip() == (
+        f"[{tag}] sale: PROJ-123 adapt module"
+    )
+    assert resource.check(base="main").valid
+
+
 def test_commit_plan_captures_context_and_rejects_hook_failure(tmp_path: Path) -> None:
     _repo(tmp_path)
     (tmp_path / "change.txt").write_text("change\n", encoding="utf-8")

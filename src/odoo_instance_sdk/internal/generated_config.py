@@ -30,7 +30,7 @@ def _rebase_path(entry: str, repo_root: Path, worktree: Path) -> str:
     try:
         candidate.relative_to(repo_root.resolve())
     except ValueError:
-        return entry
+        return entry if p.is_absolute() else str(candidate)
     rel = candidate.relative_to(repo_root.resolve())
     return str((worktree / rel).resolve())
 

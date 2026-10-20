@@ -302,3 +302,8 @@ def test_http_preferred_allocated_in_catalog_falls_back(tmp_path: Path) -> None:
         assert find_free_port("http", catalog, project=project) == 8001
     finally:
         catalog.close()
+
+
+def test_explicit_port_reserved_for_auxiliary_is_not_replaced() -> None:
+    with pytest.raises(EnvironmentConflictError, match="8069"):
+        find_free_port("http", None, requested=8069, reserved_ports=(8069,))

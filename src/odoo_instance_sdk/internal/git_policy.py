@@ -19,8 +19,24 @@ _TICKET = re.compile(r"(?<![A-Za-z])([A-Z][A-Z0-9]+-\d+)(?:_\d+)?(?![A-Za-z0-9])
 _MESSAGE = re.compile(r"^\[(?P<tag>[A-Z][A-Z0-9_-]*)\] (?P<module>[^:]+): .+$")
 _SUBJECT_TICKET = re.compile(r"^(?P<ticket>[A-Z][A-Z0-9]+-\d+)(?:_\d+)?(?:\s+|$)")
 _COAUTHOR = re.compile(r"Co-authored-by: [^<>\n]+ <[^<>\s]+@[^<>\s]+>", re.IGNORECASE)
-_ALLOWED_TAGS = frozenset(
-    {"ADD", "DEL", "PORT", "I18N", "UI", "TEST", "DOC", "CI", "IMP", "FIX", "REF"}
+ALLOWED_TAGS = frozenset(
+    {
+        "ADD",
+        "DEL",
+        "PORT",
+        "I18N",
+        "UI",
+        "VIEW",
+        "DEMO",
+        "DATA",
+        "ACC",
+        "TEST",
+        "DOC",
+        "CI",
+        "IMP",
+        "FIX",
+        "REF",
+    }
 )
 _SEMANTIC_DIRS = {
     "i18n": "I18N",
@@ -156,7 +172,7 @@ def _message_issue(message: str, *, root: Path) -> str | None:
     parts = _subject_parts(message)
     if parts is None:
         return "commit message does not match the Odoo format"
-    if parts[0] not in _ALLOWED_TAGS:
+    if parts[0] not in ALLOWED_TAGS:
         return "commit message uses an unsupported prefix"
     try:
         settings = effective_ticket_settings(ProjectConfig.load(root))

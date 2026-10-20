@@ -21,6 +21,7 @@ from odoo_instance_sdk.internal import git_repository
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
 from odoo_instance_sdk.internal.git_frontier import RuntimeEnvironmentFactory
 from odoo_instance_sdk.internal.git_policy import (
+    ALLOWED_TAGS,
     check_log as _check_log,
     module_scope as _module_scope,
     semantic_tag as _semantic_tag,
@@ -54,9 +55,6 @@ if TYPE_CHECKING:
 
 _TICKET = re.compile(r"(?<![A-Za-z])([A-Z][A-Z0-9]+-\d+)(?:_\d+)?(?![A-Za-z0-9])")
 _PROTECTED = {"main", "master", "develop"}
-_ALLOWED_TAGS = frozenset(
-    {"ADD", "DEL", "PORT", "I18N", "UI", "TEST", "DOC", "CI", "IMP", "FIX", "REF"}
-)
 _FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
@@ -244,7 +242,7 @@ def _commit_context_from_results(
         if tag is not None
         else _semantic_tag(paths, tuple(status for status, _ in entries), outside=outside)
     )
-    if resolved_tag not in _ALLOWED_TAGS:
+    if resolved_tag not in ALLOWED_TAGS:
         raise PlanValidationError("tag must be one of the supported commit prefixes")
     first = f"[{resolved_tag}] {module}: "
     if resolved_ticket is not None:
