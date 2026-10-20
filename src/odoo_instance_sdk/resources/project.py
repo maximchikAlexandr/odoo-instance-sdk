@@ -160,6 +160,7 @@ class ProjectResource:
                         {filestore_target.identity: filestore_target}
                     )
                 if claim is not None and claim.state == "active":
+                    scheduled_environment_states = frozenset({"ready", "failed", "cleanup_failed"})
 
                     def _compose_dependencies() -> tuple[str, ...]:
                         return tuple(
@@ -168,6 +169,7 @@ class ProjectResource:
                                 project_id=registration.project_id,
                                 include_removed=False,
                             )
+                            if str(row["state"]) not in scheduled_environment_states
                         )
 
                     def _compose_dependency_check() -> bool:

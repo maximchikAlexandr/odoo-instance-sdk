@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from odoo_instance_sdk import (
     ProjectResourceDecision,
     ProjectSelector,
 )
+from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.project_removal_coordinator import (
     capture_project_removal_command,
 )
@@ -198,7 +200,7 @@ def test_public_project_resource_composes_backup_and_terminal_catalogue_actions(
     catalog.close()
 
 
-def test_public_project_resource_refuses_compose_when_catalogue_dependency_remains(
+def test_public_project_resource_orders_compose_after_scheduled_environment_removal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -241,10 +243,66 @@ def test_public_project_resource_refuses_compose_when_catalogue_dependency_remai
 
     def capture_with_compose_probe(*args: object, **kwargs: object) -> object:
         adapters = kwargs["adapters"]
-        captured["compose"] = adapters.for_decision(compose_decision)  # type: ignore[attr-defined]
-        captured["child"] = captured["compose"].capture(  # type: ignore[union-attr]
-            compose_decision, project_id=project_id
-        )
+        compose = adapters.for_decision(compose_decision)  # type: ignore[attr-defined]
+        assert compose is not None
+
+        def result_factory(step):
+            if step.step_id.endswith("inspect-volume"):
+                return ProcessResult(
+                    step.argv,
+                    0,
+                    json.dumps(
+                        {
+                            "Name": "owned-volume",
+                            "Labels": {
+                                "com.docker.compose.project": "owned-compose",
+                                "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
+                                "io.odoo-instance-sdk.project-id": project_id,
+                            },
+                        }
+                    ),
+                    "",
+                    0.0,
+                    step.cwd,
+                    step.environment,
+                )
+            if step.step_id.endswith("inspect-container"):
+                return ProcessResult(
+                    step.argv,
+                    0,
+                    json.dumps(
+                        {
+                            "Name": "/owned-compose-postgres-1",
+                            "Config": {
+                                "Labels": {
+                                    "com.docker.compose.project": "owned-compose",
+                                    "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
+                                    "io.odoo-instance-sdk.project-id": project_id,
+                                }
+                            },
+                            "Mounts": [{"Type": "volume", "Name": "owned-volume"}],
+                        }
+                    ),
+                    "",
+                    0.0,
+                    step.cwd,
+                    step.environment,
+                )
+            if step.step_id.endswith(("verify-volume", "verify-container")):
+                return ProcessResult(
+                    step.argv,
+                    1,
+                    "",
+                    "Error: No such object",
+                    0.0,
+                    step.cwd,
+                    step.environment,
+                )
+            return ProcessResult(step.argv, 0, "", "", 0.0, step.cwd, step.environment)
+
+        compose._executor = RecordingExecutor(result_factory=result_factory)  # type: ignore[attr-defined]
+        captured["compose"] = compose
+        captured["child"] = compose.capture(compose_decision, project_id=project_id)
         return real_capture(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
@@ -258,5 +316,24 @@ def test_public_project_resource_refuses_compose_when_catalogue_dependency_remai
     )
 
     assert captured["compose"] is not None
-    assert captured["child"] is None
+    child = captured["child"]
+    assert child is not None
+    catalog.update_environment_state("retained-environment", "removed")
+    assert child.run() == compose_decision
+
+    catalog.create_environment(
+        make_env(
+            "new-retained-environment",
+            project_id=project_id,
+            repository_root=str(root),
+            git_common_dir=str(root / ".git"),
+            state="creating",
+        )
+    )
+    assert (
+        captured["compose"].capture(  # type: ignore[union-attr]
+            compose_decision, project_id=project_id
+        )
+        is None
+    )
     catalog.close()
