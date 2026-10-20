@@ -224,12 +224,22 @@ def _projection(
     catalog: BackupCatalog, registration: ProjectRegistration
 ) -> ProjectRemovalProjection:
     environments = _environment_sources(catalog, registration.project_id)
+    from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
+
+    owned_paths = project_owned_paths(registration.repository_root)
     inventory = collect_resource_inventory(
         catalog=catalog,
         projects=(
             ProjectResourceSource(
                 project_id=registration.project_id,
                 repository_root=registration.repository_root,
+                config_paths=tuple(path for kind, path in owned_paths if kind == "config"),
+                secret_paths=tuple(path for kind, path in owned_paths if kind == "secret"),
+                primary_python_environment_path=next(
+                    (path for kind, path in owned_paths if kind == "python_environment"), None
+                ),
+                log_paths=tuple(path for kind, path in owned_paths if kind == "log"),
+                temp_paths=tuple(path for kind, path in owned_paths if kind == "temporary"),
             ),
         ),
         environments=environments,
@@ -278,15 +288,30 @@ def _error_details(
     *,
     mode: Literal["forget", "purge"],
     failed_step: str,
+    completed: tuple[ProjectResourceDecision, ...] = (),
+    retained: tuple[ProjectResourceDecision, ...] | None = None,
+    remaining: tuple[ProjectResourceDecision, ...] | None = None,
 ) -> ProjectRemovalErrorDetails:
     public = projection.public_decisions
+    retained_values = (
+        tuple(item for item in public if item.action == "retain")
+        if retained is None
+        else retained
+    )
+    remaining_values = (
+        tuple(item for item in public if item.action != "retain")
+        if remaining is None
+        else remaining
+    )
     return ProjectRemovalErrorDetails(
         project_id=projection.project_id,
         mode=mode,
         registration_state=projection.registration_state,
-        retained=tuple(item for item in public if item.action == "retain"),
-        remaining=tuple(item for item in public if item.action != "retain"),
+        completed=completed,
+        retained=retained_values,
+        remaining=remaining_values,
         failed_step=failed_step,
+        failed_identity=failed_step.removeprefix("project-removal:") or None,
     )
 
 
@@ -296,9 +321,23 @@ def _error(
     *,
     mode: Literal["forget", "purge"],
     failed_step: str,
+    completed: tuple[ProjectResourceDecision, ...] = (),
+    retained: tuple[ProjectResourceDecision, ...] | None = None,
+    remaining: tuple[ProjectResourceDecision, ...] | None = None,
 ) -> ProjectRemovalError:
-    details = _error_details(projection, mode=mode, failed_step=failed_step)
+    details = _error_details(
+        projection,
+        mode=mode,
+        failed_step=failed_step,
+        completed=completed,
+        retained=retained,
+        remaining=remaining,
+    )
     builtins = cast("dict[str, JsonValue]", msgspec.to_builtins(details))
+    builtins["completed_total"] = details.completed_total
+    builtins["retained_total"] = details.retained_total
+    builtins["remaining_total"] = details.remaining_total
+    builtins["truncated"] = False
     return ProjectRemovalError(message, details={"removal": builtins})
 
 
@@ -440,19 +479,36 @@ def capture_project_removal_command(  # noqa: C901
                 if decision.action == "retain":
                     retained.append(decision)
                     continue
-                child = captured_children.get(decision.identity)
-                if child is None:
-                    step = _action_step(decision)
-                    context.action(step.step_id)
-                    remaining.append(decision)
-                    context.complete_action(step.step_id)
-                    continue
-                callback = cast(
-                    "Callable[[RunContext[ProjectRemovalResult]], ProjectResourceDecision]",
-                    child.callback,
-                )
-                completed.append(callback(context))
-            if remaining or current.registration_state == "registered":
+                try:
+                    child = captured_children.get(decision.identity)
+                    if child is None:
+                        step = _action_step(decision)
+                        context.action(step.step_id)
+                        context.complete_action(step.step_id)
+                        completed.append(decision)
+                        continue
+                    callback = cast(
+                        "Callable[[RunContext[ProjectRemovalResult]], ProjectResourceDecision]",
+                        child.callback,
+                    )
+                    completed.append(callback(context))
+                except Exception as exc:
+                    remaining.extend(
+                        item
+                        for item in decisions
+                        if item.action != "retain"
+                        and item.identity not in {value.identity for value in completed}
+                    )
+                    raise _error(
+                        f"project removal step failed: {exc}",
+                        projection,
+                        mode=mode,
+                        failed_step=decision.identity,
+                        completed=tuple(completed),
+                        retained=tuple(retained),
+                        remaining=tuple(remaining),
+                    ) from exc
+            if remaining:
                 return ProjectRemovalResult(
                     project_id=registration.project_id,
                     mode="purge",
@@ -461,6 +517,8 @@ def capture_project_removal_command(  # noqa: C901
                     retained=tuple(retained),
                     remaining=tuple(remaining),
                 )
+            if current.registration_state == "registered":
+                catalog.forget_project(registration.project_id, _lock_held=True)
             return ProjectRemovalResult(
                 project_id=registration.project_id,
                 mode="purge",
