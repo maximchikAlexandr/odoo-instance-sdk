@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import PublicationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
@@ -19,6 +19,7 @@ from odoo_instance_sdk.internal.proc import (
     RunContext,
     prepared_command,
 )
+from odoo_instance_sdk.internal.project_removal_coordinator import ProjectRemovalAdapter
 from odoo_instance_sdk.internal.publication_routes import read_owned_routes
 from odoo_instance_sdk.models.project_removal import ProjectResourceDecision
 from odoo_instance_sdk.project import ProjectConfig
@@ -26,6 +27,10 @@ from odoo_instance_sdk.resources.environment.checkout_artifacts import _row_to_e
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.resources.publication import PublicationResult
+
+
+_T = TypeVar("_T")
 
 
 def _prefix(family: str, identity: str) -> str:
@@ -36,7 +41,7 @@ def _prefix(family: str, identity: str) -> str:
 
 
 def _decision_command(
-    command: Command[object],
+    command: Command[_T],
     decision: ProjectResourceDecision,
 ) -> Command[ProjectResourceDecision]:
     """Retain a captured child plan while adapting its typed result."""
@@ -44,7 +49,7 @@ def _decision_command(
     prepared = command._prepared()
 
     def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
-        prepared.callback(cast("RunContext[Any]", context))
+        prepared.callback(cast("RunContext[_T]", context))
         return decision
 
     return Command.from_prepared(
@@ -131,7 +136,7 @@ class RuntimePurgeAdapter:
             timeout=self.timeout,
             step_prefix=_prefix("runtime", decision.identity),
         )
-        return _decision_command(cast("Command[object]", command), decision)
+        return _decision_command(command, decision)
 
 
 @dataclass(slots=True)
@@ -164,6 +169,8 @@ class PublicationPurgeAdapter:
                 decision,
                 step_id=f"{_prefix('publication', decision.identity)}absent",
             )
+        if route.project_id != project_id:
+            raise ValueError("publication route is outside the selected project")
         expected_route_identity = route.route_identity
         command = self.client.publication.unpublish_command(
             (owner_kind, owner_id),
@@ -182,7 +189,7 @@ class PublicationPurgeAdapter:
             )
             if current is not None and current.route_identity != expected_route_identity:
                 raise PublicationError("publication route identity changed after planning")
-            prepared.callback(cast("RunContext[Any]", context))
+            prepared.callback(cast("RunContext[PublicationResult]", context))
             return decision
 
         return Command.from_prepared(
@@ -217,7 +224,7 @@ class EnvironmentPurgeAdapter:
             force_connections=self.force_connections,
             step_prefix=_prefix("environment", decision.identity),
         )
-        return _decision_command(cast("Command[object]", command), decision)
+        return _decision_command(command, decision)
 
 
 @dataclass(slots=True)
@@ -239,7 +246,7 @@ class RuntimeEnvironmentPurgeAdapters:
             force_connections=self.force_environment_connections,
         )
 
-    def for_decision(self, decision: ProjectResourceDecision) -> object | None:
+    def for_decision(self, decision: ProjectResourceDecision) -> ProjectRemovalAdapter | None:
         if decision.action == "stop" and decision.resource_type == "runtime":
             return self._runtime
         if decision.action == "unpublish" and decision.resource_type == "publication":
