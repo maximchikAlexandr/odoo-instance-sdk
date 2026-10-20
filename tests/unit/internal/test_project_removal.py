@@ -240,8 +240,8 @@ def test_shared_resource_matrix_is_fail_closed_without_cross_project_scope(tmp_p
 
     inventory = ResourceInventory(
         resources=(
-            item("project:project-a", ResourceType.PROJECT, ()),
-            item("project:project-b", ResourceType.PROJECT, ()),
+            item("project:project-a", ResourceType.PROJECT, ("database:shared",)),
+            item("project:project-b", ResourceType.PROJECT, ("database:shared",)),
             item("environment:env-a", ResourceType.ENVIRONMENT, ("project:project-a",)),
             item("environment:env-b", ResourceType.ENVIRONMENT, ("project:project-b",)),
             item(
@@ -257,12 +257,12 @@ def test_shared_resource_matrix_is_fail_closed_without_cross_project_scope(tmp_p
             item(
                 "database:shared",
                 ResourceType.DATABASE,
-                ("environment:env-a", "environment:env-b"),
+                ("project:project-a", "project:project-b"),
             ),
             item(
                 "backup:shared",
                 ResourceType.BACKUP,
-                ("environment:env-a", "environment:env-b"),
+                ("database:shared",),
             ),
             item(
                 "volume:shared",
@@ -296,6 +296,45 @@ def test_shared_resource_matrix_is_fail_closed_without_cross_project_scope(tmp_p
         decision.identity.endswith("project-b-only") and decision.action == "delete"
         for decision in projection.decisions
     )
+
+
+def test_exclusive_database_backup_is_in_project_scope(tmp_path: Path) -> None:
+    root = tmp_path / "project-a"
+    root.mkdir()
+
+    def item(
+        identity: str,
+        resource_type: ResourceType,
+        relationships: tuple[str, ...],
+    ) -> ResourceInventoryItem:
+        return ResourceInventoryItem(
+            stable_identity=identity,
+            type=resource_type,
+            name=identity,
+            relationships=relationships,
+            ownership_confidence=OwnershipConfidence.PROVEN,
+            active_use=ActiveUse.INACTIVE,
+            completeness=MeasurementCompleteness.COMPLETE,
+            sanitized_path="<local>/resource",
+        )
+
+    inventory = ResourceInventory(
+        resources=(
+            item("project:project-a", ResourceType.PROJECT, ("database:exclusive",)),
+            item("database:exclusive", ResourceType.DATABASE, ()),
+            item("backup:exclusive", ResourceType.BACKUP, ("database:exclusive",)),
+        ),
+        findings=(),
+        complete=True,
+    )
+    projection = build_project_removal_projection(
+        registration=ProjectRegistration("project-a", root),
+        inventory=inventory,
+    )
+    by_id = {decision.identity: decision for decision in projection.decisions}
+
+    assert by_id["backup:exclusive"].action == "delete"
+    assert by_id["backup:exclusive"].reason == "exclusive_sdk_ownership"
 
 
 def test_symlink_escape_is_never_contained_or_deletable(tmp_path: Path) -> None:

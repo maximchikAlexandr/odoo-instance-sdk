@@ -297,7 +297,7 @@ def resolve_project_selector(
     return matches[0]
 
 
-def _owner_projects(inventory: ResourceInventory) -> dict[str, frozenset[str]]:
+def _owner_projects(inventory: ResourceInventory) -> dict[str, frozenset[str]]:  # noqa: C901
     """Map resources to direct project owners without crossing shared nodes.
 
     Project and environment edges are ownership evidence.  A project edge is
@@ -328,13 +328,47 @@ def _owner_projects(inventory: ResourceInventory) -> dict[str, frozenset[str]]:
             if relationship.startswith("environment:"):
                 owners.update(direct_projects.get(relationship, ()))
 
-    # Preserve the existing project -> direct resource ownership edges, but
-    # never propagate from an environment/resource that has multiple owners.
+    resources = {item.stable_identity: item for item in inventory.resources}
+    backups_by_database: dict[str, set[str]] = {}
     for item in inventory.resources:
-        owners = owners_by_identity[item.stable_identity]
-        if item.type is ResourceType.PROJECT and len(owners) == 1:
+        if item.type is ResourceType.BACKUP:
             for relationship in item.relationships:
-                owners_by_identity.setdefault(relationship, set()).update(owners)
+                if (
+                    resources.get(relationship) is not None
+                    and resources[relationship].type is ResourceType.DATABASE
+                ):
+                    backups_by_database.setdefault(relationship, set()).add(item.stable_identity)
+
+    def dependency_targets(item: ResourceInventoryItem) -> tuple[str, ...]:
+        if item.type in {ResourceType.PROJECT, ResourceType.ENVIRONMENT}:
+            return item.relationships
+        if item.type is ResourceType.DATABASE:
+            return tuple(
+                relationship
+                for relationship in item.relationships
+                if resources.get(relationship) is not None
+                and resources[relationship].type is ResourceType.BACKUP
+            )
+        return ()
+
+    # Propagate ownership to dependency targets until no new owner appears.
+    # Shared nodes may propagate only along the explicitly safe dependency
+    # edges above; they never become arbitrary graph traversal bridges.
+    changed = True
+    while changed:
+        changed = False
+        for item in inventory.resources:
+            owners = owners_by_identity[item.stable_identity]
+            targets = set(dependency_targets(item))
+            if item.type is ResourceType.DATABASE:
+                targets.update(backups_by_database.get(item.stable_identity, ()))
+            for relationship in targets:
+                if relationship.startswith("project:"):
+                    continue
+                target_owners = owners_by_identity.setdefault(relationship, set())
+                before = len(target_owners)
+                target_owners.update(owners)
+                changed |= len(target_owners) != before
 
     return {identity: frozenset(owners) for identity, owners in owners_by_identity.items()}
 
