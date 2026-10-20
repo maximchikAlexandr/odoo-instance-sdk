@@ -161,6 +161,7 @@ class ProjectResource:
                     )
                 if claim is not None and claim.state == "active":
                     scheduled_environment_states = frozenset({"ready", "failed", "cleanup_failed"})
+                    capture_dependency_check_pending = True
 
                     def _compose_dependencies() -> tuple[str, ...]:
                         return tuple(
@@ -173,7 +174,16 @@ class ProjectResource:
                         )
 
                     def _compose_dependency_check() -> bool:
-                        return bool(_compose_dependencies())
+                        nonlocal capture_dependency_check_pending
+                        if capture_dependency_check_pending:
+                            capture_dependency_check_pending = False
+                            return bool(_compose_dependencies())
+                        return bool(
+                            catalog.list_environments(
+                                project_id=registration.project_id,
+                                include_removed=False,
+                            )
+                        )
 
                     compose_target = ComposeClusterPurgeTarget(
                         identity=stable_resource_identity(
