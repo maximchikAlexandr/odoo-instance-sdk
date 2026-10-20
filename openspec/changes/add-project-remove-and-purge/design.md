@@ -25,7 +25,7 @@ The repository already has the required narrow lifecycle operations: immutable `
 
 ### D1. Preserve one project ownership row and separate registration state
 
-Add checked `registration_state` (`registered` or `forgotten`) and nullable `forgotten_at` columns to the existing `projects` row. Existing rows migrate as `registered`. Forget changes only those fields after its safety preflight; it does not null or delete foreign keys. Initialization upserts canonical repository provenance and restores `registered` with `forgotten_at=NULL`.
+Add one checked `registration_state` (`registered` or `forgotten`) column to the existing `projects` row. Existing rows migrate as `registered`. Forget changes only that state through the row's existing update boundary after its safety preflight; it does not add a lifecycle timestamp, null or delete foreign keys. Initialization upserts canonical repository provenance and restores `registered`.
 
 Monitor and ordinary project discovery select only `registered` rows. Explicit lifecycle resolution by full `project_id` may read either state so an absent source tree and interrupted retry remain recoverable. Catalogue foreign keys, resource ownership, timestamps, and the canonical identifier remain stable.
 
@@ -33,7 +33,7 @@ Alternatives considered: deleting the row is unsafe for retained references; cop
 
 ### D2. Add one minimal public project lifecycle facade
 
-Attach a `ProjectResource` facade to `OdooClient.projects`. It exposes frozen JSON-safe plan/result types plus `remove_command(selector, purge=False, confirmation=None)` and the delegating convenience method. The selector is a typed exact path-or-full-id value; the CLI requires exactly one of command-local `--project PATH` and `--project-id ID`.
+Attach a `ProjectResource` facade to `OdooClient.projects`. It exposes frozen JSON-safe selector, minimal decision/result/error-detail types plus `remove_command(selector, purge=False, confirmation=None)` and the delegating convenience method. A public decision carries only stable identity/type, action, reason, sanitized target and deterministic order; ownership confidence, active-use evidence, dependencies and raw fingerprint inputs stay in the internal inventory. The selector is a typed exact path-or-full-id value; the CLI requires exactly one of command-local `--project PATH` and `--project-id ID`. `odcli remove` and `odcli rm` resolve to the same Click command object, callback, options, plan and renderer; `remove` remains the stable machine command identifier and the sole bounded-leaf inventory row.
 
 The command returns one immutable public `ExecutionPlan`. Child lifecycle plans are captured once, flattened into that plan in execution order, and consumed without rebuilding argv, paths, observations, or actions. CLI code performs only Click parsing, exact interactive confirmation collection, envelope construction, and Rich rendering.
 
@@ -49,7 +49,7 @@ Alternative considered: a new lock service is unnecessary. Independent point-ope
 
 ### D4. Build the removal plan from the existing catalogue and resource inventory
 
-Extend the existing internal resource projection with a project-removal view. Every known resource receives one stable identity, action (`delete`, `retain`, `stop`, `unpublish`, or `forget`), reason code, ownership confidence, active-use state, dependencies, and sanitized display target. The projection covers project and environment runtimes/routes, environments and their worktrees/venvs/config/logs, project manifest/secrets/primary venv/logs/temp files, owned databases/filestores/backups, and the exact Compose container/volume claim.
+Extend the existing internal resource projection with a project-removal view. Internally, every known resource receives one stable identity, action (`delete`, `retain`, `stop`, `unpublish`, or `forget`), reason code, ownership confidence, active-use state, dependencies, and sanitized display target. Only identity/type, action, reason and sanitized target cross the public result boundary. The projection covers project and environment runtimes/routes, environments and their worktrees/venvs/config/logs, project manifest/secrets/primary venv/logs/temp files, owned databases/filestores/backups, and the exact Compose container/volume claim.
 
 Unknown files below an otherwise owned directory, symlinks escaping the owned root, shared/external resources, caller-owned or other-tool-managed checkouts, borrowed backups, Docker images, remote repositories, and remote instances are retained and listed. A source root is deletable only when its canonical registered root and Git metadata prove it is the selected primary checkout and it is not a linked/caller/other-tool-managed checkout; legacy ambiguity is retained.
 
@@ -91,6 +91,9 @@ Alternatives considered: a dedicated purge journal would duplicate existing reso
 
 - `ProjectResource` public facade: necessary to satisfy the typed SDK-first contract; no existing facade represents project registration. Keep it as one thin facade.
 - Project-removal coordinator/projection: necessary to order cross-resource ownership decisions and expose one immutable plan. Keep one module composed from existing commands and inventory.
+- Public decision detail: expose only stable identity/type, action, reason and sanitized target. Keep confidence, active-use, dependency and fingerprint evidence internal; do not duplicate the inventory graph in the public API.
+- Registration lifecycle metadata: one checked `registration_state` is sufficient. Reuse the row's existing `updated_at`; omit a dedicated forgotten timestamp and its migration/API/test surface.
+- Short CLI spelling: reuse the existing Click alias mechanism on the canonical `remove` command object. Do not add a second callback, renderer, SDK method, inventory row, command identifier, or alias registry.
 - Separate ownership catalogue, purge journal/state-machine service, generic cleanup/renderer/runner abstractions, dependency, and policy engine: existing catalogue rows, command ledger, point lifecycle operations, output pipeline, and locks already cover them. Omit all of these.
 
 ## Risks / Trade-offs
@@ -104,7 +107,7 @@ Alternatives considered: a dedicated purge journal would duplicate existing reso
 
 ## Migration Plan
 
-1. Add the checked registration columns and indexes through the next single-head catalogue migration; backfill existing rows as `registered` and preserve every relation and timestamp.
+1. Add the checked registration-state column and any required index through the next single-head catalogue migration; backfill existing rows as `registered` and preserve every relation and existing timestamp.
 2. Deploy read paths that treat only `registered` rows as user-visible while explicit lifecycle lookup can resolve forgotten rows.
 3. Deploy init reactivation and project removal in the same release so forgotten projects have a supported return path.
 4. Downgrade only when no row is `forgotten`; otherwise refuse rather than silently re-registering removed projects.

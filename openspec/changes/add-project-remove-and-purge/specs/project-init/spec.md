@@ -2,7 +2,7 @@
 
 ### Requirement: Initialization reactivates canonical forgotten registration
 
-After every required initialization postcondition succeeds, registration SHALL upsert the canonical existing project row as `registered` and clear `forgotten_at` without changing `project_id`, duplicating ownership records, or adopting resources. Dry-run and failed/incomplete initialization SHALL NOT reactivate a forgotten project. Initialization and removal SHALL serialize through the same project lifecycle lock.
+After every required initialization postcondition succeeds, registration SHALL upsert the canonical existing project row as `registered` without changing `project_id`, duplicating ownership records, adding a dedicated forgotten timestamp, or adopting resources. Dry-run and failed/incomplete initialization SHALL NOT reactivate a forgotten project. Initialization and removal SHALL serialize through the same project lifecycle lock.
 
 #### Scenario: Successful re-init restores visibility
 
