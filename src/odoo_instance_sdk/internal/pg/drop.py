@@ -511,8 +511,9 @@ def build_database_drop_command(  # noqa: C901
     if cluster is None:
         raise ConfigError("database drop requires the resolved project's PostgreSQL cluster")
     process_executor = executor or SubprocessExecutor()
+    planning_step_id = scoped(_PLANNING_INSPECT_STEP)
     planning_step = _inspect_command_step(
-        binding, database=database, step_id=_PLANNING_INSPECT_STEP, timeout=timeout
+        binding, database=database, step_id=planning_step_id, timeout=timeout
     )
     ownership: _DropOwnershipEvidence | None = None
     if defer_planning:
@@ -694,7 +695,7 @@ def build_database_drop_command(  # noqa: C901
         current_project_default = current_default()
         if defer_planning:
             planned_before_lock = _decode_inspection(
-                _process_result(context, _PLANNING_INSPECT_STEP), database
+                _process_result(context, planning_step_id), database
             )
             _assert_safe(
                 planned_before_lock,
