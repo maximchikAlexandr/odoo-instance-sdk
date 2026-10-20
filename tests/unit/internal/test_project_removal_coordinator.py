@@ -92,6 +92,36 @@ def test_purge_requires_exact_confirmation_at_execution_and_dry_run_is_inert(
     catalog.close()
 
 
+def test_purge_rejects_wrong_confirmation_before_lock_or_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    command = capture_project_removal_command(
+        catalog,
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation="wrong-token",
+    )
+    lock_entered = False
+
+    def forbidden_lock(_path: Path):
+        nonlocal lock_entered
+        lock_entered = True
+        raise AssertionError("confirmation must be checked before lock acquisition")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_removal_coordinator.exclusive_lock",
+        forbidden_lock,
+    )
+    with pytest.raises(ProjectRemovalError, match="confirmation"):
+        command.run()
+
+    assert not lock_entered
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
 def test_purge_fails_closed_when_mutating_adapter_is_missing(tmp_path: Path) -> None:
     catalog, project_id, root = _catalog(tmp_path)
     (root / ".odcli").mkdir()
