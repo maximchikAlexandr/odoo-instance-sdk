@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from odoo_instance_sdk.exceptions import GitRepositoryChangedError, GitRepositoryError
 from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, SubprocessExecutor
@@ -76,7 +76,35 @@ def _normalize_origin(value: str) -> tuple[str, str, str]:
 
 def _resolve_submodule_url(origin: str, value: str) -> str:
     """Resolve a committed relative URL using Git's superproject directory."""
-    return urljoin(f"{origin.rstrip('/')}/", value.strip())
+    value = value.strip()
+    scp = re.fullmatch(r"git@([^/:\s]+):(.+)", value)
+    if scp is not None:
+        if scp[2].startswith(("/", "~")):
+            raise GitRepositoryError(
+                "submodule SSH URL must use a repository-relative project path"
+            )
+        return f"https://{scp[1]}/{quote(scp[2], safe='/')}"
+    parsed = urlsplit(value)
+    if parsed.scheme.casefold() == "ssh":
+        try:
+            port = parsed.port
+            path = unquote(parsed.path, errors="strict")
+        except (ValueError, UnicodeError) as exc:
+            raise GitRepositoryError("submodule SSH URL cannot be mapped to HTTPS") from exc
+        if (
+            parsed.username != "git"
+            or parsed.password is not None
+            or port not in (None, 22)
+            or not parsed.hostname
+            or path.startswith(("//", "/~"))
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise GitRepositoryError("submodule SSH URL cannot be mapped to HTTPS")
+        return f"https://{parsed.hostname}{quote(path, safe='/')}"
+    if ":" in value and not parsed.scheme:
+        raise GitRepositoryError("submodule SSH URL cannot be mapped to HTTPS")
+    return urljoin(f"{origin.rstrip('/')}/", value)
 
 
 def normalize_repository_url(value: str) -> tuple[str, str, str]:
@@ -191,8 +219,8 @@ def _configured_values(root: Path, key_pattern: str, step_id: str) -> tuple[str,
     return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
-def submodule_urls(root: Path | str) -> tuple[tuple[str, str, str], ...]:  # noqa: C901
-    """Return ``(path, normalized URL, host)`` for repository-owned submodules.
+def _submodule_entries(root: Path | str) -> tuple[tuple[str, str, str, str], ...]:  # noqa: C901
+    """Return ``(name, path, normalized URL, host)`` for declared submodules.
 
     This reads only committed ``.gitmodules`` data and never asks Git to resolve
     or fetch a credentialed URL. Relative URLs are resolved against the
@@ -205,9 +233,12 @@ def submodule_urls(root: Path | str) -> tuple[tuple[str, str, str], ...]:  # noq
     if not modules.is_file():
         return ()
     origin, _host, _project = _normalize_origin(
-        _stdout(
-            _probe(checkout, ("remote", "get-url", "origin"), "git.submodule.origin"), "origin"
-        ).strip()
+        _resolve_submodule_url(
+            "",
+            _stdout(
+                _probe(checkout, ("remote", "get-url", "origin"), "git.submodule.origin"), "origin"
+            ).strip(),
+        )
     )
     url_result = _probe(
         checkout,
@@ -243,8 +274,16 @@ def submodule_urls(root: Path | str) -> tuple[tuple[str, str, str], ...]:  # noq
         name = key.removeprefix("submodule.").removesuffix(".path")
         if not separator or not name or name in path_by_name:
             raise GitRepositoryError("submodule path configuration is malformed")
+        name_path = Path(name)
+        if (
+            "=" in name
+            or name_path.is_absolute()
+            or name_path == Path(".")
+            or ".." in name_path.parts
+        ):
+            raise GitRepositoryError("submodule logical name is unsafe")
         path_by_name[name] = raw_path.strip()
-    result: list[tuple[str, str, str]] = []
+    result: list[tuple[str, str, str, str]] = []
     for line in values:
         key, separator, raw_url = line.partition(" ")
         if not separator or not raw_url.strip():
@@ -265,48 +304,151 @@ def submodule_urls(root: Path | str) -> tuple[tuple[str, str, str], ...]:  # noq
             raise GitRepositoryError("submodule path escapes the repository")
         candidate = _resolve_submodule_url(origin, raw_url)
         normalized, host, _project = _normalize_origin(candidate)
-        result.append((path, normalized, host))
+        result.append((name, path, normalized, host))
     return tuple(result)
 
 
-def _validate_local_submodule_url_overrides(root: Path, modules: Path, origin: str) -> None:
+def submodule_urls(root: Path | str) -> tuple[tuple[str, str, str], ...]:
+    """Return the declared submodule paths and canonical HTTPS identities."""
+    return tuple((path, url, host) for _name, path, url, host in _submodule_entries(root))
+
+
+def submodule_update_arguments(
+    root: Path, *paths: str, allowed_hosts: Sequence[str]
+) -> tuple[str, ...]:
+    """Override transport for this child only, without editing Git configuration."""
+    owner = Path(
+        _stdout(
+            _probe(root, ("rev-parse", "--show-toplevel"), "git.submodule.owner"), "root"
+        ).strip()
+    ).resolve()
+    entries = _validated_submodule_entries(owner, allowed_hosts=allowed_hosts)
+    requested = {(root / path).resolve() for path in paths}
+    entries = tuple(
+        entry for entry in entries if not requested or (owner / entry[1]).resolve() in requested
+    )
+    controls = tuple(
+        arg for name, _path, url, _host in entries for arg in ("-c", f"submodule.{name}.url={url}")
+    )
+    rewrites = _cached_submodule_origin_rewrites(owner, entries)
+    return (*controls, *rewrites, "submodule", "update", "--init", "--", *paths)
+
+
+def submodule_update_target(root: Path, path: str) -> tuple[Path, str]:
+    """Select the deepest populated repository that owns a missing submodule path."""
+    parts = Path(path).parts
+    for index in range(len(parts) - 1, 0, -1):
+        owner = root.joinpath(*parts[:index])
+        if (owner / ".git").exists():
+            return owner, str(Path(*parts[index:]))
+    return root, path
+
+
+def submodule_recursive_update_arguments(
+    root: Path, *paths: str, allowed_hosts: Sequence[str]
+) -> tuple[str, ...]:
+    """Update selected submodules and recurse only within those paths."""
+    arguments = submodule_update_arguments(root, *paths, allowed_hosts=allowed_hosts)
+    separator = arguments.index("--")
+    return (*arguments[:separator], "--recursive", *arguments[separator:])
+
+
+def _cached_submodule_origin_rewrites(
+    owner: Path, entries: Sequence[tuple[str, str, str, str]]
+) -> tuple[str, ...]:
+    """Validate cached origins and return only their transport rewrite controls."""
+    # Cached origins may preserve a different SSH spelling than .gitmodules.
+    cache_root = Path(
+        _stdout(
+            _probe(owner, ("rev-parse", "--git-path", "modules"), "git.submodule.cache-root"),
+            "submodule cache directory",
+        ).strip()
+    )
+    cache_root = (owner / cache_root).resolve()
+    rewrites: list[str] = []
+    for name, _path, url, _host in entries:
+        cached = (cache_root / name).resolve()
+        if not cached.is_relative_to(cache_root) or (cached / "config").is_symlink():
+            raise GitRepositoryError("cached submodule directory is unsafe")
+        if not cached.is_dir():
+            continue
+        raw_origins = _stdout(
+            _probe(
+                owner,
+                ("--git-dir", str(cached), "config", "--local", "--get-all", "remote.origin.url"),
+                "git.submodule.cached-origin",
+            ),
+            "cached submodule origin",
+        ).splitlines()
+        if len(raw_origins) != 1:
+            raise GitRepositoryError("cached submodule origin is absent or ambiguous")
+        raw_origin = raw_origins[0].strip()
+        if _normalize_origin(_resolve_submodule_url("", raw_origin))[0] != url:
+            raise GitRepositoryError("cached submodule origin does not match declared repository")
+        rewrites.extend(("-c", f"url.{url}.insteadOf={raw_origin}"))
+    return tuple(rewrites)
+
+
+def submodule_recursive_transport_arguments(hosts: Sequence[str]) -> tuple[str, ...]:
+    """Capture transport rewrites for one recursive, credentialed update."""
+    controls: list[str] = []
+    for host in sorted(set(hosts)):
+        https = f"https://{host}/"
+        controls.extend(
+            (
+                "-c",
+                f"url.{https}.insteadOf=git@{host}:",
+                "-c",
+                f"url.{https}.insteadOf=ssh://git@{host}/",
+                "-c",
+                f"url.{https}.insteadOf=ssh://git@{host}:22/",
+            )
+        )
+    return (*controls, "submodule", "update", "--init", "--recursive")
+
+
+def submodule_frontier_transport_arguments(hosts: Sequence[str]) -> tuple[str, ...]:
+    """Capture a one-level update for every currently initialized frontier."""
+    recursive = submodule_recursive_transport_arguments(hosts)
+    separator = recursive.index("submodule")
+    controls = recursive[:separator]
+    return (*controls, "submodule", "foreach", "--recursive", "git submodule update --init")
+
+
+def validate_submodule_cache(root: Path, *, allowed_hosts: Sequence[str]) -> None:
+    """Validate cached submodule identities without returning executable argv."""
+    checkout = Path(root).expanduser().resolve()
+    entries = _validated_submodule_entries(checkout, allowed_hosts=allowed_hosts)
+    _cached_submodule_origin_rewrites(checkout, entries)
+
+
+def _validate_local_submodule_url_overrides(
+    root: Path, entries: Sequence[tuple[str, str, str, str]], origin: str
+) -> None:
     """Reject local URL overrides that redirect a declared logical submodule."""
     configured = _configured_values(root, r"^submodule\..*\.url$", "git.submodule.local-urls")
     if not configured:
         return
-    # The committed file is the authority for the logical name and path.  Read
-    # it directly so local config cannot manufacture an unmapped frontier.
-    committed_result = _probe(
-        root,
-        ("config", "--file", str(modules), "--get-regexp", r"^submodule\..*\.url$"),
-        "git.submodule.committed-urls",
-    )
-    committed = {}
-    if committed_result.returncode not in (0, 1) or not isinstance(committed_result.stdout, str):
-        raise GitRepositoryError("repository submodule URL configuration is unavailable")
-    for line in committed_result.stdout.splitlines():
-        key, separator, value = line.partition(" ")
-        if not separator:
-            raise GitRepositoryError("submodule URL configuration is malformed")
-        committed[key.removeprefix("submodule.").removesuffix(".url")] = value.strip()
+    committed = {name: url for name, _path, url, _host in entries}
     for line in configured:
         key, separator, value = line.partition(" ")
         name = key.removeprefix("submodule.").removesuffix(".url")
         if not separator or name not in committed:
             raise GitRepositoryError("local submodule URL override is unmapped")
-        expected = _resolve_submodule_url(origin, committed[name])
+        expected = committed[name]
         actual = _resolve_submodule_url(origin, value)
         if _normalize_origin(expected)[0] != _normalize_origin(actual)[0]:
             raise GitRepositoryError("local submodule URL override is unsafe")
 
 
-def validate_submodule_configuration(
+def _validated_submodule_entries(
     root: Path | str,
     *,
     allowed_hosts: Sequence[str],
-) -> tuple[tuple[str, str, str], ...]:
+) -> tuple[tuple[str, str, str, str], ...]:
     """Reject repository-controlled credential and command-routing overrides."""
     checkout = Path(root).expanduser().resolve()
+    entries = _submodule_entries(checkout)
     dangerous = _configured_values(
         checkout,
         r"^(credential\.helper|core\.hooksPath|submodule\..*\.update|protocol\..*|url\..*\.insteadof|http.*|remote\..*\.proxy)$",
@@ -319,12 +461,15 @@ def validate_submodule_configuration(
         raise GitRepositoryError("submodule configuration is not repository-owned")
     if modules.is_file():
         origin = _normalize_origin(
-            _stdout(
-                _probe(checkout, ("remote", "get-url", "origin"), "git.submodule.origin"),
-                "origin",
-            ).strip()
+            _resolve_submodule_url(
+                "",
+                _stdout(
+                    _probe(checkout, ("remote", "get-url", "origin"), "git.submodule.origin"),
+                    "origin",
+                ).strip(),
+            )
         )[0]
-        _validate_local_submodule_url_overrides(checkout, modules, origin)
+        _validate_local_submodule_url_overrides(checkout, entries, origin)
         configured = _probe(
             checkout,
             (
@@ -340,11 +485,22 @@ def validate_submodule_configuration(
             raise GitRepositoryError("repository submodule policy is unavailable")
         if configured.stdout.strip():
             raise GitRepositoryError("repository-controlled submodule transport is unsafe")
-    values = submodule_urls(checkout)
     allowed = frozenset(allowed_hosts)
-    if any(host not in allowed for _path, _url, host in values):
+    if any(host not in allowed for _name, _path, _url, host in entries):
         raise GitRepositoryError("submodule host has no selected-member credential mapping")
-    return values
+    return entries
+
+
+def validate_submodule_configuration(
+    root: Path | str, *, allowed_hosts: Sequence[str]
+) -> tuple[tuple[str, str, str], ...]:
+    """Validate one frontier and return its canonical HTTPS identities."""
+    return tuple(
+        (path, url, host)
+        for _name, path, url, host in _validated_submodule_entries(
+            root, allowed_hosts=allowed_hosts
+        )
+    )
 
 
 def validate_credentialed_transport_configuration(root: Path | str) -> None:
@@ -383,7 +539,12 @@ __all__ = [
     "resolve_generic_repository",
     "resolve_repository",
     "revalidate_repository",
+    "submodule_frontier_transport_arguments",
+    "submodule_recursive_transport_arguments",
+    "submodule_recursive_update_arguments",
+    "submodule_update_target",
     "submodule_urls",
     "validate_credentialed_transport_configuration",
+    "validate_submodule_cache",
     "validate_submodule_configuration",
 ]

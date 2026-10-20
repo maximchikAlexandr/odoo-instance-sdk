@@ -463,7 +463,7 @@ def register_init_command(cli: click.Group) -> None:
         "addon_roots",
         type=click.Path(),
         multiple=True,
-        help="Project-relative addon root; repeat to preserve order.",
+        help="Project-relative or absolute addon root; repeat to preserve order.",
     )
     @click.option(
         "--server-wide-module",

@@ -283,6 +283,7 @@ def git_sync(
 @click.argument("destination", type=click.Path())
 @click.option("--member-id", required=True, help="Selected GitLab member UUID.")
 @click.option("--recurse-submodules", is_flag=True, help="Initialize validated missing submodules.")
+@click.option("--branch", help="Branch to check out before initializing submodules.")
 @click.option("--dry-run", is_flag=True, help="Plan only.")
 @click.option("--yes", is_flag=True, help="Skip confirmation.")
 @output_options
@@ -291,6 +292,7 @@ def git_clone(
     destination: str,
     member_id: str,
     recurse_submodules: bool,
+    branch: str | None,
     dry_run: bool,
     yes: bool,
     output_format: str | None,
@@ -305,6 +307,7 @@ def git_clone(
                 Path(destination),
                 member_id=member_id,
                 recurse_submodules=recurse_submodules,
+                branch=branch,
             ),
             command_name="git.clone",
             mode=mode,

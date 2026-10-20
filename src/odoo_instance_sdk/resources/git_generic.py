@@ -25,18 +25,27 @@ from odoo_instance_sdk.internal.git_frontier import (
     validated_frontier_credentials,
 )
 from odoo_instance_sdk.internal.git_repository import (
+    missing_submodules,
     normalize_repository_url,
     repository_push_origin,
     resolve_repository,
     revalidate_repository,
+    submodule_frontier_transport_arguments,
+    submodule_recursive_transport_arguments,
+    submodule_recursive_update_arguments,
+    submodule_update_target,
     validate_credentialed_transport_configuration,
+    validate_submodule_cache,
 )
 from odoo_instance_sdk.internal.git_sync import (
     AuthoritativeProbeCapture,
     SyncSteps,
     execute_sync,
 )
-from odoo_instance_sdk.internal.gitlab_credentials import cleanup_askpass_channel
+from odoo_instance_sdk.internal.gitlab_credentials import (
+    cleanup_askpass_channel,
+    mapped_credential_hosts,
+)
 from odoo_instance_sdk.models import (
     GitCloneResult,
     GitCommitResult,
@@ -144,6 +153,10 @@ def _step(
         "core.fsmonitor=false",
         "-c",
         f"core.hooksPath={hooks_path}",
+        "-c",
+        "protocol.ssh.allow=never",
+        "-c",
+        "protocol.ext.allow=never",
     )
     return PreparedStep(
         step_id=step_id,
@@ -203,6 +216,7 @@ class GenericGitMixin:
         *,
         member_id: str,
         recurse_submodules: bool = False,
+        branch: str | None = None,
         credential: GitLabCredentialContext | None = None,
         identity: GitLabIdentity | None = None,
         identity_transport: GitLabUserTransport
@@ -217,6 +231,12 @@ class GenericGitMixin:
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
+        if branch is not None and (
+            not branch
+            or branch.startswith("-")
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in branch)
+        ):
+            raise GitWorkflowError("clone branch must be a non-empty Git branch name")
         origin, host, _project = normalize_repository_url(url)
         root = Path(destination).expanduser().resolve()
         selected, _verified = resolve_credentials(
@@ -239,6 +259,10 @@ class GenericGitMixin:
             snapshot = resolve_repository(root)
             if snapshot.origin != origin:
                 raise GitWorkflowError("clone destination has a different origin")
+            if branch is not None and snapshot.branch != branch:
+                raise GitWorkflowError(
+                    "existing destination branch does not match --branch; checkout was preserved"
+                )
             if recurse_submodules:
                 validate_frontier(
                     member_id,
@@ -252,35 +276,23 @@ class GenericGitMixin:
                     identity_transport=identity_transport,
                 )
         credential_options = credential_environment(credentials, askpass)
-        direct_credentials: list[tuple[GitLabCredentialContext, ...]] = [credentials]
-        direct_options = frontier_environment(
-            selected,
-            member_id=member_id,
-            user_root=user_root,
-            mapping_path=mapping_path,
-            environment_path=environment_path,
-            include_selected=True,
-            credentials_provider=lambda: direct_credentials[0],
-        )
-        nested_options = frontier_environment(
-            selected,
-            member_id=member_id,
-            user_root=user_root,
-            mapping_path=mapping_path,
-            environment_path=environment_path,
-            include_selected=False,
-        )
         environment = credential_options["environment"]
         secrets = credential_options["secrets"]
         credential_helper = credential_options["helper"]
         hooks = os.devnull
         steps: list[PreparedStep] = []
+        update_step_ids: tuple[str, ...] = ()
         if not reused:
             steps.append(
                 _step(
                     root.parent,
                     "git.clone",
-                    ("clone", origin, str(root)),
+                    (
+                        "clone",
+                        *(("--branch", branch) if branch is not None else ()),
+                        origin,
+                        str(root),
+                    ),
                     environment=environment,
                     secrets=secrets,
                     hooks_path=hooks,
@@ -290,35 +302,144 @@ class GenericGitMixin:
                 )
             )
         if recurse_submodules:
-            steps.extend(
-                (
+            mapped_hosts = mapped_credential_hosts(
+                selected, user_root=user_root, mapping_path=mapping_path
+            )
+
+            steps.append(
+                _step(
+                    root,
+                    "git.clone.submodule-status",
+                    ("submodule", "status", "--recursive"),
+                    environment=environment,
+                    secrets=secrets,
+                    hooks_path=hooks,
+                    credential_helper=credential_helper,
+                    runtime_environment=credential_options["runtime_environment"],
+                )
+            )
+
+            active_frontier_credentials: tuple[GitLabCredentialContext, ...] = (selected,)
+
+            def runtime_frontier_credentials() -> tuple[GitLabCredentialContext, ...]:
+                return active_frontier_credentials
+
+            recursive_options = frontier_environment(
+                selected,
+                member_id=member_id,
+                user_root=user_root,
+                mapping_path=mapping_path,
+                environment_path=environment_path,
+                include_selected=False,
+                credentials_provider=runtime_frontier_credentials,
+            )
+
+            def recursive_runtime_environment() -> tuple[
+                tuple[tuple[str, str], ...], Callable[[], None], tuple[str, ...]
+            ]:
+                return frontier_environment(
+                    selected,
+                    member_id=member_id,
+                    user_root=user_root,
+                    mapping_path=mapping_path,
+                    environment_path=environment_path,
+                    include_selected=False,
+                    credentials_provider=runtime_frontier_credentials,
+                )["runtime_environment"]()
+
+            direct_arguments = submodule_recursive_transport_arguments(mapped_hosts)[:-1]
+            direct_root = root
+            if reused:
+                try:
+                    missing_paths = missing_submodules(root)
+                except GitRepositoryError:
+                    missing_paths = ()
+                update_step_ids = tuple(
+                    f"git.clone.submodule-update.{index}"
+                    for index, _path in enumerate(missing_paths)
+                )
+                for index, missing_path in enumerate(missing_paths):
+                    owner, child_path = submodule_update_target(root, missing_path)
+                    try:
+                        arguments = submodule_recursive_update_arguments(
+                            owner,
+                            child_path,
+                            allowed_hosts=mapped_hosts,
+                        )
+                    except GitRepositoryError:
+                        arguments = (
+                            *submodule_recursive_transport_arguments(mapped_hosts)[:-1],
+                            "--recursive",
+                            "--",
+                            child_path,
+                        )
+                    steps.append(
+                        _step(
+                            owner,
+                            f"git.clone.submodule-update.{index}",
+                            arguments,
+                            environment=recursive_options["environment"],
+                            secrets=recursive_options["secrets"],
+                            hooks_path=hooks,
+                            runtime_environment=recursive_runtime_environment,
+                            mutating=True,
+                        )
+                    )
+            if not update_step_ids:
+                update_step_ids = ("git.clone.submodule-update",)
+                steps.append(
                     _step(
-                        root,
-                        "git.clone.submodule-status",
-                        ("submodule", "status", "--recursive"),
-                        environment=environment,
-                        secrets=secrets,
-                        hooks_path=hooks,
-                        credential_helper=credential_helper,
-                        runtime_environment=credential_options["runtime_environment"],
-                    ),
-                    _step(
-                        root,
+                        direct_root,
                         "git.clone.submodule-update",
-                        ("submodule", "update", "--init", "--"),
-                        environment=direct_options["environment"],
-                        secrets=direct_options["secrets"],
+                        direct_arguments,
+                        environment=recursive_options["environment"],
+                        secrets=recursive_options["secrets"],
                         hooks_path=hooks,
-                        credential_helper=direct_options["helper"],
-                        runtime_environment=direct_options["runtime_environment"],
+                        runtime_environment=recursive_runtime_environment,
                         mutating=True,
-                    ),
+                    )
+                )
+            steps.append(
+                _step(
+                    root,
+                    "git.clone.submodule-frontier",
+                    submodule_frontier_transport_arguments(mapped_hosts),
+                    environment=recursive_options["environment"],
+                    secrets=recursive_options["secrets"],
+                    hooks_path=hooks,
+                    runtime_environment=recursive_runtime_environment,
+                    mutating=True,
+                )
+            )
+            steps.append(
+                _step(
+                    root,
+                    "git.clone.submodule-update-recursive",
+                    submodule_recursive_transport_arguments(mapped_hosts),
+                    environment=recursive_options["environment"],
+                    secrets=recursive_options["secrets"],
+                    hooks_path=hooks,
+                    runtime_environment=recursive_runtime_environment,
+                    mutating=True,
+                )
+            )
+            steps.append(
+                _step(
+                    root,
+                    "git.clone.submodule-status-final",
+                    ("submodule", "status", "--recursive"),
+                    environment=environment,
+                    secrets=secrets,
+                    hooks_path=hooks,
+                    credential_helper=credential_helper,
+                    runtime_environment=credential_options["runtime_environment"],
                 )
             )
 
         executor = SubprocessExecutor()
 
         def callback(context: RunContext[GitCloneResult]) -> GitCloneResult:  # noqa: C901
+            nonlocal active_frontier_credentials
             try:
                 if not reused:
                     result = cast("ProcessResult", context.process("git.clone"))
@@ -338,51 +459,7 @@ class GenericGitMixin:
                             context.skip_remaining()
                             raise GitWorkflowError("submodule status is unavailable")
                         initialized = _status_missing(status.stdout)
-                        direct_credentials[0] = validated_frontier_credentials(
-                            member_id,
-                            root,
-                            None,
-                            selected=selected,
-                            user_root=user_root,
-                            mapping_path=mapping_path,
-                            environment_path=environment_path,
-                            process_environment=process_environment,
-                            identity_transport=identity_transport,
-                        )
                         if initialized:
-                            update = cast(
-                                "ProcessResult", context.process("git.clone.submodule-update")
-                            )
-                            if update.returncode != 0:
-                                context.skip_remaining()
-                                raise GitWorkflowError("submodule initialization failed")
-                        else:
-                            context.skip("git.clone.submodule-update")
-                        iteration = 0
-                        while True:
-                            status_id = f"git.clone.submodule-status.dynamic-{iteration}"
-                            previous = cast(
-                                "ProcessResult",
-                                context.process_dynamic(
-                                    _step(
-                                        root,
-                                        status_id,
-                                        ("submodule", "status", "--recursive"),
-                                        environment=environment,
-                                        secrets=secrets,
-                                        hooks_path=hooks,
-                                        credential_helper=credential_helper,
-                                        runtime_environment=credential_options[
-                                            "runtime_environment"
-                                        ],
-                                    )
-                                ),
-                            )
-                            if previous.returncode != 0:
-                                raise GitWorkflowError("submodule status is unavailable")
-                            missing = _status_missing(previous.stdout)
-                            if not missing:
-                                break
                             frontier_credentials = validated_frontier_credentials(
                                 member_id,
                                 root,
@@ -394,48 +471,110 @@ class GenericGitMixin:
                                 process_environment=process_environment,
                                 identity_transport=identity_transport,
                             )
-                            update_id = f"git.clone.submodule-update.dynamic-{iteration}"
-                            missing_path = Path(missing[0])
-                            if missing_path.is_absolute() or ".." in missing_path.parts:
-                                raise GitWorkflowError("submodule frontier path is unsafe")
-                            parent = (root / missing_path.parent).resolve()
-                            if not parent.is_relative_to(root) or not parent.is_dir():
-                                raise GitWorkflowError("submodule frontier path is unavailable")
-                            nested_args = (
-                                "submodule",
-                                "update",
-                                "--init",
-                                "--",
-                                missing_path.name,
-                            )
-                            frontier_options = frontier_environment(
-                                selected,
-                                member_id=member_id,
-                                user_root=user_root,
-                                mapping_path=mapping_path,
-                                environment_path=environment_path,
-                                include_selected=False,
-                                frontier_credentials=frontier_credentials,
-                            )
-                            nested = cast(
-                                "ProcessResult",
-                                context.process_dynamic(
-                                    _step(
-                                        parent,
-                                        update_id,
-                                        nested_args,
-                                        environment=frontier_options["environment"],
-                                        secrets=frontier_options["secrets"],
-                                        hooks_path=hooks,
-                                        credential_helper=frontier_options["helper"],
-                                        runtime_environment=frontier_options["runtime_environment"],
-                                        mutating=True,
+                            if frontier_credentials:
+                                active_frontier_credentials = frontier_credentials
+                                validate_submodule_cache(root, allowed_hosts=mapped_hosts)
+                                validate_frontier(
+                                    member_id,
+                                    root,
+                                    None,
+                                    selected=selected,
+                                    user_root=user_root,
+                                    mapping_path=mapping_path,
+                                    environment_path=environment_path,
+                                    process_environment=process_environment,
+                                    identity_transport=identity_transport,
+                                )
+                                for update_step_id in update_step_ids:
+                                    result = cast("ProcessResult", context.process(update_step_id))
+                                    if result.returncode != 0:
+                                        raise GitWorkflowError(
+                                            _text(result.stderr)
+                                            or "submodule initialization failed"
+                                        )
+                                if reused:
+                                    follow_up_status = cast(
+                                        "ProcessResult",
+                                        context.process("git.clone.submodule-status-final"),
                                     )
-                                ),
-                            )
-                            if nested.returncode != 0:
-                                raise GitWorkflowError("nested submodule initialization failed")
-                            iteration += 1
+                                    if follow_up_status.returncode != 0:
+                                        raise GitWorkflowError("submodule status is unavailable")
+                                    if _status_missing(follow_up_status.stdout):
+                                        raise GitWorkflowError(
+                                            "submodule initialization left missing paths"
+                                        )
+                                    context.skip_remaining()
+                                    return GitCloneResult(
+                                        destination=str(root),
+                                        origin=origin,
+                                        reused=reused,
+                                        initialized_submodules=initialized,
+                                    )
+                                validate_submodule_cache(root, allowed_hosts=mapped_hosts)
+                                validate_frontier(
+                                    member_id,
+                                    root,
+                                    None,
+                                    selected=selected,
+                                    user_root=user_root,
+                                    mapping_path=mapping_path,
+                                    environment_path=environment_path,
+                                    process_environment=process_environment,
+                                    identity_transport=identity_transport,
+                                )
+                                active_frontier_credentials = validated_frontier_credentials(
+                                    member_id,
+                                    root,
+                                    None,
+                                    selected=selected,
+                                    user_root=user_root,
+                                    mapping_path=mapping_path,
+                                    environment_path=environment_path,
+                                    process_environment=process_environment,
+                                    identity_transport=identity_transport,
+                                )
+                                result = cast(
+                                    "ProcessResult",
+                                    context.process("git.clone.submodule-frontier"),
+                                )
+                                if result.returncode != 0:
+                                    raise GitWorkflowError(
+                                        _text(result.stderr) or "submodule initialization failed"
+                                    )
+                                validate_submodule_cache(root, allowed_hosts=mapped_hosts)
+                                active_frontier_credentials = validated_frontier_credentials(
+                                    member_id,
+                                    root,
+                                    None,
+                                    selected=selected,
+                                    user_root=user_root,
+                                    mapping_path=mapping_path,
+                                    environment_path=environment_path,
+                                    process_environment=process_environment,
+                                    identity_transport=identity_transport,
+                                )
+                                result = cast(
+                                    "ProcessResult",
+                                    context.process("git.clone.submodule-update-recursive"),
+                                )
+                                if result.returncode != 0:
+                                    raise GitWorkflowError(
+                                        _text(result.stderr) or "submodule initialization failed"
+                                    )
+                                final_status = cast(
+                                    "ProcessResult",
+                                    context.process("git.clone.submodule-status-final"),
+                                )
+                                if final_status.returncode != 0 or _status_missing(
+                                    final_status.stdout
+                                ):
+                                    raise GitWorkflowError(
+                                        "submodule initialization left missing paths"
+                                    )
+                            else:
+                                context.skip_remaining()
+                        else:
+                            context.skip_remaining()
                         validate_frontier(
                             member_id,
                             root,
@@ -447,7 +586,7 @@ class GenericGitMixin:
                             process_environment=process_environment,
                             identity_transport=identity_transport,
                         )
-                    except PlanError as exc:
+                    except (PlanError, GitRepositoryError) as exc:
                         context.skip_remaining()
                         raise GitWorkflowError(str(exc)) from None
                 return GitCloneResult(
@@ -457,13 +596,19 @@ class GenericGitMixin:
                     initialized_submodules=initialized,
                 )
             finally:
-                _cleanup(
-                    credential_options["environment"],
-                    direct_options["environment"],
-                    nested_options["environment"],
-                )
+                _cleanup(credential_options["environment"])
 
-        return Command.create(_plan(tuple(steps)), callback, tuple(steps), executor=executor)
+        observations: tuple[JsonValue, ...] = (
+            ({"submodule_initialization": "recursive HTTPS update is captured in the plan"},)
+            if recurse_submodules
+            else ()
+        )
+        return Command.create(
+            _plan(tuple(steps), observations=observations),
+            callback,
+            tuple(steps),
+            executor=executor,
+        )
 
     def clone(
         self,
@@ -472,6 +617,7 @@ class GenericGitMixin:
         *,
         member_id: str,
         recurse_submodules: bool = False,
+        branch: str | None = None,
         credential: GitLabCredentialContext | None = None,
         identity: GitLabIdentity | None = None,
         identity_transport: GitLabUserTransport
@@ -488,6 +634,7 @@ class GenericGitMixin:
             destination,
             member_id=member_id,
             recurse_submodules=recurse_submodules,
+            branch=branch,
             credential=credential,
             identity=identity,
             identity_transport=identity_transport,

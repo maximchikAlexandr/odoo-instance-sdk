@@ -67,6 +67,25 @@ def credential_mapping_path(user_root: Path | str | None = None) -> Path:
     return credential_directory(user_root) / "gitlab-credentials.toml"
 
 
+def mapped_credential_hosts(
+    selected: GitLabCredentialContext,
+    *,
+    user_root: Path | str | None,
+    mapping_path: Path | str | None,
+) -> tuple[str, ...]:
+    """Return hosts mapped to the selected member, including its selected host."""
+    path = credential_mapping_path(user_root) if mapping_path is None else Path(mapping_path)
+    hosts = {selected.host}
+    if path.is_file():
+        selected_member = selected.identity.user_id.casefold()
+        hosts.update(
+            item.host
+            for item in read_gitlab_credential_mappings(path)
+            if item.user_id.casefold() == selected_member
+        )
+    return tuple(sorted(hosts))
+
+
 def credential_environment_path(user_root: Path | str | None = None) -> Path:
     return credential_directory(user_root) / ".env"
 
@@ -509,6 +528,7 @@ __all__ = [
     "ensure_credential_directory",
     "gitlab_host",
     "https_host",
+    "mapped_credential_hosts",
     "normalize_gitlab_host",
     "normalize_member_id",
     "packaged_askpass",

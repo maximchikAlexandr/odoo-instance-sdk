@@ -419,7 +419,13 @@ def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartCo
     )
     step = PreparedStep(
         step_id="database.restore.auxiliary.start",
-        argv=(*instance._executable_prefix(), *cli_args),
+        argv=(
+            *instance._executable_prefix(),
+            *cli_args,
+            "--workers=0",
+            "--limit-time-cpu=0",
+            "--limit-time-real=0",
+        ),
         cwd=None if instance.config.default_cwd is None else str(instance.config.default_cwd),
         environment=environment_overrides,
         environment_snapshot=environment_snapshot,
