@@ -1,9 +1,4 @@
-"""Public project lifecycle facade.
-
-The coordinator is intentionally supplied by the project-removal implementation
-package. This facade fixes the SDK contract without doing discovery during
-client construction.
-"""
+"""Public project lifecycle facade."""
 
 from __future__ import annotations
 
@@ -33,15 +28,17 @@ class ProjectResource:
         purge: bool = False,
         confirmation: str | None = None,
     ) -> Command[ProjectRemovalResult]:
-        """Capture a project removal command.
+        """Capture one immutable project removal command."""
+        from odoo_instance_sdk.internal.project_removal_coordinator import (
+            capture_project_removal_command,
+        )
 
-        The cross-resource coordinator is intentionally implemented by a later
-        delivery package; keeping this contract inert prevents facade creation
-        from performing discovery or mutation.
-        """
-
-        del selector, purge, confirmation
-        raise NotImplementedError("project removal coordinator is not installed")
+        return capture_project_removal_command(
+            self._client.get_catalog(),
+            selector,
+            purge=purge,
+            confirmation=confirmation,
+        )
 
     def remove(
         self,
