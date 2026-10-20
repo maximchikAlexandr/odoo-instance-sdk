@@ -47,7 +47,6 @@ class ProjectResourceDecision(
     action: ProjectResourceAction
     reason: str
     target: str
-    order: int
 
     def __post_init__(self) -> None:
         if not self.identity.strip():
@@ -56,8 +55,6 @@ class ProjectResourceDecision(
             raise ValueError("decision resource_type must not be empty")
         if not self.reason.strip():
             raise ValueError("decision reason must not be empty")
-        if self.order < 0:
-            raise ValueError("decision order must not be negative")
 
     @property
     def stable_identity(self) -> str:

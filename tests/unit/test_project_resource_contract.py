@@ -21,7 +21,6 @@ def _decision() -> ProjectResourceDecision:
         action="retain",
         reason="caller_owned",
         target="/projects/example",
-        order=0,
     )
 
 
@@ -35,6 +34,15 @@ def test_public_project_values_are_frozen_and_json_safe() -> None:
     )
 
     assert msgspec.to_builtins(selector) == {"path": "/projects/example", "project_id": None}
+    decision = msgspec.to_builtins(_decision())
+    assert set(decision) == {"identity", "resource_type", "action", "reason", "target"}
+    assert decision == {
+        "identity": "project:abc",
+        "resource_type": "source",
+        "action": "retain",
+        "reason": "caller_owned",
+        "target": "/projects/example",
+    }
     assert msgspec.to_builtins(result) == {
         "project_id": "project_abc",
         "mode": "forget",
@@ -47,7 +55,6 @@ def test_public_project_values_are_frozen_and_json_safe() -> None:
                 "action": "retain",
                 "reason": "caller_owned",
                 "target": "/projects/example",
-                "order": 0,
             },
         ),
         "remaining": (),
