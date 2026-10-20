@@ -603,7 +603,7 @@ Port registry не гарантирует OS-level reservation между checko
 
 #### Scenario: Auto-allocated port
 
-- **WHEN** `checkout` без `--http-port` и port 8069 свободен
+- **WHEN** `checkout` без `--http-port` и port 8069 свободен и не зарезервирован для auxiliary restore
 - **THEN** `http_port = 8069` записан в environment
 
 #### Scenario: Full-range fallback on occupied port
@@ -1279,10 +1279,33 @@ Adoption and ordinary checkout SHALL use the same internal provenance normalizat
 
 Removal of an adopted COPY environment on an SDK-owned Compose PostgreSQL cluster SHALL validate the exact caller-owned checkout and endpoint claim, then reuse the managed cluster's volume, restore-binding, database and filestore ownership guards. An external PostgreSQL target SHALL retain its separate exact restore-provenance guard. A foreign cluster binding or changed adoption claim SHALL fail before database mutation.
 
+#### Scenario: COPY adoption reserves the auxiliary restore HTTP port
+
+- **WHEN** COPY preparation captures a source Odoo HTTP port that is currently free
+- **THEN** environment port allocation reserves that source port before starting the auxiliary restore Odoo, and chooses another available environment port automatically
+- **AND** this applies to both caller-owned adoption and SDK-owned COPY checkout
+- **AND** an explicit environment port that conflicts with the reserved source port fails without automatic substitution
+- **AND** execution still revalidates the selected environment port before provisioning
+
+#### Scenario: Explicit COPY source port conflict fails during resource planning
+
+- **WHEN** SDK-owned COPY checkout or caller-owned COPY adoption supplies an explicit `http_port` equal to the source config HTTP port
+- **THEN** the resource command raises `EnvironmentConflictError(code="port_in_use")` during planning
+- **AND** no catalog row, worktree, generated config, database, auxiliary restore, or other provisioning artifact is created
+- **AND** the requested port is not replaced with an automatically allocated port
+
 #### Scenario: Adopt a native external checkout
 
 - **WHEN** a valid existing checkout and compatible explicit COPY inputs are supplied
 - **THEN** exactly that checkout supplies the Odoo code, a separate target database and writable filestore are prepared, and one environment UUID is returned without another Git checkout
+
+#### Scenario: Adopted configuration uses task-local project code
+
+- **WHEN** the primary project's source configuration contains absolute or relative `addons_path` or `upgrade_path` entries inside its repository
+- **THEN** generated configuration rebases those entries from the primary repository root into the caller-owned checkout
+- **AND** already-absolute entries outside the primary repository, including sibling platform repositories, retain their existing paths
+- **AND** relative entries outside the primary repository resolve against the primary repository root and are recorded as absolute paths
+- **AND** the primary source configuration remains unchanged for both linked worktrees and independent clones
 
 #### Scenario: Independent clone belongs to the configured project
 

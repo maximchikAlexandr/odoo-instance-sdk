@@ -1,11 +1,19 @@
 # odoo-git-workflow Specification
 
 ## Purpose
-TBD - created by archiving change developer-workflow-cli-contracts. Update Purpose after archive.
+Define inspectable Git operations for Odoo development: commit composition and validation, review-fix absorption, scoped remote authentication, synchronization, and merge-request preparation.
 ## Requirements
 ### Requirement: Frozen Odoo commit context and message
 
 The Git resource SHALL use the already-resolved project ticket settings from the selected project manifest when composing a commit message in an environment worktree. It SHALL NOT re-load `.odcli/project.toml` from the environment worktree root. When `ticket_link_enabled` is `true` and `ticket_base_url` is set in the selected project manifest, the ticket URL SHALL be appended as an angle-bracketed link in the second paragraph of the commit message, regardless of whether the worktree has its own `.odcli/project.toml`. Copying `.odcli/project.toml` into each worktree SHALL NOT be required. History validation SHALL accept existing bare URL paragraphs and optional standard `Co-authored-by` trailers without accepting arbitrary extra paragraphs.
+
+Explicit commit prefixes SHALL support `ADD`, `DEL`, `PORT`, `I18N`, `UI`, `VIEW`, `DEMO`, `DATA`, `ACC`, `TEST`, `DOC`, `CI`, `IMP`, `FIX`, and `REF` in both message generation and history validation. Adding explicit prefixes SHALL NOT change deterministic prefix inference.
+
+#### Scenario: Use an explicit policy prefix
+
+- **WHEN** a caller supplies `VIEW`, `DEMO`, `DATA`, or `ACC` to commit generation
+- **THEN** preview and execution retain that prefix and the resulting correctly scoped commit passes history validation
+- **AND** existing `UI` commits remain supported
 
 #### Scenario: Build a configured ticket commit
 
