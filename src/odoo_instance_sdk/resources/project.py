@@ -160,6 +160,19 @@ class ProjectResource:
                         {filestore_target.identity: filestore_target}
                     )
                 if claim is not None and claim.state == "active":
+
+                    def _compose_dependencies() -> tuple[str, ...]:
+                        return tuple(
+                            f"environment:{row['id']}"
+                            for row in catalog.list_environments(
+                                project_id=registration.project_id,
+                                include_removed=False,
+                            )
+                        )
+
+                    def _compose_dependency_check() -> bool:
+                        return bool(_compose_dependencies())
+
                     compose_target = ComposeClusterPurgeTarget(
                         identity=stable_resource_identity(
                             "volume", f"{registration.project_id}\x00{claim.volume_name}"
@@ -169,7 +182,8 @@ class ProjectResource:
                         compose_project=claim.compose_project,
                         container_name=f"{claim.compose_project}-postgres-1",
                         volume_name=claim.volume_name,
-                        dependency_check=lambda: False,
+                        dependencies=_compose_dependencies(),
+                        dependency_check=_compose_dependency_check,
                     )
                     data.compose = ComposeClusterPurgeAdapter(
                         catalog,

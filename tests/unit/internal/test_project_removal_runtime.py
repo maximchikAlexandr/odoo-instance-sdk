@@ -503,12 +503,15 @@ def test_runtime_adapter_integration_preserves_order_identity_and_isolation(
         f"project-removal.runtime.runtime_project_{project_id}.stop",
         f"project-removal.publication.publication_project_{project_id}.unpublish",
         f"project-removal.environment.environment_{environment_id}.remove",
+        f"project-removal:forget:project-forget:{project_id}",
     )
     assert len(step_ids) == len(set(step_ids))
     result = command.run()
-    assert tuple(item.identity for item in result.completed) == tuple(
-        item.identity for item in projection.public_decisions
+    assert tuple(item.identity for item in result.completed) == (
+        *(item.identity for item in projection.public_decisions),
+        f"project-forget:{project_id}",
     )
+    assert result.registration_state == "forgotten"
     client.publication.unpublish_command.assert_called_once()
     assert unrelated_route.owner_id not in " ".join(step_ids)
     catalog.close()
