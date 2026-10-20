@@ -756,8 +756,9 @@ def test_public_remove_command_refuses_registered_root_symlink(
     command = ProjectResource(_client=client).remove_command(
         ProjectSelector.from_project_id(project_id),
         purge=True,
-        confirmation=f"{missing_target.name}:{project_id}",
+        confirmation=f"{root.name}:{project_id}",
     )
+    assert expected_project_confirmation_for_command(command) == f"{root.name}:{project_id}"
     with pytest.raises(ProjectRemovalError, match="observation") as error:
         command.run()
 

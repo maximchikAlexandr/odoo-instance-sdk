@@ -60,6 +60,17 @@ def test_missing_source_is_recoverable_only_by_full_id(tmp_path: Path) -> None:
     )
 
 
+def test_confirmation_token_uses_lexical_registered_root_for_symlink(
+    tmp_path: Path,
+) -> None:
+    registered_root = tmp_path / "project"
+    registered_root.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+
+    assert (
+        expected_confirmation_token(registered_root, "project-full-id") == "project:project-full-id"
+    )
+
+
 def test_projection_is_ordered_deduplicated_and_fingerprinted(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()

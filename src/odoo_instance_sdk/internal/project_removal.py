@@ -236,7 +236,7 @@ def canonical_containment(path: Path, root: Path) -> bool:
 
 def expected_confirmation_token(repository_root: Path, project_id: str) -> str:
     """Build the exact purge token without exposing the absolute root path."""
-    name = _canonical_path(repository_root).name
+    name = repository_root.expanduser().name
     if not name or not project_id.strip():
         raise ValueError("repository_root and project_id are required")
     return f"{name}:{project_id}"
