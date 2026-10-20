@@ -37,6 +37,7 @@ from odoo_instance_sdk.internal.project_init import (
     verify_project_owned_data_dir,
 )
 from odoo_instance_sdk.internal.project_manifest import write_manifest
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.venv_origin import origin_record_path
 from odoo_instance_sdk.models import Backup, DatabaseRefreshOptions, StartConfig
 from odoo_instance_sdk.project import (
@@ -1702,6 +1703,15 @@ def test_init_bootstrap_failure_prevents_successful_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_: catalog_path
+    )
+    project_id = f"project_{repo_key(tmp_path, tmp_path / '.git')}"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog._register_project(project_id, tmp_path, tmp_path / ".git")
+    assert catalog.forget_project(project_id)
+    catalog.close()
 
     def _noop_ensure_running(
         self: PostgresCluster,
@@ -1733,6 +1743,44 @@ def test_init_bootstrap_failure_prevents_successful_result(
     )
     with pytest.raises(BootstrapFailedError, match=r"init_bootstrap_failed|tmp bootstrap failed"):
         command.run()
+    catalog = BackupCatalog(db_path=catalog_path)
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+@pytest.mark.usefixtures("stub_compose_init_followup")
+def test_init_compose_failure_keeps_forgotten_project_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_: catalog_path
+    )
+    project_id = f"project_{repo_key(tmp_path, tmp_path / '.git')}"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog._register_project(project_id, tmp_path, tmp_path / ".git")
+    assert catalog.forget_project(project_id)
+    catalog.close()
+
+    def fail_compose(_context: object, _followup: object) -> None:
+        raise InstanceConfigurationError("compose init failed")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.project_init._execute_compose_followup_phase", fail_compose
+    )
+    command = init_project_command(
+        tmp_path,
+        _compose_config(tmp_path),
+        postgres_allocated=False,
+        local_config=True,
+        allow_partial=True,
+    )
+    with pytest.raises(InstanceConfigurationError, match="compose init failed"):
+        command.run()
+    catalog = BackupCatalog(db_path=catalog_path)
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
 
 
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(

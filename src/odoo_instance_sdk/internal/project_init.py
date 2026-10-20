@@ -7,19 +7,19 @@ import os
 import secrets
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
-from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.generated_config import (
     configured_admin_password,
     generate_config,
     project_generated_config_path,
     render_config,
 )
+from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
 from odoo_instance_sdk.internal.urls import normalize_base_url
@@ -89,6 +89,15 @@ def project_owned_data_dir(project_root: Path) -> Path:
     the exact contained filestore without guessing by database name.
     """
     return project_root.resolve() / ".odcli" / "filestore"
+
+
+@contextlib.contextmanager
+def project_lifecycle_lock(project_path: Path) -> Iterator[None]:
+    from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
+
+    _, _, identity = _planned_project_identity(project_path)
+    with exclusive_lock(project_manifest_lock_path(f"project_{identity}")):
+        yield
 
 
 def manifest_dict(
@@ -435,18 +444,22 @@ def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> 
         return True
 
 
-def register_initialized_project(project_path: Path) -> None:
-    """Idempotently register a project after its valid manifest is available."""
+def register_initialized_project(project_path: Path, *, _lock_held: bool = False) -> None:
+    """Register a project after successful init postconditions under its lifecycle lock."""
+    from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
+
     root, common, identity = _planned_project_identity(project_path)
     project_id = f"project_{identity}"
+    lock = contextlib.nullcontext() if _lock_held else project_lifecycle_lock(project_path)
     from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-    catalog = BackupCatalog(db_path=get_catalog_path())
-    try:
-        catalog._register_project(project_id, root, common)
-    finally:
-        catalog.close()
+    with lock:
+        catalog = BackupCatalog(db_path=get_catalog_path())
+        try:
+            catalog._register_project(project_id, root, common)
+        finally:
+            catalog.close()
 
 
 def project_env_path(project_root: Path) -> Path:
