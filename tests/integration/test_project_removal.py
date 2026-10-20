@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -14,7 +16,11 @@ from odoo_instance_sdk.internal.proc import (
     RecordingExecutor,
     RunContext,
 )
-from odoo_instance_sdk.internal.project_data_purge import DatabasePurgeAdapter, DatabasePurgeTarget
+from odoo_instance_sdk.internal.project_data_purge import (
+    ComposeClusterPurgeAdapter,
+    DatabasePurgeAdapter,
+    DatabasePurgeTarget,
+)
 from odoo_instance_sdk.internal.project_filesystem_purge import (
     FilesystemPurgeAdapter,
     FilesystemPurgeTarget,
@@ -36,7 +42,12 @@ from odoo_instance_sdk.internal.project_removal_terminal import (
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.resource_inventory import ActiveUse, OwnershipConfidence
+from odoo_instance_sdk.models.database_inventory import (
+    DatabaseInventoryItem,
+    DatabaseInventoryResult,
+)
 from odoo_instance_sdk.models.project_removal import ProjectResourceDecision, ProjectSelector
+from odoo_instance_sdk.resources.project import ProjectResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
@@ -184,7 +195,7 @@ def test_partial_purge_failure_captured_process_is_publicly_truthful_and_retryab
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.project_removal_coordinator._projection",
-        lambda _catalog, _registration: projection,
+        lambda _catalog, _registration, **_kwargs: projection,
     )
     command = capture_project_removal_command(
         catalog,
@@ -249,7 +260,7 @@ def test_partial_purge_failure_in_process_action_is_publicly_truthful_and_retrya
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.project_removal_coordinator._projection",
-        lambda _catalog, _registration: projection,
+        lambda _catalog, _registration, **_kwargs: projection,
     )
     adapters = {
         completed_identity: filesystem_adapter,
@@ -347,7 +358,7 @@ def test_projection_fails_closed_for_unobserved_database_and_compose_volume(
     assert database.action == "retain"
     assert database.reason == "observation_incomplete"
     assert volume.action == "retain"
-    assert volume.reason == "active_use_unproven"
+    assert volume.reason == "observation_incomplete"
     assert any(
         relationship.startswith("database:")
         for relationship in next(
@@ -368,4 +379,195 @@ def test_projection_retains_dirty_primary_source_at_capture(tmp_path: Path) -> N
     source = next(item for item in projection.decisions if item.resource_type == "source")
     assert source.action == "retain"
     assert source.reason == "source_git_provenance_unmatched"
+    catalog.close()
+
+
+def test_public_remove_command_executes_observed_database_and_compose_before_forget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    manifest_dir = root / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        '[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8"
+    )
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose-project", "volume")
+    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose-project", "volume")
+    database_inventory = DatabaseInventoryResult(
+        cluster="127.0.0.1:5432",
+        databases=(
+            DatabaseInventoryItem(
+                cluster="127.0.0.1:5432",
+                cluster_id=None,
+                name="owned_db",
+                logical_size_bytes=128,
+                active_sessions=0,
+                is_default=True,
+            ),
+        ),
+        tracked=True,
+    )
+    cluster = SimpleNamespace(
+        owned=True,
+        compose_runner=SimpleNamespace(),
+        resource_snapshot=lambda: SimpleNamespace(
+            container=None,
+            metrics=SimpleNamespace(volume_usage_bytes=1024),
+            unavailability_reason="stopped",
+        ),
+    )
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(list_inventory=lambda *_args, **_kwargs: database_inventory),
+        _postgres_cluster=cluster,
+    )
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=lambda _project: instance),
+        ),
+    )
+    database_executor = RecordingExecutor()
+    compose_executor = RecordingExecutor()
+    real_database_capture = DatabasePurgeAdapter.capture
+    real_compose_capture = ComposeClusterPurgeAdapter.capture
+
+    def capture_database(
+        _adapter: DatabasePurgeAdapter,
+        decision: ProjectResourceDecision,
+        *,
+        project_id: str,
+    ) -> Command[ProjectResourceDecision] | None:
+        _adapter._command_factory = lambda target: _process_child(
+            database_executor, target.identity
+        )
+        return real_database_capture(_adapter, decision, project_id=project_id)
+
+    def compose_result_factory(step: PreparedStep) -> ProcessResult:
+        if step.step_id.endswith("inspect-volume"):
+            stdout = json.dumps(
+                {
+                    "Name": "volume",
+                    "Labels": {
+                        "com.docker.compose.project": "compose-project",
+                        "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
+                        "io.odoo-instance-sdk.project-id": project_id,
+                    },
+                }
+            )
+        elif (
+            step.step_id.endswith("inspect-container")
+            or step.step_id.endswith("verify-volume")
+            or step.step_id.endswith("verify-container")
+        ):
+            stdout = ""
+            return ProcessResult(
+                argv=step.argv,
+                returncode=1,
+                stdout=stdout,
+                stderr="No such object",
+                duration=0.0,
+                cwd=step.cwd,
+                environment=step.environment,
+            )
+        else:
+            stdout = ""
+        return ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+            duration=0.0,
+            cwd=step.cwd,
+            environment=step.environment,
+        )
+
+    compose_executor.result_factory = compose_result_factory
+
+    def capture_compose(
+        _adapter: ComposeClusterPurgeAdapter,
+        decision: ProjectResourceDecision,
+        *,
+        project_id: str,
+    ) -> Command[ProjectResourceDecision] | None:
+        _adapter._executor = compose_executor
+        return real_compose_capture(_adapter, decision, project_id=project_id)
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(DatabasePurgeAdapter, "capture", capture_database)
+    monkeypatch.setattr(ComposeClusterPurgeAdapter, "capture", capture_compose)
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    result = command.run()
+
+    assert [step.step_id for step in database_executor.executed] == [
+        "project-removal.database.guarded-drop:database:owned_db"
+    ]
+    assert any(step.step_id.endswith("remove-volume") for step in compose_executor.executed)
+    assert tuple(
+        item.resource_type
+        for item in result.completed
+        if item.resource_type in {"database", "volume"}
+    ) == ("database", "volume")
+    assert result.completed[-1].action == "forget"
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_remove_command_blocks_forget_when_required_observation_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest_dir = root / ".odcli"
+    manifest_dir.mkdir()
+    manifest = manifest_dir / "project.toml"
+    manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose-project", "volume")
+    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose-project", "volume")
+
+    def unavailable_inventory(*_args: object, **_kwargs: object) -> DatabaseInventoryResult:
+        raise OSError("database observation unavailable")
+
+    cluster = SimpleNamespace(
+        owned=True,
+        compose_runner=SimpleNamespace(),
+        resource_snapshot=lambda: (_ for _ in ()).throw(OSError("Compose observation unavailable")),
+    )
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(list_inventory=unavailable_inventory),
+        _postgres_cluster=cluster,
+    )
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=lambda _project: instance),
+        ),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
+        lambda *_args, **_kwargs: False,
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert manifest.exists()
+    assert root.exists()
     catalog.close()

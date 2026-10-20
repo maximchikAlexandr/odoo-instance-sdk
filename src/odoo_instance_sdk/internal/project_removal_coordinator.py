@@ -53,6 +53,10 @@ from odoo_instance_sdk.internal.resource_inventory import (
     collect_resource_inventory,
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message
+from odoo_instance_sdk.models.database_inventory import (
+    DatabaseInventoryItem,
+    DatabaseInventoryResult,
+)
 from odoo_instance_sdk.models.project_removal import (
     ProjectRemovalErrorDetails,
     ProjectRemovalResult,
@@ -226,7 +230,11 @@ def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...
 
 
 def _projection(
-    catalog: BackupCatalog, registration: ProjectRegistration
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+    *,
+    database_inventory: DatabaseInventoryResult | None = None,
+    volume_observation: VolumeResourceSource | None = None,
 ) -> ProjectRemovalProjection:
     environments = _environment_sources(catalog, registration.project_id)
     from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
@@ -238,59 +246,96 @@ def _projection(
     owned_paths = project_owned_paths(
         registration.repository_root, managed_filestore=managed_filestore
     )
-    database_inventory = None
     database_name: str | None = None
     with suppress(ConfigError, OSError, ValueError):
         config = ProjectConfig.load(registration.repository_root)
         database_name = config.default_source_database
     claim = catalog._get_postgres_cluster(registration.project_id)
-    if database_name is not None:
-        from odoo_instance_sdk.models.database_inventory import (
-            DatabaseInventoryItem,
-            DatabaseInventoryResult,
+    active_claim = claim if claim is not None and claim.state == "active" else None
+    database_required = database_name is not None or active_claim is not None
+    observed_databases = tuple(database_inventory.databases) if database_inventory else ()
+    if active_claim is not None and database_name is not None:
+        observed_databases = tuple(
+            msgspec.structs.replace(item, cluster_id=str(active_claim.cluster_id))
+            if item.name == database_name and item.cluster_id is None
+            else item
+            for item in observed_databases
         )
-
+    database_observed = bool(
+        active_claim is not None
+        and database_name is not None
+        and any(
+            item.name == database_name and item.cluster_id == str(active_claim.cluster_id)
+            for item in observed_databases
+        )
+    )
+    if database_required and database_name is not None and not database_observed:
         database_cluster = (
-            str(claim.cluster_id)
-            if claim is not None and claim.state == "active"
-            else "project-database"
+            str(active_claim.cluster_id) if active_claim is not None else "project-database"
         )
-        database_inventory = DatabaseInventoryResult(
-            cluster=database_cluster,
-            databases=(
-                DatabaseInventoryItem(
-                    cluster=database_cluster,
-                    cluster_id=(
-                        str(claim.cluster_id)
-                        if claim is not None and claim.state == "active"
-                        else None
-                    ),
-                    name=database_name,
-                    logical_size_bytes=None,
-                    active_sessions=0,
-                    is_default=True,
-                    origin="unknown",
-                ),
+        observed_databases = (
+            *observed_databases,
+            DatabaseInventoryItem(
+                cluster=database_cluster,
+                cluster_id=str(active_claim.cluster_id) if active_claim is not None else None,
+                name=database_name,
+                logical_size_bytes=None,
+                active_sessions=0,
+                is_default=True,
+                origin="unknown",
             ),
         )
+    if database_inventory is not None or observed_databases:
+        database_inventory = DatabaseInventoryResult(
+            cluster=database_inventory.cluster if database_inventory is not None else "unknown",
+            databases=observed_databases,
+            tracked=database_inventory.tracked if database_inventory is not None else False,
+        )
     volumes: tuple[VolumeResourceSource, ...] = ()
-    if claim is not None and claim.state == "active":
-        volumes = (
-            VolumeResourceSource(
+    volume_observed = active_claim is None
+    if active_claim is not None:
+        if (
+            volume_observation is not None
+            and volume_observation.project_id == registration.project_id
+            and volume_observation.cluster_id == str(active_claim.cluster_id)
+            and volume_observation.volume_name == active_claim.volume_name
+        ):
+            volumes = (volume_observation,)
+            volume_observed = volume_observation.available and volume_observation.active is not None
+        else:
+            volume_observation = VolumeResourceSource(
                 project_id=registration.project_id,
-                volume_name=claim.volume_name,
-                cluster_id=str(claim.cluster_id),
+                volume_name=active_claim.volume_name,
+                cluster_id=str(active_claim.cluster_id),
                 owned=True,
                 available=False,
                 usage_bytes=None,
                 active=None,
                 reason="live Compose volume observation unavailable during removal planning",
-            ),
-        )
+            )
+            volumes = (volume_observation,)
+            volume_observed = False
+    database_measurement_complete = not database_required or database_observed
+    database_inactive = not database_required or all(
+        item.active_sessions == 0
+        for item in observed_databases
+        if database_name is None or item.name == database_name
+    )
+    volume_inactive = active_claim is None or (
+        volume_observation is not None and volume_observed and volume_observation.active is False
+    )
+    required_observations_complete = (
+        database_measurement_complete and database_inactive and volume_observed and volume_inactive
+    )
     inventory = collect_resource_inventory(
         catalog=catalog,
         database_inventory=database_inventory,
-        database_measurement_complete=False,
+        database_measurement_complete=database_measurement_complete,
+        database_measurement_reason=(
+            None
+            if database_measurement_complete
+            else "project-scoped PostgreSQL observation unavailable or unproven"
+        ),
         projects=(
             ProjectResourceSource(
                 project_id=registration.project_id,
@@ -317,6 +362,25 @@ def _projection(
         inventory=inventory,
         runtimes=_project_runtime(catalog, registration.project_id),
         publications=_publication_sources(registration.project_id),
+        complete=required_observations_complete,
+    )
+
+
+def _planned_projection(
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+    *,
+    database_inventory: DatabaseInventoryResult | None,
+    volume_observation: VolumeResourceSource | None,
+) -> ProjectRemovalProjection:
+    """Build a projection while preserving the no-observation test seam."""
+    if database_inventory is None and volume_observation is None:
+        return _projection(catalog, registration)
+    return _projection(
+        catalog,
+        registration,
+        database_inventory=database_inventory,
+        volume_observation=volume_observation,
     )
 
 
@@ -455,13 +519,20 @@ def capture_project_removal_command(  # noqa: C901
     purge: bool = False,
     confirmation: str | None = None,
     adapters: ProjectRemovalAdapters | None = None,
+    database_inventory: DatabaseInventoryResult | None = None,
+    volume_observation: VolumeResourceSource | None = None,
 ) -> Command[ProjectRemovalResult]:
     """Capture one project-removal plan; execution revalidates it under lock."""
     registrations = tuple(
         _row_registration(row) for row in catalog.list_projects(include_forgotten=True)
     )
     registration = resolve_project_selector(selector, registrations)
-    projection = _projection(catalog, registration)
+    projection = _planned_projection(
+        catalog,
+        registration,
+        database_inventory=database_inventory,
+        volume_observation=volume_observation,
+    )
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     decisions: tuple[ProjectResourceDecision, ...]
     if not purge:
@@ -512,8 +583,7 @@ def capture_project_removal_command(  # noqa: C901
     for decision in decisions:
         child: Command[ProjectResourceDecision] | None
         if (
-            decision.action == "delete"
-            and decision.resource_type == "source"
+            decision.resource_type == "source"
             and (registration.repository_root / ".git" / "HEAD").is_file()
         ):
             status = PreparedStep(
@@ -581,7 +651,12 @@ def capture_project_removal_command(  # noqa: C901
                     failed_step="project-removal:revalidate",
                 )
             current = _row_registration(row)
-            current_projection = _projection(catalog, current)
+            current_projection = _planned_projection(
+                catalog,
+                current,
+                database_inventory=database_inventory,
+                volume_observation=volume_observation,
+            )
             if current.repository_root.resolve() != registration.repository_root.resolve():
                 raise _error(
                     "project registration identity changed",
@@ -626,11 +701,22 @@ def capture_project_removal_command(  # noqa: C901
                     failed_step="project-removal:confirmation",
                     decisions=decisions,
                 )
+            if not projection.complete:
+                raise _error(
+                    "required database or Compose observation is unavailable or unproven",
+                    projection,
+                    mode=mode,
+                    failed_step="project-removal:observations",
+                    decisions=decisions,
+                )
             completed: list[ProjectResourceDecision] = []
             retained: list[ProjectResourceDecision] = []
             remaining: list[ProjectResourceDecision] = []
             for decision in decisions:
                 if decision.action == "retain":
+                    step = _action_step(decision)
+                    context.action(step.step_id)
+                    context.complete_action(step.step_id)
                     retained.append(decision)
                     continue
                 try:
