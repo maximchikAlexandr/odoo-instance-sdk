@@ -4,7 +4,7 @@
 
 ## What Changes
 
-- Add a public typed project-removal SDK operation and one root `odcli remove` command with mutually exclusive `--project PATH` and `--project-id ID` selectors.
+- Add a public typed project-removal SDK operation and one root `odcli remove` command, also reachable as the short alias `odcli rm`, with mutually exclusive `--project PATH` and `--project-id ID` selectors.
 - Make the default operation forget the project without deleting source, configuration, secrets, databases, backups, environments, or other retained resources; preserve their internal ownership and refuse when active managed resources would become unaccounted for.
 - Add `--purge` to capture and execute an immutable, resumable removal plan that first stops owned runtimes and removes publication, then deletes only resources whose exclusive SDK ownership is proven. Shared, external, remote, and tool-managed resources are retained and reported.
 - Require an exact confirmation token containing the full project name and full `project_id` for purge. Interactive and `--confirm-project` confirmation are supported; `--yes` alone is insufficient. Dry-run is non-mutating and renders the same bounded plan.
@@ -23,7 +23,7 @@
 - `project-init`: Initialization reactivates a forgotten project under its existing canonical identity and preserves retained ownership records.
 - `environment-monitor`: Project registration state controls catalogue/monitor visibility without discarding retained ownership metadata.
 - `local-resource-lifecycle`: The existing inventory supplies the complete project purge projection and explicit delete/retain ownership decisions.
-- `cli-odcli`: The root command surface, context rules, SDK-first leaf inventory, confirmation behavior, dry-run, and bounded machine output include `remove`.
+- `cli-odcli`: The root command surface, context rules, SDK-first leaf inventory, confirmation behavior, dry-run, and bounded machine output include canonical `remove` with the `rm` alias.
 
 ## Impact
 

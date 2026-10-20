@@ -2,7 +2,7 @@
 
 ### Requirement: Public typed project removal operation
 
-`OdooClient` SHALL expose a `projects` resource with a typed `remove_command()` returning one immutable `Command[ProjectRemovalResult]` and a convenience `remove()` that delegates to that captured command. The public selector SHALL contain exactly one canonical project path or full `project_id`. Public plan, decision, result, and error-detail values SHALL be frozen, strictly typed, JSON-safe, lazily exported, and free of Click, Rich, private executor, and secret values.
+`OdooClient` SHALL expose a `projects` resource with a typed `remove_command()` returning one immutable `Command[ProjectRemovalResult]` and a convenience `remove()` that delegates to that captured command. The public selector SHALL contain exactly one canonical project path or full `project_id`. Public decision values SHALL contain only stable identity/type, action, reason and sanitized target in deterministic order; ownership confidence, active-use evidence, dependency facts and fingerprint inputs SHALL remain internal. Public selector, decision, result, and error-detail values SHALL be frozen, strictly typed, JSON-safe, lazily exported, and free of Click, Rich, private executor, and secret values.
 
 #### Scenario: Path selector resolves canonical registration
 
@@ -21,7 +21,7 @@
 
 ### Requirement: Immutable complete removal projection
 
-The captured plan SHALL contain every known project-owned or related local resource exactly once with stable identity, dependency order, sanitized target, ownership confidence, active-use state, and one explicit action/reason. Actions SHALL be limited to `stop`, `unpublish`, `delete`, `retain`, and terminal `forget`. Planning SHALL reuse the existing catalogue and local resource collectors and SHALL NOT mutate, reconcile, adopt, create a second catalogue, or fabricate ownership.
+The captured internal projection SHALL contain every known project-owned or related local resource exactly once with stable identity, dependency order, sanitized target, ownership confidence, active-use state, and one explicit action/reason. Its public plan/result projection SHALL preserve deterministic order, stable identity/type, sanitized target and action/reason without exporting the internal evidence graph. Actions SHALL be limited to `stop`, `unpublish`, `delete`, `retain`, and terminal `forget`. Planning SHALL reuse the existing catalogue and local resource collectors and SHALL NOT mutate, reconcile, adopt, create a second catalogue, or fabricate ownership.
 
 #### Scenario: Mixed ownership plan
 
@@ -57,7 +57,7 @@ Forget SHALL refuse while a non-removed environment, live or unresolved-stale ru
 #### Scenario: Repeated forget is idempotent
 
 - **WHEN** forget is repeated for an already forgotten project by full id
-- **THEN** it succeeds with the same forgotten state without changing ownership or `forgotten_at`
+- **THEN** it succeeds with the same forgotten state without changing ownership or the existing row timestamps
 
 ### Requirement: Exact purge confirmation
 

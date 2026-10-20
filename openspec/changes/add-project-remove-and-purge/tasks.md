@@ -1,12 +1,12 @@
 ## 1. Registration State and Migration
 
-- [ ] 1.1 Extend fresh catalogue metadata and the next single-head Alembic migration with checked project registration state and `forgotten_at`; backfill every existing row as registered, preserve rows/relations/indexes/timestamps, require forgotten rows before downgrade refusal, and cover fresh/prior-head metadata equivalence.
-- [ ] 1.2 Add narrow catalogue APIs for registered-only listing, explicit full-id lifecycle lookup, locked forget, and canonical reactivation; enforce legal state/timestamp transitions and cover unknown, duplicate, repeated, and foreign-key-linked cases.
+- [ ] 1.1 Extend fresh catalogue metadata and the next single-head Alembic migration with one checked project registration-state column; backfill every existing row as registered, preserve rows/relations/indexes/existing timestamps, require forgotten rows before downgrade refusal, and cover fresh/prior-head metadata equivalence without adding a dedicated forgotten timestamp.
+- [ ] 1.2 Add narrow catalogue APIs for registered-only listing, explicit full-id lifecycle lookup, locked forget, and canonical reactivation; enforce legal state transitions and idempotent existing-timestamp behavior, and cover unknown, duplicate, repeated, and foreign-key-linked cases.
 - [ ] 1.3 Make initialization and project removal share the canonical project lifecycle lock; reactivate only after successful init postconditions, keep dry-run/failure inert, and cover concurrent init/remove serialization without resource adoption.
 
 ## 2. Typed Project Lifecycle and Resource Projection
 
-- [ ] 2.1 Add frozen JSON-safe selector, resource-decision, result, and structured-error models; add the lazy-exported `ProjectResource` facade and `OdooClient.projects` wiring while preserving lightweight imports and the characterized public SDK boundary.
+- [ ] 2.1 Add frozen JSON-safe selector, minimal resource-decision (stable identity/type, action, reason, sanitized target), result, and structured-error models; keep ownership/active-use/dependency/fingerprint evidence internal, and add the lazy-exported `ProjectResource` facade and `OdooClient.projects` wiring while preserving lightweight imports and the characterized public SDK boundary.
 - [ ] 2.2 Extend the existing local resource inventory with one deterministic full-project projection for runtimes/routes, environments, worktrees/venvs/config/logs, project config/secrets/primary venv/logs/temp, databases/filestores/backups, Compose container/volume, and source root; deduplicate shared identities and assign every item one fail-closed delete/retain reason.
 - [ ] 2.3 Implement exact path/full-id selection, bounded sanitized projection, expected confirmation token, and a stable resource-decision fingerprint; cover missing roots, unknown/abbreviated ids, shared resources, symlink escapes, caller/linked/other-tool-managed checkouts, unknown files, and secret redaction.
 - [ ] 2.4 Build one immutable project removal command by flattening captured child command steps in stable dependency order; revalidate registration and projection under the project lock and preserve each child operation's executor, action ledger, narrower locks, stale-plan checks, and postconditions.
@@ -27,8 +27,8 @@
 
 ## 5. CLI, Documentation, and Architecture Contracts
 
-- [ ] 5.1 Register root `odcli remove` with exclusive `--project`/`--project-id`, `--purge`, `--confirm-project`, `--dry-run`, and shared format options; keep interactive token collection in the CLI while delegating all domain work to the already captured SDK command.
-- [ ] 5.2 Add `remove` to `PUBLIC_LEAF_CASES`, bounded Rich/JSON/TOON output, confirmation/error mappings, help/synopsis, SDK-first/import/architecture inventories, and generated command matrix; cover selector usage errors, machine non-prompt behavior, exact token execution, plan parity, exit codes, and secret-free partial errors.
+- [ ] 5.1 Register canonical root `odcli remove` with `odcli rm` as an alias of the same Click command object, exclusive `--project`/`--project-id`, `--purge`, `--confirm-project`, `--dry-run`, and shared format options; keep interactive token collection in the CLI while delegating all domain work to the already captured SDK command.
+- [ ] 5.2 Add only canonical `remove` to `PUBLIC_LEAF_CASES`, bounded Rich/JSON/TOON output, confirmation/error mappings, help/synopsis, SDK-first/import/architecture inventories, and generated command matrix; cover `remove`/`rm` callback-option-output-completion parity with stable machine command id `remove`, selector usage errors, machine non-prompt behavior, exact token execution, plan parity, exit codes, and secret-free partial errors.
 - [ ] 5.3 Document forget versus purge, full-id recovery for a missing source, exact confirmation, ownership/retention rules, partial failure/retry, re-init, and explicit exclusions for remote/shared/external resources and Docker images.
 
 ## 6. Verification

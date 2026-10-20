@@ -18,7 +18,7 @@ odcli [--project PATH] COMMAND
 odcli [--project PATH] [--env SELECTOR] <instance-command>
 
 odcli init [OPTIONS]
-odcli remove (--project PATH | --project-id ID) [--purge] [OPTIONS]
+odcli remove|rm (--project PATH | --project-id ID) [--purge] [OPTIONS]
 odcli env checkout BRANCH [OPTIONS]
 odcli env sync [ENVIRONMENT] [OPTIONS]
 odcli env list [OPTIONS]
@@ -43,7 +43,7 @@ odcli ps [OPTIONS]
 #### Scenario: Help shows full command surface
 
 - **WHEN** `odcli --help` runs
-- **THEN** shows init, remove, env, run, logs, shell, doctor, monitor, eval, exec, test, module, translations, deps, vscode, ps
+- **THEN** shows init, canonical remove with alternate spelling rm, env, run, logs, shell, doctor, monitor, eval, exec, test, module, translations, deps, vscode, ps
 
 ### Requirement: Stable machine output
 
@@ -158,7 +158,13 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 
 ### Requirement: Root project removal CLI
 
-`odcli remove` SHALL require exactly one command-local `--project PATH` or `--project-id ID`, delegate to `OdooClient.projects.remove_command()`, and record `sdk_primitive=projects.remove_command` in `PUBLIC_LEAF_CASES`. It SHALL accept `--purge`, `--confirm-project`, `--dry-run`, and `--format rich|json|toon`. It SHALL accept `--yes` for shared lifecycle compatibility, but `--yes` SHALL NOT satisfy purge confirmation. The CLI SHALL NOT enumerate, stop, unpublish, or delete resources itself.
+Canonical `odcli remove` and its short alias `odcli rm` SHALL resolve to the same Click command object, callback and parameters. They SHALL require exactly one command-local `--project PATH` or `--project-id ID`, delegate to `OdooClient.projects.remove_command()`, and share the sole `PUBLIC_LEAF_CASES` row whose stable command identifier is `remove` and whose `sdk_primitive` is `projects.remove_command`. Both spellings SHALL accept `--purge`, `--confirm-project`, `--dry-run`, and `--format rich|json|toon`. They SHALL accept `--yes` for shared lifecycle compatibility, but `--yes` SHALL NOT satisfy purge confirmation. Help SHALL present one operation with the alternate spelling; completion, validation, prompt, plan, Rich/JSON/TOON output, stderr and exit behavior SHALL be identical. The CLI SHALL NOT enumerate, stop, unpublish, or delete resources itself, and SHALL NOT add a second callback, renderer, SDK method, inventory row, or machine command id for `rm`.
+
+#### Scenario: Short remove alias preserves one command
+
+- **WHEN** equivalent `odcli remove` and `odcli rm` invocations receive the same arguments and input, including help, completion, dry-run, refusal, forget, or purge paths
+- **THEN** they resolve one callback and captured SDK command, produce semantically identical output, prompts, errors and exit codes, and machine envelopes keep `command="remove"`
+- **AND** help exposes `rm` only as the alternate spelling of `remove` and `PUBLIC_LEAF_CASES` contains no `rm` row
 
 #### Scenario: Selector exclusivity
 
