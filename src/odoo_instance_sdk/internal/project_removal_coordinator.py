@@ -294,9 +294,7 @@ def _error_details(
 ) -> ProjectRemovalErrorDetails:
     public = projection.public_decisions
     retained_values = (
-        tuple(item for item in public if item.action == "retain")
-        if retained is None
-        else retained
+        tuple(item for item in public if item.action == "retain") if retained is None else retained
     )
     remaining_values = (
         tuple(item for item in public if item.action != "retain")
