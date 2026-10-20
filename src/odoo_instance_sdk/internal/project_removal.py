@@ -463,6 +463,7 @@ def _project_source_decision(
     existing: InternalRemovalDecision | None,
 ) -> InternalRemovalDecision:
     """Allow source deletion only when the registered Git identity still matches."""
+    lexical_exists = project.repository_root.exists() or project.repository_root.is_symlink()
     root = _canonical_path(project.repository_root)
     common = parse_git_common_dir(root) if root.is_dir() else None
     clean = False
@@ -495,7 +496,7 @@ def _project_source_decision(
     action: ProjectResourceAction
     if proven:
         action, reason = "delete", "registered_primary_source"
-    elif not root.exists():
+    elif not lexical_exists:
         action, reason = "retain", "source_already_absent"
     else:
         action, reason = "retain", "source_git_provenance_unmatched"
@@ -511,6 +512,7 @@ def _project_source_decision(
         evidence=(
             ("project_id", project.project_id),
             ("registered_root", str(root)),
+            ("registered_root_entry", "present" if lexical_exists else "absent"),
             (
                 "registered_common_dir",
                 str(_canonical_path(project.git_common_dir)) if project.git_common_dir else "",
@@ -623,12 +625,14 @@ def removal_fingerprint(
     registration_state: str,
     repository_root: Path,
     decisions: Sequence[InternalRemovalDecision],
+    complete: bool = True,
 ) -> str:
     """Hash all identity, ownership, path and dependency facts, not secrets."""
     payload = {
         "project_id": project_id,
         "registration_state": registration_state,
         "repository_root": str(_canonical_path(repository_root)),
+        "complete": complete,
         "decisions": [decision.canonical() for decision in decisions],
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -724,6 +728,7 @@ def build_project_removal_projection(  # noqa: C901
             project.registration_state,
             project.repository_root,
             ordered,
+            complete,
         ),
         complete=complete,
     )
