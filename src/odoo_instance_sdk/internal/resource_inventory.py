@@ -158,6 +158,7 @@ class ProjectResourceSource:
     database_cluster: str | None = None
     config_paths: tuple[Path, ...] = ()
     secret_paths: tuple[Path, ...] = ()
+    filestore_paths: tuple[Path, ...] = ()
     primary_python_environment_path: Path | None = None
     log_paths: tuple[Path, ...] = ()
     temp_paths: tuple[Path, ...] = ()
@@ -283,6 +284,7 @@ def _backup_item(
     projection: BackupProjection,
     roots: Sequence[Path],
     database_identities: Mapping[tuple[str, str], str],
+    project_id: str | None = None,
 ) -> tuple[ResourceInventoryItem, ResourceFinding | None]:
     backup_id = str(projection.backup.id)
     identity = f"backup:{backup_id}"
@@ -312,7 +314,8 @@ def _backup_item(
         recommendation=(
             f"backup delete {backup_id}" if projection.state.value == "available" else None
         ),
-        relationships=tuple(
+        relationships=((f"project:{project_id}",) if project_id is not None else ())
+        + tuple(
             database_identities.get(
                 (f"{link.db_host}:{link.db_port}", link.database_name),
                 _database_identity(f"{link.db_host}:{link.db_port}", link.database_name),
@@ -584,6 +587,7 @@ def build_resource_inventory(  # noqa: C901
     roots: Sequence[Path] = (),
     database_measurement_complete: bool = True,
     database_measurement_reason: str | None = None,
+    project_id: str | None = None,
 ) -> ResourceInventory:
     """Compose deterministic resource records from already captured inputs."""
     resources: dict[str, ResourceInventoryItem] = {}
@@ -630,7 +634,7 @@ def build_resource_inventory(  # noqa: C901
         resources[item.stable_identity] = current.__class__(**values)
 
     for projection in backups:
-        item, finding = _backup_item(projection, roots, by_cluster_name)
+        item, finding = _backup_item(projection, roots, by_cluster_name, project_id)
         add(item)
         if finding is not None:
             findings[(finding.code, finding.stable_identity)] = finding
@@ -715,6 +719,18 @@ def build_resource_inventory(  # noqa: C901
                     FileResourceSource(
                         path=path,
                         kind="secret",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
+                )
+            )
+        for path in project.filestore_paths:
+            add(
+                _file_item(
+                    FileResourceSource(
+                        path=path,
+                        kind="filestore",
                         owner_identity=identity,
                         ownership=OwnershipConfidence.PROVEN,
                     ),
@@ -934,6 +950,7 @@ def collect_resource_inventory(
             if database_inventory is not None
             else database_measurement_reason or "PostgreSQL inventory was not collected"
         ),
+        project_id=project_id,
     )
 
 

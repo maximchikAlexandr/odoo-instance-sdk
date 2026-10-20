@@ -31,6 +31,17 @@ class ProjectResource:
         confirmation: str | None = None,
     ) -> Command[ProjectRemovalResult]:
         """Capture one immutable project removal command."""
+        from odoo_instance_sdk.exceptions import ConfigError
+        from odoo_instance_sdk.internal.project_data_purge import (
+            BackupPurgeAdapter,
+            ComposeClusterPurgeAdapter,
+            ComposeClusterPurgeTarget,
+            DatabasePurgeAdapter,
+            DatabasePurgeTarget,
+            FilestorePurgeAdapter,
+            FilestorePurgeTarget,
+            ProjectDataPurgeAdapters,
+        )
         from odoo_instance_sdk.internal.project_filesystem_purge import (
             FilesystemPurgeAdapter,
             FilesystemPurgeTarget,
@@ -48,6 +59,7 @@ class ProjectResource:
             RuntimeEnvironmentPurgeAdapters,
         )
         from odoo_instance_sdk.internal.resource_inventory import stable_resource_identity
+        from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
 
         catalog = self._client.get_catalog()
         registrations = tuple(
@@ -64,6 +76,14 @@ class ProjectResource:
         registration = resolve_project_selector(selector, registrations)
 
         client = self._client
+        project_config: ProjectConfig | None
+        try:
+            project_config = ProjectConfig.load(registration.repository_root)
+        except (ConfigError, OSError, ValueError):
+            project_config = None
+        managed_filestore = (
+            managed_filestore_path(project_config) if project_config is not None else None
+        )
 
         class _Adapters:
             def __init__(self) -> None:
@@ -79,7 +99,11 @@ class ProjectResource:
                                 path=path,
                                 allowed_root=registration.repository_root,
                             )
-                            for kind, path in project_owned_paths(registration.repository_root)
+                            for kind, path in project_owned_paths(
+                                registration.repository_root,
+                                managed_filestore=managed_filestore,
+                            )
+                            if kind != "filestore"
                         ),
                         FilesystemPurgeTarget(
                             identity=f"project:{registration.project_id}",
@@ -90,12 +114,82 @@ class ProjectResource:
                         ),
                     )
                 )
+                claim = catalog._get_postgres_cluster(registration.project_id)
+                data = ProjectDataPurgeAdapters(
+                    backup=BackupPurgeAdapter(client, catalog),
+                )
+                if project_config is not None:
+                    database = project_config.default_source_database
+                    if database:
+                        database_target = DatabasePurgeTarget(
+                            identity=f"database:{database}",
+                            project_id=registration.project_id,
+                            project_root=registration.repository_root,
+                            database_name=database,
+                        )
+                        data.database = DatabasePurgeAdapter(
+                            client,
+                            {
+                                database_target.identity: database_target,
+                                stable_resource_identity(
+                                    "database", f"127.0.0.1:5432\x00{database}"
+                                ): database_target,
+                                **(
+                                    {
+                                        stable_resource_identity(
+                                            "database", f"{claim.cluster_id}\x00{database}"
+                                        ): database_target
+                                    }
+                                    if claim is not None and claim.state == "active"
+                                    else {}
+                                ),
+                            },
+                        )
+                    filestore = managed_filestore_path(project_config)
+                    filestore_target = FilestorePurgeTarget(
+                        identity=stable_resource_identity("filestore", str(filestore)),
+                        project_id=registration.project_id,
+                        path=filestore,
+                        allowed_root=filestore.parent,
+                        database_provenance_check=lambda: (
+                            ProjectConfig.load(registration.repository_root).default_source_database
+                            == project_config.default_source_database
+                        ),
+                    )
+                    data.filestore = FilestorePurgeAdapter(
+                        {filestore_target.identity: filestore_target}
+                    )
+                if claim is not None and claim.state == "active":
+                    compose_target = ComposeClusterPurgeTarget(
+                        identity=stable_resource_identity(
+                            "volume", f"{registration.project_id}\x00{claim.volume_name}"
+                        ),
+                        project_id=registration.project_id,
+                        cluster_id=str(claim.cluster_id),
+                        compose_project=claim.compose_project,
+                        container_name=f"{claim.compose_project}-postgres-1",
+                        volume_name=claim.volume_name,
+                        dependency_check=lambda: False,
+                    )
+                    data.compose = ComposeClusterPurgeAdapter(
+                        catalog,
+                        {
+                            compose_target.identity: compose_target,
+                            f"volume:{claim.volume_name}": compose_target,
+                            f"compose:{claim.cluster_id}": compose_target,
+                        },
+                    )
+                self._data = data
 
             def for_decision(
                 self, decision: ProjectResourceDecision
             ) -> ProjectRemovalAdapter | None:
                 runtime = self._runtime.for_decision(decision)
-                return runtime or self._filesystem.for_decision(decision)
+                return (
+                    runtime
+                    or self._filesystem.for_decision(decision)
+                    or self._data.for_decision(decision)
+                )
 
         adapters = _Adapters()
 
