@@ -79,6 +79,18 @@ class ProjectRemovalResult(
     remaining: tuple[ProjectResourceDecision, ...] = ()
 
     @property
+    def completed_total(self) -> int:
+        return len(self.completed)
+
+    @property
+    def retained_total(self) -> int:
+        return len(self.retained)
+
+    @property
+    def remaining_total(self) -> int:
+        return len(self.remaining)
+
+    @property
     def final_registration_state(self) -> ProjectRegistrationState:
         return self.registration_state
 
@@ -98,6 +110,19 @@ class ProjectRemovalErrorDetails(
     retained: tuple[ProjectResourceDecision, ...] = ()
     remaining: tuple[ProjectResourceDecision, ...] = ()
     failed_step: str
+    failed_identity: str | None = None
+
+    @property
+    def completed_total(self) -> int:
+        return len(self.completed)
+
+    @property
+    def retained_total(self) -> int:
+        return len(self.retained)
+
+    @property
+    def remaining_total(self) -> int:
+        return len(self.remaining)
 
 
 __all__ = [

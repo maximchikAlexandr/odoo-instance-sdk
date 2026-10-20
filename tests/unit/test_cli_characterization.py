@@ -200,6 +200,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "monitor",
         "resource",
         "ps",
+        "remove",
     }
     assert "--project" in result.output
     assert "--env" in result.output
