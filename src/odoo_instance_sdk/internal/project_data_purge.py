@@ -13,10 +13,10 @@ import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+_ChildResult = TypeVar("_ChildResult")
 
 
 def _result_text(result: ProcessResultLike) -> str:
@@ -68,7 +70,7 @@ def _docker_not_found(result: ProcessResult, *, label: str) -> bool:
     )
 
 
-def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, object] | None:
+def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, JsonValue] | None:
     if not isinstance(result, ProcessResult):
         raise ConfigError(f"{label} inspection returned no result")
     if result.returncode != 0:
@@ -76,14 +78,14 @@ def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, objec
             return None
         raise ConfigError(f"{label} inspection failed; object absence is unproven")
     try:
-        value: object = json.loads(_result_text(result))
+        value: JsonValue = json.loads(_result_text(result))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ConfigError(f"{label} inspection returned invalid identity") from exc
     if isinstance(value, list):
         value = value[0] if value else None
     if not isinstance(value, Mapping):
         raise ConfigError(f"{label} inspection returned invalid identity")
-    return value
+    return cast("Mapping[str, JsonValue]", value)
 
 
 def _require_absent(result: ProcessResultLike, *, label: str) -> None:
@@ -97,14 +99,14 @@ def _require_absent(result: ProcessResultLike, *, label: str) -> None:
 
 
 def _adapt_child(
-    child: Command[object],
+    child: Command[_ChildResult],
     decision: ProjectResourceDecision,
 ) -> Command[ProjectResourceDecision]:
     """Keep a captured child plan/executor, changing only its result type."""
     prepared = child._prepared()
 
     def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
-        prepared.callback(cast("RunContext[object]", context))
+        prepared.callback(cast("RunContext[_ChildResult]", context))
         return decision
 
     return Command.from_prepared(
@@ -213,7 +215,7 @@ class DatabasePurgeAdapter:
         client: OdooClient,
         targets: Mapping[str, DatabasePurgeTarget],
         *,
-        command_factory: Callable[..., Command[object]] | None = None,
+        command_factory: Callable[..., Command[JsonValue]] | None = None,
         executor: ProcessExecutor | None = None,
     ) -> None:
         self._client = client
@@ -221,7 +223,7 @@ class DatabasePurgeAdapter:
         self._command_factory = command_factory
         self._executor = executor
 
-    def _capture_database(self, target: DatabasePurgeTarget) -> Command[object]:
+    def _capture_database(self, target: DatabasePurgeTarget) -> Command[JsonValue]:
         if self._command_factory is not None:
             return self._command_factory(target)
         from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
@@ -231,7 +233,7 @@ class DatabasePurgeAdapter:
         if instance is None:
             instance = self._client.instance.from_project(ProjectConfig.load(target.project_root))
         return cast(
-            "Command[object]",
+            "Command[JsonValue]",
             build_database_drop_command(
                 instance,
                 target.project_root,
@@ -262,7 +264,7 @@ class BackupPurgeAdapter:
         client: OdooClient,
         catalog: BackupCatalog,
         *,
-        command_factory: Callable[..., Command[object]] | None = None,
+        command_factory: Callable[..., Command[JsonValue]] | None = None,
         executor: ProcessExecutor | None = None,
     ) -> None:
         self._client = client
@@ -285,12 +287,12 @@ class BackupPurgeAdapter:
         ):
             return None
         projection = self._catalog._resolve_backup_projection(backup_id)
-        child: Command[object]
+        child: Command[JsonValue]
         if self._command_factory is not None:
             child = self._command_factory(projection.backup)
         else:
             child = cast(
-                "Command[object]",
+                "Command[JsonValue]",
                 self._client.backups.delete_command(
                     projection.backup,
                     executor=self._executor,
@@ -300,7 +302,7 @@ class BackupPurgeAdapter:
 
 
 def _identity_labels(
-    value: Mapping[str, object], *, container: bool, target: ComposeClusterPurgeTarget
+    value: Mapping[str, JsonValue], *, container: bool, target: ComposeClusterPurgeTarget
 ) -> bool:
     if container:
         config = value.get("Config")
