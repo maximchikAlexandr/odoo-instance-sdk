@@ -169,23 +169,34 @@ class _PlanningMixin:
             environment_id=str(payload["environment_id"]),
         )
 
-    def stop_environment_command(self, *, timeout: float = 10.0) -> Command[dict[str, str]]:
+    def stop_environment_command(
+        self, *, timeout: float = 10.0, step_prefix: str = ""
+    ) -> Command[dict[str, str]]:
         if self._runtime_binding is not None and self._runtime_binding.owner_kind != "environment":
             raise InstanceConfigurationError(
                 "stop_environment requires an environment-owned runtime"
             )
         return cast(
             "Command[dict[str, str]]",
-            self._stop_runtime_command(timeout=timeout, legacy_environment=True),
+            self._stop_runtime_command(
+                timeout=timeout, legacy_environment=True, step_prefix=step_prefix
+            ),
         )
 
-    def stop_runtime_command(self, *, timeout: float = 10.0) -> Command[dict[str, str | None]]:
-        return self._stop_runtime_command(timeout=timeout, legacy_environment=False)
+    def stop_runtime_command(
+        self, *, timeout: float = 10.0, step_prefix: str = ""
+    ) -> Command[dict[str, str | None]]:
+        return self._stop_runtime_command(
+            timeout=timeout, legacy_environment=False, step_prefix=step_prefix
+        )
 
     def _stop_runtime_command(  # noqa: C901
-        self, *, timeout: float, legacy_environment: bool
+        self, *, timeout: float, legacy_environment: bool, step_prefix: str = ""
     ) -> Command[dict[str, str | None]]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
+
+        def step_id(value: str) -> str:
+            return f"{step_prefix}{value}" if step_prefix else value
 
         def owner_fields(identity: _RuntimeIdentity | None) -> dict[str, str | None]:
             if identity is not None:
@@ -225,20 +236,29 @@ class _PlanningMixin:
         with self._artifact_operation(exclusive=False):
             planned_identity = self._read_runtime_identity()
 
-        action_ids = (
-            "instance.stop.runtime",
-            "instance.stop.revalidate",
-            "instance.stop.terminate",
-            "instance.stop.verify_exit",
-            "instance.stop.clear_runtime",
+        action_ids = tuple(
+            step_id(value)
+            for value in (
+                "instance.stop.runtime",
+                "instance.stop.revalidate",
+                "instance.stop.terminate",
+                "instance.stop.verify_exit",
+                "instance.stop.clear_runtime",
+            )
         )
         actions = tuple(
             PreparedAction(
                 step_id=step_id,
                 action=step_id,
                 description=step_id.replace(".", " "),
-                read_only=step_id in {"instance.stop.revalidate", "instance.stop.verify_exit"},
-                mutating=step_id in {"instance.stop.terminate", "instance.stop.clear_runtime"},
+                read_only=(
+                    step_id.removeprefix(step_prefix)
+                    in {"instance.stop.revalidate", "instance.stop.verify_exit"}
+                ),
+                mutating=(
+                    step_id.removeprefix(step_prefix)
+                    in {"instance.stop.terminate", "instance.stop.clear_runtime"}
+                ),
             )
             for step_id in action_ids
         )
