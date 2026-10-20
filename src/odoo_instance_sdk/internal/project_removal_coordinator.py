@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import msgspec
 
-from odoo_instance_sdk.exceptions import ConfigError, ProjectRemovalError
+from odoo_instance_sdk.exceptions import (
+    ConfigError,
+    ProjectManifestNotFoundError,
+    ProjectRemovalError,
+)
 from odoo_instance_sdk.execution import (
     Command,
     ExecutionPlan,
@@ -33,7 +36,6 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResultLike,
     RunContext,
     StepObserver,
-    SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.project_removal import (
     ProjectRegistration,
@@ -240,16 +242,27 @@ def _projection(
     from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
     from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
 
+    manifest = registration.repository_root / ".odcli" / "project.toml"
+    manifest_present = manifest.exists() or manifest.is_symlink()
+    config_evidence_complete = True
     managed_filestore: Path | None = None
-    with suppress(ConfigError, OSError, ValueError):
+    try:
         managed_filestore = managed_filestore_path(ProjectConfig.load(registration.repository_root))
+    except ProjectManifestNotFoundError:
+        config_evidence_complete = not registration.repository_root.exists()
+    except (ConfigError, OSError, ValueError):
+        config_evidence_complete = False
     owned_paths = project_owned_paths(
         registration.repository_root, managed_filestore=managed_filestore
     )
     database_name: str | None = None
-    with suppress(ConfigError, OSError, ValueError):
+    try:
         config = ProjectConfig.load(registration.repository_root)
         database_name = config.default_source_database
+    except ProjectManifestNotFoundError:
+        config_evidence_complete = config_evidence_complete and not manifest_present
+    except (ConfigError, OSError, ValueError):
+        config_evidence_complete = False
     claim = catalog._get_postgres_cluster(registration.project_id)
     active_claim = claim if claim is not None and claim.state == "active" else None
     database_required = database_name is not None or active_claim is not None
@@ -325,7 +338,11 @@ def _projection(
         volume_observation is not None and volume_observed and volume_observation.active is False
     )
     required_observations_complete = (
-        database_measurement_complete and database_inactive and volume_observed and volume_inactive
+        config_evidence_complete
+        and database_measurement_complete
+        and database_inactive
+        and volume_observed
+        and volume_inactive
     )
     inventory = collect_resource_inventory(
         catalog=catalog,
@@ -582,24 +599,6 @@ def capture_project_removal_command(  # noqa: C901
     child_executors: dict[str, ProcessExecutor] = {}
     for decision in decisions:
         child: Command[ProjectResourceDecision] | None
-        if (
-            decision.resource_type == "source"
-            and (registration.repository_root / ".git" / "HEAD").is_file()
-        ):
-            status = PreparedStep(
-                step_id=f"project-removal:revalidate-git:{registration.project_id}",
-                argv=(
-                    "git",
-                    "-C",
-                    str(registration.repository_root),
-                    "status",
-                    "--porcelain",
-                    "--untracked-files=all",
-                ),
-                read_only=True,
-            )
-            flattened_steps.append(status)
-            child_executors[status.step_id] = SubprocessExecutor()
         if not purge or decision.action == "retain":
             flattened_steps.append(_action_step(decision))
             continue

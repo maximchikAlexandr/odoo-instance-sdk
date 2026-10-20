@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,8 +10,9 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from odoo_instance_sdk.exceptions import ProjectRemovalError
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
     PreparedStep,
     ProcessResult,
     RecordingExecutor,
@@ -103,16 +105,16 @@ class _AdapterRegistry:
 def _process_child(
     executor: RecordingExecutor,
     identity: str,
-) -> Command[object]:
+) -> Command[JsonValue]:
     step = PreparedStep(
         step_id=f"project-removal.database.guarded-drop:{identity}",
         argv=("psql", "--guarded-project-drop"),
         mutating=True,
     )
 
-    def run(context: RunContext[object]) -> object:
+    def run(context: RunContext[JsonValue]) -> JsonValue:
         context.process(step.step_id)
-        return object()
+        return None
 
     return Command.create(
         ExecutionPlan(steps=(step.public_projection(),)),
@@ -343,9 +345,8 @@ def test_projection_fails_closed_for_unobserved_database_and_compose_volume(
     catalog, project_id, root = _catalog(tmp_path)
     manifest_dir = root / ".odcli"
     manifest_dir.mkdir()
-    (manifest_dir / "project.toml").write_text(
-        '[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8"
-    )
+    manifest = manifest_dir / "project.toml"
+    manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
     claim = catalog._ensure_postgres_cluster_pending(project_id, "compose-project", "volume")
     catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose-project", "volume")
 
@@ -386,11 +387,28 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
-    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True)
     manifest_dir = root / ".odcli"
     manifest_dir.mkdir()
-    (manifest_dir / "project.toml").write_text(
-        '[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8"
+    manifest = manifest_dir / "project.toml"
+    manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
+    (root / ".gitignore").write_text(".odcli/\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(root), "add", ".gitignore"), check=True)
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "baseline",
+        ),
+        check=True,
+        capture_output=True,
     )
     claim = catalog._ensure_postgres_cluster_pending(project_id, "compose-project", "volume")
     catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose-project", "volume")
@@ -444,7 +462,8 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         )
         return real_database_capture(_adapter, decision, project_id=project_id)
 
-    def compose_result_factory(step: PreparedStep) -> ProcessResult:
+    def compose_result_factory(step: PreparedProcess) -> ProcessResult:
+        step = cast("PreparedStep", step)
         if step.step_id.endswith("inspect-volume"):
             stdout = json.dumps(
                 {
@@ -518,6 +537,7 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         if item.resource_type in {"database", "volume"}
     ) == ("database", "volume")
     assert result.completed[-1].action == "forget"
+    assert not root.exists()
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     catalog.close()
 
@@ -570,4 +590,75 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert manifest.exists()
     assert root.exists()
+    catalog.close()
+
+
+def test_public_remove_command_blocks_malformed_manifest_before_mutation(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project\n", encoding="utf-8")
+    before = manifest.read_bytes()
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(),
+        ),
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
+    assert manifest.read_bytes() == before
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_remove_command_blocks_unreadable_manifest_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
+    before = manifest.read_bytes()
+
+    from odoo_instance_sdk.project import ProjectConfig
+
+    def unreadable(_path: Path) -> ProjectConfig:
+        raise OSError("manifest permission denied")
+
+    monkeypatch.setattr(ProjectConfig, "load", unreadable)
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(),
+        ),
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
+    assert manifest.read_bytes() == before
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()

@@ -183,3 +183,20 @@ def test_source_adapter_rechecks_capture_to_run_drift(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="clean Git"):
         command.run()
     assert root.exists()
+
+
+def test_source_adapter_deletes_clean_checkout_recursively(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    _git_repo(root)
+    (root / ".odcli").mkdir()
+    manifest = root / ".odcli" / "project.toml"
+    manifest.write_text("[project]\n", encoding="utf-8")
+    _git_commit(root, manifest)
+    identity = "project:project-1"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", root, tmp_path, root / ".git"),)
+    ).capture(_decision(identity, "source"), project_id="project-1")
+
+    assert command is not None
+    command.run()
+    assert not root.exists()

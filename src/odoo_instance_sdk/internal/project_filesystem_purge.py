@@ -126,8 +126,8 @@ class FilesystemPurgeAdapter:
             ):
                 raise ConfigError("registered primary source is not a clean Git worktree")
             if path.exists():
-                if path.is_dir() and decision.resource_type != "source":
-                    _assert_safe_directory(path, source=False)
+                if path.is_dir():
+                    _assert_safe_directory(path, source=decision.resource_type == "source")
                     shutil.rmtree(path)
                 else:
                     path.unlink()

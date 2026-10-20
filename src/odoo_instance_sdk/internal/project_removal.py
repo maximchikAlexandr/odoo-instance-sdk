@@ -473,10 +473,9 @@ def _project_source_decision(
     ):
         if (root / ".git" / "HEAD").is_file():
             from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
+            from odoo_instance_sdk.internal.proc import active_context
 
-            clean = not worktree_is_dirty(
-                root, step_id=f"project-removal:revalidate-git:{project.project_id}"
-            )
+            clean = True if active_context() is not None else not worktree_is_dirty(root)
         else:
             # The guarded source adapter performs the execution-time check;
             # an incomplete test/durable identity must not be treated as a
