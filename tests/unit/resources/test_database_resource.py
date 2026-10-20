@@ -5,7 +5,7 @@ import hashlib
 import subprocess
 import uuid
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -56,6 +56,27 @@ if TYPE_CHECKING:
 
 def _mock_http(json_data: object) -> MagicMock:
     return mock_http_for_json(json_data)
+
+
+def _configure_disconnect(http: MagicMock) -> None:
+    http.post.side_effect = TransportUnavailableError("connection closed")
+
+
+def _configure_http_error(http: MagicMock) -> None:
+    http.post.return_value = make_response(status_code=500)
+
+
+def _configure_status_error(http: MagicMock) -> None:
+    http.post.side_effect = TransportStatusError(
+        status_code=500, message="restore failure", body=b"private response"
+    )
+
+
+_RESTORE_FAILURE_CASES: tuple[tuple[str, Callable[[MagicMock], None]], ...] = (
+    ("disconnect", _configure_disconnect),
+    ("http-error", _configure_http_error),
+    ("status-error", _configure_status_error),
+)
 
 
 def _stream_http(response: MagicMock) -> tuple[MagicMock, MagicMock]:
@@ -1802,17 +1823,26 @@ class TestRestore:
         assert client.config.backup_timeout_seconds == 1800.0
         assert timeout == client.config.backup_timeout_seconds
 
-    def test_http_failure_is_accepted_when_postgres_confirms_restore(
-        self, client: OdooClient, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("failure_kind", "configure_failure"),
+        _RESTORE_FAILURE_CASES,
+        ids=[case[0] for case in _RESTORE_FAILURE_CASES],
+    )
+    def test_http_failure_rejects_partially_created_database(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        failure_kind: str,
+        configure_failure: Callable[[MagicMock], None],
     ) -> None:
         backup_path = tmp_path / "test.zip"
         backup_path.write_text("fake content")
         backup = _make_backup(path=str(backup_path))
         instance = _make_instance_with_cluster_key(client)
         http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.side_effect = TransportUnavailableError(
-            "connection closed"
-        )
+        http = http_cm.__enter__.return_value
+        configure_failure(http)
+        catalog = MagicMock()
 
         with (
             patch.object(instance, "_client") as mock_client,
@@ -1823,10 +1853,58 @@ class TestRestore:
             ),
         ):
             mock_client.config = client.config
-            mock_client.get_catalog.return_value = MagicMock()
-            result = instance.databases.restore(backup, "newdb")
+            mock_client.get_catalog.return_value = catalog
+            with pytest.raises(DatabaseError, match="Database restore"):
+                instance.databases.restore(backup, "newdb")
 
-        assert result.new_db == "newdb"
+        catalog.record_restore.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("failure_kind", "configure_failure"),
+        _RESTORE_FAILURE_CASES,
+        ids=[case[0] for case in _RESTORE_FAILURE_CASES],
+    )
+    def test_http_failure_after_verified_absence_rejects_database(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        failure_kind: str,
+        configure_failure: Callable[[MagicMock], None],
+    ) -> None:
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_text("fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client)
+        http_cm = _mock_http({})
+        http = http_cm.__enter__.return_value
+        configure_failure(http)
+        catalog = MagicMock()
+
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
+            patch(
+                "odoo_instance_sdk.resources.database.DatabaseResource.exists",
+                side_effect=[False, True],
+            ),
+        ):
+            mock_client.config = client.config
+            mock_client.get_catalog.return_value = catalog
+            with pytest.raises(DatabaseError, match="Database restore"):
+                from odoo_instance_sdk.execution import Command, ExecutionPlan
+                from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+
+                action = PreparedAction("database.restore")
+
+                def callback(context: RunContext[RestoreResult]) -> RestoreResult:
+                    context.action(action.step_id)
+                    return instance.databases._restore_after_verified_absence(backup, "newdb")
+
+                Command.create(
+                    ExecutionPlan(steps=(action.public_projection(),)), callback, (action,)
+                ).run()
+
+        catalog.record_restore.assert_not_called()
 
     def test_http_failure_does_not_retain_request_or_backup_graph(
         self, client: OdooClient, tmp_path: Path

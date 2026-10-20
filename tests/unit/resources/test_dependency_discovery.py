@@ -59,6 +59,52 @@ def test_explicit_missing_requirement_fails_before_planning(tmp_path: Path) -> N
         )
 
 
+@pytest.mark.parametrize("managed_worktree", [False, True])
+def test_absolute_addon_requirements_reject_escape(tmp_path: Path, managed_worktree: bool) -> None:
+    repo = tmp_path / "client"
+    repo.mkdir()
+    worktree = tmp_path / "checkout" if managed_worktree else repo
+    worktree.mkdir(exist_ok=True)
+    addons = tmp_path / "platform" / "addons"
+    module = addons / "sale"
+    module.mkdir(parents=True)
+    (module / "__manifest__.py").write_text("{}")
+    module_requirement = module / "requirements.txt"
+    parent_requirement = addons / "requirements.txt"
+    parent_requirement.write_text("parent-package==1\n")
+    outside = tmp_path / "private.txt"
+    outside.write_text("private-package==1\n")
+    module_requirement.symlink_to(outside)
+    config = ProjectConfig(repository_root=repo, addon_roots=(addons,))
+
+    with pytest.raises(ConfigError, match="escapes its configured checkout boundary"):
+        discover_dependency_inputs(config, repo, worktree)
+
+
+@pytest.mark.parametrize("managed_worktree", [False, True])
+def test_absolute_addon_requirements_discover_declared_boundary(
+    tmp_path: Path, managed_worktree: bool
+) -> None:
+    repo = tmp_path / "client"
+    repo.mkdir()
+    worktree = tmp_path / "checkout" if managed_worktree else repo
+    worktree.mkdir(exist_ok=True)
+    addons = tmp_path / "platform" / "addons"
+    module = addons / "sale"
+    module.mkdir(parents=True)
+    (module / "__manifest__.py").write_text("{}")
+    module_requirement = module / "requirements.txt"
+    parent_requirement = addons / "requirements.txt"
+    parent_requirement.write_text("parent-package==1\n")
+    module_requirement.write_text("module-package==1\n")
+    config = ProjectConfig(repository_root=repo, addon_roots=(addons,))
+
+    assert discover_dependency_inputs(config, repo, worktree) == (
+        str(module_requirement),
+        str(parent_requirement),
+    )
+
+
 def test_discovery_rebases_identical_inputs_to_managed_worktree(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     worktree = tmp_path / "worktree"
