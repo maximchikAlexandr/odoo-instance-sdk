@@ -1,0 +1,466 @@
+"""Ownership-safe data and Compose cleanup adapters for project removal.
+
+The project-removal coordinator owns ordering and the public ledger.  This
+module owns only the data providers it can prove: the existing guarded
+PostgreSQL drop command, the existing backup deletion command, contained
+filestore cleanup, and an exact SDK-owned Compose container/volume pair.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
+    PreparedStep,
+    ProcessExecutor,
+    ProcessResult,
+    ProcessResultLike,
+    RunContext,
+    SubprocessExecutor,
+    prepared_command,
+)
+from odoo_instance_sdk.models.project_removal import ProjectResourceDecision
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+    from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+
+def _result_text(result: ProcessResultLike) -> str:
+    if not isinstance(result, ProcessResult):
+        raise ConfigError("project cleanup process returned no result")
+    value = result.stdout
+    return value.decode(errors="replace") if isinstance(value, bytes) else value
+
+
+def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, object] | None:
+    if not isinstance(result, ProcessResult):
+        raise ConfigError(f"{label} inspection returned no result")
+    if result.returncode != 0:
+        return None
+    try:
+        value: object = json.loads(_result_text(result))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"{label} inspection returned invalid identity") from exc
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return value if isinstance(value, Mapping) else None
+
+
+def _adapt_child(
+    child: Command[object],
+    decision: ProjectResourceDecision,
+) -> Command[ProjectResourceDecision]:
+    """Keep a captured child plan/executor, changing only its result type."""
+    prepared = child._prepared()
+
+    def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
+        prepared.callback(context)
+        return decision
+
+    return Command.from_prepared(
+        child.plan,
+        prepared_command(run, prepared.steps, executor=prepared.executor),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DatabasePurgeTarget:
+    """Exact database identity captured from the project inventory."""
+
+    identity: str
+    project_id: str
+    project_root: Path
+    database_name: str
+    instance: OdooInstance | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FilestorePurgeTarget:
+    """A database-owned filestore with an explicit canonical containment root."""
+
+    identity: str
+    project_id: str
+    path: Path
+    allowed_root: Path
+    ownership_check: Callable[[], bool] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeClusterPurgeTarget:
+    """Exact Compose identities and the evidence required before destruction."""
+
+    identity: str
+    project_id: str
+    cluster_id: str
+    compose_project: str
+    container_name: str
+    volume_name: str
+    dependencies: tuple[str, ...] = ()
+    dependency_check: Callable[[], bool] | None = None
+    compose_file: Path | None = None
+    runner: ComposeRunner | None = field(default=None, repr=False, compare=False)
+
+
+def _delete_contained_filestore(target: FilestorePurgeTarget) -> None:
+    path = target.path
+    root = target.allowed_root.resolve(strict=False)
+    if target.ownership_check is not None and not target.ownership_check():
+        raise ConfigError("filestore ownership evidence changed before deletion")
+    if path.is_symlink() or path.resolve(strict=False).parent != root:
+        raise ConfigError("filestore path is outside its proven containment root")
+    if not path.exists():
+        return
+    if not path.is_dir():
+        raise ConfigError("proven filestore target is not a directory")
+    shutil.rmtree(path)
+    if path.exists() or path.is_symlink():
+        raise ConfigError("filestore deletion postcondition failed")
+
+
+class FilestorePurgeAdapter:
+    def __init__(self, targets: Mapping[str, FilestorePurgeTarget]) -> None:
+        self._targets = dict(targets)
+
+    def capture(
+        self, decision: ProjectResourceDecision, *, project_id: str
+    ) -> Command[ProjectResourceDecision] | None:
+        target = self._targets.get(decision.identity)
+        if target is None or target.project_id != project_id:
+            return None
+        action = PreparedAction(
+            step_id=f"project-removal:filestore:{decision.identity}",
+            action="delete-filestore",
+            description="Delete one proven contained project filestore",
+            details={"identity": decision.identity},
+            mutating=True,
+        )
+
+        def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
+            context.action(action.step_id)
+            _delete_contained_filestore(target)
+            context.complete_action(action.step_id)
+            return decision
+
+        return Command.create(
+            ExecutionPlan(steps=(action.public_projection(),)),
+            run,
+            (action,),
+        )
+
+
+class DatabasePurgeAdapter:
+    """Compose the existing guarded database/filestore deletion command."""
+
+    def __init__(
+        self,
+        client: OdooClient,
+        targets: Mapping[str, DatabasePurgeTarget],
+        *,
+        command_factory: Callable[..., Command[object]] | None = None,
+        executor: ProcessExecutor | None = None,
+    ) -> None:
+        self._client = client
+        self._targets = dict(targets)
+        self._command_factory = command_factory
+        self._executor = executor
+
+    def _capture_database(self, target: DatabasePurgeTarget) -> Command[object]:
+        if self._command_factory is not None:
+            return self._command_factory(target)
+        from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
+        from odoo_instance_sdk.project import ProjectConfig
+
+        instance = target.instance
+        if instance is None:
+            instance = self._client.instance.from_project(ProjectConfig.load(target.project_root))
+        return cast(
+            "Command[object]",
+            build_database_drop_command(
+                instance,
+                target.project_root,
+                target.database_name,
+                force_default=True,
+                idempotent_absent=True,
+                defer_planning=True,
+                command_origin="project-removal",
+                step_prefix=f"project-removal:{target.identity}:",
+                executor=self._executor,
+            ),
+        )
+
+    def capture(
+        self, decision: ProjectResourceDecision, *, project_id: str
+    ) -> Command[ProjectResourceDecision] | None:
+        target = self._targets.get(decision.identity)
+        if target is None or target.project_id != project_id:
+            return None
+        return _adapt_child(self._capture_database(target), decision)
+
+
+class BackupPurgeAdapter:
+    """Delete only a current, exclusively project-owned backup through BackupResource."""
+
+    def __init__(
+        self,
+        client: OdooClient,
+        catalog: BackupCatalog,
+        *,
+        command_factory: Callable[..., Command[object]] | None = None,
+        executor: ProcessExecutor | None = None,
+    ) -> None:
+        self._client = client
+        self._catalog = catalog
+        self._command_factory = command_factory
+        self._executor = executor
+
+    def capture(
+        self, decision: ProjectResourceDecision, *, project_id: str
+    ) -> Command[ProjectResourceDecision] | None:
+        if not decision.identity.startswith("backup:"):
+            return None
+        backup_id = decision.identity.removeprefix("backup:")
+        row = self._catalog.get_by_id(backup_id)
+        if row is None or row["project_id"] != project_id:
+            return None
+        projection = self._catalog._resolve_backup_projection(backup_id)
+        if self._command_factory is not None:
+            child = self._command_factory(projection.backup)
+        else:
+            child = self._client.backups.delete_command(
+                projection.backup,
+                executor=self._executor,
+            )
+        return _adapt_child(cast("Command[object]", child), decision)
+
+
+def _identity_labels(
+    value: Mapping[str, object], *, container: bool, target: ComposeClusterPurgeTarget
+) -> bool:
+    if container:
+        config = value.get("Config")
+        labels = config.get("Labels") if isinstance(config, Mapping) else None
+        mounts = value.get("Mounts")
+        return (
+            value.get("Name") in {f"/{target.container_name}", target.container_name}
+            and isinstance(labels, Mapping)
+            and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
+            and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
+            and isinstance(mounts, list)
+            and any(
+                isinstance(mount, Mapping)
+                and mount.get("Type") == "volume"
+                and mount.get("Name") == target.volume_name
+                for mount in mounts
+            )
+        )
+    labels = value.get("Labels")
+    return (
+        value.get("Name") == target.volume_name
+        and isinstance(labels, Mapping)
+        and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
+        and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
+    )
+
+
+class ComposeClusterPurgeAdapter:
+    """Destroy exactly one stopped, SDK-labelled Compose container and volume."""
+
+    def __init__(
+        self,
+        catalog: BackupCatalog,
+        targets: Mapping[str, ComposeClusterPurgeTarget],
+        *,
+        executor: ProcessExecutor | None = None,
+    ) -> None:
+        self._catalog = catalog
+        self._targets = dict(targets)
+        self._executor = executor or SubprocessExecutor()
+
+    def _claim_matches(self, target: ComposeClusterPurgeTarget) -> bool:
+        claim = self._catalog._get_postgres_cluster(target.project_id)
+        return bool(
+            claim is not None
+            and claim.state == "active"
+            and str(claim.cluster_id) == target.cluster_id
+            and claim.project_id == target.project_id
+            and claim.compose_project == target.compose_project
+            and claim.volume_name == target.volume_name
+        )
+
+    def capture(  # noqa: C901 -- one explicit guarded Compose lifecycle
+        self, decision: ProjectResourceDecision, *, project_id: str
+    ) -> Command[ProjectResourceDecision] | None:
+        target = self._targets.get(decision.identity)
+        if target is None or target.project_id != project_id:
+            return None
+        if not self._claim_matches(target):
+            return None
+        if target.dependencies or (
+            target.dependency_check is not None and target.dependency_check()
+        ):
+            return None
+
+        prefix = f"project-removal:compose:{target.identity}"
+        volume_inspect = PreparedStep(
+            step_id=f"{prefix}:inspect-volume",
+            argv=("docker", "volume", "inspect", "--format", "{{json .}}", target.volume_name),
+            read_only=True,
+            text=True,
+        )
+        container_inspect = PreparedStep(
+            step_id=f"{prefix}:inspect-container",
+            argv=("docker", "inspect", "--format", "{{json .}}", target.container_name),
+            read_only=True,
+            text=True,
+        )
+        stop = PreparedStep(
+            step_id=f"{prefix}:stop-container",
+            argv=("docker", "stop", target.container_name),
+            mutating=True,
+            text=True,
+        )
+        remove_container = PreparedStep(
+            step_id=f"{prefix}:remove-container",
+            argv=("docker", "rm", "--force", target.container_name),
+            mutating=True,
+            text=True,
+        )
+        remove_volume = PreparedStep(
+            step_id=f"{prefix}:remove-volume",
+            argv=("docker", "volume", "rm", target.volume_name),
+            mutating=True,
+            text=True,
+        )
+        verify_volume = PreparedStep(
+            step_id=f"{prefix}:verify-volume",
+            argv=("docker", "volume", "inspect", "--format", "{{json .}}", target.volume_name),
+            read_only=True,
+            text=True,
+        )
+        verify_container = PreparedStep(
+            step_id=f"{prefix}:verify-container",
+            argv=("docker", "inspect", "--format", "{{json .}}", target.container_name),
+            read_only=True,
+            text=True,
+        )
+        steps = (
+            volume_inspect,
+            container_inspect,
+            stop,
+            remove_container,
+            remove_volume,
+            verify_volume,
+            verify_container,
+        )
+        action = PreparedAction(
+            step_id=f"{prefix}:destroy",
+            action="destroy-compose-cluster",
+            description="Destroy one exact SDK-owned Compose container and volume",
+            details={"identity": target.identity},
+            mutating=True,
+        )
+        prepared_steps = (action, *steps)
+
+        def skip(context: RunContext[ProjectResourceDecision], step: PreparedStep) -> None:
+            if context.planned(step.step_id) and not context.consumed(step.step_id):
+                context.skip(step.step_id)
+
+        def run(  # noqa: C901 -- guard, effect, and postcondition are one transaction
+            context: RunContext[ProjectResourceDecision],
+        ) -> ProjectResourceDecision:
+            context.action(action.step_id)
+            if not self._claim_matches(target):
+                raise ConfigError("Compose cluster claim changed before destruction")
+            if target.dependency_check is not None and target.dependency_check():
+                raise ConfigError("Compose cluster has a retained or active dependency")
+            volume = _json_object(context.process(volume_inspect.step_id), label="volume")
+            container = _json_object(context.process(container_inspect.step_id), label="container")
+            if volume is not None and not _identity_labels(volume, container=False, target=target):
+                raise ConfigError("Compose volume labels do not match the active project claim")
+            if container is not None and not _identity_labels(
+                container, container=True, target=target
+            ):
+                raise ConfigError("Compose container labels or volume mount do not match the claim")
+            if container is not None:
+                stop_result = context.process(stop.step_id)
+                if isinstance(stop_result, ProcessResult) and stop_result.returncode != 0:
+                    raise ConfigError("Compose container stop failed")
+                remove_result = context.process(remove_container.step_id)
+                if isinstance(remove_result, ProcessResult) and remove_result.returncode != 0:
+                    raise ConfigError("Compose container removal failed")
+            else:
+                skip(context, stop)
+                skip(context, remove_container)
+            if volume is not None:
+                remove_result = context.process(remove_volume.step_id)
+                if isinstance(remove_result, ProcessResult) and remove_result.returncode != 0:
+                    raise ConfigError("Compose volume removal failed")
+            else:
+                skip(context, remove_volume)
+            verified_volume = context.process(verify_volume.step_id)
+            verified_container = context.process(verify_container.step_id)
+            if isinstance(verified_volume, ProcessResult) and verified_volume.returncode == 0:
+                raise ConfigError("Compose volume removal postcondition failed")
+            if isinstance(verified_container, ProcessResult) and verified_container.returncode == 0:
+                raise ConfigError("Compose container removal postcondition failed")
+            context.complete_action(action.step_id)
+            return decision
+
+        return Command.from_prepared(
+            ExecutionPlan(steps=tuple(step.public_projection() for step in prepared_steps)),
+            prepared_command(run, prepared_steps, executor=self._executor),
+        )
+
+
+@dataclass(slots=True)
+class ProjectDataPurgeAdapters:
+    """Fixed coordinator adapter set for databases, backups, filestores, and Compose."""
+
+    database: DatabasePurgeAdapter | None = None
+    backup: BackupPurgeAdapter | None = None
+    filestore: FilestorePurgeAdapter | None = None
+    compose: ComposeClusterPurgeAdapter | None = None
+
+    def for_decision(
+        self, decision: ProjectResourceDecision
+    ) -> (
+        DatabasePurgeAdapter
+        | BackupPurgeAdapter
+        | FilestorePurgeAdapter
+        | ComposeClusterPurgeAdapter
+        | None
+    ):
+        if decision.identity.startswith("database:") and self.database is not None:
+            return self.database
+        if decision.identity.startswith("backup:") and self.backup is not None:
+            return self.backup
+        if decision.identity.startswith("filestore:") and self.filestore is not None:
+            return self.filestore
+        if (
+            decision.identity.startswith("volume:") or decision.identity.startswith("compose:")
+        ) and self.compose is not None:
+            return self.compose
+        return None
+
+
+__all__ = [
+    "BackupPurgeAdapter",
+    "ComposeClusterPurgeAdapter",
+    "ComposeClusterPurgeTarget",
+    "DatabasePurgeAdapter",
+    "DatabasePurgeTarget",
+    "FilestorePurgeAdapter",
+    "FilestorePurgeTarget",
+    "ProjectDataPurgeAdapters",
+]
