@@ -24,7 +24,8 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.internal.project_removal_coordinator import (
-    expected_project_confirmation,
+    expected_project_confirmation_for_command,
+    set_project_confirmation,
 )
 from odoo_instance_sdk.models.project_removal import ProjectRemovalResult, ProjectSelector
 
@@ -91,22 +92,18 @@ def remove(
         raise click.exceptions.Exit(1)
 
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
-    if purge and not dry_run and output_mode is OutputMode.RICH and confirm_project is None:
-        try:
-            token = expected_project_confirmation(client.get_catalog(), selector)
-        except Exception as exc:
-            fail(output_mode, "remove", exc, dry_run=dry_run)
-        confirm_project = click.prompt(
-            f"Type the exact project confirmation token ({token})",
-            type=str,
-        )
-
     try:
         command = client.projects.remove_command(
             selector,
             purge=purge,
             confirmation=confirm_project,
         )
+        if purge and not dry_run and output_mode is OutputMode.RICH and confirm_project is None:
+            token = expected_project_confirmation_for_command(command)
+            set_project_confirmation(
+                command,
+                click.prompt(f"Type the exact project confirmation token ({token})", type=str),
+            )
         run_or_preview(
             lambda: command,
             command_name="remove",
