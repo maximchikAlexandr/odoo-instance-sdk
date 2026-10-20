@@ -632,6 +632,7 @@ before Git or GitLab mutation and never writes credentials into an origin URL.
 
 ```bash
 odcli git clone https://gitlab.example/group/repository ./repository \
+  --branch dev --recurse-submodules \
   --member-id 11111111-1111-4111-8111-111111111111 --yes
 odcli git commit "describe the staged change" --repo ./repository \
   --member-id 11111111-1111-4111-8111-111111111111 --yes
@@ -641,6 +642,10 @@ odcli git mr create --repo ./repository \
   --member-id 11111111-1111-4111-8111-111111111111 --target main \
   --title "Review the change" --description-file ./description.md --yes
 ```
+
+`--branch` selects the initial branch before submodule discovery. Omit it to use
+the remote default branch. On an existing checkout, a supplied branch must
+match the current attached branch; retry never switches or resets it.
 
 For repository A and a superproject B, clone A directly and clone B with
 `--recurse-submodules`; submodule synchronization operates only on the selected
