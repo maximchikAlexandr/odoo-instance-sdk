@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -29,6 +30,7 @@ def find_free_port(
     host: str = "127.0.0.1",
     requested: int | None = None,
     project: ProjectConfig | None = None,
+    reserved_ports: Sequence[int] = (),
 ) -> int:
     """Find a free loopback port by scanning existing catalog + project manifests + generated configs.
 
@@ -41,7 +43,7 @@ def find_free_port(
     ``exclude_project`` skips the current project's own manifest so re-init
     doesn't see its own ports as a collision.
     """
-    used = _collect_used_ports(catalog, exclude_project)
+    used = _collect_used_ports(catalog, exclude_project) | set(reserved_ports)
 
     if requested is not None:
         if requested in used or probe_address(host, requested) is not AddressState.FREE:

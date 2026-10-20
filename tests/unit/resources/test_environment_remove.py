@@ -223,7 +223,7 @@ def preflight_case(
         listener.listen()
         free_port = int(listener.getsockname()[1])
         monkeypatch.setattr(
-            "odoo_instance_sdk.resources.environment.checkout.find_free_port",
+            "odoo_instance_sdk.resources.environment.checkout_execution.find_free_port",
             lambda *_args, **_kwargs: free_port,
         )
         monkeypatch.setattr(

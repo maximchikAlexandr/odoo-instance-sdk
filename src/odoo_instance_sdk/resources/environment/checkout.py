@@ -28,7 +28,6 @@ from odoo_instance_sdk.internal.locks import (
     provisioning_lock_path,
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_env import load_project_environment
 from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
@@ -55,7 +54,10 @@ from odoo_instance_sdk.resources.environment.checkout_artifacts import (
     _row_to_env,
     _validate_checkout_stage,
 )
-from odoo_instance_sdk.resources.environment.checkout_execution import do_checkout
+from odoo_instance_sdk.resources.environment.checkout_execution import (
+    do_checkout,
+    revalidate_checkout_locked,
+)
 from odoo_instance_sdk.resources.environment.checkout_planning import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
@@ -123,6 +125,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
             catalog: BackupCatalog | None,
             http_interface: str,
             exclude_project: Path | None = None,
+            reserved_ports: tuple[int, ...] = (),
         ) -> int: ...
 
         def _resolve_odoo_bin(
@@ -251,8 +254,10 @@ class _CheckoutMixin(_CheckoutApiMixin):
         )
 
         http_interface = cfg_dict.get("http_interface", "127.0.0.1") or "127.0.0.1"
+        source_port = int(cfg_dict.get("http_port") or 8069)
+        reserved = (source_port,) if db_mode is EnvironmentDatabaseMode.COPY else ()
         http_port = self._allocate_port(
-            options.http_port, project_cfg, catalog, http_interface, repo_root
+            options.http_port, project_cfg, catalog, http_interface, repo_root, reserved
         )
 
         env_id = uuid.uuid4()
@@ -786,7 +791,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
             context.action("checkout.catalog")
             if catalog is None:
                 catalog = self._client.get_catalog()
-            self._revalidate_checkout_locked(catalog, plan)
+            revalidate_checkout_locked(catalog, plan)
             result = self._do_checkout(catalog, plan, context=context)
             context.complete_action("checkout.catalog")
             return result
@@ -967,28 +972,6 @@ class _CheckoutMixin(_CheckoutApiMixin):
                     expected=str(path),
                     actual="exists",
                 )
-
-    def _revalidate_checkout_locked(self, catalog: BackupCatalog, plan: _CheckoutPlan) -> None:
-        cat = catalog
-        existing = cat.active_environment_for(plan.git_common_dir, plan.branch)
-        if existing is not None:
-            raise EnvironmentConflictError(
-                "active_environment_exists",
-                f"Active environment already exists for branch {plan.branch!r}",
-                details={"branch": plan.branch, "existing_id": existing["id"]},
-            )
-        try:
-            find_free_port(
-                "http",
-                cat,
-                requested=plan.http_port,
-                host=plan.http_interface,
-                exclude_project=plan.repo_root,
-            )
-        except EnvironmentConflictError as exc:
-            raise EnvironmentConflictError(
-                "port_in_use", f"Port {plan.http_port} is no longer available"
-            ) from exc
 
     def _do_checkout(
         self,

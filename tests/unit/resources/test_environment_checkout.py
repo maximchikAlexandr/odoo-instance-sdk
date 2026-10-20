@@ -2431,6 +2431,26 @@ class TestCheckoutCopy:
 
 
 class TestCheckoutDryRun:
+    def test_copy_checkout_rejects_explicit_source_http_port_before_provisioning(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        with pytest.raises(EnvironmentConflictError) as raised:
+            env_client.environments.checkout_command(
+                project_manifest,
+                "feat/copy-source-port-conflict",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    source_database="comerta",
+                    target_database="comerta_copy",
+                    http_port=8069,
+                ),
+            )
+
+        assert raised.value.code == "port_in_use"
+        assert raised.value.details["port"] == 8069
+        assert env_client.environments.list(project=project_manifest) == []
+
     def test_checkout_command_captures_secret_free_snapshot(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
@@ -2922,7 +2942,7 @@ class TestOwnedRuntimePreflight:
         fake_python: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from odoo_instance_sdk.resources.environment import checkout as environment_module
+        from odoo_instance_sdk.resources.environment import checkout_execution as environment_module
 
         options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         snapshot = env_client.environments._build_checkout_snapshot(

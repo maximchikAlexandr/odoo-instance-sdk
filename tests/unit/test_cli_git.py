@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
@@ -24,7 +25,8 @@ def _context(root: Path) -> SimpleNamespace:
     return SimpleNamespace(instance=instance)
 
 
-def test_git_commit_dry_run_has_shared_message_and_no_commit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tag", ["IMP", "VIEW", "DEMO", "DATA", "ACC", "UI"])
+def test_git_commit_dry_run_has_shared_message_and_no_commit(tmp_path: Path, tag: str) -> None:
     _repo(tmp_path)
     head = _git(tmp_path, "rev-parse", "HEAD").strip()
     (tmp_path / "change.txt").write_text("change\n", encoding="utf-8")
@@ -42,7 +44,7 @@ def test_git_commit_dry_run_has_shared_message_and_no_commit(tmp_path: Path) -> 
                 "--ticket",
                 "PROJ-123",
                 "--tag",
-                "IMP",
+                tag,
                 "--dry-run",
                 "--format",
                 "json",
@@ -54,7 +56,7 @@ def test_git_commit_dry_run_has_shared_message_and_no_commit(tmp_path: Path) -> 
     assert payload["dry_run"] is True
     assert payload["result"]["steps"][-1]["argv"][-2:] == [
         "-m",
-        f"[IMP] {tmp_path.name}: PROJ-123 change",
+        f"[{tag}] {tmp_path.name}: PROJ-123 change",
     ]
     assert _git(tmp_path, "rev-parse", "HEAD").strip() == head
 

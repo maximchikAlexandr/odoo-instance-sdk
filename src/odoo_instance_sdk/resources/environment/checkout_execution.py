@@ -15,6 +15,7 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.dependency_sync import revalidate_hash_lock
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import exclusive_lock, python_env_lock_path
+from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import Backup
 from odoo_instance_sdk.project import ProjectConfig
@@ -141,7 +142,7 @@ def do_checkout(  # noqa: C901
             generate_config(
                 plan.source_config,
                 plan.generated_config,
-                repo_root=plan.repo_root,
+                repo_root=plan.project_root or plan.repo_root,
                 worktree=plan.worktree,
                 http_interface=plan.http_interface,
                 http_port=plan.http_port,
@@ -241,3 +242,26 @@ def do_checkout(  # noqa: C901
         )
         context.complete_action("checkout.cleanup")
         raise
+
+
+def revalidate_checkout_locked(catalog: BackupCatalog, plan: _CheckoutPlan) -> None:
+    cat = catalog
+    existing = cat.active_environment_for(plan.git_common_dir, plan.branch)
+    if existing is not None:
+        raise EnvironmentConflictError(
+            "active_environment_exists",
+            f"Active environment already exists for branch {plan.branch!r}",
+            details={"branch": plan.branch, "existing_id": existing["id"]},
+        )
+    try:
+        find_free_port(
+            "http",
+            cat,
+            requested=plan.http_port,
+            host=plan.http_interface,
+            exclude_project=plan.repo_root,
+        )
+    except EnvironmentConflictError as exc:
+        raise EnvironmentConflictError(
+            "port_in_use", f"Port {plan.http_port} is no longer available"
+        ) from exc

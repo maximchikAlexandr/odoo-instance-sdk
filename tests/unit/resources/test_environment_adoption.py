@@ -432,6 +432,84 @@ def test_adoption_executes_copy_pipeline_without_taking_code_ownership(
     assert checkout.is_dir()
 
 
+@pytest.mark.parametrize("linked", [True, False], ids=["linked-worktree", "independent-clone"])
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "relative"])
+@pytest.mark.parametrize(
+    "external_relative", [False, True], ids=["external-absolute", "external-relative"]
+)
+def test_adoption_rebases_project_paths_and_preserves_external_paths(
+    env_client: object,
+    project_manifest: Path,
+    source_config: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    linked: bool,
+    absolute: bool,
+    external_relative: bool,
+) -> None:
+    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+    checkout = _external_checkout(project_manifest, tmp_path, linked=linked)
+    external = tmp_path / "platform" / "addons"
+    external_upgrade = tmp_path / "platform" / "upgrades"
+    external.mkdir(parents=True)
+    external_upgrade.mkdir(parents=True)
+    addons = str(project_manifest / "addons") if absolute else "addons"
+    upgrades = str(project_manifest / "upgrades") if absolute else "upgrades"
+    external_entry = "../platform/addons" if external_relative else str(external)
+    upgrade_external_entry = "../platform/upgrades" if external_relative else str(external)
+    source_config.write_text(
+        source_config.read_text()
+        + f"addons_path = {addons},{external_entry}\n"
+        + f"upgrade_path = {upgrades},{upgrade_external_entry}\n"
+    )
+    original = source_config.read_bytes()
+    command, _, _ = _capture_adoption_command(
+        env_client, project_manifest, checkout, fake_python, monkeypatch
+    )
+
+    environment = command.run()  # type: ignore[attr-defined]
+    generated = parse_odoo_config(Path(environment.generated_config_path))
+
+    assert generated["addons_path"].split(",") == [str(checkout / "addons"), str(external)]
+    expected_upgrade_external = external_upgrade if external_relative else external
+    assert generated["upgrade_path"].split(",") == [
+        str(checkout / "upgrades"),
+        str(expected_upgrade_external),
+    ]
+    assert source_config.read_bytes() == original
+
+
+@pytest.mark.parametrize("linked", [True, False], ids=["linked-worktree", "independent-clone"])
+def test_adoption_rejects_explicit_source_http_port_before_provisioning(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    linked: bool,
+) -> None:
+    checkout = _external_checkout(project_manifest, tmp_path, linked=linked)
+
+    with pytest.raises(EnvironmentConflictError) as raised:
+        env_client.environments.adopt_command(  # type: ignore[attr-defined]
+            project_manifest,
+            checkout,
+            options=EnvironmentCheckoutOptions(
+                db_mode=EnvironmentDatabaseMode.COPY,
+                base_ref="main",
+                remote_name="staging",
+                python=str(fake_python),
+                http_port=8069,
+            ),
+        )
+
+    assert raised.value.code == "port_in_use"
+    assert raised.value.details["port"] == 8069
+    assert env_client.environments.list(project=project_manifest) == []  # type: ignore[attr-defined]
+    assert checkout.is_dir()
+
+
 def test_adoption_plan_publishes_captured_base_provenance(
     env_client: object,
     project_manifest: Path,
@@ -623,3 +701,31 @@ def test_adoption_rejects_wrong_repository_before_execution(
                 python=str(fake_python),
             ),
         )
+
+
+@pytest.mark.parametrize("linked", [True, False], ids=["worktree", "clone"])
+def test_adoption_reserves_source_http_port_before_auxiliary_start(
+    env_client: object,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    linked: bool,
+) -> None:
+    from odoo_instance_sdk.internal.address import AddressState
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_START", 8000)
+    monkeypatch.setattr("odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_END", 9000)
+    busy: set[int] = set()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.port_allocation.probe_address",
+        lambda _host, port: AddressState.OCCUPIED if port in busy else AddressState.FREE,
+    )
+    checkout = _external_checkout(project_manifest, tmp_path, linked=linked)
+    command, _, _ = _capture_adoption_command(
+        env_client, project_manifest, checkout, fake_python, monkeypatch
+    )
+    busy.add(8069)
+    environment = command.run()  # type: ignore[attr-defined]
+    assert environment.state is EnvironmentState.READY
+    assert environment.http_port != 8069

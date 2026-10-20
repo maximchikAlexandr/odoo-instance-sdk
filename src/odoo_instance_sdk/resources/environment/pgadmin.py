@@ -287,6 +287,7 @@ class _PgadminMixin:
         catalog: BackupCatalog | None,
         http_interface: str,
         exclude_project: Path | None = None,
+        reserved_ports: tuple[int, ...] = (),
     ) -> int:
         cat = catalog
         return find_free_port(
@@ -296,6 +297,7 @@ class _PgadminMixin:
             project=project,
             host=http_interface,
             exclude_project=exclude_project,
+            reserved_ports=reserved_ports,
         )
 
     def _resolve_selector(
