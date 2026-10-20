@@ -640,6 +640,14 @@ def capture_project_removal_command(  # noqa: C901
     confirmation_value = [confirmation]
 
     def run(context: RunContext[ProjectRemovalResult]) -> ProjectRemovalResult:  # noqa: C901
+        if purge and confirmation_value[0] != projection.expected_confirmation:
+            raise _error(
+                "exact project confirmation is required",
+                projection,
+                mode=mode,
+                failed_step="project-removal:confirmation",
+                decisions=decisions,
+            )
         lock = exclusive_lock(project_manifest_lock_path(registration.project_id))
         with lock:
             row = catalog.get_project_for_lifecycle(registration.project_id)
@@ -692,14 +700,6 @@ def capture_project_removal_command(  # noqa: C901
                     registration_state="forgotten",
                     completed=(decisions[0],),
                     retained=forget_retained,
-                )
-            if confirmation_value[0] != projection.expected_confirmation:
-                raise _error(
-                    "exact project confirmation is required",
-                    projection,
-                    mode=mode,
-                    failed_step="project-removal:confirmation",
-                    decisions=decisions,
                 )
             if not projection.complete:
                 raise _error(
