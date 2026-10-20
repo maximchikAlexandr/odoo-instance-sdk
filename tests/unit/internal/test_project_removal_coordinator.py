@@ -7,6 +7,10 @@ import pytest
 from odoo_instance_sdk.exceptions import ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.proc import PreparedAction
+from odoo_instance_sdk.internal.project_removal import (
+    InternalRemovalDecision,
+    ProjectRemovalProjection,
+)
 from odoo_instance_sdk.internal.project_removal_coordinator import (
     capture_project_removal_command,
     expected_project_confirmation_for_command,
@@ -90,6 +94,8 @@ def test_purge_requires_exact_confirmation_at_execution_and_dry_run_is_inert(
 
 def test_purge_fails_closed_when_mutating_adapter_is_missing(tmp_path: Path) -> None:
     catalog, project_id, root = _catalog(tmp_path)
+    (root / ".odcli").mkdir()
+    (root / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
     command = capture_project_removal_command(
         catalog,
         ProjectSelector.from_project_id(project_id),
@@ -132,9 +138,31 @@ def test_forget_refuses_an_active_project_publication(
     catalog.close()
 
 
-def test_purge_flattens_captured_child_plan_and_runs_its_callback(tmp_path: Path) -> None:
-    catalog, project_id, _root = _catalog(tmp_path)
+def test_purge_flattens_captured_child_plan_and_runs_its_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
     captured: list[str] = []
+    projection = ProjectRemovalProjection(
+        project_id=project_id,
+        registration_state="registered",
+        repository_root=root,
+        expected_confirmation=f"{root.name}:{project_id}",
+        decisions=(
+            InternalRemovalDecision(
+                identity=f"project:{project_id}",
+                resource_type="source",
+                action="delete",
+                reason="registered_primary_source",
+                target="<local>",
+            ),
+        ),
+        fingerprint="stable-test-projection",
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_removal_coordinator._projection",
+        lambda _catalog, _registration, **_kwargs: projection,
+    )
 
     class Adapter:
         def capture(self, decision, *, project_id):

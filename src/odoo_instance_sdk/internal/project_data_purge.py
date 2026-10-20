@@ -13,7 +13,7 @@ import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
@@ -32,6 +32,7 @@ from odoo_instance_sdk.models.project_removal import ProjectResourceDecision
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+    from odoo_instance_sdk.models.backup import Backup
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -154,6 +155,14 @@ class ComposeClusterPurgeTarget:
     runner: ComposeRunner | None = field(default=None, repr=False, compare=False)
 
 
+class DatabaseCommandFactory(Protocol):
+    def __call__(self, target: DatabasePurgeTarget, /) -> Command[JsonValue]: ...
+
+
+class BackupCommandFactory(Protocol):
+    def __call__(self, backup: Backup, /) -> Command[JsonValue]: ...
+
+
 def _delete_contained_filestore(target: FilestorePurgeTarget) -> None:
     path = target.path
     root = target.allowed_root.resolve(strict=False)
@@ -215,7 +224,7 @@ class DatabasePurgeAdapter:
         client: OdooClient,
         targets: Mapping[str, DatabasePurgeTarget],
         *,
-        command_factory: Callable[..., Command[JsonValue]] | None = None,
+        command_factory: DatabaseCommandFactory | None = None,
         executor: ProcessExecutor | None = None,
     ) -> None:
         self._client = client
@@ -264,7 +273,7 @@ class BackupPurgeAdapter:
         client: OdooClient,
         catalog: BackupCatalog,
         *,
-        command_factory: Callable[..., Command[JsonValue]] | None = None,
+        command_factory: BackupCommandFactory | None = None,
         executor: ProcessExecutor | None = None,
     ) -> None:
         self._client = client
