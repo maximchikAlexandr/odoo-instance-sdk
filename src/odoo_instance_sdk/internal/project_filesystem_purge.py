@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,18 +27,40 @@ class FilesystemPurgeTarget:
     git_common_dir: Path | None = None
 
 
-def project_owned_paths(root: Path) -> tuple[tuple[str, Path], ...]:
+def project_owned_paths(
+    root: Path, *, managed_filestore: Path | None = None
+) -> tuple[tuple[str, Path], ...]:
     """Return only canonical project-local artifacts with a known owner."""
     odcli = root / ".odcli"
-    candidates = (
+    candidates = [
         ("config", odcli / "project.toml"),
         ("config", odcli / "odoo.conf"),
         ("secret", odcli / ".env"),
         ("temporary", odcli / "tmp"),
         ("log", odcli / "logs"),
         ("python_environment", root / ".venv"),
+    ]
+    if managed_filestore is not None:
+        candidates.append(("filestore", managed_filestore))
+    return tuple(
+        (kind, path) for kind, path in candidates if kind and (path.exists() or path.is_symlink())
     )
-    return tuple((kind, path) for kind, path in candidates if path.exists() or path.is_symlink())
+
+
+def _assert_safe_directory(path: Path, *, source: bool) -> None:
+    """Refuse a recursive delete when ownership or link traversal is ambiguous."""
+    unknown_odcli = {"project.toml", "odoo.conf", ".env", "tmp", "logs", "filestore"}
+    try:
+        for directory, directories, files in os.walk(path, followlinks=False):
+            directory_path = Path(directory)
+            if any((directory_path / name).is_symlink() for name in (*directories, *files)):
+                raise ConfigError("nested symlink in project filesystem target")
+            if source and directory_path == path / ".odcli":
+                unknown = set(directories).union(files) - unknown_odcli
+                if unknown:
+                    raise ConfigError("unknown project filesystem content was retained")
+    except OSError as exc:
+        raise ConfigError("project filesystem inventory failed") from exc
 
 
 class FilesystemPurgeAdapter:
@@ -76,6 +99,7 @@ class FilesystemPurgeAdapter:
                 raise ConfigError("registered primary source identity changed")
             if path.exists():
                 if path.is_dir():
+                    _assert_safe_directory(path, source=decision.resource_type == "source")
                     shutil.rmtree(path)
                 else:
                     path.unlink()
