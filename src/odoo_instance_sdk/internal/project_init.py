@@ -20,6 +20,7 @@ from odoo_instance_sdk.internal.generated_config import (
     project_generated_config_path,
     render_config,
 )
+from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
 from odoo_instance_sdk.internal.urls import normalize_base_url
@@ -435,18 +436,24 @@ def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> 
         return True
 
 
-def register_initialized_project(project_path: Path) -> None:
-    """Idempotently register a project after its valid manifest is available."""
+def register_initialized_project(project_path: Path, *, _lock_held: bool = False) -> None:
+    """Register a project after successful init postconditions under its lifecycle lock."""
     root, common, identity = _planned_project_identity(project_path)
     project_id = f"project_{identity}"
+    lock = (
+        contextlib.nullcontext()
+        if _lock_held
+        else exclusive_lock(project_manifest_lock_path(project_id))
+    )
     from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-    catalog = BackupCatalog(db_path=get_catalog_path())
-    try:
-        catalog._register_project(project_id, root, common)
-    finally:
-        catalog.close()
+    with lock:
+        catalog = BackupCatalog(db_path=get_catalog_path())
+        try:
+            catalog._register_project(project_id, root, common)
+        finally:
+            catalog.close()
 
 
 def project_env_path(project_root: Path) -> Path:

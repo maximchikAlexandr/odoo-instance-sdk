@@ -192,9 +192,9 @@ def _execute_manifest_phase(
     if resume_existing:
         from odoo_instance_sdk.exceptions import StalePlanError
 
-        root, common, _ = _planned_project_identity(project_path)
-        lock_id = hashlib.sha256(str(common).encode()).hexdigest()
-        with exclusive_lock(project_manifest_lock_path(lock_id)):
+        root, _, identity = _planned_project_identity(project_path)
+        project_id = f"project_{identity}"
+        with exclusive_lock(project_manifest_lock_path(project_id)):
             current = ProjectConfig.load(root)
             if manifest_dict(current) != manifest_dict(effective_config):
                 raise StalePlanError(
@@ -203,7 +203,7 @@ def _execute_manifest_phase(
                     actual=manifest_dict(current),
                 )
             context.action("init")
-            register_initialized_project(root)
+            register_initialized_project(root, _lock_held=True)
             context.complete_action("init")
             return manifest_dict(current)
     context.action("init")
