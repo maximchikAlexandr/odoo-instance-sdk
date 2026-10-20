@@ -17,6 +17,7 @@ from odoo_instance_sdk import (
     ProjectResourceDecision,
     ProjectSelector,
 )
+from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.project_removal_coordinator import (
     capture_project_removal_command,
@@ -318,6 +319,8 @@ def test_public_project_resource_orders_compose_after_scheduled_environment_remo
     assert captured["compose"] is not None
     child = captured["child"]
     assert child is not None
+    with pytest.raises(ConfigError, match="dependency"):
+        child.run()
     catalog.update_environment_state("retained-environment", "removed")
     assert child.run() == compose_decision
 
