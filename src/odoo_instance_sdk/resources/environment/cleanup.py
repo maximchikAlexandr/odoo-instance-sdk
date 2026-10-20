@@ -202,8 +202,12 @@ class _CleanupMixin:
         *,
         force_connections: bool = False,
         executor: ProcessExecutor | None = None,
+        step_prefix: str = "",
     ) -> Command[None]:
         from odoo_instance_sdk.internal.proc import PreparedStep
+
+        def scoped(step_id: str) -> str:
+            return f"{step_prefix}{step_id}" if step_prefix else step_id
 
         env = (
             self._resolve_selector(selector, include_removed=True)
@@ -218,7 +222,7 @@ class _CleanupMixin:
         if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED and worktree.is_dir():
             preflight_steps = (
                 PreparedStep(
-                    step_id="environment.remove.worktree-dirty",
+                    step_id=scoped("environment.remove.worktree-dirty"),
                     argv=("git", "-C", str(worktree), "status", "--porcelain"),
                     timeout=30.0,
                     read_only=True,
@@ -226,7 +230,7 @@ class _CleanupMixin:
             )
             artifact_steps = (
                 PreparedStep(
-                    step_id="environment.remove.worktree",
+                    step_id=scoped("environment.remove.worktree"),
                     argv=(
                         "git",
                         "-C",
@@ -243,26 +247,39 @@ class _CleanupMixin:
         if get_publication_config_path().is_file():
             publication_steps = (
                 PreparedAction(
-                    step_id="environment.remove.publication",
+                    step_id=scoped("environment.remove.publication"),
                     action="remove-publication-route",
                     description="Remove the environment route before deleting its artifacts",
                     mutating=True,
                 ),
             )
         steps = (*preflight_steps, *publication_steps, *artifact_steps)
-        copy_drop = self._remove_copy_database_command(
-            env, executor=executor, force_connections=force_connections
-        )
+        if step_prefix:
+            copy_drop = self._remove_copy_database_command(
+                env,
+                executor=executor,
+                force_connections=force_connections,
+                step_prefix=step_prefix,
+            )
+        else:
+            # Keep the established private hook call shape for integrations
+            # that replace the guarded COPY planner in focused tests.
+            copy_drop = self._remove_copy_database_command(
+                env,
+                executor=executor,
+                force_connections=force_connections,
+            )
         if copy_drop is not None:
             steps = (*steps, *copy_drop.steps)
         return self._action_command(
             "environment.remove",
             "Remove the selected development environment",
-            lambda: self._remove_impl(env, copy_drop=copy_drop),
+            lambda: self._remove_impl(env, copy_drop=copy_drop, step_prefix=step_prefix),
             executor=executor,
             mutating=True,
             steps=steps,
             optional_steps=tuple(step.step_id for step in steps),
+            step_prefix=step_prefix,
         )
 
     def _remove_copy_database_command(  # noqa: C901
@@ -271,6 +288,7 @@ class _CleanupMixin:
         *,
         executor: ProcessExecutor | None,
         force_connections: bool = False,
+        step_prefix: str = "",
     ) -> PreparedCommand[None] | None:
         """Capture the guarded direct COPY database cleanup before removal starts."""
         if env.db_mode is not EnvironmentDatabaseMode.COPY or env.target_db_name is None:
@@ -317,6 +335,7 @@ class _CleanupMixin:
                 executor=executor,
                 force_connections=force_connections,
                 command_origin="env-remove",
+                step_prefix=step_prefix,
                 allow_environment_id=str(env.id),
                 allow_environment_backup_id=(
                     str(env.backup_id) if env.backup_id is not None else None
@@ -368,7 +387,7 @@ class _CleanupMixin:
                     if env.code_ownership is EnvironmentCodeOwnership.CALLER_OWNED
                     else None,
                     idempotent_absent=True,
-                    step_prefix="environment.remove.rollback.",
+                    step_prefix=f"{step_prefix}environment.remove.rollback.",
                 )
                 rollback_prepared = cast("PreparedCommand[None]", rollback_command._prepared())
                 from odoo_instance_sdk.internal.proc import prepared_command
@@ -402,14 +421,24 @@ class _CleanupMixin:
             ) from exc
 
     def _remove_impl(
-        self, env: DevelopmentEnvironment, *, copy_drop: PreparedCommand[None] | None
+        self,
+        env: DevelopmentEnvironment,
+        *,
+        copy_drop: PreparedCommand[None] | None,
+        step_prefix: str = "",
     ) -> None:
         from odoo_instance_sdk.internal.proc import active_context
 
         catalog = self._client.get_catalog()
         with exclusive_lock(environment_lock_path(str(env.id))):
             context = cast("RunContext[None] | None", active_context())
-            self._do_remove(catalog, env, context=context, copy_drop=copy_drop)
+            self._do_remove(
+                catalog,
+                env,
+                context=context,
+                copy_drop=copy_drop,
+                step_prefix=step_prefix,
+            )
 
     def _action_command(
         self,
@@ -421,21 +450,23 @@ class _CleanupMixin:
         mutating: bool,
         steps: Sequence[PreparedStep | PreparedAction] = (),
         optional_steps: Sequence[str] = (),
+        step_prefix: str = "",
     ) -> Command[T]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
 
+        scoped_step_id = f"{step_prefix}{step_id}" if step_prefix else step_id
         step = PreparedAction(
-            step_id=step_id,
-            action=step_id,
+            step_id=scoped_step_id,
+            action=scoped_step_id,
             description=description,
             mutating=mutating,
         )
 
         def run(context: RunContext[T]) -> T:
-            context.action(step_id)
+            context.action(scoped_step_id)
             result = callback()
-            context.complete_action(step_id)
+            context.complete_action(scoped_step_id)
             for optional_step_id in optional_steps:
                 if not context.consumed(optional_step_id):
                     context.skip(optional_step_id)
@@ -460,6 +491,7 @@ class _CleanupMixin:
         *,
         context: RunContext[None] | None = None,
         copy_drop: PreparedCommand[None] | None = None,
+        step_prefix: str = "",
     ) -> None:
         cat = catalog
         # A removed catalog row is the durable idempotence boundary.  Do not
@@ -468,9 +500,9 @@ class _CleanupMixin:
         # fail-closed port preflight below.
         if env.state is EnvironmentState.REMOVED:
             return
-        copy_plan = self._preflight_remove(cat, env, context=context)
+        copy_plan = self._preflight_remove(cat, env, context=context, step_prefix=step_prefix)
         _validate_retained_removal_evidence(cat, env)
-        publication_step = "environment.remove.publication"
+        publication_step = f"{step_prefix}environment.remove.publication"
         if context is not None and context.planned(publication_step):
             context.action(publication_step)
             try:
@@ -620,7 +652,7 @@ class _CleanupMixin:
                     worktree,
                     failures,
                     dirty_checked=context is not None
-                    and context.planned("environment.remove.worktree-dirty"),
+                    and context.planned(f"{step_prefix}environment.remove.worktree-dirty"),
                     context=context,
                 )
                 or cleanup_failed
@@ -646,6 +678,7 @@ class _CleanupMixin:
         env: DevelopmentEnvironment,
         *,
         context: RunContext[None] | None = None,
+        step_prefix: str = "",
     ) -> CopyCleanupPlan | None:
         """Reject unsafe or stale catalog rows before changing any external state."""
         if env.db_mode is not EnvironmentDatabaseMode.COPY and not _port_free(
@@ -684,7 +717,7 @@ class _CleanupMixin:
         if env.python_environment_owned:
             _validate_owned_artifact(Path(env.python_environment_path), env_root / "venv", "dir")
         worktree = Path(env.worktree_path)
-        status_step_id = "environment.remove.worktree-dirty"
+        status_step_id = f"{step_prefix}environment.remove.worktree-dirty"
         if env.code_ownership is not EnvironmentCodeOwnership.SDK_OWNED:
             is_dirty = False
         elif context is not None and context.planned(status_step_id):

@@ -112,6 +112,7 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             mutating: bool,
             steps: Sequence[PreparedStep | PreparedAction] = (),
             optional_steps: Sequence[str] = (),
+            step_prefix: str = "",
         ) -> Command[T]: ...
 
         def list_command(
