@@ -339,6 +339,7 @@ def _projection(
     )
     required_observations_complete = (
         config_evidence_complete
+        and not registration.repository_root.is_symlink()
         and database_measurement_complete
         and database_inactive
         and volume_observed
@@ -663,14 +664,14 @@ def capture_project_removal_command(  # noqa: C901
                     mode=mode,
                     failed_step="project-removal:revalidate",
                 )
-            if current_projection.fingerprint != projection.fingerprint:
-                raise _error(
-                    "project removal plan is stale",
-                    projection,
-                    mode=mode,
-                    failed_step="project-removal:revalidate",
-                )
             if not purge:
+                if current_projection.fingerprint != projection.fingerprint:
+                    raise _error(
+                        "project removal plan is stale",
+                        projection,
+                        mode=mode,
+                        failed_step="project-removal:revalidate",
+                    )
                 blockers = _forget_blockers(catalog, registration.project_id)
                 if blockers and current.registration_state == "registered":
                     raise _error(
@@ -707,6 +708,21 @@ def capture_project_removal_command(  # noqa: C901
                     mode=mode,
                     failed_step="project-removal:observations",
                     decisions=decisions,
+                )
+            if not current_projection.complete:
+                raise _error(
+                    "required database or Compose observation is unavailable or unproven",
+                    current_projection,
+                    mode=mode,
+                    failed_step="project-removal:observations",
+                    decisions=current_projection.public_decisions,
+                )
+            if current_projection.fingerprint != projection.fingerprint:
+                raise _error(
+                    "project removal plan is stale",
+                    projection,
+                    mode=mode,
+                    failed_step="project-removal:revalidate",
                 )
             completed: list[ProjectResourceDecision] = []
             retained: list[ProjectResourceDecision] = []

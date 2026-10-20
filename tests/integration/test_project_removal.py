@@ -662,3 +662,108 @@ def test_public_remove_command_blocks_unreadable_manifest_before_mutation(
     assert root.exists()
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()
+
+
+def test_public_remove_command_refuses_manifest_drift_before_mutation(
+    tmp_path: Path,
+) -> None:
+    """A manifest becoming malformed after capture cannot reach a child action."""
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=lambda _project: None),
+        ),
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    manifest.write_text("[project\n", encoding="utf-8")
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
+    assert manifest.read_text(encoding="utf-8") == "[project\n"
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_remove_command_refuses_manifest_drift_when_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest becoming unreadable after capture cannot reach a child action."""
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
+    before = manifest.read_bytes()
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=lambda _project: None),
+        ),
+    )
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    from odoo_instance_sdk.project import ProjectConfig
+
+    def unreadable(_path: Path) -> ProjectConfig:
+        raise OSError("manifest permission denied")
+
+    monkeypatch.setattr(ProjectConfig, "load", unreadable)
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
+    assert manifest.read_bytes() == before
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_remove_command_refuses_registered_root_symlink(
+    tmp_path: Path,
+) -> None:
+    """A dangling registered root is present lexically and cannot be forgotten."""
+    catalog, project_id, root = _catalog(tmp_path)
+    (root / ".git").rmdir()
+    root.rmdir()
+    missing_target = tmp_path / "missing-target"
+    root.symlink_to(missing_target, target_is_directory=True)
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(),
+        ),
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{missing_target.name}:{project_id}",
+    )
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
+    assert root.is_symlink()
+    assert not root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
