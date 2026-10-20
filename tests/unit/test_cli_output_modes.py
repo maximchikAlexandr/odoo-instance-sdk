@@ -229,8 +229,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         requires_dry_run=True,
         sdk_primitive="ProjectResource.remove_command",
         aliases=(("rm",),),
-        e2e_disposition="not-applicable",
-        e2e_rationale="cross-provider purge walkthrough is owned by the later project-removal E2E package",
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-16",),
+        e2e_rationale="public forget, re-init, exact-token purge, and full-id retry lifecycle",
         failure_args=("remove", "--project-id", "project-test", "--purge", "--dry-run"),
     ),
     PublicLeafCase(
