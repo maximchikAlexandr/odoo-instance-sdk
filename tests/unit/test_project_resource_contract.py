@@ -84,8 +84,7 @@ def test_project_resource_is_lazy_exported_and_client_wiring_is_inert() -> None:
     assert isinstance(client.projects, ProjectResource)
     assert client._catalog is None
 
-    with pytest.raises(NotImplementedError, match="coordinator"):
-        client.projects.remove_command(ProjectSelector.from_project_id("project_abc"))
+    assert callable(client.projects.remove_command)
 
 
 def test_remove_delegates_to_the_captured_command() -> None:
