@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0008"
+CATALOG_REVISION = "0009"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -402,6 +402,7 @@ def _ddl_fingerprint(
 
 
 _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
+    "projects": frozenset({"registration_state"}),
     "environments": frozenset(
         {
             "project_id",
@@ -683,7 +684,9 @@ FROM runtime WHERE owner_kind = 'environment'"""),
 def _historical_checks(
     table: str, checks: tuple[str, ...], version: Literal["v16", "pre_source_neutral"]
 ) -> tuple[str, ...]:
-    if table == "backups":
+    if table == "projects":
+        checks = tuple(check for check in checks if "registration_state" not in check)
+    elif table == "backups":
         checks = tuple(check for check in checks if "pinned IN" not in check)
     elif table == "backup_events":
         checks = tuple(check.replace(",'pin_set'", "") for check in checks)
@@ -791,12 +794,9 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
     expected_by_name = {table: (columns, keys) for table, columns, keys in expected_tables}
     for table, columns, keys in actual_tables:
         expected_columns, expected_keys = expected_by_name.get(table, ((), frozenset()))
-        if table == "environments":
-            expected_columns = tuple(
-                item
-                for item in expected_columns
-                if not _is_historical_common_omission(table, item[0])
-            )
+        expected_columns = tuple(
+            item for item in expected_columns if not _is_historical_common_omission(table, item[0])
+        )
         if table == "runtime":
             expected_columns = _without_runtime_launch_identity(expected_columns)
         if table == "backups":
