@@ -420,14 +420,14 @@ def _inventory_decision(  # noqa: C901
         action, reason = "retain", "active_use"
     elif (
         item.type in {ResourceType.DATABASE, ResourceType.VOLUME}
-        and item.active_use is ActiveUse.UNKNOWN
-    ):
-        action, reason = "retain", "active_use_unproven"
-    elif (
-        item.type in {ResourceType.DATABASE, ResourceType.VOLUME}
         and item.completeness is not MeasurementCompleteness.COMPLETE
     ):
         action, reason = "retain", "observation_incomplete"
+    elif (
+        item.type in {ResourceType.DATABASE, ResourceType.VOLUME}
+        and item.active_use is ActiveUse.UNKNOWN
+    ):
+        action, reason = "retain", "active_use_unproven"
     elif item.type is ResourceType.PROJECT:
         action, reason = "retain", "source_ownership_requires_git_provenance"
     elif item.type in {ResourceType.ENVIRONMENT, ResourceType.WORKTREE}:
@@ -644,6 +644,7 @@ def build_project_removal_projection(  # noqa: C901
     publications: Iterable[RemovalPublicationSource] = (),
     paths: Iterable[RemovalPathSource] = (),
     compose: Iterable[RemovalComposeSource] = (),
+    complete: bool = True,
 ) -> ProjectRemovalProjection:
     """Build a deterministic project-scoped removal projection.
 
@@ -725,6 +726,7 @@ def build_project_removal_projection(  # noqa: C901
             project.repository_root,
             ordered,
         ),
+        complete=complete,
     )
 
 
