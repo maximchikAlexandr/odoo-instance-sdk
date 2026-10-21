@@ -160,16 +160,36 @@ def _row_registration(row: sqlite3.Row) -> ProjectRegistration:
     )
 
 
+def _environment_owner_clause(
+    registration: ProjectRegistration,
+    *,
+    alias: str = "e",
+) -> tuple[str, tuple[str, str, str]]:
+    """Select current and legacy rows owned by one captured registration."""
+    return (
+        (
+            f"({alias}.project_id = ? OR ({alias}.project_id IS NULL "
+            f"AND {alias}.repository_root = ? AND {alias}.git_common_dir = ?))"
+        ),
+        (
+            registration.project_id,
+            str(registration.repository_root),
+            str(registration.git_common_dir),
+        ),
+    )
+
+
 def _environment_sources(
-    catalog: BackupCatalog, project_id: str
+    catalog: BackupCatalog, registration: ProjectRegistration
 ) -> tuple[EnvironmentResourceSource, ...]:
+    owner_clause, owner_params = _environment_owner_clause(registration)
     rows = catalog._conn.execute(
-        "SELECT * FROM environments WHERE project_id = ? ORDER BY id", (project_id,)
+        f"SELECT * FROM environments e WHERE {owner_clause} ORDER BY id", owner_params
     ).fetchall()
     return tuple(
         EnvironmentResourceSource(
             environment_id=str(row["id"]),
-            project_id=project_id,
+            project_id=registration.project_id,
             name=str(row["name"]),
             worktree_path=Path(str(row["worktree_path"])),
             python_environment_path=Path(str(row["python_environment_path"])),
@@ -182,7 +202,10 @@ def _environment_sources(
     )
 
 
-def _project_runtime(catalog: BackupCatalog, project_id: str) -> tuple[RemovalRuntimeSource, ...]:
+def _project_runtime(
+    catalog: BackupCatalog, registration: ProjectRegistration
+) -> tuple[RemovalRuntimeSource, ...]:
+    project_id = registration.project_id
     sources: list[RemovalRuntimeSource] = []
     if catalog.get_runtime("project", project_id) is not None:
         sources.append(
@@ -194,8 +217,9 @@ def _project_runtime(catalog: BackupCatalog, project_id: str) -> tuple[RemovalRu
                 stale=False,
             )
         )
+    owner_clause, owner_params = _environment_owner_clause(registration)
     for row in catalog._conn.execute(
-        "SELECT id FROM environments WHERE project_id = ? ORDER BY id", (project_id,)
+        f"SELECT e.id FROM environments e WHERE {owner_clause} ORDER BY e.id", owner_params
     ):
         environment_id = str(row["id"])
         if catalog.get_runtime("environment", environment_id) is not None:
@@ -238,7 +262,7 @@ def _projection(
     database_inventory: DatabaseInventoryResult | None = None,
     volume_observation: VolumeResourceSource | None = None,
 ) -> ProjectRemovalProjection:
-    environments = _environment_sources(catalog, registration.project_id)
+    environments = _environment_sources(catalog, registration)
     from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
     from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
 
@@ -378,7 +402,7 @@ def _projection(
     return build_project_removal_projection(
         registration=registration,
         inventory=inventory,
-        runtimes=_project_runtime(catalog, registration.project_id),
+        runtimes=_project_runtime(catalog, registration),
         publications=_publication_sources(registration.project_id),
         complete=required_observations_complete,
     )
@@ -402,18 +426,21 @@ def _planned_projection(
     )
 
 
-def _forget_blockers(catalog: BackupCatalog, project_id: str) -> tuple[str, ...]:
+def _forget_blockers(catalog: BackupCatalog, registration: ProjectRegistration) -> tuple[str, ...]:
+    project_id = registration.project_id
     blockers: set[str] = set()
     if catalog.get_runtime("project", project_id) is not None:
         blockers.add(f"runtime:project:{project_id}")
+    owner_clause, owner_params = _environment_owner_clause(registration)
     for row in catalog._conn.execute(
-        "SELECT id FROM environments WHERE project_id = ? ORDER BY id", (project_id,)
+        f"SELECT e.id FROM environments e WHERE {owner_clause} ORDER BY e.id", owner_params
     ):
         environment_id = str(row["id"])
         if catalog.get_runtime("environment", environment_id) is not None:
             blockers.add(f"runtime:environment:{environment_id}")
     for row in catalog._conn.execute(
-        "SELECT id, state FROM environments WHERE project_id = ? ORDER BY id", (project_id,)
+        f"SELECT e.id, e.state FROM environments e WHERE {owner_clause} ORDER BY e.id",
+        owner_params,
     ):
         if str(row["state"]) != "removed":
             blockers.add(f"environment:{row['id']}")
@@ -554,7 +581,7 @@ def capture_project_removal_command(  # noqa: C901
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     decisions: tuple[ProjectResourceDecision, ...]
     if not purge:
-        blockers = _forget_blockers(catalog, registration.project_id)
+        blockers = _forget_blockers(catalog, registration)
         if blockers and registration.registration_state == "registered":
             raise _error(
                 "project cannot be forgotten while managed resources are active: "
@@ -680,7 +707,7 @@ def capture_project_removal_command(  # noqa: C901
                         mode=mode,
                         failed_step="project-removal:revalidate",
                     )
-                blockers = _forget_blockers(catalog, registration.project_id)
+                blockers = _forget_blockers(catalog, current)
                 if blockers and current.registration_state == "registered":
                     raise _error(
                         "project removal blockers changed: " + ", ".join(blockers),
