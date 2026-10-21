@@ -63,7 +63,7 @@ def candidate_database_names(
 _BOOTSTRAP_INIT_MODULE = "base"
 _BOOTSTRAP_READY_SQL = b"SELECT state FROM ir_module_module WHERE name = 'base'"
 _BOOTSTRAP_INVENTORY_SQL = (
-    b"SELECT datname || E'\\t' || oid FROM pg_database "
+    b"SELECT datname || chr(9) || oid FROM pg_database "
     b"WHERE NOT datistemplate AND datallowconn ORDER BY datname"
 )
 _BOOTSTRAP_CREATE_SQL = (
