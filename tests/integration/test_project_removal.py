@@ -14,6 +14,7 @@ import pytest
 
 from odoo_instance_sdk.exceptions import ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -950,6 +951,22 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     catalog._activate_postgres_cluster(
         claim.cluster_id, legacy_project_id, compose_project, volume_name
     )
+    full_container_id = "a" * 64
+    inspect_entry = cast(
+        "dict[str, JsonValue]",
+        {
+            "Name": f"/{compose_project}-postgres-1",
+            "Id": full_container_id,
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": compose_project,
+                    "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
+                    "io.odoo-instance-sdk.project-id": legacy_project_id,
+                }
+            },
+            "Mounts": [{"Type": "volume", "Name": volume_name}],
+        },
+    )
     database_inventory = DatabaseInventoryResult(
         cluster="127.0.0.1:5432",
         databases=(
@@ -970,25 +987,12 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
             run=lambda *_args, **_kwargs: subprocess.CompletedProcess(
                 args=["docker"],
                 returncode=0,
-                stdout=json.dumps(
-                    {
-                        "Name": f"/{compose_project}-postgres-1",
-                        "Id": "owned-container",
-                        "Config": {
-                            "Labels": {
-                                "com.docker.compose.project": compose_project,
-                                "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
-                                "io.odoo-instance-sdk.project-id": legacy_project_id,
-                            }
-                        },
-                        "Mounts": [{"Type": "volume", "Name": volume_name}],
-                    }
-                ),
+                stdout=json.dumps(inspect_entry),
                 stderr="",
             )
         ),
         resource_snapshot=lambda: SimpleNamespace(
-            container=SimpleNamespace(id="owned-container"),
+            container=build_container(inspect_entry),
             metrics=SimpleNamespace(volume_usage_bytes=1024),
             unavailability_reason=None,
         ),
@@ -1037,6 +1041,7 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
             stdout = json.dumps(
                 {
                     "Name": f"/{compose_project}-postgres-1",
+                    "Id": full_container_id,
                     "Config": {
                         "Labels": {
                             "com.docker.compose.project": compose_project,
@@ -1118,7 +1123,7 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     catalog.close()
 
 
-@pytest.mark.parametrize("container_probe", ["mismatch", "unavailable"])
+@pytest.mark.parametrize("container_probe", ["mismatch", "malformed", "unavailable"])
 def test_public_remove_command_blocks_forget_for_mismatched_snapshot_container(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, container_probe: str
 ) -> None:
@@ -1152,11 +1157,14 @@ def test_public_remove_command_blocks_forget_for_mismatched_snapshot_container(
         tracked=True,
     )
 
+    expected_container_id = "b" * 64
+    foreign_container_id = "c" * 64
+
     cluster = SimpleNamespace(
         owned=True,
         compose_runner=SimpleNamespace(),
         resource_snapshot=lambda: SimpleNamespace(
-            container=SimpleNamespace(id="foreign-container"),
+            container=build_container({"Id": foreign_container_id}),
             metrics=SimpleNamespace(volume_usage_bytes=1),
             unavailability_reason=None,
         ),
@@ -1179,7 +1187,12 @@ def test_public_remove_command_blocks_forget_for_mismatched_snapshot_container(
     if container_probe == "mismatch":
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
-            lambda *_args, **_kwargs: "expected-container",
+            lambda *_args, **_kwargs: expected_container_id,
+        )
+    elif container_probe == "malformed":
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
+            lambda *_args, **_kwargs: "not-a-docker-id",
         )
     else:
 

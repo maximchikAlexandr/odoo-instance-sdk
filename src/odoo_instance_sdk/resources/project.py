@@ -37,6 +37,7 @@ class ProjectResource:
             PostgresClusterError,
         )
         from odoo_instance_sdk.internal.postgres_compose import (
+            container_id_matches_snapshot,
             inspect_container_identity,
             inspect_volume_identity,
         )
@@ -169,7 +170,10 @@ class ProjectResource:
                                 volume_verified
                                 and inspected_container_id is not None
                                 and container is not None
-                                and getattr(container, "id", None) == inspected_container_id
+                                and container_id_matches_snapshot(
+                                    inspected_container_id,
+                                    getattr(container, "id", None),
+                                )
                             ),
                             reason=(
                                 None

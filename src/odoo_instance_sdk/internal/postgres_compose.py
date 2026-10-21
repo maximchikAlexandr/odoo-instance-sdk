@@ -34,6 +34,18 @@ _PROJECT_NAME_PREFIX = "odcli_pg_"
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@+-]+$")
 _USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DIGEST_RE = re.compile(r"^(?P<repo>[A-Za-z0-9._/:-]+)@sha256:(?P<digest>[a-f0-9]{64})$")
+_DOCKER_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def container_id_matches_snapshot(inspected_id: str | None, snapshot_id: str | None) -> bool:
+    """Match a full Docker identity to the snapshot's display prefix."""
+    return bool(
+        inspected_id is not None
+        and snapshot_id is not None
+        and _DOCKER_CONTAINER_ID_RE.fullmatch(inspected_id) is not None
+        and len(snapshot_id) == 12
+        and snapshot_id == inspected_id[:12]
+    )
 
 
 def _require_timeout_budget(timeout: float | None) -> None:
@@ -610,7 +622,12 @@ def inspect_container_identity(
         ):
             return None
         container_id = value.get("Id")
-        return container_id if isinstance(container_id, str) and container_id else None
+        return (
+            container_id
+            if isinstance(container_id, str)
+            and _DOCKER_CONTAINER_ID_RE.fullmatch(container_id) is not None
+            else None
+        )
     except (json.JSONDecodeError, IndexError, TypeError):
         return None
 
