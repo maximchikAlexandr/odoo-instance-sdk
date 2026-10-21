@@ -22,6 +22,7 @@ from odoo_instance_sdk.internal.dbprep.bootstrap import (
     BootstrapFailedError,
     BootstrapOutcome,
     bootstrap_tmp_plan,
+    candidate_database_names,
     tmp_bootstrap_command,
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
@@ -1966,6 +1967,10 @@ def test_deferred_init_materializes_password_for_database_inventory_probe(
     environment, _cleanup, secrets = inventory.runtime_environment_factory()
     assert dict(environment)["PGPASSWORD"] == "runtime-secret"
     assert secrets == ("runtime-secret",)
+
+
+def test_init_database_candidates_exclude_system_databases() -> None:
+    assert candidate_database_names("postgres", "template1", "odoo") == ("tmp", "odoo")
 
 
 def test_init_fails_closed_when_database_inventory_probe_is_unavailable(
