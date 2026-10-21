@@ -2089,6 +2089,14 @@ def test_inventory_prepared_subprocess_reports_bounded_delimiter_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     psql = tmp_path / "psql"
+    raw_values = (
+        "owned-db",
+        "101",
+        "postgres",
+        "5",
+        "tmp",
+        "16385",
+    )
     psql.write_text(
         "#!/bin/sh\nprintf 'owned-db\\\\t101\\npostgres\\\\t5\\ntmp\\\\t16385\\n'\n",
         encoding="utf-8",
@@ -2117,6 +2125,8 @@ def test_inventory_prepared_subprocess_reports_bounded_delimiter_shape(
     assert "delimiter_tab_count=0" in message
     assert "delimiter_literal_backslash_t_count=3" in message
     assert "first_delimiter=literal_backslash_t" in message
+    for raw_value in raw_values:
+        assert raw_value not in message
 
 
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(
