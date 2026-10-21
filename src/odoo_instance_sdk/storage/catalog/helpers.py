@@ -93,7 +93,7 @@ class PostgresClusterClaim:
     activated_at: datetime | None = None
 
 
-def resolve_postgres_cluster_claim(  # noqa: C901 -- explicit identity gates
+def resolve_postgres_cluster_claim(
     get_claim: Callable[[str], PostgresClusterClaim | None],
     project_id: str,
     repository_root: str | Path,
@@ -132,10 +132,6 @@ def resolve_postgres_cluster_claim(  # noqa: C901 -- explicit identity gates
     claim = get_claim(project_id)
     if claim is not None:
         return claim
-    if missing_root and not common.is_dir():
-        # Without the live Git identity, never turn a legacy path/key into an
-        # ownership claim.  Exact project claims remain eligible above.
-        return None
     legacy_project_id = repo_key(root, common)
     if project_id != f"project_{legacy_project_id}":
         return None
