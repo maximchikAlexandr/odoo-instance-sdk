@@ -43,6 +43,7 @@ from odoo_instance_sdk.internal.project_removal import (
     RemovalPublicationSource,
     RemovalRuntimeSource,
     build_project_removal_projection,
+    removal_fingerprint,
     resolve_project_selector,
 )
 from odoo_instance_sdk.internal.publication_routes import read_owned_routes
@@ -428,6 +429,22 @@ def _planned_projection(
     )
 
 
+def _forget_resource_fingerprint(projection: ProjectRemovalProjection) -> str:
+    """Fingerprint stable forget decisions, excluding mutable DB/volume evidence."""
+    stable_decisions = tuple(
+        decision
+        for decision in projection.decisions
+        if decision.resource_type not in {"database", "volume"}
+    )
+    return removal_fingerprint(
+        projection.project_id,
+        projection.registration_state,
+        projection.repository_root,
+        stable_decisions,
+        complete=True,
+    )
+
+
 def _forget_blockers(catalog: BackupCatalog, registration: ProjectRegistration) -> tuple[str, ...]:
     project_id = registration.project_id
     blockers: set[str] = set()
@@ -664,8 +681,11 @@ def capture_project_removal_command(  # noqa: C901
             ),
         ),
         warnings=(),
-        fingerprint=projection.fingerprint,
+        fingerprint=(
+            _forget_resource_fingerprint(projection) if not purge else projection.fingerprint
+        ),
     )
+    captured_forget_fingerprint = _forget_resource_fingerprint(projection) if not purge else None
     confirmation_value = [confirmation]
 
     def run(context: RunContext[ProjectRemovalResult]) -> ProjectRemovalResult:  # noqa: C901
@@ -700,7 +720,28 @@ def capture_project_removal_command(  # noqa: C901
                     mode=mode,
                     failed_step="project-removal:revalidate",
                 )
+            if current.registration_state != registration.registration_state:
+                raise _error(
+                    "project registration state changed",
+                    projection,
+                    mode=mode,
+                    failed_step="project-removal:revalidate",
+                )
             if not purge:
+                current_projection = _planned_projection(
+                    catalog,
+                    current,
+                    database_inventory=database_inventory,
+                    volume_observation=volume_observation,
+                )
+                assert captured_forget_fingerprint is not None
+                if _forget_resource_fingerprint(current_projection) != captured_forget_fingerprint:
+                    raise _error(
+                        "project removal plan is stale",
+                        projection,
+                        mode=mode,
+                        failed_step="project-removal:revalidate",
+                    )
                 blockers = _forget_blockers(catalog, current)
                 if blockers and current.registration_state == "registered":
                     raise _error(

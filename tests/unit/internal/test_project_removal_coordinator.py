@@ -153,6 +153,37 @@ def test_forgotten_and_unknown_projects_keep_legacy_resources_unchanged(
     catalog.close()
 
 
+def test_forget_refuses_reactivation_after_capture(tmp_path: Path) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    assert catalog.forget_project(project_id)
+    command = capture_project_removal_command(catalog, ProjectSelector.from_project_id(project_id))
+    assert catalog.reactivate_project(project_id, root, root / ".git")
+
+    with pytest.raises(ProjectRemovalError, match="registration state changed"):
+        command.run()
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert root.exists()
+    catalog.close()
+
+
+def test_forget_refuses_nonblocking_resource_decision_drift(tmp_path: Path) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    command = capture_project_removal_command(catalog, ProjectSelector.from_project_id(project_id))
+    _legacy_environment(catalog, "removed-after-capture", root)
+    catalog._conn.execute(
+        "UPDATE environments SET state = 'removed' WHERE id = ?", ("removed-after-capture",)
+    )
+    catalog._conn.commit()
+
+    with pytest.raises(ProjectRemovalError, match="plan is stale"):
+        command.run()
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert catalog.get_environment("removed-after-capture") is not None
+    catalog.close()
+
+
 def test_forget_refuses_project_runtime_before_registration_mutation(tmp_path: Path) -> None:
     catalog, project_id, _root = _catalog(tmp_path)
     catalog._upsert_runtime(
