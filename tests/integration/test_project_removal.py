@@ -900,6 +900,7 @@ def _capture_missing_source_purge(  # noqa: C901
     seed_catalog: Callable[[BackupCatalog, str, object, Path], None] = lambda *_args: None,
     publish_observed: Callable[[BackupCatalog, object | None, Path], object | None] | None = None,
     real_children: bool = False,
+    observed_oids: Mapping[str, int] | None = None,
 ) -> tuple[BackupCatalog, Command[ProjectRemovalResult], RecordingExecutor, str]:
     root = tmp_path / "source"
     common = root / ".git"
@@ -997,7 +998,7 @@ def _capture_missing_source_purge(  # noqa: C901
                         cluster="127.0.0.1:15432",
                         cluster_id=str(claim.cluster_id),
                         name=name,
-                        database_oid=101 if name == "tmp" else 102,
+                        database_oid=(observed_oids or {}).get(name, 101 if name == "tmp" else 102),
                         logical_size_bytes=1,
                         active_sessions=0,
                         is_default=False,
@@ -1123,7 +1124,11 @@ def _capture_missing_source_purge(  # noqa: C901
 
 
 def _seed_exact_restore(
-    catalog: BackupCatalog, project_id: str, claim: object, data_directory: Path
+    catalog: BackupCatalog,
+    project_id: str,
+    claim: object,
+    data_directory: Path,
+    database_oid: int = 102,
 ) -> None:
     backup_id = str(uuid.uuid4())
     backup_path = data_directory.parent / "owned.zip"
@@ -1145,7 +1150,7 @@ def _seed_exact_restore(
         backup_id,
         cluster_id=getattr(claim, "cluster_id"),
         data_directory=data_directory,
-        database_oid=102,
+        database_oid=database_oid,
     )
     catalog._record_project_database_binding(
         project_id,
@@ -1153,7 +1158,7 @@ def _seed_exact_restore(
         "127.0.0.1",
         15432,
         "owned_db",
-        database_oid=102,
+        database_oid=database_oid,
     )
 
 
@@ -1218,13 +1223,7 @@ def test_public_purge_refuses_same_name_replaced_restored_database(
     def seed_replaced_restore(
         catalog: BackupCatalog, seeded_project_id: str, claim: object, data_directory: Path
     ) -> None:
-        _seed_exact_restore(catalog, seeded_project_id, claim, data_directory)
-        catalog._conn.execute(
-            "UPDATE project_database_bindings SET database_oid=101 "
-            "WHERE project_id=? AND database_name='owned_db'",
-            (seeded_project_id,),
-        )
-        catalog._conn.commit()
+        _seed_exact_restore(catalog, seeded_project_id, claim, data_directory, database_oid=101)
 
     catalog, command, executor, project_id = _capture_missing_source_purge(
         tmp_path,
@@ -1232,6 +1231,7 @@ def test_public_purge_refuses_same_name_replaced_restored_database(
         project_id,
         ("owned_db",),
         seed_replaced_restore,
+        observed_oids={"owned_db": 202},
     )
     with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
         command.run()
