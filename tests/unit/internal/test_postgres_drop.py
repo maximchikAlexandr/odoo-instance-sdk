@@ -75,12 +75,14 @@ def _inspection(
     exists: bool = True,
     sessions: list[dict[str, object]] | None = None,
     template: bool = False,
+    database_oid: int | None = None,
 ) -> str:
     return json.dumps(
         {
             "exists": exists,
             "is_template": template,
             "sessions": sessions or [],
+            **({"database_oid": database_oid} if database_oid is not None else {}),
         }
     )
 
@@ -95,15 +97,25 @@ def _executor(
     revalidate_terminate_returncode: int = 0,
     revalidate_drop_stdout: str | None = None,
     revalidate_drop_returncode: int = 0,
+    database_oid: int | None = None,
+    revalidate_database_oid: int | None = None,
     drop_returncode: int = 0,
     verify_stdout: str = "t\n",
     verify_returncode: int = 0,
 ) -> RecordingExecutor:
-    initial = _inspection(exists=exists, template=template, sessions=sessions)
+    initial = _inspection(
+        exists=exists,
+        template=template,
+        sessions=sessions,
+        database_oid=database_oid,
+    )
     checked = _inspection(
         exists=exists,
         template=template,
         sessions=revalidation_sessions if revalidation_sessions is not None else sessions,
+        database_oid=(
+            revalidate_database_oid if revalidate_database_oid is not None else database_oid
+        ),
     )
 
     def result_factory(step: object) -> ProcessResult:
@@ -1570,6 +1582,42 @@ def test_init_binding_drop_refuses_missing_current_database_oid_before_mutation(
         database_oid=101,
     )
     executor = _executor()
+
+    with pytest.raises(ConfigError, match="database identity changed"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            force_default=True,
+            defer_planning=True,
+            expected_database_oid=101,
+            executor=executor,
+        ).run()
+    assert not any(step.step_id.endswith("database.drop.execute") for step in executor.executed)
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_init_binding_drop_refuses_replaced_database_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "replaced-database.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        database_oid=101,
+    )
+    executor = _executor(database_oid=101, revalidate_database_oid=202)
 
     with pytest.raises(ConfigError, match="database identity changed"):
         build_database_drop_command(

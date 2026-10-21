@@ -210,6 +210,15 @@ def _assert_safe(
         )
 
 
+def _assert_database_identity(
+    inspection: _DropInspection,
+    *,
+    expected_database_oid: int | None,
+) -> None:
+    if expected_database_oid is not None and inspection.database_oid != expected_database_oid:
+        raise ConfigError("database drop database identity changed before mutation")
+
+
 def _drop_ownership_evidence(  # noqa: C901
     instance: OdooInstance,
     cluster: PostgresCluster,
@@ -711,15 +720,17 @@ def build_database_drop_command(  # noqa: C901
 
     def _execute_locked(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:  # noqa: C901
         planned_before_lock: _DropInspection | None = None
+        captured_database_oid = expected_database_oid
         if defer_planning:
             planned_before_lock = _decode_inspection(
                 _process_result(context, planning_step_id), database
             )
-            if (
-                expected_database_oid is not None
-                and planned_before_lock.database_oid != expected_database_oid
-            ):
-                raise ConfigError("database drop database identity changed before mutation")
+            _assert_database_identity(
+                planned_before_lock,
+                expected_database_oid=expected_database_oid,
+            )
+            if planned_before_lock.database_oid is not None:
+                captured_database_oid = planned_before_lock.database_oid
         current_ownership = _drop_ownership_evidence(
             instance,
             cluster,
@@ -806,6 +817,10 @@ def build_database_drop_command(  # noqa: C901
             checked = _decode_inspection(
                 _process_result(context, revalidate_terminate_step_id), database
             )
+            _assert_database_identity(
+                checked,
+                expected_database_oid=captured_database_oid,
+            )
             _assert_safe(
                 checked,
                 database=database,
@@ -822,6 +837,10 @@ def build_database_drop_command(  # noqa: C901
             context.skip(revalidate_terminate_step_id)
             context.skip(terminate_step_id)
         checked = _decode_inspection(_process_result(context, revalidate_drop_step_id), database)
+        _assert_database_identity(
+            checked,
+            expected_database_oid=captured_database_oid,
+        )
         if idempotent_absent and not checked.exists:
             if context.planned(drop_step_id) and not context.consumed(drop_step_id):
                 context.skip(drop_step_id)
