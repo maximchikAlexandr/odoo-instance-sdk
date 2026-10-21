@@ -287,8 +287,9 @@ class _EnvironmentMixin:
             else:
                 clauses.append(
                     "(project_id = ? OR (project_id IS NULL AND git_common_dir = ?)) "
-                    "AND EXISTS (SELECT 1 FROM projects p WHERE p.project_id = ? "
-                    "AND p.registration_state = 'registered')"
+                    "AND (EXISTS (SELECT 1 FROM projects p WHERE p.project_id = ? "
+                    "AND p.registration_state = 'registered') OR NOT EXISTS ("
+                    "SELECT 1 FROM projects))"
                 )
                 params.extend((project_id, git_common_dir, project_id))
         elif project_id is not None:
@@ -475,12 +476,12 @@ class _EnvironmentMixin:
                 clauses.append("e.state != 'removed'")
             if project_id is not None:
                 clauses.append(
-                    "(e.project_id = ? OR (e.project_id IS NULL AND EXISTS ("
+                    "(e.project_id = ? OR (e.project_id IS NULL AND (EXISTS ("
                     "SELECT 1 FROM projects p "
                     "WHERE p.project_id = ? AND p.repository_root = e.repository_root "
                     "AND p.git_common_dir = e.git_common_dir "
-                    "AND p.registration_state = 'registered'"
-                    ")))"
+                    "AND p.registration_state = 'registered') OR NOT EXISTS ("
+                    "SELECT 1 FROM projects))))"
                 )
                 params.extend((project_id, project_id))
             state_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
