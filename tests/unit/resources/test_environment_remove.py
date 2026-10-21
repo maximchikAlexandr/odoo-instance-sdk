@@ -1261,6 +1261,7 @@ class TestCopyRestoreClusterIdentity:
                 backup_id,
                 cluster_id=cluster_id,
                 data_directory=data_directory,
+                database_oid=102,
             )
 
         catalog.record_restore = capture_restore  # type: ignore[assignment]
