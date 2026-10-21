@@ -164,8 +164,10 @@ def _environment_owner_clause(
     registration: ProjectRegistration,
     *,
     alias: str = "e",
-) -> tuple[str, tuple[str, str, str]]:
+) -> tuple[str, tuple[str, ...]]:
     """Select current and legacy rows owned by one captured registration."""
+    if registration.git_common_dir is None:
+        return f"{alias}.project_id = ?", (registration.project_id,)
     return (
         (
             f"({alias}.project_id = ? OR ({alias}.project_id IS NULL "
@@ -686,13 +688,12 @@ def capture_project_removal_command(  # noqa: C901
                     failed_step="project-removal:revalidate",
                 )
             current = _row_registration(row)
-            current_projection = _planned_projection(
-                catalog,
-                current,
-                database_inventory=database_inventory,
-                volume_observation=volume_observation,
-            )
-            if current.repository_root.resolve() != registration.repository_root.resolve():
+            if (
+                current.repository_root.resolve() != registration.repository_root.resolve()
+                or current.git_common_dir is None
+                or registration.git_common_dir is None
+                or current.git_common_dir.resolve() != registration.git_common_dir.resolve()
+            ):
                 raise _error(
                     "project registration identity changed",
                     projection,
@@ -700,13 +701,6 @@ def capture_project_removal_command(  # noqa: C901
                     failed_step="project-removal:revalidate",
                 )
             if not purge:
-                if current_projection.fingerprint != projection.fingerprint:
-                    raise _error(
-                        "project removal plan is stale",
-                        projection,
-                        mode=mode,
-                        failed_step="project-removal:revalidate",
-                    )
                 blockers = _forget_blockers(catalog, current)
                 if blockers and current.registration_state == "registered":
                     raise _error(
@@ -728,6 +722,12 @@ def capture_project_removal_command(  # noqa: C901
                     completed=(decisions[0],),
                     retained=forget_retained,
                 )
+            current_projection = _planned_projection(
+                catalog,
+                current,
+                database_inventory=database_inventory,
+                volume_observation=volume_observation,
+            )
             if not projection.complete:
                 raise _error(
                     "required database or Compose observation is unavailable or unproven",
