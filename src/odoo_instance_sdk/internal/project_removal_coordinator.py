@@ -260,7 +260,7 @@ def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...
     return tuple(sources)
 
 
-def _projection(
+def _projection(  # noqa: C901 -- source-less claim recovery shares the existing projection boundary
     catalog: BackupCatalog,
     registration: ProjectRegistration,
     *,
@@ -302,6 +302,16 @@ def _projection(
     active_claim = claim if claim is not None and claim.state == "active" else None
     database_required = database_name is not None or active_claim is not None
     observed_databases = tuple(database_inventory.databases) if database_inventory else ()
+    if database_name is None and active_claim is not None and observed_databases:
+        owned_databases = tuple(
+            item for item in observed_databases if item.cluster_id == str(active_claim.cluster_id)
+        )
+        if owned_databases:
+            # A source-less project has no manifest default.  An inventory
+            # already bound to the exact active claim is the durable default
+            # for the projection; all returned databases remain represented
+            # as separate decisions below.
+            database_name = owned_databases[0].name
     if active_claim is not None and database_name is not None:
         observed_databases = tuple(
             msgspec.structs.replace(item, cluster_id=str(active_claim.cluster_id))

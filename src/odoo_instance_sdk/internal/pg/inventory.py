@@ -14,6 +14,7 @@ from odoo_instance_sdk.models import DatabaseInventoryItem, DatabaseInventoryRes
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.proc import ProcessExecutor, ProcessResult, RunContext
+    from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -133,6 +134,7 @@ def build_database_inventory_command(
     *,
     tracked: bool = False,
     catalog: BackupCatalog | _CatalogUnset | None = _CATALOG_UNSET,
+    project: ProjectConfig | None = None,
     executor: ProcessExecutor | None = None,
 ) -> Command[DatabaseInventoryResult]:
     """Capture a direct PostgreSQL inventory without Odoo reconciliation."""
@@ -145,7 +147,7 @@ def build_database_inventory_command(
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-    project = ProjectConfig.load(Path(project_root).resolve())
+    project = project or ProjectConfig.load(Path(project_root).resolve())
     cluster = getattr(instance, "_postgres_cluster", None)
     if cluster is None:
         raise ConfigError("database inventory requires the resolved project PostgreSQL cluster")

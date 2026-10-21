@@ -99,12 +99,28 @@ def resolve_postgres_cluster_claim(
     repository_root: str | Path,
     git_common_dir: str | Path | None,
 ) -> PostgresClusterClaim | None:
-    """Select a claim only after proving the captured Git identity is live."""
+    """Select a claim only after proving the captured Git identity is owned.
+
+    A removed source root is a supported recovery state: the registration and
+    claim are the durable ownership record, while the root itself cannot be
+    used for a live Git probe.  This exception is deliberately narrower than
+    accepting a stale checkout.  It requires a real captured common directory,
+    a lexically absent (and non-symlink) root, and the same exact/validated
+    claim identities used by the live path.  Existing roots still require a
+    successful read-only Git common-dir proof.
+    """
     if git_common_dir is None:
         return None
     try:
-        root, common = Path(repository_root).resolve(), Path(git_common_dir).resolve()
-        if parse_git_common_dir(root) != common:
+        lexical_root = Path(repository_root)
+        root, common = lexical_root.resolve(), Path(git_common_dir).resolve()
+        root_exists = lexical_root.exists()
+        if root_exists or lexical_root.is_symlink():
+            if parse_git_common_dir(root) != common:
+                return None
+        elif not common.is_dir():
+            # A missing source is recoverable only while its captured Git
+            # common directory remains a durable, readable directory.
             return None
     except (OSError, RuntimeError):
         return None
