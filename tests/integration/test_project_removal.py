@@ -231,6 +231,34 @@ def test_public_forget_refuses_nonblocking_resource_decision_drift(tmp_path: Pat
     catalog.close()
 
 
+def test_public_forget_preserves_dirty_source_decision_across_execution(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True, text=True)
+    odcli = root / ".odcli"
+    odcli.mkdir()
+    (odcli / "project.toml").write_text(
+        '[project]\ndefault_source_database = "binta_db"\n', encoding="utf-8"
+    )
+    (odcli / "odoo.conf").write_text("[options]\n", encoding="utf-8")
+    (odcli / ".env").write_text("BINTA_DIAGNOSTIC=redacted\n", encoding="utf-8")
+    (odcli / "filestore").mkdir()
+    untracked = root / "untracked-addon.py"
+    untracked.write_text("# preserved\n", encoding="utf-8")
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+
+    result = ProjectResource(_client=cast("OdooClient", client)).remove(
+        ProjectSelector.from_project_id(project_id)
+    )
+
+    assert result.registration_state == "forgotten"
+    assert untracked.exists()
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
 class _AdapterRegistry:
     def __init__(self, adapters: Mapping[str, ProjectRemovalAdapter]) -> None:
         self.adapters = dict(adapters)
