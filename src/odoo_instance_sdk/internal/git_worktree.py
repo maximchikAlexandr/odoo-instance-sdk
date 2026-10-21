@@ -420,21 +420,26 @@ def worktree_remove(repo_root: Path, worktree: Path) -> None:
         raise GitError(f"git worktree remove failed: {stderr}")
 
 
+def project_git_status_argv(worktree: Path) -> tuple[str, ...]:
+    """Build the repository-independent status probe used by project removal."""
+    return (
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        f"core.hooksPath={os.devnull}",
+        "-C",
+        str(worktree),
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    )
+
+
 def _git_status_argv(worktree: Path, *, hardened: bool) -> list[str]:
     if hardened:
-        return [
-            "git",
-            "--no-optional-locks",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            f"core.hooksPath={os.devnull}",
-            "-C",
-            str(worktree),
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-        ]
+        return list(project_git_status_argv(worktree))
     return ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"]
 
 
