@@ -2084,7 +2084,15 @@ def test_first_run_triggers_bootstrap_when_no_valid_tmp(
     context.action = MagicMock()
     context.complete_action = MagicMock()
     context.skip = MagicMock()
-    context.process_prepared.return_value = SimpleNamespace(returncode=0, stdout="postgres\t1\n")
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="tmp\t101\npostgres\t1\n",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
     ensure_project_bootstrap_tmp(instance, context)
     assert calls == [True]
     context.action.assert_called_once_with("init.bootstrap.tmp.verify")

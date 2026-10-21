@@ -644,6 +644,11 @@ class _QueriesMixin:
         from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 
         query_name = name.replace("'", "''")
+        query = (
+            f"SELECT oid FROM pg_database WHERE datname='{query_name}'"
+            if step_id == "database.restore.exists-after"
+            else f"SELECT 1 FROM pg_database WHERE datname='{query_name}'"
+        )
         try:
             return build_psql_specification(
                 step_id=step_id,
@@ -654,7 +659,7 @@ class _QueriesMixin:
                 database="postgres",
                 args=(
                     "-c",
-                    f"SELECT 1 FROM pg_database WHERE datname='{query_name}'",
+                    query,
                 ),
                 _trusted_args=("-t", "-A"),
                 timeout=30.0,

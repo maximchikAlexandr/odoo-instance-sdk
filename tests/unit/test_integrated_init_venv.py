@@ -154,7 +154,9 @@ def _process_result(step: PreparedStep, *, returncode: int = 0, stderr: str = ""
     return ProcessResult(
         argv=step.argv,
         returncode=returncode,
-        stdout="",
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n"
+        if step.step_id == "init.bootstrap.databases"
+        else "",
         stderr=stderr,
         duration=0.0,
         cwd=step.cwd,
@@ -647,6 +649,8 @@ def test_omitted_venv_keeps_legacy_compose_plan_and_capture_effects(
     cluster = PostgresCluster._from_config(config, repository_root=tmp_path, compose_runner=None)
     cluster.password_file.unlink(missing_ok=True)
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", lambda *args, **kwargs: None)
+    executor = RecordingExecutor(result_factory=_fake_preparation_result())
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
 
     def skip_bootstrap(context: object, plan: object) -> BootstrapOutcome:
         assert plan.create_step is None  # type: ignore[attr-defined]

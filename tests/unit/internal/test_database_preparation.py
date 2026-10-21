@@ -2613,6 +2613,7 @@ def _incomplete_restore_retry_case(
         str(backup.id),
         source_kind="catalogue",
         cluster_id=active.cluster_id,
+        database_oid=102,
         state="incomplete",
     )
     local = OdooInstance(
@@ -2645,7 +2646,7 @@ def _incomplete_restore_retry_case(
         stdout = (
             "t\n"
             if step.step_id.endswith("verify")
-            else '{"exists": true, "is_template": false, "sessions": []}'
+            else '{"exists": true, "is_template": false, "sessions": [], "database_oid": 102}'
         )
         return ProcessResult(
             argv=step.argv,

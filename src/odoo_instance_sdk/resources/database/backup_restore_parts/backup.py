@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypedDict, TypeVar
 
 from odoo_instance_sdk.exceptions import (
     BackupDownloadError,
@@ -52,6 +52,10 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
+
+
+class _RestoreIdentity(TypedDict, total=False):
+    database_oid: int
 
 
 class _BackupMixin:
@@ -580,9 +584,30 @@ class _BackupMixin:
                 f"Database {target_database_name!r} was not created after restore"
             )
 
+        database_oid: int | None = None
+        if after_step_id is not None:
+            from odoo_instance_sdk.internal.proc import ProcessResult
+
+            context = active_context()
+            result = None if context is None else context.results.get(after_step_id)
+            if isinstance(result, ProcessResult):
+                raw_oid = (
+                    result.stdout.decode("utf-8", errors="replace")
+                    if isinstance(result.stdout, bytes)
+                    else result.stdout
+                )
+                if raw_oid is None or not raw_oid.strip().isdigit() or int(raw_oid.strip()) <= 0:
+                    raise RestoreFailedError(
+                        "Database identity observation was invalid after restore"
+                    )
+                database_oid = int(raw_oid.strip())
+
         ck = self._cluster
         if ck is not None and record_provenance:
             db_host, db_port = ck
+            restore_identity: _RestoreIdentity = (
+                {"database_oid": database_oid} if database_oid is not None else {}
+            )
             if source_kind == "local_archive":
                 catalog.record_restore(
                     db_host,
@@ -592,6 +617,7 @@ class _BackupMixin:
                     source_sha256=source_sha256,
                     cluster_id=cluster_identity,
                     data_directory=data_directory,
+                    **restore_identity,
                 )
             elif cluster_identity is None and data_directory is None:
                 assert isinstance(source, Backup)
@@ -600,6 +626,7 @@ class _BackupMixin:
                     db_port,
                     target_database_name,
                     str(source.id),
+                    **restore_identity,
                 )
             else:
                 assert isinstance(source, Backup)
@@ -610,6 +637,20 @@ class _BackupMixin:
                     str(source.id),
                     cluster_id=cluster_identity,
                     data_directory=data_directory,
+                    **restore_identity,
+                )
+            if (
+                database_oid is not None
+                and cluster_identity is not None
+                and postgres_cluster is not None
+            ):
+                catalog._record_project_database_binding(
+                    postgres_cluster._project_id,
+                    cluster_identity,
+                    db_host,
+                    db_port,
+                    target_database_name,
+                    database_oid=database_oid,
                 )
 
     def drop(

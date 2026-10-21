@@ -853,6 +853,45 @@ def test_projection_recovers_owned_claim_after_source_root_is_removed(tmp_path: 
     catalog.close()
 
 
+def test_public_purge_retains_registration_when_missing_source_recovery_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    claim = catalog._ensure_postgres_cluster_pending(
+        project_id, f"odcli_pg_{project_id}", f"pgdata_{project_id}"
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, project_id, claim.compose_project, claim.volume_name
+    )
+    catalog._record_database_bootstrapped(
+        "127.0.0.1",
+        5432,
+        "tmp",
+        cluster_id=claim.cluster_id,
+        data_directory=tmp_path / "data",
+    )
+    shutil.rmtree(root)
+    monkeypatch.setattr(
+        PostgresCluster,
+        "_from_config",
+        classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(OSError("unavailable"))),
+    )
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        instance=SimpleNamespace(from_project=lambda _project: None),
+    )
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
 def _capture_missing_source_purge(  # noqa: C901
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1106,6 +1145,15 @@ def _seed_exact_restore(
         backup_id,
         cluster_id=getattr(claim, "cluster_id"),
         data_directory=data_directory,
+        database_oid=102,
+    )
+    catalog._record_project_database_binding(
+        project_id,
+        getattr(claim, "cluster_id"),
+        "127.0.0.1",
+        15432,
+        "owned_db",
+        database_oid=102,
     )
 
 
@@ -1158,6 +1206,37 @@ def test_public_purge_recovers_missing_source_with_exact_claim(
     assert result.registration_state == "forgotten"
     assert len(executor.executed) == 2
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_purge_refuses_same_name_replaced_restored_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    project_id = f"project_{repo_key(root, root / '.git')}"
+
+    def seed_replaced_restore(
+        catalog: BackupCatalog, seeded_project_id: str, claim: object, data_directory: Path
+    ) -> None:
+        _seed_exact_restore(catalog, seeded_project_id, claim, data_directory)
+        catalog._conn.execute(
+            "UPDATE project_database_bindings SET database_oid=101 "
+            "WHERE project_id=? AND database_name='owned_db'",
+            (seeded_project_id,),
+        )
+        catalog._conn.commit()
+
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        project_id,
+        ("owned_db",),
+        seed_replaced_restore,
+    )
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()
 
 

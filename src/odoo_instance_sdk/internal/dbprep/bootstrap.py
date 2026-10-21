@@ -26,7 +26,13 @@ from odoo_instance_sdk.internal.locks import (
     exclusive_lock_until,
 )
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
-from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
+    PreparedStep,
+    ProcessResult,
+    ProcessResultLike,
+    SubprocessExecutor,
+)
 from odoo_instance_sdk.models import StartConfig
 
 if TYPE_CHECKING:
@@ -306,11 +312,13 @@ def run_bootstrap_tmp(
     return BootstrapOutcome.CREATED
 
 
-def _read_database_inventory(result: object) -> tuple[ObservedDatabase, ...]:
+def _read_database_inventory(result: ProcessResultLike) -> tuple[ObservedDatabase, ...]:
     """Decode one successful, non-empty PostgreSQL inventory observation."""
-    if getattr(result, "returncode", 1) != 0:
+    if not isinstance(result, ProcessResult):
+        raise BootstrapFailedError("database inventory observation returned no process result")
+    if result.returncode != 0:
         raise BootstrapFailedError("database inventory observation failed")
-    stdout = getattr(result, "stdout", "") or ""
+    stdout = result.stdout or ""
     if isinstance(stdout, bytes):
         try:
             stdout = stdout.decode("utf-8")
