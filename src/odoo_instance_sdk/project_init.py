@@ -507,6 +507,7 @@ def _compose_followup_steps(
     defer_actions: bool = False,
 ) -> tuple[_ComposeFollowup, _BootstrapFollowup]:
     from odoo_instance_sdk.internal.dbprep.bootstrap import (
+        BOOTSTRAP_DATABASE,
         bootstrap_record_action,
         bootstrap_tmp_plan,
     )
@@ -614,7 +615,11 @@ def _compose_followup_steps(
             ),
             probe_step=refresh_password_environment(bootstrap_plan.probe_step),
             ready_step=refresh_password_environment(bootstrap_plan.ready_step),
+            inventory_step=refresh_password_environment(bootstrap_plan.inventory_step)
+            if bootstrap_plan.inventory_step is not None
+            else None,
         )
+    candidate_names = (BOOTSTRAP_DATABASE, config.default_source_database, source_start.db_name)
     return (
         _ComposeFollowup(
             cluster=cluster,
@@ -631,10 +636,7 @@ def _compose_followup_steps(
             plan=bootstrap_plan,
             project_root=root,
             data_directory=data_directory,
-            database_names=(
-                config.default_source_database,
-                source_start.db_name,
-            ),
+            database_names=tuple(filter(None, candidate_names)),
         ),
     )
 
