@@ -215,7 +215,7 @@ def _assert_database_identity(
     *,
     expected_database_oid: int | None,
 ) -> None:
-    if expected_database_oid is None or not inspection.exists:
+    if not inspection.exists:
         return
     if type(inspection.database_oid) is not int or inspection.database_oid <= 0:
         raise ConfigError("database drop database identity evidence is unavailable")
