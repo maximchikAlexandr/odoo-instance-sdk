@@ -34,6 +34,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResult,
     RecordingExecutor,
     RunContext,
+    SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.project_init import (
     _INIT_REMOTE_NAMES_ACTION_ID,
@@ -2078,6 +2079,42 @@ def test_database_inventory_valid_name_oid_shape_remains_observable() -> None:
         environment=(),
     )
     assert _read_database_inventory(result) == (ObservedDatabase("owned-db", 101),)
+
+
+def test_inventory_prepared_subprocess_normalizes_delimiter_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    psql = tmp_path / "psql"
+    psql.write_text(
+        "#!/bin/sh\n"
+        "if grep -q 'chr(9)' ; then\n"
+        "  printf 'owned-db\\t101\\npostgres\\t5\\ntmp\\t16385\\n'\n"
+        "else\n"
+        "  printf 'owned-db\\\\t101\\npostgres\\\\t5\\ntmp\\\\t16385\\n'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    psql.chmod(0o755)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable", lambda: str(psql)
+    )
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        capture_inventory=True,
+    )
+    assert plan.inventory_step is not None
+    result = SubprocessExecutor().execute(plan.inventory_step)
+    assert _read_database_inventory(result) == (
+        ObservedDatabase("owned-db", 101),
+        ObservedDatabase("postgres", 5),
+        ObservedDatabase("tmp", 16385),
+    )
 
 
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(
