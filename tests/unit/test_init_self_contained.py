@@ -1927,13 +1927,18 @@ def test_deferred_init_materializes_password_for_database_inventory_probe(
         "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda _project_id: postgres_dir,
     )
+    source_config = root / "odoo.conf"
+    source_config.write_text("[options]\ndb_name = binta_target\n", encoding="utf-8")
     config = ProjectConfig(
         repository_root=root,
-        default_source_database="odoo",
-        postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=15432),
+        default_source_database="binta_target",
+        source_config=source_config,
+        postgres=PostgresProjectConfig(
+            mode="compose", image="postgres:16", port=15432, user="odoo"
+        ),
     )
     compose, followup = _compose_followup_steps(root, config, dry_run=False, defer_actions=True)
-    assert followup.database_names == ("tmp", "odoo")
+    assert followup.database_names == ("tmp", "binta_target", "odoo")
     inventory = followup.plan.inventory_step
     assert inventory is not None and inventory.runtime_environment_factory is not None
     compose.password_state[0] = "runtime-secret"

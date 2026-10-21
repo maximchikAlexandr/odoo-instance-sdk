@@ -57,7 +57,6 @@ from odoo_instance_sdk.internal.resource_inventory import (
     OwnershipConfidence,
     VolumeResourceSource,
 )
-from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.models.database_inventory import (
     DatabaseInventoryItem,
     DatabaseInventoryResult,
@@ -67,9 +66,9 @@ from odoo_instance_sdk.models.project_removal import (
     ProjectResourceDecision,
     ProjectSelector,
 )
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.project_init import (
-    _BootstrapFollowup,
+    _compose_followup_steps,
     _execute_bootstrap_followup_phase,
     init_project,
 )
@@ -879,13 +878,14 @@ def _capture_missing_source_purge(  # noqa: C901
         f"odcli_pg_{claim_project_id}",
         f"pgdata_{claim_project_id}",
     )
-    catalog._record_database_bootstrapped(
-        "127.0.0.1",
-        15432,
-        "tmp",
-        cluster_id=claim.cluster_id,
-        data_directory=tmp_path / "data",
-    )
+    if publish_observed is None:
+        catalog._record_database_bootstrapped(
+            "127.0.0.1",
+            15432,
+            "tmp",
+            cluster_id=claim.cluster_id,
+            data_directory=tmp_path / "data",
+        )
     if publish_observed is None:
         seed_catalog(catalog, claim_project_id, claim, tmp_path / "data")
     else:
@@ -1084,29 +1084,18 @@ def _seed_exact_restore(
 def _publish_observed_init_binding(catalog: BackupCatalog, claim: object, root: Path) -> None:
     data_directory = root / ".odcli" / "filestore"
     data_directory.mkdir(parents=True)
-    cluster = SimpleNamespace(
-        _project_id=str(getattr(claim, "project_id")),
-        endpoint_host="127.0.0.1",
-        endpoint_port=15432,
+    source_config = root / "odoo.conf"
+    source_database = f"binta_{getattr(claim, 'project_id')}"
+    source_config.write_text(f"[options]\ndb_name = {source_database}\n", encoding="utf-8")
+    config = ProjectConfig(
+        repository_root=root,
+        default_source_database=source_database,
+        source_config=source_config,
+        postgres=PostgresProjectConfig(
+            mode="compose", image="pgvector/pgvector:pg16", port=15432, user="odoo"
+        ),
     )
-    plan = bootstrap.bootstrap_tmp_plan(
-        command_prefix=("python3", "odoo-bin"),
-        start_config=StartConfig(db_user="odoo"),
-        db_host="127.0.0.1",
-        db_port=15432,
-        db_user="odoo",
-        db_password="secret",
-        include_create=False,
-        record_action=bootstrap.bootstrap_record_action(),
-        capture_inventory=True,
-    )
-    followup = _BootstrapFollowup(
-        cluster=cluster,  # type: ignore[arg-type]
-        plan=plan,
-        project_root=root,
-        data_directory=data_directory,
-        database_names=("tmp", "odoo"),
-    )
+    _compose, followup = _compose_followup_steps(root, config, dry_run=True, defer_actions=False)
     context = MagicMock()
     context.process_prepared.side_effect = lambda step: ProcessResult(
         argv=step.argv,
@@ -1151,7 +1140,7 @@ def test_public_purge_recovers_missing_source_with_legacy_init_binding(
     monkeypatch.setattr(
         bootstrap,
         "run_bootstrap_tmp",
-        lambda _context, _plan: bootstrap.BootstrapOutcome.ALREADY_READY,
+        lambda _context, _plan: bootstrap.BootstrapOutcome.CREATED,
     )
     catalog, command, _executor, project_id = _capture_missing_source_purge(
         tmp_path,
@@ -1185,7 +1174,7 @@ def test_public_purge_refuses_missing_source_with_foreign_database(
     monkeypatch.setattr(
         bootstrap,
         "run_bootstrap_tmp",
-        lambda _context, _plan: bootstrap.BootstrapOutcome.ALREADY_READY,
+        lambda _context, _plan: bootstrap.BootstrapOutcome.CREATED,
     )
     catalog, command, executor, project_id = _capture_missing_source_purge(
         tmp_path,
