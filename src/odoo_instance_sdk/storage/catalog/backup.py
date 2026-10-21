@@ -890,6 +890,32 @@ class _BackupMixin:
         return _row_to_cluster_claim(row) if row is not None else None
 
     @_translate_sqlite_error
+    def _get_postgres_cluster_for_project(
+        self,
+        project_id: str,
+        repository_root: str | Path,
+        git_common_dir: str | Path,
+    ) -> PostgresClusterClaim | None:
+        """Resolve the exact or legacy Compose claim for one registration."""
+        claim = self._get_postgres_cluster(project_id)
+        if claim is not None:
+            return claim
+        root, common = Path(repository_root).resolve(), Path(git_common_dir).resolve()
+
+        legacy_project_id = repo_key(root, common)
+        if project_id != f"project_{legacy_project_id}":
+            return None
+        legacy = self._get_postgres_cluster(legacy_project_id)
+        if legacy is None:
+            return None
+        if (
+            legacy.compose_project != f"odcli_pg_{legacy_project_id}"
+            or legacy.volume_name != f"pgdata_{legacy_project_id}"
+        ):
+            return None
+        return legacy
+
+    @_translate_sqlite_error
     def _get_postgres_cluster_by_id(
         self, cluster_id: uuid.UUID | str
     ) -> PostgresClusterClaim | None:

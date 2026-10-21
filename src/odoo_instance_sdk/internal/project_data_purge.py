@@ -149,6 +149,7 @@ class ComposeClusterPurgeTarget:
     compose_project: str
     container_name: str
     volume_name: str
+    claim_project_id: str | None = None
     dependencies: tuple[str, ...] = ()
     dependency_check: Callable[[], bool] | None = None
     compose_file: Path | None = None
@@ -313,6 +314,7 @@ class BackupPurgeAdapter:
 def _identity_labels(
     value: Mapping[str, JsonValue], *, container: bool, target: ComposeClusterPurgeTarget
 ) -> bool:
+    claim_project_id = target.claim_project_id or target.project_id
     if container:
         config = value.get("Config")
         labels = config.get("Labels") if isinstance(config, Mapping) else None
@@ -322,7 +324,7 @@ def _identity_labels(
             and isinstance(labels, Mapping)
             and labels.get("com.docker.compose.project") == target.compose_project
             and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
-            and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
+            and labels.get("io.odoo-instance-sdk.project-id") == claim_project_id
             and isinstance(mounts, list)
             and any(
                 isinstance(mount, Mapping)
@@ -337,7 +339,7 @@ def _identity_labels(
         and isinstance(labels, Mapping)
         and labels.get("com.docker.compose.project") == target.compose_project
         and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
-        and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
+        and labels.get("io.odoo-instance-sdk.project-id") == claim_project_id
     )
 
 
@@ -356,12 +358,13 @@ class ComposeClusterPurgeAdapter:
         self._executor = executor or SubprocessExecutor()
 
     def _claim_matches(self, target: ComposeClusterPurgeTarget) -> bool:
-        claim = self._catalog._get_postgres_cluster(target.project_id)
+        claim_project_id = target.claim_project_id or target.project_id
+        claim = self._catalog._get_postgres_cluster(claim_project_id)
         return bool(
             claim is not None
             and claim.state == "active"
             and str(claim.cluster_id) == target.cluster_id
-            and claim.project_id == target.project_id
+            and claim.project_id == claim_project_id
             and claim.compose_project == target.compose_project
             and claim.volume_name == target.volume_name
         )

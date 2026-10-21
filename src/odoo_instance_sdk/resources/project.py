@@ -94,7 +94,11 @@ class ProjectResource:
         )
         database_inventory = None
         volume_observation: VolumeResourceSource | None = None
-        claim = catalog._get_postgres_cluster(registration.project_id)
+        claim = catalog._get_postgres_cluster_for_project(
+            registration.project_id,
+            registration.repository_root,
+            registration.git_common_dir or registration.repository_root / ".git",
+        )
         if purge and project_config is not None:
             try:
                 instance = client.instance.from_project(project_config)
@@ -122,7 +126,7 @@ class ProjectResource:
                                 cluster.compose_runner,
                                 claim.volume_name,
                                 str(claim.cluster_id),
-                                project_id=registration.project_id,
+                                project_id=claim.project_id,
                             )
                             snapshot = cluster.resource_snapshot()
                         except (OSError, ValueError, PostgresClusterError):
@@ -264,6 +268,7 @@ class ProjectResource:
                         compose_project=claim.compose_project,
                         container_name=f"{claim.compose_project}-postgres-1",
                         volume_name=claim.volume_name,
+                        claim_project_id=claim.project_id,
                         dependencies=_compose_dependencies(),
                         dependency_check=_compose_dependency_check,
                     )
