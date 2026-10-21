@@ -99,8 +99,18 @@ class _QueriesMixin:
             filestore: bool,
         ) -> tuple[str | None, int, str]: ...
 
+    def _request_base_url(self) -> str:
+        from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+            active_auxiliary_restore_session,
+        )
+
+        session = active_auxiliary_restore_session()
+        if session is not None and session.owns_instance(self._instance):
+            return session.request_base_url
+        return self.base_url
+
     def _url(self, path: str) -> str:
-        return f"{self.base_url.rstrip('/')}/web/database/{path}"
+        return f"{self._request_base_url().rstrip('/')}/web/database/{path}"
 
     def _require_password(self) -> str:
         if self.master_password is None:
@@ -459,11 +469,12 @@ class _QueriesMixin:
     def _http(self, timeout: float | None = None) -> Iterator[OdooHttpClient]:
         from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
 
-        warn_if_cleartext_secret(self.base_url)
+        base_url = self._request_base_url()
+        warn_if_cleartext_secret(base_url)
         effective = (
             timeout if timeout is not None else self._instance._client.config.http_timeout_seconds
         )
-        with open_odoo_http_client(self.base_url, timeout=effective) as http:
+        with open_odoo_http_client(base_url, timeout=effective) as http:
             yield http
 
     def names(self) -> tuple[str, ...]:

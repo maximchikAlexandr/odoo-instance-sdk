@@ -7,8 +7,9 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import pytest
@@ -54,6 +55,23 @@ def _record(record_property: Any, evidence: str, value: object) -> None:
     record_property(evidence.lower().replace("-", "_"), json.dumps(value, default=str))
 
 
+@dataclass(frozen=True)
+class _SmokeWorkflow:
+    source_server: E2ERuntime
+    runtime: E2ERuntime
+    project: Path
+    config: Path
+    proxy: Path
+    environment: dict[str, str]
+    runner: CliRunner
+
+
+@dataclass(frozen=True)
+class _SmokeRestoreResult:
+    restored_database: str
+    backup: dict[str, Any]
+
+
 def _git_project(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     result = subprocess.run(
@@ -65,11 +83,12 @@ def _git_project(path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def _write_target_proxy(project: Path, target_url: str, auxiliary_port: int) -> Path:
+def _write_target_proxy(project: Path, target_url: str) -> Path:
     """Proxy the owned container Odoo through the project runtime boundary."""
     proxy = project / "smoke-odoo-proxy.py"
     proxy.write_text(
         """from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -105,9 +124,18 @@ class Proxy(BaseHTTPRequestHandler):
     do_HEAD = _forward
 
 
+def _http_port():
+    for index, argument in enumerate(sys.argv):
+        if argument == "--http-port":
+            return int(sys.argv[index + 1])
+        if argument.startswith("--http-port="):
+            return int(argument.split("=", 1)[1])
+    raise RuntimeError("Odoo did not provide --http-port")
+
+
 if __name__ == \"__main__\":
-    ThreadingHTTPServer((\"127.0.0.1\", __AUXILIARY_PORT__), Proxy).serve_forever()
-""".replace("__TARGET_URL__", repr(target_url)).replace("__AUXILIARY_PORT__", str(auxiliary_port)),
+    ThreadingHTTPServer((\"127.0.0.1\", _http_port()), Proxy).serve_forever()
+""".replace("__TARGET_URL__", repr(target_url)),
         encoding="utf-8",
     )
     proxy.chmod(0o700)
@@ -215,13 +243,9 @@ def _align_target_master_password(runtime: E2ERuntime, source: E2ERuntime) -> No
     )
 
 
-@pytest.mark.timeout(180, func_only=True)
-def test_container_smoke_public_path(
-    source_server: E2ERuntime,
-    target_runtime: E2ERuntime,
-    record_property: Any,
-) -> None:
-    """Exercise E2E-SM-01..05 through one disposable image-backed workflow."""
+def _prepare_smoke_workflow(
+    source_server: E2ERuntime, target_runtime: E2ERuntime
+) -> _SmokeWorkflow:
     runtime = target_runtime
     _align_target_master_password(runtime, source_server)
     _start_target_odoo(runtime)
@@ -241,7 +265,6 @@ def test_container_smoke_public_path(
     proxy = _write_target_proxy(
         project,
         f"http://127.0.0.1:{runtime.reservations[3].port}",
-        auxiliary_http_port,
     )
     environment = dict(os.environ)
     environment.update(runtime.environment)
@@ -255,35 +278,45 @@ def test_container_smoke_public_path(
             ),
         }
     )
-    runner = CliRunner()
+    return _SmokeWorkflow(
+        source_server=source_server,
+        runtime=runtime,
+        project=project,
+        config=config,
+        proxy=proxy,
+        environment=environment,
+        runner=CliRunner(),
+    )
 
+
+def _record_smoke_initialization(workflow: _SmokeWorkflow, record_property: Any) -> None:
     initialized = _invoke(
-        runner,
-        project,
-        environment,
+        workflow.runner,
+        workflow.project,
+        workflow.environment,
         "init",
         "--no-input",
         "--allow-partial",
         "--odoo-bin",
-        str(proxy),
+        str(workflow.proxy),
         "--python",
         sys.executable,
         "--config",
-        str(config),
+        str(workflow.config),
         "--database",
-        runtime.topology.target_sentinel_database,
+        workflow.runtime.topology.target_sentinel_database,
         command_project=True,
     )
-    manifest_path = project / ".odcli" / "project.toml"
+    manifest_path = workflow.project / ".odcli" / "project.toml"
     assert manifest_path.is_file()
-    loaded = ProjectConfig.load(project)
+    loaded = ProjectConfig.load(workflow.project)
     from odoo_instance_sdk.project import TestInstanceProjectConfig
 
     loaded = msgspec.structs.replace(
         loaded,
         test_instance=TestInstanceProjectConfig(
-            base_url=f"http://127.0.0.1:{source_server.topology.source_odoo_port}",
-            database=source_server.topology.source_database,
+            base_url=f"http://127.0.0.1:{workflow.source_server.topology.source_odoo_port}",
+            database=workflow.source_server.topology.source_database,
             git_branch=E2E_PINS.odoo_source_commit,
         ),
         default_base_ref=E2E_PINS.odoo_source_commit,
@@ -295,15 +328,19 @@ def test_container_smoke_public_path(
         {
             "manifest": manifest_path,
             "init": initialized,
-            "target_compose_project": target_runtime.topology.project_name,
-            "target_database_manager": (f"http://127.0.0.1:{target_runtime.reservations[3].port}"),
+            "target_compose_project": workflow.runtime.topology.project_name,
+            "target_database_manager": (
+                f"http://127.0.0.1:{workflow.runtime.reservations[3].port}"
+            ),
         },
     )
 
+
+def _restore_smoke_database(workflow: _SmokeWorkflow, record_property: Any) -> _SmokeRestoreResult:
     refreshed = _invoke(
-        runner,
-        project,
-        environment,
+        workflow.runner,
+        workflow.project,
+        workflow.environment,
         "db",
         "refresh",
         "--restore",
@@ -314,21 +351,57 @@ def test_container_smoke_public_path(
     backup = refreshed.get("backup")
     assert isinstance(restored_database, str) and restored_database
     assert isinstance(backup, dict) and isinstance(backup.get("id"), str)
-    restored_filestore = runtime.root / "target-data" / "filestore" / restored_database
+    restored_filestore = workflow.runtime.root / "target-data" / "filestore" / restored_database
     assert restored_filestore.is_dir()
     assert any(path.is_file() and path.stat().st_size > 0 for path in restored_filestore.rglob("*"))
-    assert runtime.environment["ODCLI_E2E_CATALOG"].startswith(str(runtime.root))
+    assert workflow.runtime.environment["ODCLI_E2E_CATALOG"].startswith(str(workflow.runtime.root))
     _record(record_property, "E2E-SM-02", {"database": restored_database, "backup": backup})
+    return _SmokeRestoreResult(
+        restored_database=restored_database,
+        backup=cast("dict[str, Any]", backup),
+    )
 
-    validated = _invoke(runner, project, environment, "backup", "validate", str(backup["id"]))
+
+def _validate_smoke_backup(
+    workflow: _SmokeWorkflow, restore_result: _SmokeRestoreResult, record_property: Any
+) -> None:
+    validated = _invoke(
+        workflow.runner,
+        workflow.project,
+        workflow.environment,
+        "backup",
+        "validate",
+        str(restore_result.backup["id"]),
+    )
     assert validated
     _record(record_property, "E2E-SM-03", validated)
 
-    databases = _invoke(runner, project, environment, "db", "list")
-    assert restored_database in json.dumps(databases)
+
+def _list_smoke_databases(
+    workflow: _SmokeWorkflow, restore_result: _SmokeRestoreResult, record_property: Any
+) -> None:
+    databases = _invoke(workflow.runner, workflow.project, workflow.environment, "db", "list")
+    assert restore_result.restored_database in json.dumps(databases)
     _record(record_property, "E2E-SM-04", databases)
 
-    health = _invoke(runner, project, environment, "resource", "doctor")
+
+def _check_smoke_health(workflow: _SmokeWorkflow, record_property: Any) -> None:
+    health = _invoke(workflow.runner, workflow.project, workflow.environment, "resource", "doctor")
     findings = health.get("findings")
     assert isinstance(findings, list)
     _record(record_property, "E2E-SM-05", health)
+
+
+@pytest.mark.timeout(180, func_only=True)
+def test_container_smoke_public_path(
+    source_server: E2ERuntime,
+    target_runtime: E2ERuntime,
+    record_property: Any,
+) -> None:
+    """Exercise E2E-SM-01..05 through one disposable image-backed workflow."""
+    workflow = _prepare_smoke_workflow(source_server, target_runtime)
+    _record_smoke_initialization(workflow, record_property)
+    restore_result = _restore_smoke_database(workflow, record_property)
+    _validate_smoke_backup(workflow, restore_result, record_property)
+    _list_smoke_databases(workflow, restore_result, record_property)
+    _check_smoke_health(workflow, record_property)

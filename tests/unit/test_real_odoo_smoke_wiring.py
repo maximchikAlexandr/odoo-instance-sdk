@@ -1,7 +1,10 @@
 """smoke tests for the real-Odoo CI contract."""
 
 import json
+import runpy
 import subprocess
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -128,12 +131,28 @@ def test_smoke_target_wiring_keeps_source_and_target_endpoints_distinct(tmp_path
     assert "source_postgres" not in host_config
 
 
-def test_smoke_auxiliary_proxy_is_project_bound(tmp_path: Path) -> None:
-    proxy = smoke._write_target_proxy(tmp_path, "http://127.0.0.1:18069", 18070)
+@pytest.mark.parametrize(
+    ("argv", "expected_port"),
+    [
+        (["smoke-proxy", "--http-port", "18101"], 18101),
+        (["smoke-proxy", "--http-port=18102"], 18102),
+    ],
+)
+def test_smoke_auxiliary_proxy_is_project_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected_port: int,
+) -> None:
+    proxy = smoke._write_target_proxy(tmp_path, "http://127.0.0.1:18070")
     assert proxy.stat().st_mode & 0o777 == 0o700
     proxy_source = proxy.read_text(encoding="utf-8")
-    assert "http://127.0.0.1:18069" in proxy_source
-    assert '("127.0.0.1", 18070)' in proxy_source
+    assert "http://127.0.0.1:18070" in proxy_source
+    monkeypatch.setattr(sys, "argv", argv)
+    proxy_namespace = runpy.run_path(str(proxy), run_name="proxy_test")
+    parse_port = cast("Callable[[], int]", proxy_namespace["_http_port"])
+    assert parse_port() == expected_port
+    assert parse_port() != 18069
 
 
 def test_smoke_releases_target_port_before_compose_and_waits_for_health(

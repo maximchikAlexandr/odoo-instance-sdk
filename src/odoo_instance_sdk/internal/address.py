@@ -47,7 +47,6 @@ def probe_address(host: str, port: int) -> AddressState:
 def _probe_bind(family: int, socktype: int, proto: int, sockaddr: SocketAddress) -> AddressState:
     try:
         sock = socket.socket(family, socktype, proto)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.settimeout(0.2)
         try:
             sock.bind(sockaddr)

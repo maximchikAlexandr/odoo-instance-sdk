@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import struct
 from typing import cast
 from unittest.mock import Mock
 
@@ -46,8 +47,9 @@ def test_probe_allows_immediate_bind_after_closed_accepted_loopback() -> None:
     try:
         client.connect(("127.0.0.1", port))
         accepted, _ = listener.accept()
-        accepted.close()
+        accepted.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         client.close()
+        accepted.close()
         listener.close()
         assert probe_address("127.0.0.1", port) is AddressState.FREE
     finally:
@@ -58,6 +60,17 @@ def test_probe_allows_immediate_bind_after_closed_accepted_loopback() -> None:
 def test_probe_keeps_live_listener_occupied() -> None:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        assert probe_address("127.0.0.1", listener.getsockname()[1]) is AddressState.OCCUPIED
+    finally:
+        listener.close()
+
+
+def test_probe_rejects_reuseaddr_wildcard_listener() -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("0.0.0.0", 0))
     listener.listen(1)
     try:
         assert probe_address("127.0.0.1", listener.getsockname()[1]) is AddressState.OCCUPIED
