@@ -252,6 +252,7 @@ class _RestoreMixin:
             f"{self.compose_project_name}-postgres-1",
             str(claim.cluster_id),
             project_id=self._project_id,
+            compose_project=self.compose_project_name,
             volume_name=compose_volume_name(self._project_id),
             timeout=timeout,
             step_id=container_step_id,

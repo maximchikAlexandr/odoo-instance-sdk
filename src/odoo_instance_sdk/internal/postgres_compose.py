@@ -571,6 +571,7 @@ def inspect_container_identity(
     cluster_id: str,
     *,
     project_id: str,
+    compose_project: str,
     volume_name: str,
     timeout: float | None = None,
     step_id: str | None = None,
@@ -594,7 +595,9 @@ def inspect_container_identity(
         labels = config.get("Labels") if isinstance(config, dict) else None
         mounts = value.get("Mounts")
         return (
-            isinstance(labels, dict)
+            value.get("Name") in {f"/{container_name}", container_name}
+            and isinstance(labels, dict)
+            and labels.get("com.docker.compose.project") == compose_project
             and labels.get("io.odoo-instance-sdk.cluster-id") == cluster_id
             and labels.get("io.odoo-instance-sdk.project-id") == project_id
             and isinstance(mounts, list)

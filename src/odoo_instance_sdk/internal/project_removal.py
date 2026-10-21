@@ -416,6 +416,8 @@ def _inventory_decision(  # noqa: C901
         action, reason = "retain", "external_resource"
     elif item.ownership_confidence is OwnershipConfidence.UNKNOWN:
         action, reason = "retain", "ownership_unproven"
+    elif item.type is ResourceType.VOLUME and item.reclaimable:
+        action, reason = "delete", "exclusive_sdk_ownership"
     elif item.active_use is ActiveUse.ACTIVE:
         action, reason = "retain", "active_use"
     elif (

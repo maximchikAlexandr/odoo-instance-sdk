@@ -93,7 +93,7 @@ def test_active_volume_is_reclaimable_only_for_its_proven_container() -> None:
                 available=True,
                 usage_bytes=1,
                 active=True,
-                active_container_owned=True,
+                container_identity_verified=True,
             ),
             VolumeResourceSource(
                 project_id="project-unproven",
@@ -120,7 +120,7 @@ def test_active_volume_is_reclaimable_only_for_its_proven_container() -> None:
         == stable_resource_identity("volume", "project-unproven\x00unproven-volume")
     )
     assert owned.reclaimable is True
-    assert owned.active_use is ActiveUse.INACTIVE
+    assert owned.active_use is ActiveUse.ACTIVE
     assert unproven.reclaimable is False
     assert unproven.active_use is ActiveUse.ACTIVE
 

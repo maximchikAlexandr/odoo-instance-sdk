@@ -848,6 +848,10 @@ def test_public_purge_refuses_invalid_git_common_for_postgres_claim(
         "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
         lambda *_args, **_kwargs: True,
     )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
+        lambda *_args, **_kwargs: True,
+    )
     database_executor = RecordingExecutor()
 
     def capture_child(
@@ -962,7 +966,26 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     )
     cluster = SimpleNamespace(
         owned=True,
-        compose_runner=SimpleNamespace(),
+        compose_runner=SimpleNamespace(
+            run=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "Name": f"/{compose_project}-postgres-1",
+                        "Config": {
+                            "Labels": {
+                                "com.docker.compose.project": compose_project,
+                                "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
+                                "io.odoo-instance-sdk.project-id": legacy_project_id,
+                            }
+                        },
+                        "Mounts": [{"Type": "volume", "Name": volume_name}],
+                    }
+                ),
+                stderr="",
+            )
+        ),
         resource_snapshot=lambda: SimpleNamespace(
             container=SimpleNamespace(id="owned-container"),
             metrics=SimpleNamespace(volume_usage_bytes=1024),
@@ -1094,8 +1117,9 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     catalog.close()
 
 
-def test_public_remove_command_blocks_forget_when_required_observation_is_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("container_probe", ["mismatch", "unavailable"])
+def test_public_remove_command_blocks_forget_for_mismatched_snapshot_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, container_probe: str
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
     manifest_dir = root / ".odcli"
@@ -1112,16 +1136,32 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
         claim.cluster_id, legacy_project_id, compose_project, volume_name
     )
 
-    def unavailable_inventory(*_args: object, **_kwargs: object) -> DatabaseInventoryResult:
-        raise OSError("database observation unavailable")
+    database_inventory = DatabaseInventoryResult(
+        cluster="127.0.0.1:5432",
+        databases=(
+            DatabaseInventoryItem(
+                cluster="127.0.0.1:5432",
+                cluster_id=None,
+                name="owned_db",
+                logical_size_bytes=1,
+                active_sessions=0,
+                is_default=True,
+            ),
+        ),
+        tracked=True,
+    )
 
     cluster = SimpleNamespace(
         owned=True,
         compose_runner=SimpleNamespace(),
-        resource_snapshot=lambda: (_ for _ in ()).throw(OSError("Compose observation unavailable")),
+        resource_snapshot=lambda: SimpleNamespace(
+            container=SimpleNamespace(id="foreign-container"),
+            metrics=SimpleNamespace(volume_usage_bytes=1),
+            unavailability_reason=None,
+        ),
     )
     instance = SimpleNamespace(
-        databases=SimpleNamespace(list_inventory=unavailable_inventory),
+        databases=SimpleNamespace(list_inventory=lambda *_args, **_kwargs: database_inventory),
         _postgres_cluster=cluster,
     )
     client = cast(
@@ -1133,8 +1173,37 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
-        lambda *_args, **_kwargs: False,
+        lambda *_args, **_kwargs: True,
     )
+    if container_probe == "mismatch":
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
+            lambda *_args, **_kwargs: False,
+        )
+    else:
+
+        def unavailable_container(*_args: object, **_kwargs: object) -> bool:
+            raise OSError("container observation unavailable")
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
+            unavailable_container,
+        )
+    database_executor = RecordingExecutor()
+
+    def capture_database(
+        _adapter: DatabasePurgeAdapter,
+        decision: ProjectResourceDecision,
+        *,
+        project_id: str,
+    ) -> Command[ProjectResourceDecision] | None:
+        del project_id
+        return cast(
+            "Command[ProjectResourceDecision]",
+            _process_child(database_executor, decision.identity),
+        )
+
+    monkeypatch.setattr(DatabasePurgeAdapter, "capture", capture_database)
 
     command = ProjectResource(_client=client).remove_command(
         ProjectSelector.from_project_id(project_id),
@@ -1146,6 +1215,7 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
 
     details = cast("dict[str, object]", error.value.details["removal"])
     assert details["failed_step"] == "project-removal:observations"
+    assert database_executor.executed == []
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert manifest.exists()
     assert root.exists()
@@ -1181,6 +1251,73 @@ def test_public_remove_command_blocks_malformed_manifest_before_mutation(
     assert manifest.read_bytes() == before
     assert root.exists()
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_remove_command_retains_registration_when_instance_probe_fails(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.exceptions import ConfigError
+
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(
+                from_project=lambda _project: (_ for _ in ()).throw(ConfigError("probe failed"))
+            ),
+        ),
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    with pytest.raises(ProjectRemovalError, match="observation"):
+        command.run()
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert manifest.exists()
+    catalog.close()
+
+
+def test_public_remove_command_retains_registration_when_database_probe_fails(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(
+            list_inventory=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("database probe failed")
+            )
+        )
+    )
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=lambda _project: instance),
+        ),
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    with pytest.raises(ProjectRemovalError, match="observation"):
+        command.run()
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert manifest.exists()
     catalog.close()
 
 

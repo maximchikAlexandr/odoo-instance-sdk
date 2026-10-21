@@ -181,7 +181,7 @@ class VolumeResourceSource:
     available: bool
     usage_bytes: int | None
     active: bool | None = None
-    active_container_owned: bool = False
+    container_identity_verified: bool = False
     reason: str | None = None
 
 
@@ -465,7 +465,9 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
     reclaimable = (
         source.owned
         and source.available
-        and (source.active is False or (source.active is True and source.active_container_owned))
+        and (
+            source.active is False or (source.active is True and source.container_identity_verified)
+        )
     )
     return ResourceInventoryItem(
         stable_identity=identity,
@@ -473,9 +475,7 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
         name=identity,
         relationships=(f"project:{source.project_id}",),
         ownership_confidence=ownership,
-        active_use=ActiveUse.INACTIVE
-        if reclaimable
-        else (
+        active_use=(
             ActiveUse.ACTIVE
             if source.active is True
             else ActiveUse.INACTIVE
