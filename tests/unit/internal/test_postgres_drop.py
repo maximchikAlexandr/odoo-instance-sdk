@@ -1690,6 +1690,46 @@ def test_non_deferred_drop_refuses_replaced_database_before_mutation(
 
 
 @pytest.mark.unit
+def test_non_deferred_drop_refuses_missing_planning_database_oid_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "missing-planning-identity.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        database_oid=101,
+    )
+    executor = _executor(database_oid=None)
+
+    with pytest.raises(ConfigError, match="identity evidence is unavailable"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            force_default=True,
+            executor=executor,
+        ).run()
+    assert not any(
+        step.step_id.endswith("database.terminate.execute") for step in executor.executed
+    )
+    assert not any(step.step_id.endswith("database.drop.execute") for step in executor.executed)
+    assert catalog._project_bound_database_records(
+        cluster._project_id, claim.cluster_id, cluster.endpoint_host, cluster.endpoint_port
+    ) == (("feature_db", 101), ("tmp", 101))
+    catalog.close()
+
+
+@pytest.mark.unit
 def test_binding_without_database_oid_refuses_before_mutation(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
 ) -> None:
