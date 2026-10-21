@@ -575,26 +575,26 @@ def inspect_container_identity(
     volume_name: str,
     timeout: float | None = None,
     step_id: str | None = None,
-) -> bool:
-    """Prove the managed service label and its exact named-volume mount."""
+) -> str | None:
+    """Return the exact managed container ID when identity and mount match."""
     _require_timeout_budget(timeout)
     args = ["docker", "inspect", "--format", "{{json .}}", container_name]
     try:
         result = _run_compose(runner, args, cwd=None, timeout=timeout, step_id=step_id)
-    except (OSError, subprocess.SubprocessError):
-        return False
+    except (AttributeError, OSError, subprocess.SubprocessError):
+        return None
     if result.returncode != 0:
-        return False
+        return None
     try:
         value = json.loads(result.stdout)
         if isinstance(value, list):
             value = value[0] if value else None
         if not isinstance(value, dict):
-            return False
+            return None
         config = value.get("Config")
         labels = config.get("Labels") if isinstance(config, dict) else None
         mounts = value.get("Mounts")
-        return (
+        if not (
             value.get("Name") in {f"/{container_name}", container_name}
             and isinstance(labels, dict)
             and labels.get("com.docker.compose.project") == compose_project
@@ -607,9 +607,12 @@ def inspect_container_identity(
                 and mount.get("Name") == volume_name
                 for mount in mounts
             )
-        )
+        ):
+            return None
+        container_id = value.get("Id")
+        return container_id if isinstance(container_id, str) and container_id else None
     except (json.JSONDecodeError, IndexError, TypeError):
-        return False
+        return None
 
 
 def derive_state(  # noqa: C901
