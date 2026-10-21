@@ -349,7 +349,10 @@ def _projection(
             and volume_observation.volume_name == active_claim.volume_name
         ):
             volumes = (volume_observation,)
-            volume_observed = volume_observation.available and volume_observation.active is not None
+            volume_observed = volume_observation.available and (
+                volume_observation.active is False
+                or (volume_observation.active is True and volume_observation.active_container_owned)
+            )
         else:
             volume_observation = VolumeResourceSource(
                 project_id=registration.project_id,
@@ -369,9 +372,7 @@ def _projection(
         for item in observed_databases
         if database_name is None or item.name == database_name
     )
-    volume_inactive = active_claim is None or (
-        volume_observation is not None and volume_observed and volume_observation.active is False
-    )
+    volume_inactive = active_claim is None or volume_observed
     required_observations_complete = (
         config_evidence_complete
         and not registration.repository_root.is_symlink()

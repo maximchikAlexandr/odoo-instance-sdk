@@ -153,6 +153,7 @@ class ProjectResource:
                                 if volume_verified and container is not None
                                 else None
                             ),
+                            active_container_owned=(volume_verified and container is not None),
                             reason=(
                                 None
                                 if volume_verified and (stopped or container is not None)
