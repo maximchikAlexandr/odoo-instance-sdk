@@ -314,31 +314,86 @@ def run_bootstrap_tmp(
     return BootstrapOutcome.CREATED
 
 
+def _inventory_shape_metadata(
+    result: ProcessResultLike, stdout: object = None, *, line_count: int | None = None
+) -> str:
+    """Return bounded shape-only diagnostics for an inventory failure."""
+    if not isinstance(result, ProcessResult):
+        return "result_type=unsupported"
+    if stdout is None:
+        stdout = result.stdout
+    if stdout is None:
+        stdout_type = "none"
+        stdout_length = 0
+    elif isinstance(stdout, str):
+        stdout_type = "str"
+        stdout_length = len(stdout)
+    elif isinstance(stdout, bytes):
+        stdout_type = "bytes"
+        stdout_length = len(stdout)
+    else:
+        stdout_type = "unsupported"
+        stdout_length = 0
+    fields = [
+        "result_type=ProcessResult",
+        f"stdout_type={stdout_type}",
+        f"stdout_length={stdout_length}",
+    ]
+    if line_count is not None:
+        fields.append(f"line_count={line_count}")
+    return " ".join(fields)
+
+
 def _read_database_inventory(result: ProcessResultLike) -> tuple[ObservedDatabase, ...]:
     """Decode one successful, non-empty PostgreSQL inventory observation."""
     if not isinstance(result, ProcessResult):
-        raise BootstrapFailedError("database inventory observation returned no process result")
+        raise BootstrapFailedError(
+            "database inventory observation returned no process result "
+            f"({_inventory_shape_metadata(result)})"
+        )
     if result.returncode != 0:
-        raise BootstrapFailedError("database inventory observation failed")
-    stdout = result.stdout or ""
+        raise BootstrapFailedError(
+            "database inventory observation failed "
+            f"(returncode={result.returncode} {_inventory_shape_metadata(result)})"
+        )
+    raw_stdout = result.stdout
+    stdout = "" if raw_stdout is None else raw_stdout
     if isinstance(stdout, bytes):
         try:
             stdout = stdout.decode("utf-8")
         except UnicodeDecodeError as error:
             raise BootstrapFailedError(
-                "database inventory observation was not valid UTF-8"
+                "database inventory observation was not valid UTF-8 "
+                f"({_inventory_shape_metadata(result, raw_stdout)})"
             ) from error
+    if not isinstance(stdout, str):
+        raise BootstrapFailedError(
+            "database inventory observation was invalid "
+            f"({_inventory_shape_metadata(result, raw_stdout)})"
+        )
+    lines = stdout.splitlines()
     observations: list[ObservedDatabase] = []
-    for line in str(stdout).splitlines():
+    for line_index, line in enumerate(lines):
         parts = line.strip().split("\t")
         if len(parts) != 2 or not parts[0] or not parts[1].isdigit():
-            raise BootstrapFailedError("database inventory observation was invalid")
+            raise BootstrapFailedError(
+                "database inventory observation was invalid "
+                f"({_inventory_shape_metadata(result, raw_stdout, line_count=len(lines))} "
+                f"invalid_line={line_index} field_count={len(parts)})"
+            )
         oid = int(parts[1])
         if oid <= 0 or any(ord(char) < 0x20 and char != "\t" for char in line):
-            raise BootstrapFailedError("database inventory observation was invalid")
+            raise BootstrapFailedError(
+                "database inventory observation was invalid "
+                f"({_inventory_shape_metadata(result, raw_stdout, line_count=len(lines))} "
+                f"invalid_line={line_index} field_count={len(parts)})"
+            )
         observations.append(ObservedDatabase(parts[0], oid))
     if not observations:
-        raise BootstrapFailedError("database inventory observation was invalid")
+        raise BootstrapFailedError(
+            "database inventory observation was invalid "
+            f"({_inventory_shape_metadata(result, raw_stdout, line_count=len(lines))})"
+        )
     return tuple({item.name: item for item in observations}.values())
 
 
