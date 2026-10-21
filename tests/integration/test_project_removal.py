@@ -967,9 +967,9 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         owned=True,
         compose_runner=SimpleNamespace(),
         resource_snapshot=lambda: SimpleNamespace(
-            container=None,
+            container=SimpleNamespace(id="owned-container"),
             metrics=SimpleNamespace(volume_usage_bytes=1024),
-            unavailability_reason="stopped",
+            unavailability_reason=None,
         ),
     )
     instance = SimpleNamespace(
@@ -1012,11 +1012,21 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
                     },
                 }
             )
-        elif (
-            step.step_id.endswith("inspect-container")
-            or step.step_id.endswith("verify-volume")
-            or step.step_id.endswith("verify-container")
-        ):
+        elif step.step_id.endswith("inspect-container"):
+            stdout = json.dumps(
+                {
+                    "Name": f"/{compose_project}-postgres-1",
+                    "Config": {
+                        "Labels": {
+                            "com.docker.compose.project": compose_project,
+                            "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
+                            "io.odoo-instance-sdk.project-id": legacy_project_id,
+                        }
+                    },
+                    "Mounts": [{"Type": "volume", "Name": volume_name}],
+                }
+            )
+        elif step.step_id.endswith("verify-volume") or step.step_id.endswith("verify-container"):
             stdout = ""
             return ProcessResult(
                 argv=step.argv,
@@ -1067,7 +1077,15 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     assert [step.step_id for step in database_executor.executed] == [
         "project-removal.database.guarded-drop:database:owned_db"
     ]
-    assert any(step.step_id.endswith("remove-volume") for step in compose_executor.executed)
+    assert [step.step_id.rsplit(":", 1)[-1] for step in compose_executor.executed] == [
+        "inspect-volume",
+        "inspect-container",
+        "stop-container",
+        "remove-container",
+        "remove-volume",
+        "verify-volume",
+        "verify-container",
+    ]
     assert tuple(
         item.resource_type
         for item in result.completed
