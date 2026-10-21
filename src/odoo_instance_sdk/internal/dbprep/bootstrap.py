@@ -44,6 +44,7 @@ _ContextT = TypeVar("_ContextT")
 
 BOOTSTRAP_DATABASE = "tmp"
 _BOOTSTRAP_DATABASE = BOOTSTRAP_DATABASE
+_SYSTEM_DATABASE_NAMES = frozenset(("postgres", "template0", "template1"))
 
 
 def candidate_database_names(
@@ -51,10 +52,11 @@ def candidate_database_names(
 ) -> tuple[str, ...]:
     """Return ordered init candidates, including the configured PostgreSQL user database."""
     return tuple(
-        filter(
-            None,
-            dict.fromkeys((BOOTSTRAP_DATABASE, default_source_database, source_database, db_user)),
+        name
+        for name in dict.fromkeys(
+            (BOOTSTRAP_DATABASE, default_source_database, source_database, db_user)
         )
+        if name and name not in _SYSTEM_DATABASE_NAMES
     )
 
 
