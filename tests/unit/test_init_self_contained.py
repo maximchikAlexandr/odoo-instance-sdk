@@ -1081,6 +1081,7 @@ def test_repeated_compose_resume_failure_preserves_boundary_error_and_ledger(
             "init.bootstrap.tmp.probe",
             "init.bootstrap.tmp",
             "init.bootstrap.tmp.ready",
+            "init.bootstrap.databases",
             "catalog.bootstrap.tmp.record",
         ),
         (
@@ -1088,6 +1089,7 @@ def test_repeated_compose_resume_failure_preserves_boundary_error_and_ledger(
             "init.bootstrap.tmp.probe",
             "init.bootstrap.tmp",
             "init.bootstrap.tmp.ready",
+            "init.bootstrap.databases",
             "catalog.bootstrap.tmp.record",
         ),
     ]

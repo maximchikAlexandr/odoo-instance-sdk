@@ -1518,6 +1518,38 @@ def test_bootstrap_drop_accepts_exact_event_and_records_drop(
 
 
 @pytest.mark.unit
+def test_init_binding_drop_accepts_exact_observed_database(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "init-binding.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+    )
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "feature_db",
+        force_default=True,
+        executor=_executor(),
+    ).run()
+
+    assert result.database == "feature_db"
+    catalog.close()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("revocation", ["dropped", "restored"])
 def test_bootstrap_authority_is_revoked_or_delegated_by_latest_event(
     monkeypatch: pytest.MonkeyPatch,

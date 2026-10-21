@@ -193,18 +193,24 @@ class ProjectResource:
                             project=project_config,
                         ).run()
                         durable_names = set(
-                            catalog.project_restored_database_names(registration.project_id)
+                            catalog._project_restored_database_names(
+                                registration.project_id,
+                                claim.cluster_id if claim is not None else "",
+                                *(recovery_endpoint or ("", 0)),
+                            )
+                            if claim is not None and recovery_endpoint is not None
+                            else ()
                         )
                         if recovery_endpoint is not None and claim is not None:
                             durable_names.update(
-                                catalog.project_bound_database_names(
+                                catalog._project_bound_database_names(
                                     claim.project_id,
                                     claim.cluster_id,
                                     *recovery_endpoint,
                                 )
                             )
                             durable_names.update(
-                                catalog.project_bootstrapped_database_names(
+                                catalog._project_bootstrapped_database_names(
                                     claim.cluster_id, *recovery_endpoint
                                 )
                             )
