@@ -202,6 +202,46 @@ def test_public_init_then_immediate_forget_revalidates_same_plan(
     catalog.close()
 
 
+def test_public_purge_reuses_captured_git_decision_before_forget(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True, text=True)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
+    untracked = root / "untracked-addon.py"
+    untracked.write_text("preserve me\n", encoding="utf-8")
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(
+            list_inventory=lambda *_args, **_kwargs: DatabaseInventoryResult(
+                cluster="127.0.0.1:5432", databases=(), tracked=True
+            )
+        ),
+        _postgres_cluster=None,
+    )
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        instance=SimpleNamespace(from_project=lambda _project: instance),
+    )
+
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    assert command.plan.fingerprint
+    assert command.plan.steps[0].step_id == f"project-removal:git-status:{project_id}"
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert root.exists()
+    assert untracked.read_text(encoding="utf-8") == "preserve me\n"
+    catalog.close()
+
+
 def test_public_forget_refuses_reactivation_after_capture(tmp_path: Path) -> None:
     catalog, project_id, root = _catalog(tmp_path)
     assert catalog.forget_project(project_id)
@@ -1098,8 +1138,14 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         purge=True,
         confirmation=f"{root.name}:{project_id}",
     )
+    captured_fingerprint = command.plan.fingerprint
+    assert captured_fingerprint
+    plan_step_ids = tuple(step.step_id for step in command.plan.steps)
+    assert any("database" in step_id and "guarded-drop" in step_id for step_id in plan_step_ids)
+    assert any(step_id.endswith(":destroy") for step_id in plan_step_ids)
     result = command.run()
 
+    assert command.plan.fingerprint == captured_fingerprint
     assert [step.step_id for step in database_executor.executed] == [
         "project-removal.database.guarded-drop:database:owned_db"
     ]

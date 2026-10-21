@@ -616,7 +616,7 @@ def capture_project_removal_command(  # noqa: C901
     registration = resolve_project_selector(selector, registrations)
     git_status_step_id = (
         f"project-removal:git-status:{registration.project_id}"
-        if (registration.repository_root / ".git" / "HEAD").is_file() and not purge
+        if (registration.repository_root / ".git" / "HEAD").is_file()
         else None
     )
     source_status_step = (
@@ -685,6 +685,7 @@ def capture_project_removal_command(  # noqa: C901
     child_executors: dict[str, ProcessExecutor] = {}
     if source_status_step is not None:
         flattened_steps.append(source_status_step)
+        child_executors[source_status_step.step_id] = SubprocessExecutor()
     for decision in decisions:
         child: Command[ProjectResourceDecision] | None
         if not purge or decision.action == "retain":
@@ -811,6 +812,8 @@ def capture_project_removal_command(  # noqa: C901
                 current,
                 database_inventory=database_inventory,
                 volume_observation=volume_observation,
+                git_status_step_id=git_status_step_id,
+                git_status_hardened=git_status_step_id is not None,
             )
             if not projection.complete:
                 raise _error(
