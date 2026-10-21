@@ -263,6 +263,7 @@ class _EnvironmentMixin:
         self,
         *,
         git_common_dir: str | None = None,
+        repository_root: str | None = None,
         project_id: str | None = None,
         include_removed: bool = False,
     ) -> list[sqlite3.Row]:
@@ -286,12 +287,29 @@ class _EnvironmentMixin:
                 params.append(git_common_dir)
             else:
                 clauses.append(
-                    "(project_id = ? OR (project_id IS NULL AND git_common_dir = ?)) "
-                    "AND (EXISTS (SELECT 1 FROM projects p WHERE p.project_id = ? "
-                    "AND p.registration_state = 'registered') OR NOT EXISTS ("
-                    "SELECT 1 FROM projects))"
+                    "(project_id = ? AND EXISTS (SELECT 1 FROM projects p "
+                    "WHERE p.project_id = ? AND p.registration_state = 'registered') "
+                    "OR (project_id IS NULL AND EXISTS (SELECT 1 FROM projects p "
+                    "WHERE p.project_id = ? AND p.repository_root = environments.repository_root "
+                    "AND p.git_common_dir = environments.git_common_dir "
+                    "AND p.registration_state = 'registered')))"
                 )
-                params.extend((project_id, git_common_dir, project_id))
+                params.extend((project_id, project_id, project_id))
+                if repository_root is not None:
+                    from odoo_instance_sdk.internal.repo_key import repo_key
+
+                    legacy_project_id = (
+                        f"project_{repo_key(Path(repository_root), Path(git_common_dir))}"
+                    )
+                else:
+                    legacy_project_id = None
+                if legacy_project_id == project_id:
+                    clauses[-1] = (
+                        "(" + clauses[-1] + " OR (project_id IS NULL AND repository_root = ? "
+                        "AND git_common_dir = ?))"
+                    )
+                    assert repository_root is not None
+                    params.extend((repository_root, git_common_dir))
         elif project_id is not None:
             clauses.append(
                 "project_id = ? AND EXISTS (SELECT 1 FROM projects p "
@@ -454,7 +472,12 @@ class _EnvironmentMixin:
 
     @_translate_sqlite_error
     def _monitor_snapshot_rows(
-        self, *, include_removed: bool = False, project_id: str | None = None
+        self,
+        *,
+        include_removed: bool = False,
+        project_id: str | None = None,
+        repository_root: str | None = None,
+        git_common_dir: str | None = None,
     ) -> MonitorCatalogSnapshot:
         """Read all monitor catalog inputs in one transactionally typed snapshot."""
         self._conn.execute("BEGIN")
@@ -476,14 +499,28 @@ class _EnvironmentMixin:
                 clauses.append("e.state != 'removed'")
             if project_id is not None:
                 clauses.append(
-                    "(e.project_id = ? OR (e.project_id IS NULL AND (EXISTS ("
-                    "SELECT 1 FROM projects p "
+                    "(e.project_id = ? AND EXISTS (SELECT 1 FROM projects p "
+                    "WHERE p.project_id = ? AND p.registration_state = 'registered') "
+                    "OR (e.project_id IS NULL AND EXISTS (SELECT 1 FROM projects p "
                     "WHERE p.project_id = ? AND p.repository_root = e.repository_root "
                     "AND p.git_common_dir = e.git_common_dir "
-                    "AND p.registration_state = 'registered') OR NOT EXISTS ("
-                    "SELECT 1 FROM projects))))"
+                    "AND p.registration_state = 'registered')))"
                 )
-                params.extend((project_id, project_id))
+                params.extend((project_id, project_id, project_id))
+                if repository_root is not None and git_common_dir is not None:
+                    from odoo_instance_sdk.internal.repo_key import repo_key
+
+                    legacy_project_id = (
+                        f"project_{repo_key(Path(repository_root), Path(git_common_dir))}"
+                    )
+                    if legacy_project_id == project_id:
+                        clauses[-1] = (
+                            "("
+                            + clauses[-1]
+                            + " OR (e.project_id IS NULL AND e.repository_root = ? "
+                            "AND e.git_common_dir = ?))"
+                        )
+                        params.extend((repository_root, git_common_dir))
             state_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
             environment_query = (
                 "SELECT e.*, b.state AS backup_state, b.path AS backup_path "

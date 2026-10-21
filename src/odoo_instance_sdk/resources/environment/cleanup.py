@@ -180,6 +180,7 @@ class _CleanupMixin:
                 project_id = f"project_{repo_key(project_path.resolve(), common_path)}"
                 rows = catalog.list_environments(
                     git_common_dir=str(common_path),
+                    repository_root=str(Path(_text(top).strip()).resolve()),
                     project_id=project_id,
                     include_removed=include_removed,
                 )

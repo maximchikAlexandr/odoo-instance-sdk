@@ -880,6 +880,8 @@ def collect_resource_inventory(
     database_measurement_reason: str | None = None,
     database_measurement_complete: bool | None = None,
     project_id: str | None = None,
+    repository_root: str | None = None,
+    git_common_dir: str | None = None,
     all_projects: bool = False,
 ) -> ResourceInventory:
     """Read existing catalogue projections, then build the same pure graph.
@@ -898,7 +900,12 @@ def collect_resource_inventory(
             include_all_states=True, limit=1000, project_id=project_id
         )
         backups = page.items
-        rows = catalog._monitor_snapshot_rows(include_removed=False, project_id=project_id)
+        rows = catalog._monitor_snapshot_rows(
+            include_removed=False,
+            project_id=project_id,
+            repository_root=repository_root,
+            git_common_dir=git_common_dir,
+        )
         if not env_sources:
             env_sources = tuple(
                 EnvironmentResourceSource(
