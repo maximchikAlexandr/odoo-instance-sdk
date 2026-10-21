@@ -6,6 +6,7 @@ import io
 import json
 import shutil
 import socket
+import struct
 import textwrap
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -587,8 +588,9 @@ class TestOdooTestRunner:
         try:
             client.connect(("127.0.0.1", port))
             accepted, _ = listener.accept()
-            accepted.close()
+            accepted.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             client.close()
+            accepted.close()
             listener.close()
             inst = _make_instance(tmp_path)
             payload = {"result": {"tests": 1, "successful": 1, "failed": 0, "errors": 0}}

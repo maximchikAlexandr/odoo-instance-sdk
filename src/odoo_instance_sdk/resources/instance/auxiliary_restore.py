@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -406,7 +406,15 @@ def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartCo
         raise InstanceConfigurationError(
             "stopped-project restore requires a project StartConfig; run `odcli init`"
         )
+    from odoo_instance_sdk.internal.port_allocation import find_free_port
+
     config = copy.deepcopy(config)
+    config.http_port = find_free_port(
+        "http",
+        None,
+        reserved_ports=(config.http_port,),
+    )
+    config.http_interface = "127.0.0.1"
     cluster = instance._postgres_cluster
     if cluster is not None and cluster.owned:
         from odoo_instance_sdk.internal.dbprep.bootstrap import BOOTSTRAP_DATABASE
@@ -445,6 +453,14 @@ def auxiliary_restore_session(instance: OdooInstance) -> AuxiliaryRestoreSession
     step, secret_config, secret_path = _auxiliary_start_step(instance)
     return AuxiliaryRestoreSession(
         instance=instance,
+        auxiliary_instance=replace(
+            instance,
+            config=replace(
+                instance.config,
+                start_config=secret_config,
+                base_url=f"http://127.0.0.1:{secret_config.http_port}",
+            ),
+        ),
         start_step=step,
         probe_action=PreparedAction(
             step_id="database.restore.auxiliary.probe",
@@ -492,6 +508,7 @@ class AuxiliaryRestoreSession:
     """Own one bounded Odoo process used only by a stopped-project restore."""
 
     instance: OdooInstance
+    auxiliary_instance: OdooInstance
     start_step: PreparedStep
     probe_action: PreparedAction
     port_action: PreparedAction
@@ -621,7 +638,9 @@ class AuxiliaryRestoreSession:
                 context.skip(self.port_action.step_id)
             self._wait_for_recorded_runtime(context, recorded_pid)
             return
-        self._port_precondition(context, config)
+        auxiliary_config = self.auxiliary_instance.config.start_config
+        assert auxiliary_config is not None
+        self._port_precondition(context, auxiliary_config)
         if self.secret_config is not None and self.secret_path is not None:
             _write_secret_config(self.secret_config, self.secret_path)
         handle: ProcessHandle | None = None
@@ -638,7 +657,7 @@ class AuxiliaryRestoreSession:
             self.process_handle = handle
             context.action(self.ready_action.step_id)
             try:
-                self.instance.wait_ready(process, timeout=60.0, database_manager=True)
+                self.auxiliary_instance.wait_ready(process, timeout=60.0, database_manager=True)
             except BaseException as error:
                 context.fail_action(self.ready_action.step_id, error)
                 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
@@ -729,6 +748,11 @@ class AuxiliaryRestoreSession:
             return False
         return _socket_owned_by(config, self.process.pid)
 
+    @property
+    def request_base_url(self) -> str:
+        runtime = self.instance if self.using_existing_runtime else self.auxiliary_instance
+        return runtime.config.base_url
+
     def owns_instance(self, instance: OdooInstance) -> bool:
         if instance is self.instance:
             return True
@@ -761,7 +785,10 @@ class AuxiliaryRestoreSession:
                 if self.using_existing_runtime:
                     proven = _recorded_runtime_pid(self.instance, config) is not None
                 else:
-                    proven = self._owned_runtime_proven(config)
+                    auxiliary_config = self.auxiliary_instance.config.start_config
+                    proven = auxiliary_config is not None and self._owned_runtime_proven(
+                        auxiliary_config
+                    )
             if not proven:
                 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
 
