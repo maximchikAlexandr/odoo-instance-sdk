@@ -1683,7 +1683,6 @@ def test_non_deferred_drop_refuses_replaced_database_before_mutation(
             project_manifest,
             "feature_db",
             force_default=True,
-            expected_database_oid=101,
             executor=executor,
         ).run()
     assert not any(step.step_id.endswith("database.drop.execute") for step in executor.executed)
