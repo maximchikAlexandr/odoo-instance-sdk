@@ -46,6 +46,8 @@ from odoo_instance_sdk.models.database_inventory import (
     DatabaseInventoryResult,
 )
 from odoo_instance_sdk.models.project_removal import ProjectResourceDecision, ProjectSelector
+from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project_init import init_project
 from odoo_instance_sdk.resources.project import ProjectResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -128,6 +130,67 @@ def test_public_forget_refuses_matching_legacy_environment(
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert catalog.get_environment("legacy-alpha") is not None
     assert root.exists()
+    catalog.close()
+
+
+def test_public_init_then_immediate_forget_revalidates_same_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: catalog_path
+    )
+    root = tmp_path / "initialized-project"
+    root.mkdir()
+
+    init_project(
+        root,
+        ProjectConfig(repository_root=root, python="3.12", default_source_database="owned_db"),
+        postgres_allocated=False,
+        allow_partial=True,
+    )
+    catalog = BackupCatalog(db_path=catalog_path)
+    row = catalog.list_projects()[0]
+    project_id = str(row["project_id"])
+    database_inventory = DatabaseInventoryResult(
+        cluster="127.0.0.1:5432",
+        databases=(
+            DatabaseInventoryItem(
+                cluster="127.0.0.1:5432",
+                cluster_id=None,
+                name="owned_db",
+                logical_size_bytes=1,
+                active_sessions=0,
+                is_default=True,
+            ),
+        ),
+        tracked=True,
+    )
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(list_inventory=lambda *_args, **_kwargs: database_inventory),
+        _postgres_cluster=None,
+    )
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        instance=SimpleNamespace(from_project=lambda _project: instance),
+    )
+
+    result = ProjectResource(_client=cast("OdooClient", client)).remove(
+        ProjectSelector.from_path(str(root))
+    )
+
+    assert result.registration_state == "forgotten"
+    assert root.exists()
+    assert (root / ".odcli" / "project.toml").exists()
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+
+    init_project(
+        root,
+        ProjectConfig(repository_root=root, python="3.12", default_source_database="owned_db"),
+        postgres_allocated=False,
+        allow_partial=True,
+    )
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()
 
 
