@@ -294,7 +294,11 @@ def _projection(
         config_evidence_complete = config_evidence_complete and not manifest_present
     except (ConfigError, OSError, ValueError):
         config_evidence_complete = False
-    claim = catalog._get_postgres_cluster(registration.project_id)
+    claim = catalog._get_postgres_cluster_for_project(
+        registration.project_id,
+        registration.repository_root,
+        registration.git_common_dir or registration.repository_root / ".git",
+    )
     active_claim = claim if claim is not None and claim.state == "active" else None
     database_required = database_name is not None or active_claim is not None
     observed_databases = tuple(database_inventory.databases) if database_inventory else ()

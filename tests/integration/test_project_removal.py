@@ -666,8 +666,31 @@ def test_projection_fails_closed_for_unobserved_database_and_compose_volume(
     manifest_dir.mkdir()
     manifest = manifest_dir / "project.toml"
     manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
-    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose-project", "volume")
-    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose-project", "volume")
+    legacy_project_id = repo_key(root, root / ".git")
+    compose_project = f"odcli_pg_{legacy_project_id}"
+    volume_name = f"pgdata_{legacy_project_id}"
+    claim = catalog._ensure_postgres_cluster_pending(
+        legacy_project_id, compose_project, volume_name
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, legacy_project_id, compose_project, volume_name
+    )
+    foreign_root = tmp_path / "foreign"
+    (foreign_root / ".git").mkdir(parents=True)
+    foreign_project_id = f"project_{repo_key(foreign_root, foreign_root / '.git')}"
+    catalog._register_project(foreign_project_id, foreign_root, foreign_root / ".git")
+    foreign_legacy_id = repo_key(foreign_root, foreign_root / ".git")
+    foreign_claim = catalog._ensure_postgres_cluster_pending(
+        foreign_legacy_id,
+        f"odcli_pg_{foreign_legacy_id}",
+        f"pgdata_{foreign_legacy_id}",
+    )
+    catalog._activate_postgres_cluster(
+        foreign_claim.cluster_id,
+        foreign_legacy_id,
+        f"odcli_pg_{foreign_legacy_id}",
+        f"pgdata_{foreign_legacy_id}",
+    )
 
     projection = coordinator_projection(
         catalog,
@@ -679,6 +702,9 @@ def test_projection_fails_closed_for_unobserved_database_and_compose_volume(
     assert database.reason == "observation_incomplete"
     assert volume.action == "retain"
     assert volume.reason == "observation_incomplete"
+    assert all(
+        str(foreign_claim.cluster_id) not in decision.identity for decision in projection.decisions
+    )
     assert any(
         relationship.startswith("database:")
         for relationship in next(
@@ -729,8 +755,15 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         check=True,
         capture_output=True,
     )
-    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose-project", "volume")
-    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose-project", "volume")
+    legacy_project_id = repo_key(root, root / ".git")
+    compose_project = f"odcli_pg_{legacy_project_id}"
+    volume_name = f"pgdata_{legacy_project_id}"
+    claim = catalog._ensure_postgres_cluster_pending(
+        legacy_project_id, compose_project, volume_name
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, legacy_project_id, compose_project, volume_name
+    )
     database_inventory = DatabaseInventoryResult(
         cluster="127.0.0.1:5432",
         databases=(
@@ -786,11 +819,11 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         if step.step_id.endswith("inspect-volume"):
             stdout = json.dumps(
                 {
-                    "Name": "volume",
+                    "Name": volume_name,
                     "Labels": {
-                        "com.docker.compose.project": "compose-project",
+                        "com.docker.compose.project": compose_project,
                         "io.odoo-instance-sdk.cluster-id": str(claim.cluster_id),
-                        "io.odoo-instance-sdk.project-id": project_id,
+                        "io.odoo-instance-sdk.project-id": legacy_project_id,
                     },
                 }
             )
@@ -869,8 +902,15 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
     manifest_dir.mkdir()
     manifest = manifest_dir / "project.toml"
     manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
-    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose-project", "volume")
-    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose-project", "volume")
+    legacy_project_id = repo_key(root, root / ".git")
+    compose_project = f"odcli_pg_{legacy_project_id}"
+    volume_name = f"pgdata_{legacy_project_id}"
+    claim = catalog._ensure_postgres_cluster_pending(
+        legacy_project_id, compose_project, volume_name
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, legacy_project_id, compose_project, volume_name
+    )
 
     def unavailable_inventory(*_args: object, **_kwargs: object) -> DatabaseInventoryResult:
         raise OSError("database observation unavailable")
