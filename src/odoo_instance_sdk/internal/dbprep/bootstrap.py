@@ -63,7 +63,7 @@ def candidate_database_names(
 _BOOTSTRAP_INIT_MODULE = "base"
 _BOOTSTRAP_READY_SQL = b"SELECT state FROM ir_module_module WHERE name = 'base'"
 _BOOTSTRAP_INVENTORY_SQL = (
-    b"SELECT datname || chr(9) || oid FROM pg_database "
+    b"SELECT datname || E'\\t' || oid FROM pg_database "
     b"WHERE NOT datistemplate AND datallowconn ORDER BY datname"
 )
 _BOOTSTRAP_CREATE_SQL = (
@@ -337,10 +337,41 @@ def _inventory_shape_metadata(
     else:
         stdout_type = "unsupported"
         stdout_length = 0
+    if isinstance(stdout, str):
+        delimiter_tab_count = stdout.count("\t")
+        delimiter_literal_backslash_t_count = stdout.count("\\t")
+        first_delimiter = next(
+            (
+                "tab" if character == "\t" else "literal_backslash_t"
+                for index, character in enumerate(stdout)
+                if character == "\t"
+                or (character == "\\" and index + 1 < len(stdout) and stdout[index + 1] == "t")
+            ),
+            "none",
+        )
+    elif isinstance(stdout, bytes):
+        delimiter_tab_count = stdout.count(bytes((9,)))
+        delimiter_literal_backslash_t_count = stdout.count(bytes((92, 116)))
+        first_delimiter = next(
+            (
+                "tab" if byte == 9 else "literal_backslash_t"
+                for index, byte in enumerate(stdout)
+                if byte == 9
+                or (byte == 92 and index + 1 < len(stdout) and stdout[index + 1] == 116)
+            ),
+            "none",
+        )
+    else:
+        delimiter_tab_count = 0
+        delimiter_literal_backslash_t_count = 0
+        first_delimiter = "unavailable"
     fields = [
         "result_type=ProcessResult",
         f"stdout_type={stdout_type}",
         f"stdout_length={stdout_length}",
+        f"delimiter_tab_count={delimiter_tab_count}",
+        f"delimiter_literal_backslash_t_count={delimiter_literal_backslash_t_count}",
+        f"first_delimiter={first_delimiter}",
     ]
     if line_count is not None:
         fields.append(f"line_count={line_count}")
