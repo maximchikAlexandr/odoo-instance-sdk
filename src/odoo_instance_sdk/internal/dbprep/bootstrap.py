@@ -297,6 +297,24 @@ def run_bootstrap_tmp(
     return BootstrapOutcome.CREATED
 
 
+def _read_database_inventory(result: object) -> tuple[str, ...]:
+    """Decode one successful, non-empty PostgreSQL inventory observation."""
+    if getattr(result, "returncode", 1) != 0:
+        raise BootstrapFailedError("database inventory observation failed")
+    stdout = getattr(result, "stdout", "") or ""
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise BootstrapFailedError(
+                "database inventory observation was not valid UTF-8"
+            ) from error
+    names = tuple(str(name).strip() for name in str(stdout).splitlines())
+    if not names or any(not name or any(ord(char) < 0x20 for char in name) for name in names):
+        raise BootstrapFailedError("database inventory observation was invalid")
+    return tuple(dict.fromkeys(names))
+
+
 def execute_bootstrap_tmp(
     context: RunContext[_ContextT],
     plan: BootstrapTmpPlan,
@@ -321,12 +339,7 @@ def execute_bootstrap_tmp(
         context.complete_action(plan.verify_action.step_id)
         observed: tuple[str, ...] = ()
         if plan.inventory_step is not None:
-            result = context.process_prepared(plan.inventory_step)
-            if getattr(result, "returncode", 1) == 0:
-                stdout = getattr(result, "stdout", "") or ""
-                if isinstance(stdout, bytes):
-                    stdout = stdout.decode(errors="replace")
-                observed = tuple(name.strip() for name in str(stdout).splitlines() if name.strip())
+            observed = _read_database_inventory(context.process_prepared(plan.inventory_step))
             if on_observed is not None:
                 on_observed(observed)
         if plan.record_action is not None:
@@ -525,11 +538,52 @@ def record_project_database_bindings(
 
 
 def record_observed_project_database_bindings(
-    cluster: PostgresCluster, candidates: tuple[str | None, ...], observed: tuple[str, ...]
+    cluster: PostgresCluster,
+    candidates: tuple[str | None, ...],
+    observed: tuple[str, ...],
+    *,
+    fresh_cluster: bool = False,
 ) -> None:
-    """Persist observed names only when they are init candidates."""
-    allowed = frozenset(filter(None, candidates))
+    """Persist observed init names only with a durable ownership boundary.
+
+    A newly-created Compose claim is the only boundary that can authorize a
+    database which was merely observed (the image may create the user DB
+    before the bootstrap probe).  On retries or reused claims, only names
+    already bound by an earlier successful init are eligible; observation
+    alone must never adopt a same-name foreign database.
+    """
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        claim = catalog._get_postgres_cluster(cluster._project_id)
+        if claim is None or claim.state != "active":
+            return
+        existing = frozenset(
+            catalog._project_bound_database_names(
+                claim.project_id,
+                claim.cluster_id,
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+            )
+        )
+    finally:
+        catalog.close()
+    allowed = frozenset(filter(None, candidates)) if fresh_cluster else existing
     record_project_database_bindings(cluster, tuple(name for name in observed if name in allowed))
+
+
+def observed_project_database_binding_callback(
+    cluster: PostgresCluster,
+    candidates: tuple[str | None, ...],
+    *,
+    fresh_cluster: bool,
+) -> Callable[[tuple[str, ...]], None]:
+    """Build the captured init callback without widening the public boundary."""
+    return lambda observed: record_observed_project_database_bindings(
+        cluster, candidates, observed, fresh_cluster=fresh_cluster
+    )
 
 
 def record_project_database_binding(cluster: PostgresCluster, database_name: str) -> None:

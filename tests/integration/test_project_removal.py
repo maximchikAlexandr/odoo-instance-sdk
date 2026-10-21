@@ -8,6 +8,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -1093,6 +1094,7 @@ def _publish_observed_init_binding(catalog: BackupCatalog, claim: object, root: 
         ),
     )
     _compose, followup = _compose_followup_steps(root, config, dry_run=True, defer_actions=False)
+    followup = replace(followup, fresh_cluster=True)
     context = MagicMock()
     context.process_prepared.side_effect = lambda step: ProcessResult(
         argv=step.argv,
