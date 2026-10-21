@@ -38,6 +38,20 @@ _ContextT = TypeVar("_ContextT")
 
 BOOTSTRAP_DATABASE = "tmp"
 _BOOTSTRAP_DATABASE = BOOTSTRAP_DATABASE
+
+
+def candidate_database_names(
+    default_source_database: str | None, source_database: str | None, db_user: str | None
+) -> tuple[str, ...]:
+    """Return ordered init candidates, including the configured PostgreSQL user database."""
+    return tuple(
+        filter(
+            None,
+            dict.fromkeys((BOOTSTRAP_DATABASE, default_source_database, source_database, db_user)),
+        )
+    )
+
+
 _BOOTSTRAP_INIT_MODULE = "base"
 _BOOTSTRAP_READY_SQL = b"SELECT state FROM ir_module_module WHERE name = 'base'"
 _BOOTSTRAP_INVENTORY_SQL = (
