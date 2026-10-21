@@ -97,7 +97,7 @@ class ProjectResource:
         claim = catalog._get_postgres_cluster_for_project(
             registration.project_id,
             registration.repository_root,
-            registration.git_common_dir or registration.repository_root / ".git",
+            registration.git_common_dir,
         )
         if purge and project_config is not None:
             try:

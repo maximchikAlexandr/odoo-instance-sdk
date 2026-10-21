@@ -297,7 +297,7 @@ def _projection(
     claim = catalog._get_postgres_cluster_for_project(
         registration.project_id,
         registration.repository_root,
-        registration.git_common_dir or registration.repository_root / ".git",
+        registration.git_common_dir,
     )
     active_claim = claim if claim is not None and claim.state == "active" else None
     database_required = database_name is not None or active_claim is not None
