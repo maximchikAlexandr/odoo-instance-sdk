@@ -79,6 +79,7 @@ class _BootstrapFollowup:
     project_root: Path
     data_directory: Path
     database_names: tuple[str | None, ...]
+    fresh_cluster: bool = False
 
 
 def _init_action_details(
@@ -283,8 +284,10 @@ def _execute_bootstrap_followup_phase(
             followup.cluster,
             verify_project_owned_data_dir(followup.project_root, followup.data_directory),
         ),
-        on_observed=lambda names: bootstrap.record_observed_project_database_bindings(
-            followup.cluster, followup.database_names, names
+        on_observed=bootstrap.observed_project_database_binding_callback(
+            followup.cluster,
+            followup.database_names,
+            fresh_cluster=followup.fresh_cluster,
         ),
     )
     for step in followup.plan.execution_steps:
@@ -351,12 +354,10 @@ def init_project_command(  # noqa: C901
         raise InstanceConfigurationError(
             f"init_incomplete: missing capabilities {preliminary_missing}"
         )
-
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
         validate_generated_config_target(
             project_generated_config_path(project_path), project_root=project_path.resolve()
         )
-
     primary_preparation: _PrimaryVenvPreparation | None = None
     if venv is not None:
         if effective_config.python is None:
@@ -366,7 +367,6 @@ def init_project_command(  # noqa: C901
             python=effective_config.python,
             venv=venv,
         )
-
     compose_followup: _ComposeFollowup | None = None
     bootstrap_followup: _BootstrapFollowup | None = None
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
@@ -377,7 +377,6 @@ def init_project_command(  # noqa: C901
             python=(primary_preparation.interpreter if primary_preparation is not None else None),
             defer_actions=venv is not None or confirm_postgres_image is not None,
         )
-
     image_phase = None
     if compose_followup is not None and confirm_postgres_image is not None:
         from odoo_instance_sdk.internal.project_init_image import capture_image_consent_phase
@@ -387,7 +386,6 @@ def init_project_command(  # noqa: C901
         image_phase = capture_image_consent_phase(
             compose_followup.cluster, effective_config.postgres.image
         )
-
     init_action = PreparedAction(
         step_id="init",
         action="verify-init-manifest" if resume_existing else "init",
@@ -638,6 +636,7 @@ def _compose_followup_steps(
             database_names=candidate_database_names(
                 config.default_source_database, source_start.db_name, start_config.db_user
             ),
+            fresh_cluster=cluster._cluster_claim() is None,
         ),
     )
 
