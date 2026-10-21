@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import msgspec
 import pytest
@@ -18,8 +19,11 @@ from odoo_instance_sdk import (
     ProjectSelector,
 )
 from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.execution import ActionStep, Command
 from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.project_data_purge import ComposeClusterPurgeAdapter
 from odoo_instance_sdk.internal.project_removal_coordinator import (
+    ProjectRemovalAdapters,
     capture_project_removal_command,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
@@ -120,11 +124,11 @@ def test_remove_delegates_to_the_captured_command() -> None:
             *,
             purge: bool = False,
             confirmation: str | None = None,
-        ) -> CommandStub:
+        ) -> Command[ProjectRemovalResult]:
             assert received_selector is selector
             assert purge is True
             assert confirmation == "project_abc"
-            return CommandStub()
+            return cast("Command[ProjectRemovalResult]", CommandStub())
 
     resource = ResourceStub(_client=None)  # type: ignore[arg-type]
     assert resource.remove(selector, purge=True, confirmation="project_abc") is result
@@ -192,7 +196,8 @@ def test_public_project_resource_composes_backup_and_terminal_catalogue_actions(
         purge=True,
         confirmation=f"{root.name}:{project_id}",
     )
-    actions = tuple(step.action for step in command.plan.steps)
+    assert all(isinstance(step, ActionStep) for step in command.plan.steps)
+    actions = tuple(cast("ActionStep", step).action for step in command.plan.steps)
 
     assert "backup.delete" in actions, tuple(step.step_id for step in command.plan.steps)
     assert "delete-filestore" in actions
@@ -239,12 +244,14 @@ def test_public_project_resource_orders_compose_after_scheduled_environment_remo
         reason="exclusive_sdk_ownership",
         target="compose cluster",
     )
-    captured: dict[str, object] = {}
+    captured_compose: ComposeClusterPurgeAdapter | None = None
+    captured_child: Command[ProjectResourceDecision] | None = None
     real_capture = capture_project_removal_command
 
     def capture_with_compose_probe(*args: object, **kwargs: object) -> object:
-        adapters = kwargs["adapters"]
-        compose = adapters.for_decision(compose_decision)  # type: ignore[attr-defined]
+        nonlocal captured_child, captured_compose
+        adapters = cast("ProjectRemovalAdapters", kwargs["adapters"])
+        compose = cast("ComposeClusterPurgeAdapter | None", adapters.for_decision(compose_decision))
         assert compose is not None
 
         def result_factory(step):
@@ -301,9 +308,9 @@ def test_public_project_resource_orders_compose_after_scheduled_environment_remo
                 )
             return ProcessResult(step.argv, 0, "", "", 0.0, step.cwd, step.environment)
 
-        compose._executor = RecordingExecutor(result_factory=result_factory)  # type: ignore[attr-defined]
-        captured["compose"] = compose
-        captured["child"] = compose.capture(compose_decision, project_id=project_id)
+        compose._executor = RecordingExecutor(result_factory=result_factory)
+        captured_compose = compose
+        captured_child = compose.capture(compose_decision, project_id=project_id)
         return real_capture(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
@@ -316,8 +323,8 @@ def test_public_project_resource_orders_compose_after_scheduled_environment_remo
         confirmation=f"{root.name}:{project_id}",
     )
 
-    assert captured["compose"] is not None
-    child = captured["child"]
+    assert captured_compose is not None
+    child = captured_child
     assert child is not None
     with pytest.raises(ConfigError, match="dependency"):
         child.run()
@@ -333,10 +340,5 @@ def test_public_project_resource_orders_compose_after_scheduled_environment_remo
             state="creating",
         )
     )
-    assert (
-        captured["compose"].capture(  # type: ignore[union-attr]
-            compose_decision, project_id=project_id
-        )
-        is None
-    )
+    assert captured_compose.capture(compose_decision, project_id=project_id) is None
     catalog.close()

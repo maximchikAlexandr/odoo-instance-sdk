@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn, cast
 
 import pytest
 
 from odoo_instance_sdk.exceptions import ProjectRemovalError
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
 from odoo_instance_sdk.internal.proc import PreparedAction
 from odoo_instance_sdk.internal.project_removal import (
     InternalRemovalDecision,
@@ -41,6 +42,7 @@ def test_forget_captures_one_mutating_terminal_action_and_preserves_resources(
     )
 
     assert len(command.plan.steps) == 1
+    assert isinstance(command.plan.steps[0], ActionStep)
     assert command.plan.steps[0].action == "forget"
     result = command.run()
 
@@ -104,7 +106,7 @@ def test_purge_rejects_wrong_confirmation_before_lock_or_mutation(
     )
     lock_entered = False
 
-    def forbidden_lock(_path: Path):
+    def forbidden_lock(_path: Path) -> NoReturn:
         nonlocal lock_entered
         lock_entered = True
         raise AssertionError("confirmation must be checked before lock acquisition")
@@ -135,8 +137,9 @@ def test_purge_fails_closed_when_mutating_adapter_is_missing(tmp_path: Path) -> 
 
     with pytest.raises(ProjectRemovalError, match="captured adapter") as error:
         command.run()
-    details = error.value.details["removal"]
+    details = cast("dict[str, object]", error.value.details["removal"])
     assert details["registration_state"] == "registered"
+    assert isinstance(details["remaining_total"], int)
     assert details["remaining_total"] >= 1
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()
@@ -223,6 +226,7 @@ def test_purge_flattens_captured_child_plan_and_runs_its_callback(
         adapters=Adapters(),
     )
     assert captured == [project_id]
+    assert isinstance(command.plan.steps[-1], ActionStep)
     assert command.plan.steps[-1].action == "forget"
     assert tuple(step.step_id for step in command.plan.steps[:-1]) == ("child.project.delete",)
 

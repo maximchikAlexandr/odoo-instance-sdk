@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -1451,7 +1451,7 @@ def _patch_leaf_external(  # noqa: C901
 ) -> None:
     """Give one public leaf an isolated operation seam for the parity matrix."""
 
-    def fail_operation(*_args: object, **_kwargs: object) -> object:
+    def fail_operation(*_args: object, **_kwargs: object) -> NoReturn:
         raise RuntimeError("isolated external operation failed")
 
     path = case.path
@@ -1470,7 +1470,7 @@ def _patch_leaf_external(  # noqa: C901
 
         def remove_command(*_args: object, **_kwargs: object) -> object:
             if failing:
-                raise fail_operation()
+                fail_operation()
             return _matrix_command(
                 ProjectRemovalResult(
                     project_id="project-test",
