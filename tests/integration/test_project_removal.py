@@ -47,7 +47,11 @@ from odoo_instance_sdk.internal.project_removal_terminal import (
     _forgotten_project_is_inert,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.internal.resource_inventory import ActiveUse, OwnershipConfidence
+from odoo_instance_sdk.internal.resource_inventory import (
+    ActiveUse,
+    OwnershipConfidence,
+    VolumeResourceSource,
+)
 from odoo_instance_sdk.models.database_inventory import (
     DatabaseInventoryItem,
     DatabaseInventoryResult,
@@ -780,6 +784,167 @@ def test_catalog_claim_requires_captured_common_dir(tmp_path: Path, claim_form: 
     )
 
     assert catalog._get_postgres_cluster_for_project(project_id, root, None) is None
+    catalog.close()
+
+
+def test_projection_recovers_owned_claim_after_source_root_is_removed(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    common = tmp_path / "shared-git"
+    root.mkdir()
+    common.mkdir()
+    project_id = f"project_{repo_key(root, common)}"
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    catalog._register_project(project_id, root, common)
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "odcli_pg_owned", "pgdata_owned")
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, project_id, "odcli_pg_owned", "pgdata_owned"
+    )
+    root.rmdir()
+    projection = coordinator_projection(
+        catalog,
+        ProjectRegistration(project_id, root, common),
+        database_inventory=DatabaseInventoryResult(
+            cluster="127.0.0.1:5432",
+            databases=(
+                DatabaseInventoryItem(
+                    cluster="127.0.0.1:5432",
+                    cluster_id=str(claim.cluster_id),
+                    name="owned_db",
+                    logical_size_bytes=1,
+                    active_sessions=0,
+                    is_default=True,
+                ),
+            ),
+            tracked=False,
+        ),
+        volume_observation=VolumeResourceSource(
+            project_id=project_id,
+            volume_name="pgdata_owned",
+            cluster_id=str(claim.cluster_id),
+            owned=True,
+            available=True,
+            usage_bytes=1,
+            active=True,
+            container_identity_verified=True,
+        ),
+        git_status_hardened=False,
+    )
+
+    assert projection.complete
+    assert (
+        next(item for item in projection.decisions if item.resource_type == "database").action
+        == "delete"
+    )
+    assert (
+        next(item for item in projection.decisions if item.resource_type == "volume").action
+        == "delete"
+    )
+    catalog.close()
+
+
+def test_public_purge_recovers_missing_source_with_owned_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    common = tmp_path / "shared-git"
+    root.mkdir()
+    common.mkdir()
+    project_id = f"project_{repo_key(root, common)}"
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    catalog._register_project(project_id, root, common)
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "odcli_pg_owned", "pgdata_owned")
+    catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        project_id,
+        "odcli_pg_owned",
+        "pgdata_owned",
+    )
+    catalog._record_database_bootstrapped(
+        "127.0.0.1",
+        15432,
+        "tmp",
+        cluster_id=claim.cluster_id,
+        data_directory=tmp_path / "data",
+    )
+    root.rmdir()
+    assert catalog._get_postgres_cluster_for_project(project_id, root, common) is not None
+    full_container_id = "b" * 64
+    fake_cluster = SimpleNamespace(
+        owned=True,
+        compose_runner=SimpleNamespace(),
+        resource_snapshot=lambda: SimpleNamespace(
+            container=build_container(
+                {
+                    "Id": full_container_id,
+                    "Name": "/odcli_pg_owned-postgres-1",
+                    "Config": {"Labels": {}},
+                    "Mounts": [],
+                }
+            ),
+            metrics=SimpleNamespace(volume_usage_bytes=1),
+            unavailability_reason=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.PostgresCluster._from_config",
+        classmethod(lambda cls, *args, **kwargs: fake_cluster),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.inventory.build_database_inventory_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            run=lambda: DatabaseInventoryResult(
+                cluster="127.0.0.1:15432",
+                databases=(
+                    DatabaseInventoryItem(
+                        cluster="127.0.0.1:15432",
+                        cluster_id=str(claim.cluster_id),
+                        name="owned_db",
+                        logical_size_bytes=1,
+                        active_sessions=0,
+                        is_default=False,
+                    ),
+                ),
+                tracked=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
+        lambda *_args, **_kwargs: full_container_id,
+    )
+    executor = RecordingExecutor()
+
+    def capture_child(
+        _adapter: DatabasePurgeAdapter | ComposeClusterPurgeAdapter,
+        decision: ProjectResourceDecision,
+        *,
+        project_id: str,
+    ) -> Command[ProjectResourceDecision] | None:
+        del project_id
+        return cast("Command[ProjectResourceDecision]", _process_child(executor, decision.identity))
+
+    monkeypatch.setattr(DatabasePurgeAdapter, "capture", capture_child)
+    monkeypatch.setattr(ComposeClusterPurgeAdapter, "capture", capture_child)
+    client = cast("OdooClient", SimpleNamespace(get_catalog=lambda: catalog))
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert tuple(step.step_id.split(":", 2)[1] for step in command.plan.steps[:2]) == (
+        "database",
+        "volume",
+    )
+    assert len(executor.executed) == 2
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     catalog.close()
 
 

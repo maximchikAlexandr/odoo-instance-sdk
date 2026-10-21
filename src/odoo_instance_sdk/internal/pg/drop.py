@@ -75,6 +75,7 @@ _verify_sql = verify_sql
 _catalog_database_in_use = catalog_database_in_use
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -475,6 +476,7 @@ def build_database_drop_command(  # noqa: C901
     command_origin: str | None = None,
     defer_planning: bool = False,
     expected_restore: Callable[[], DatabaseDropRestoreExpectation | None] | None = None,
+    project: ProjectConfig | None = None,
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
     database = database_name
@@ -505,7 +507,7 @@ def build_database_drop_command(  # noqa: C901
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
     from odoo_instance_sdk.project import ProjectConfig
 
-    project = ProjectConfig.load(project_path)
+    project = project or ProjectConfig.load(project_path)
     binding = resolve_database_context(instance, explicit=database, project=project)
     cluster = binding.cluster
     if cluster is None:
@@ -663,7 +665,7 @@ def build_database_drop_command(  # noqa: C901
     )
 
     def current_default() -> str | None:
-        return ProjectConfig.load(project_path).default_source_database
+        return project.default_source_database
 
     def _execute_locked(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:  # noqa: C901
         current_ownership = _drop_ownership_evidence(
