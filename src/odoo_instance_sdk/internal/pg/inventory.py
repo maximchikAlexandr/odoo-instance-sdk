@@ -32,7 +32,7 @@ SELECT COALESCE(json_agg(row ORDER BY row->>'name'), '[]'::json)
 FROM (
   SELECT json_build_object(
     'name', d.datname,
-    'database_oid', d.oid,
+    'database_oid', d.oid::bigint,
     'logical_size_bytes', pg_database_size(d.datname),
     'active_sessions', (
       SELECT count(*)::bigint FROM pg_stat_activity a
