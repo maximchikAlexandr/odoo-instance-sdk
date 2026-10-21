@@ -276,19 +276,17 @@ def _execute_bootstrap_followup_phase(
 ) -> None:
     from odoo_instance_sdk.internal.dbprep import bootstrap
 
-    verify_project_owned_data_dir(
-        followup.project_root, followup.data_directory, require_exists=False
+    bootstrap.execute_bootstrap_tmp(
+        context,
+        followup.plan,
+        on_created=lambda: bootstrap.record_bootstrap_event(
+            followup.cluster,
+            verify_project_owned_data_dir(followup.project_root, followup.data_directory),
+        ),
+        on_observed=lambda names: bootstrap.record_observed_project_database_bindings(
+            followup.cluster, followup.database_names, names
+        ),
     )
-
-    def record() -> None:
-        data_directory = verify_project_owned_data_dir(
-            followup.project_root, followup.data_directory
-        )
-        bootstrap.record_bootstrap_event(followup.cluster, data_directory)
-        for database_name in filter(None, followup.database_names):
-            bootstrap.record_project_database_binding(followup.cluster, database_name)
-
-    bootstrap.execute_bootstrap_tmp(context, followup.plan, on_created=record)
     for step in followup.plan.execution_steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
             context.skip(step.step_id)
@@ -587,6 +585,7 @@ def _compose_followup_steps(
         include_create=defer_actions,
         project_id=cluster._project_id,
         record_action=bootstrap_record_action(),
+        capture_inventory=True,
     )
 
     password_state: list[str | None] = [None]
@@ -635,7 +634,6 @@ def _compose_followup_steps(
             database_names=(
                 config.default_source_database,
                 source_start.db_name,
-                start_config.db_user or "odoo",
             ),
         ),
     )

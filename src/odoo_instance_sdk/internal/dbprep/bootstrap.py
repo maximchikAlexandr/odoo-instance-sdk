@@ -40,6 +40,9 @@ BOOTSTRAP_DATABASE = "tmp"
 _BOOTSTRAP_DATABASE = BOOTSTRAP_DATABASE
 _BOOTSTRAP_INIT_MODULE = "base"
 _BOOTSTRAP_READY_SQL = b"SELECT state FROM ir_module_module WHERE name = 'base'"
+_BOOTSTRAP_INVENTORY_SQL = (
+    b"SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname"
+)
 _BOOTSTRAP_CREATE_SQL = (
     b"SELECT 'CREATE DATABASE tmp' "
     b"WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'tmp')\\gexec"
@@ -51,6 +54,7 @@ _BOOTSTRAP_READY_STEP_ID = "init.bootstrap.tmp.ready"
 _BOOTSTRAP_VERIFY_ACTION_ID = "init.bootstrap.tmp.verify"
 _BOOTSTRAP_LOCK_ACTION_ID = "init.bootstrap.tmp.lock"
 _BOOTSTRAP_RECORD_ACTION_ID = "catalog.bootstrap.tmp.record"
+_BOOTSTRAP_INVENTORY_STEP_ID = "init.bootstrap.databases"
 
 
 class BootstrapFailedError(InstanceConfigurationError):
@@ -80,6 +84,7 @@ class BootstrapTmpPlan:
     lock_action: PreparedAction | None = None
     create_step: PreparedStep | None = None
     record_action: PreparedAction | None = None
+    inventory_step: PreparedStep | None = None
     project_id: str | None = None
 
     @property
@@ -91,6 +96,8 @@ class BootstrapTmpPlan:
         if self.create_step is not None:
             steps.append(self.create_step)
         steps.extend((self.spawn_step, self.ready_step))
+        if self.inventory_step is not None:
+            steps.append(self.inventory_step)
         if self.record_action is not None:
             steps.append(self.record_action)
         return tuple(steps)
@@ -139,6 +146,7 @@ def bootstrap_tmp_plan(
     include_create: bool = True,
     project_id: str | None = None,
     record_action: PreparedAction | None = None,
+    capture_inventory: bool = False,
 ) -> BootstrapTmpPlan:
     """Capture bootstrap database creation, spawn, SQL probes, and verify action.
 
@@ -196,6 +204,19 @@ def bootstrap_tmp_plan(
         db_password=db_password,
         step_id=_BOOTSTRAP_READY_STEP_ID,
     )
+    inventory_step = (
+        _bootstrap_sql_step(
+            db_host=db_host,
+            db_port=db_port,
+            db_user=db_user,
+            db_password=db_password,
+            step_id=_BOOTSTRAP_INVENTORY_STEP_ID,
+            database="postgres",
+            stdin=_BOOTSTRAP_INVENTORY_SQL,
+        )
+        if capture_inventory
+        else None
+    )
     ready_action = PreparedAction(
         step_id=_BOOTSTRAP_VERIFY_ACTION_ID,
         action="verify-bootstrap-tmp-base",
@@ -221,6 +242,7 @@ def bootstrap_tmp_plan(
         lock_action=lock_action,
         create_step=create_step,
         record_action=record_action,
+        inventory_step=inventory_step,
         project_id=project_id if lock_action is not None else None,
     )
 
@@ -266,6 +288,7 @@ def execute_bootstrap_tmp(
     plan: BootstrapTmpPlan,
     *,
     on_created: Callable[[], None] | None = None,
+    on_observed: Callable[[tuple[str, ...]], None] | None = None,
 ) -> BootstrapOutcome:
     """Serialize the complete bootstrap boundary, including lifecycle record."""
     lock = (
@@ -282,6 +305,16 @@ def execute_bootstrap_tmp(
         context.action(plan.verify_action.step_id)
         outcome = run_bootstrap_tmp(context, plan)
         context.complete_action(plan.verify_action.step_id)
+        observed: tuple[str, ...] = ()
+        if plan.inventory_step is not None:
+            result = context.process_prepared(plan.inventory_step)
+            if getattr(result, "returncode", 1) == 0:
+                stdout = getattr(result, "stdout", "") or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode(errors="replace")
+                observed = tuple(name.strip() for name in str(stdout).splitlines() if name.strip())
+            if on_observed is not None:
+                on_observed(observed)
         if plan.record_action is not None:
             if outcome is BootstrapOutcome.CREATED:
                 context.action(plan.record_action.step_id)
@@ -361,6 +394,7 @@ def project_bootstrap_tmp_plan(instance: OdooInstance) -> BootstrapTmpPlan | Non
         include_create=False,
         project_id=cluster._project_id,
         record_action=bootstrap_record_action(),
+        capture_inventory=True,
     )
 
 
@@ -374,7 +408,11 @@ def ensure_project_bootstrap_tmp(
     captured = project_bootstrap_tmp_plan(instance) if plan is None else plan
     if captured is None:
         return
-    execute_bootstrap_tmp(context, captured, on_created=lambda: _record_bootstrap_event(instance))
+    execute_bootstrap_tmp(
+        context,
+        captured,
+        on_created=lambda: _record_bootstrap_event(instance),
+    )
 
 
 def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -> bool:
@@ -441,8 +479,12 @@ def record_bootstrap_event(cluster: PostgresCluster, data_directory: str | Path)
         catalog.close()
 
 
-def record_project_database_binding(cluster: PostgresCluster, database_name: str) -> None:
-    """Persist the configured init database against its exact active claim."""
+def record_project_database_bindings(
+    cluster: PostgresCluster, database_names: tuple[str, ...]
+) -> None:
+    """Persist only names observed on the exact active init cluster."""
+    if not database_names:
+        return
     from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -452,16 +494,30 @@ def record_project_database_binding(cluster: PostgresCluster, database_name: str
         catalog.close()
         raise BootstrapFailedError("database binding claim is not active")
     try:
-        catalog.record_project_database_binding(
-            claim.project_id,
-            claim.cluster_id,
-            cluster.endpoint_host,
-            cluster.endpoint_port,
-            database_name,
-        )
+        for database_name in database_names:
+            catalog._record_project_database_binding(
+                claim.project_id,
+                claim.cluster_id,
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+                database_name,
+            )
     except Exception as error:
         if isinstance(error, BootstrapFailedError):
             raise
         raise BootstrapFailedError(f"database binding publication failed: {error}") from error
     finally:
         catalog.close()
+
+
+def record_observed_project_database_bindings(
+    cluster: PostgresCluster, candidates: tuple[str | None, ...], observed: tuple[str, ...]
+) -> None:
+    """Persist observed names only when they are init candidates."""
+    allowed = frozenset(filter(None, candidates))
+    record_project_database_bindings(cluster, tuple(name for name in observed if name in allowed))
+
+
+def record_project_database_binding(cluster: PostgresCluster, database_name: str) -> None:
+    """Compatibility wrapper for one already-observed database name."""
+    record_project_database_bindings(cluster, (database_name,))

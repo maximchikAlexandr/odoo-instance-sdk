@@ -453,20 +453,29 @@ class _RestoreMixin:
         return tuple(row["database_name"] for row in rows)
 
     @_translate_sqlite_error
-    def project_restored_database_names(self, project_id: str) -> tuple[str, ...]:
-        """Return database names backed by this project's durable restores."""
+    def _project_restored_database_names(
+        self,
+        project_id: str,
+        cluster_id: uuid.UUID | str,
+        db_host: str | None,
+        db_port: int,
+    ) -> tuple[str, ...]:
+        """Return restores proved for one project and exact cluster endpoint."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
         rows = self._conn.execute(
             """SELECT DISTINCT r.database_name
                FROM restores r JOIN backups b ON b.id = r.backup_id
                WHERE b.project_id = ? AND b.state <> 'deleted'
-                 AND r.state = 'complete'
+                 AND r.state = 'complete' AND r.cluster_id = ?
+                 AND r.db_host = ? AND r.db_port = ?
                ORDER BY r.database_name""",
-            (project_id,),
+            (project_id, identity, host, db_port),
         ).fetchall()
         return tuple(str(row["database_name"]) for row in rows)
 
     @_translate_sqlite_error
-    def project_bootstrapped_database_names(
+    def _project_bootstrapped_database_names(
         self, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
     ) -> tuple[str, ...]:
         """Return databases explicitly bootstrapped on one claimed cluster."""
@@ -482,7 +491,7 @@ class _RestoreMixin:
         return tuple(str(row["database_name"]) for row in rows)
 
     @_translate_sqlite_error
-    def record_project_database_binding(
+    def _record_project_database_binding(
         self,
         project_id: str,
         cluster_id: uuid.UUID | str,
@@ -509,7 +518,7 @@ class _RestoreMixin:
             )
 
     @_translate_sqlite_error
-    def project_bound_database_names(
+    def _project_bound_database_names(
         self, project_id: str, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
     ) -> tuple[str, ...]:
         """Return only database identities captured for this exact claim endpoint."""

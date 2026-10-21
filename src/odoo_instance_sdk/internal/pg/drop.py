@@ -306,7 +306,26 @@ def _drop_ownership_evidence(  # noqa: C901
         cluster.endpoint_host, cluster.endpoint_port, binding_database
     )
     if event is None:
-        raise ConfigError("database drop requires an exact current lifecycle event")
+        bound_names = catalog._project_bound_database_names(
+            claim.project_id,
+            claim.cluster_id,
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+        )
+        if binding_database not in bound_names:
+            raise ConfigError("database drop requires an exact current lifecycle event")
+        return _DropOwnershipEvidence(
+            event_type="bound",
+            event_sequence=0,
+            cluster_id=str(claim.cluster_id),
+            compose_project=claim.compose_project,
+            volume_name=claim.volume_name,
+            backup_id=None,
+            source_kind="init-binding",
+            source_sha256=None,
+            data_directory=None,
+            restore_state="complete",
+        )
     if event["event_type"] == "bootstrapped":
         if (
             allow_environment_rollback_database is not None

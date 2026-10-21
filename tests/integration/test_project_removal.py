@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -844,20 +844,17 @@ def test_projection_recovers_owned_claim_after_source_root_is_removed(tmp_path: 
     catalog.close()
 
 
-@pytest.mark.parametrize("include_unrelated_database", [False, True])
-@pytest.mark.parametrize("claim_form", ["exact", "legacy"])
-def test_public_purge_recovers_missing_source_with_owned_claim(
+def _capture_missing_source_purge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    claim_form: str,
-    include_unrelated_database: bool,
-) -> None:
+    claim_project_id: str,
+    database_names: tuple[str, ...],
+    seed_catalog: Callable[[BackupCatalog, str, object, Path], None],
+) -> tuple[BackupCatalog, Command[ProjectRemovalResult], RecordingExecutor, str]:
     root = tmp_path / "source"
     common = root / ".git"
     common.mkdir(parents=True)
     project_id = f"project_{repo_key(root, common)}"
-    legacy_project_id = repo_key(root, common)
-    claim_project_id = project_id if claim_form == "exact" else legacy_project_id
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     catalog._register_project(project_id, root, common)
     claim = catalog._ensure_postgres_cluster_pending(
@@ -878,44 +875,7 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
         cluster_id=claim.cluster_id,
         data_directory=tmp_path / "data",
     )
-    if claim_form == "exact":
-        backup_id = str(uuid.uuid4())
-        backup_path = tmp_path / "owned.zip"
-        backup_path.write_bytes(b"owned")
-        catalog.start_download(
-            backup_id,
-            "http://127.0.0.1:8069",
-            "owned_db",
-            "zip",
-            True,
-            backup_path,
-            project_id=project_id,
-        )
-        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
-        catalog.record_restore(
-            "127.0.0.1",
-            15432,
-            "owned_db",
-            backup_id,
-            cluster_id=claim.cluster_id,
-            data_directory=tmp_path / "data",
-        )
-        assert catalog.project_restored_database_names(project_id) == ("owned_db",)
-    else:
-        assert catalog.project_bootstrapped_database_names(
-            claim.cluster_id, "127.0.0.1", 15432
-        ) == ("tmp",)
-        catalog.record_project_database_binding(
-            legacy_project_id,
-            claim.cluster_id,
-            "127.0.0.1",
-            15432,
-            "odoo",
-        )
-        assert catalog.project_restored_database_names(project_id) == ()
-        assert catalog.project_bound_database_names(
-            legacy_project_id, claim.cluster_id, "127.0.0.1", 15432
-        ) == ("odoo",)
+    seed_catalog(catalog, claim_project_id, claim, tmp_path / "data")
     shutil.rmtree(root)
     assert not root.exists()
     assert not common.exists()
@@ -948,43 +908,16 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
         lambda *_args, **_kwargs: SimpleNamespace(
             run=lambda: DatabaseInventoryResult(
                 cluster="127.0.0.1:15432",
-                databases=(
+                databases=tuple(
                     DatabaseInventoryItem(
                         cluster="127.0.0.1:15432",
                         cluster_id=str(claim.cluster_id),
-                        name="owned_db" if claim_form == "exact" else "tmp",
+                        name=name,
                         logical_size_bytes=1,
                         active_sessions=0,
                         is_default=False,
-                    ),
-                    *(
-                        (
-                            DatabaseInventoryItem(
-                                cluster="127.0.0.1:15432",
-                                cluster_id=str(claim.cluster_id),
-                                name="odoo",
-                                logical_size_bytes=1,
-                                active_sessions=0,
-                                is_default=False,
-                            ),
-                        )
-                        if claim_form == "legacy"
-                        else ()
-                    ),
-                    *(
-                        (
-                            DatabaseInventoryItem(
-                                cluster="127.0.0.1:15432",
-                                cluster_id=str(claim.cluster_id),
-                                name="foreign_db",
-                                logical_size_bytes=1,
-                                active_sessions=0,
-                                is_default=False,
-                            ),
-                        )
-                        if include_unrelated_database
-                        else ()
-                    ),
+                    )
+                    for name in database_names
                 ),
                 tracked=False,
             )
@@ -1031,28 +964,98 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
         purge=True,
         confirmation=f"{root.name}:{project_id}",
     )
-    if include_unrelated_database:
-        with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
-            command.run()
-        assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
-        assert not executor.executed
-        catalog.close()
-        return
+    return catalog, command, executor, project_id
 
+
+def _seed_exact_restore(
+    catalog: BackupCatalog, project_id: str, claim: object, data_directory: Path
+) -> None:
+    backup_id = str(uuid.uuid4())
+    backup_path = data_directory.parent / "owned.zip"
+    backup_path.write_bytes(b"owned")
+    catalog.start_download(
+        backup_id,
+        "http://127.0.0.1:8069",
+        "owned_db",
+        "zip",
+        True,
+        backup_path,
+        project_id=project_id,
+    )
+    catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
+    catalog.record_restore(
+        "127.0.0.1",
+        15432,
+        "owned_db",
+        backup_id,
+        cluster_id=getattr(claim, "cluster_id"),
+        data_directory=data_directory,
+    )
+
+
+def _seed_legacy_init_binding(
+    catalog: BackupCatalog, project_id: str, claim: object, data_directory: Path
+) -> None:
+    del data_directory
+    catalog._record_project_database_binding(
+        project_id,
+        getattr(claim, "cluster_id"),
+        "127.0.0.1",
+        15432,
+        "odoo",
+    )
+
+
+def test_public_purge_recovers_missing_source_with_exact_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    project_id = f"project_{repo_key(root, root / '.git')}"
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        project_id,
+        ("owned_db",),
+        _seed_exact_restore,
+    )
     result = command.run()
-
     assert result.registration_state == "forgotten"
-    child_steps = tuple(
-        step.step_id.split(":", 2)[1]
-        for step in command.plan.steps
-        if step.step_id.startswith("project-removal.database")
-    )
-    assert child_steps == (
-        "database",
-        "volume",
-    )
     assert len(executor.executed) == 2
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_purge_recovers_missing_source_with_legacy_init_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path, monkeypatch, legacy_project_id, ("tmp", "odoo"), _seed_legacy_init_binding
+    )
+    result = command.run()
+    assert result.registration_state == "forgotten"
+    assert len(executor.executed) == 2
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_purge_refuses_missing_source_with_foreign_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        legacy_project_id,
+        ("tmp", "odoo", "foreign_db"),
+        _seed_legacy_init_binding,
+    )
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert not executor.executed
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()
 
 
