@@ -32,6 +32,7 @@ SELECT COALESCE(json_agg(row ORDER BY row->>'name'), '[]'::json)
 FROM (
   SELECT json_build_object(
     'name', d.datname,
+    'database_oid', d.oid,
     'logical_size_bytes', pg_database_size(d.datname),
     'active_sessions', (
       SELECT count(*)::bigint FROM pg_stat_activity a
@@ -84,7 +85,19 @@ def _decode_rows(result: ProcessResult) -> tuple[dict[str, JsonValue], ...]:
             raise ConfigError("database inventory query returned invalid logical size")
         if not isinstance(sessions, int) or isinstance(sessions, bool) or sessions < 0:
             raise ConfigError("database inventory query returned invalid session count")
-        rows.append({"name": item["name"], "logical_size_bytes": size, "active_sessions": sessions})
+        database_oid = item.get("database_oid")
+        if database_oid is not None and (
+            not isinstance(database_oid, int) or isinstance(database_oid, bool) or database_oid <= 0
+        ):
+            raise ConfigError("database inventory query returned invalid database identity")
+        rows.append(
+            {
+                "name": item["name"],
+                "database_oid": database_oid,
+                "logical_size_bytes": size,
+                "active_sessions": sessions,
+            }
+        )
     return tuple(rows)
 
 
@@ -212,6 +225,7 @@ def build_database_inventory_command(
                 cluster=endpoint,
                 cluster_id=proven_clusters[0] if proven_clusters else None,
                 name=name,
+                database_oid=cast("int | None", row.get("database_oid")),
                 logical_size_bytes=cast("int | None", row["logical_size_bytes"]),
                 active_sessions=cast("int", row["active_sessions"]),
                 is_default=name == default,

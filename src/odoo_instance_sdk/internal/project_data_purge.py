@@ -125,6 +125,7 @@ class DatabasePurgeTarget:
     project_id: str
     project_root: Path
     database_name: str
+    database_oid: int | None = None
     instance: OdooInstance | None = None
     project_config: ProjectConfig | None = None
 
@@ -254,6 +255,7 @@ class DatabasePurgeAdapter:
                 instance,
                 target.project_root,
                 target.database_name,
+                expected_database_oid=target.database_oid,
                 project=project,
                 force_default=True,
                 idempotent_absent=True,

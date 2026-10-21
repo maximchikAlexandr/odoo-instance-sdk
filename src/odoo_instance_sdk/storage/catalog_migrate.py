@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0010"
+CATALOG_REVISION = "0011"
 
 type _DdlFingerprint = tuple[
     tuple[

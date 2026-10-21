@@ -8,7 +8,6 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -66,6 +65,7 @@ from odoo_instance_sdk.models.project_removal import (
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.project_init import (
+    _BootstrapFollowup,
     _compose_followup_steps,
     _execute_bootstrap_followup_phase,
     init_project,
@@ -856,7 +856,7 @@ def _capture_missing_source_purge(  # noqa: C901
     claim_project_id: str,
     database_names: tuple[str, ...],
     seed_catalog: Callable[[BackupCatalog, str, object, Path], None] = lambda *_args: None,
-    publish_observed: Callable[[BackupCatalog, object, Path], None] | None = None,
+    publish_observed: Callable[[BackupCatalog, object | None, Path], object | None] | None = None,
     real_children: bool = False,
 ) -> tuple[BackupCatalog, Command[ProjectRemovalResult], RecordingExecutor, str]:
     root = tmp_path / "source"
@@ -865,6 +865,9 @@ def _capture_missing_source_purge(  # noqa: C901
     project_id = f"project_{repo_key(root, common)}"
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     catalog._register_project(project_id, root, common)
+    captured_followup = (
+        publish_observed(catalog, None, root) if publish_observed is not None else None
+    )
     claim = catalog._ensure_postgres_cluster_pending(
         claim_project_id,
         f"odcli_pg_{claim_project_id}",
@@ -887,7 +890,22 @@ def _capture_missing_source_purge(  # noqa: C901
     if publish_observed is None:
         seed_catalog(catalog, claim_project_id, claim, tmp_path / "data")
     else:
-        publish_observed(catalog, claim, root)
+        if captured_followup is not None:
+            context = MagicMock()
+            context.process_prepared.side_effect = lambda step: ProcessResult(
+                argv=step.argv,
+                returncode=0,
+                stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
+                stderr="",
+                duration=0.0,
+                cwd=step.cwd,
+                environment=step.environment,
+            )
+            _execute_bootstrap_followup_phase(
+                context, cast("_BootstrapFollowup", captured_followup)
+            )
+        else:
+            publish_observed(catalog, claim, root)
     shutil.rmtree(root)
     assert not root.exists()
     assert not common.exists()
@@ -937,6 +955,7 @@ def _capture_missing_source_purge(  # noqa: C901
                         cluster="127.0.0.1:15432",
                         cluster_id=str(claim.cluster_id),
                         name=name,
+                        database_oid=101 if name == "tmp" else 102,
                         logical_size_bytes=1,
                         active_sessions=0,
                         is_default=False,
@@ -1026,7 +1045,15 @@ def _capture_missing_source_purge(  # noqa: C901
             elif "database.drop" in step_id and (
                 "inspect" in step_id or "revalidate-drop" in step_id
             ):
-                stdout = '{"exists": true, "is_template": false, "sessions": []}'
+                database_oid = 101 if ":tmp:" in step_id else 102
+                stdout = json.dumps(
+                    {
+                        "exists": True,
+                        "database_oid": database_oid,
+                        "is_template": False,
+                        "sessions": [],
+                    }
+                )
             else:
                 stdout = ""
             return ProcessResult(
@@ -1079,11 +1106,13 @@ def _seed_exact_restore(
     )
 
 
-def _publish_observed_init_binding(catalog: BackupCatalog, claim: object, root: Path) -> None:
+def _publish_observed_init_binding(
+    catalog: BackupCatalog, claim: object | None, root: Path
+) -> object | None:
     data_directory = root / ".odcli" / "filestore"
     data_directory.mkdir(parents=True)
     source_config = root / "odoo.conf"
-    source_database = f"binta_{getattr(claim, 'project_id')}"
+    source_database = f"binta_{root.name}"
     source_config.write_text(f"[options]\ndb_name = {source_database}\n", encoding="utf-8")
     config = ProjectConfig(
         repository_root=root,
@@ -1094,18 +1123,20 @@ def _publish_observed_init_binding(catalog: BackupCatalog, claim: object, root: 
         ),
     )
     _compose, followup = _compose_followup_steps(root, config, dry_run=True, defer_actions=False)
-    followup = replace(followup, fresh_cluster=True)
+    if claim is None:
+        return followup
     context = MagicMock()
     context.process_prepared.side_effect = lambda step: ProcessResult(
         argv=step.argv,
         returncode=0,
-        stdout="tmp\nodoo\npostgres\n",
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
         stderr="",
         duration=0.0,
         cwd=step.cwd,
         environment=step.environment,
     )
     _execute_bootstrap_followup_phase(context, followup)
+    return None
 
 
 def test_public_purge_recovers_missing_source_with_exact_claim(

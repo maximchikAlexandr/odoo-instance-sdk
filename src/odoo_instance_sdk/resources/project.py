@@ -198,7 +198,18 @@ class ProjectResource:
                             catalog=catalog,
                             project=project_config,
                         ).run()
-                        durable_names = set(
+                        durable_records = (
+                            set(
+                                catalog._project_bound_database_records(
+                                    claim.project_id,
+                                    claim.cluster_id,
+                                    *recovery_endpoint,
+                                )
+                            )
+                            if claim is not None and recovery_endpoint is not None
+                            else set()
+                        )
+                        restored_names = set(
                             catalog._project_restored_database_names(
                                 registration.project_id,
                                 claim.cluster_id if claim is not None else "",
@@ -207,14 +218,9 @@ class ProjectResource:
                             if claim is not None and recovery_endpoint is not None
                             else ()
                         )
+                        durable_names = set(restored_names)
                         if recovery_endpoint is not None and claim is not None:
-                            durable_names.update(
-                                catalog._project_bound_database_names(
-                                    claim.project_id,
-                                    claim.cluster_id,
-                                    *recovery_endpoint,
-                                )
-                            )
+                            durable_names.update(name for name, _oid in durable_records)
                             durable_names.update(
                                 catalog._project_bootstrapped_database_names(
                                     claim.cluster_id, *recovery_endpoint
@@ -225,8 +231,13 @@ class ProjectResource:
                             for item in database_inventory.databases
                             if item.name not in {"postgres", "template0", "template1"}
                         }
-                        authorized_names = observed_names & durable_names
-                        if not authorized_names or observed_names - durable_names:
+                        authorized_items = tuple(
+                            item
+                            for item in database_inventory.databases
+                            if (item.name, item.database_oid) in durable_records
+                            or item.name in restored_names
+                        )
+                        if not authorized_items or observed_names - durable_names:
                             database_inventory = None
                         else:
                             database_inventory = DatabaseInventoryResult(
@@ -234,7 +245,7 @@ class ProjectResource:
                                 databases=tuple(
                                     item
                                     for item in database_inventory.databases
-                                    if item.name in authorized_names
+                                    if item in authorized_items
                                     and item.name not in {"postgres", "template0", "template1"}
                                 ),
                                 tracked=False,
@@ -378,6 +389,18 @@ class ProjectResource:
                             project_id=registration.project_id,
                             project_root=registration.repository_root,
                             database_name=database,
+                            database_oid=next(
+                                (
+                                    item.database_oid
+                                    for item in (
+                                        database_inventory.databases
+                                        if database_inventory is not None
+                                        else ()
+                                    )
+                                    if item.name == database
+                                ),
+                                None,
+                            ),
                             instance=instance,
                             project_config=project_config,
                         )

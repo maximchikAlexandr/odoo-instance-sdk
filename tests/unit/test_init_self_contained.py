@@ -78,7 +78,7 @@ def _cleanup_magicmock_cwd_artifacts() -> object:
 def stub_psql_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Inject a disposable native-client path for public CLI command tests."""
     psql = tmp_path / "psql"
-    psql.write_text("#!/bin/sh\nprintf 'postgres\\n'\n", encoding="utf-8")
+    psql.write_text("#!/bin/sh\nprintf 'postgres\\t1\\n'\n", encoding="utf-8")
     psql.chmod(0o755)
     path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), path)))
@@ -117,7 +117,7 @@ def stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
             return ProcessResult(
                 argv=step.argv,
                 returncode=0,
-                stdout="postgres\n",
+                stdout="postgres\t1\n",
                 stderr="",
                 duration=0.0,
                 cwd=step.cwd,
@@ -1857,7 +1857,7 @@ def test_init_bootstrap_publishes_observed_project_database_binding(
     context.process_prepared.side_effect = lambda step: ProcessResult(
         argv=step.argv,
         returncode=0,
-        stdout="tmp\nodoo\npostgres\n",
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
         stderr="",
         duration=0.0,
         cwd=step.cwd,
@@ -1888,7 +1888,7 @@ def test_init_bootstrap_retry_publishes_observed_binding_when_tmp_is_ready(
         "127.0.0.1", 15432, "tmp", cluster_id=claim.cluster_id, data_directory=data_directory
     )
     catalog._record_project_database_binding(
-        project_id, claim.cluster_id, "127.0.0.1", 15432, "odoo"
+        project_id, claim.cluster_id, "127.0.0.1", 15432, "odoo", database_oid=102
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_catalog_path", lambda: tmp_path / "catalog.sqlite3"
@@ -1923,7 +1923,7 @@ def test_init_bootstrap_retry_publishes_observed_binding_when_tmp_is_ready(
     context.process_prepared.side_effect = lambda step: ProcessResult(
         argv=step.argv,
         returncode=0,
-        stdout="tmp\nodoo\npostgres\n",
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
         stderr="",
         duration=0.0,
         cwd=step.cwd,
@@ -2084,7 +2084,7 @@ def test_first_run_triggers_bootstrap_when_no_valid_tmp(
     context.action = MagicMock()
     context.complete_action = MagicMock()
     context.skip = MagicMock()
-    context.process_prepared.return_value = SimpleNamespace(returncode=0, stdout="postgres\n")
+    context.process_prepared.return_value = SimpleNamespace(returncode=0, stdout="postgres\t1\n")
     ensure_project_bootstrap_tmp(instance, context)
     assert calls == [True]
     context.action.assert_called_once_with("init.bootstrap.tmp.verify")
@@ -2221,6 +2221,15 @@ def _prepare_self_contained_restore_setup(
         inherited_stdio=False,
     )
     executor = RecordingExecutor(handles={session.start_step.step_id: handle})
+    executor.results["init.bootstrap.databases"] = ProcessResult(
+        argv=("psql",),
+        returncode=0,
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
     bootstrap_spawned: list[bool] = []
 
     def _track_bootstrap(
