@@ -439,3 +439,29 @@ def record_bootstrap_event(cluster: PostgresCluster, data_directory: str | Path)
         raise BootstrapFailedError(f"bootstrap lifecycle publication failed: {error}") from error
     finally:
         catalog.close()
+
+
+def record_project_database_binding(cluster: PostgresCluster, database_name: str) -> None:
+    """Persist the configured init database against its exact active claim."""
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    claim = catalog._get_postgres_cluster(cluster._project_id)
+    if claim is None or claim.state != "active":
+        catalog.close()
+        raise BootstrapFailedError("database binding claim is not active")
+    try:
+        catalog.record_project_database_binding(
+            claim.project_id,
+            claim.cluster_id,
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+            database_name,
+        )
+    except Exception as error:
+        if isinstance(error, BootstrapFailedError):
+            raise
+        raise BootstrapFailedError(f"database binding publication failed: {error}") from error
+    finally:
+        catalog.close()

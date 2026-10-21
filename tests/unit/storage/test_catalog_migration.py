@@ -277,6 +277,9 @@ def test_real_v16_catalogue_is_repaired_stamped_and_preserves_rows(tmp_path: Pat
     before = {
         table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in CATALOG_TABLES
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
     }
     conn.close()
 
@@ -286,6 +289,7 @@ def test_real_v16_catalogue_is_repaired_stamped_and_preserves_rows(tmp_path: Pat
     after = {
         table: catalog._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in CATALOG_TABLES
+        if table in before
     }
     assert after == before
     assert catalog.get_by_id("backup-v16") is not None
@@ -409,6 +413,9 @@ def test_real_pre_source_neutral_catalogue_is_stamped_upgraded_and_preserves_row
     before = {
         table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in CATALOG_TABLES
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
     }
     assert _ddl_fingerprint(conn) == _historical_ddl_fingerprint("pre_source_neutral")
     conn.close()
@@ -421,6 +428,7 @@ def test_real_pre_source_neutral_catalogue_is_stamped_upgraded_and_preserves_row
     after = {
         table: catalog._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in CATALOG_TABLES
+        if table in before
     }
     assert after == before
     assert catalog.get_by_id("backup-legacy") is not None

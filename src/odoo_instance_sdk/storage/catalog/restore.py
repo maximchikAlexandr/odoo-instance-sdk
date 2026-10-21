@@ -230,6 +230,11 @@ class _RestoreMixin:
                 "AND state='incomplete'",
                 (host, db_port, database_name),
             )
+            self._conn.execute(
+                "DELETE FROM project_database_bindings "
+                "WHERE db_host=? AND db_port=? AND database_name=?",
+                (host, db_port, database_name),
+            )
 
     @_translate_sqlite_error
     def record_databases_dropped(
@@ -293,6 +298,11 @@ class _RestoreMixin:
             self._conn.execute(
                 "DELETE FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
                 "AND state='incomplete'",
+                (host, db_port, database_name),
+            )
+            self._conn.execute(
+                "DELETE FROM project_database_bindings "
+                "WHERE db_host=? AND db_port=? AND database_name=?",
                 (host, db_port, database_name),
             )
         return tuple(changed)
@@ -468,6 +478,48 @@ class _RestoreMixin:
                  AND event_type = 'bootstrapped'
                ORDER BY database_name""",
             (identity, host, db_port),
+        ).fetchall()
+        return tuple(str(row["database_name"]) for row in rows)
+
+    @_translate_sqlite_error
+    def record_project_database_binding(
+        self,
+        project_id: str,
+        cluster_id: uuid.UUID | str,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+    ) -> None:
+        """Record a database identity observed during successful project init."""
+        project = str(project_id).strip()
+        name = str(database_name).strip()
+        if not project or not name or name in {"postgres", "template0", "template1"}:
+            raise BackupCatalogError("project database binding identity is invalid")
+        host = normalize_db_host(db_host)
+        identity = self._cluster_uuid(cluster_id)
+        claim = self._get_postgres_cluster_by_id(identity)
+        if claim is None or claim.state != "active" or claim.project_id != project:
+            raise BackupCatalogError("project database binding requires its active claim")
+        with self._conn:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO project_database_bindings
+                   (project_id, cluster_id, db_host, db_port, database_name, bound_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+                (project, identity, host, db_port, name),
+            )
+
+    @_translate_sqlite_error
+    def project_bound_database_names(
+        self, project_id: str, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
+    ) -> tuple[str, ...]:
+        """Return only database identities captured for this exact claim endpoint."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT database_name FROM project_database_bindings
+               WHERE project_id = ? AND cluster_id = ? AND db_host = ? AND db_port = ?
+               ORDER BY database_name""",
+            (str(project_id), identity, host, db_port),
         ).fetchall()
         return tuple(str(row["database_name"]) for row in rows)
 

@@ -78,10 +78,7 @@ class _BootstrapFollowup:
     plan: BootstrapTmpPlan
     project_root: Path
     data_directory: Path
-
-    @property
-    def steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
-        return self.plan.execution_steps
+    database_names: tuple[str | None, ...]
 
 
 def _init_action_details(
@@ -277,11 +274,7 @@ def _execute_compose_init_phase(
 def _execute_bootstrap_followup_phase(
     context: RunContext[dict[str, JsonValue]], followup: _BootstrapFollowup
 ) -> None:
-    from odoo_instance_sdk.internal.dbprep.bootstrap import (
-        execute_bootstrap_tmp,
-        record_bootstrap_event,
-    )
-    from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
+    from odoo_instance_sdk.internal.dbprep import bootstrap
 
     verify_project_owned_data_dir(
         followup.project_root, followup.data_directory, require_exists=False
@@ -291,10 +284,12 @@ def _execute_bootstrap_followup_phase(
         data_directory = verify_project_owned_data_dir(
             followup.project_root, followup.data_directory
         )
-        record_bootstrap_event(followup.cluster, data_directory)
+        bootstrap.record_bootstrap_event(followup.cluster, data_directory)
+        for database_name in filter(None, followup.database_names):
+            bootstrap.record_project_database_binding(followup.cluster, database_name)
 
-    execute_bootstrap_tmp(context, followup.plan, on_created=record)
-    for step in followup.steps:
+    bootstrap.execute_bootstrap_tmp(context, followup.plan, on_created=record)
+    for step in followup.plan.execution_steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
             context.skip(step.step_id)
 
@@ -444,7 +439,7 @@ def init_project_command(  # noqa: C901
         *((compose_followup.init_steps[1:]) if compose_followup is not None else ()),
         *(primary_preparation.steps if primary_preparation is not None else ()),
         *(compose_followup.steps if compose_followup is not None else ()),
-        *(bootstrap_followup.steps if bootstrap_followup is not None else ()),
+        *(bootstrap_followup.plan.execution_steps if bootstrap_followup is not None else ()),
     )
 
     def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -637,6 +632,11 @@ def _compose_followup_steps(
             plan=bootstrap_plan,
             project_root=root,
             data_directory=data_directory,
+            database_names=(
+                config.default_source_database,
+                source_start.db_name,
+                start_config.db_user or "odoo",
+            ),
         ),
     )
 

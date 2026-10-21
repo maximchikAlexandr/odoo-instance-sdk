@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0009"
+CATALOG_REVISION = "0010"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -590,6 +590,8 @@ def _historical_ddl_fingerprint(
     }
     historical_tables = []
     for table, columns, keys, checks, collations, generated, options, _definition in tables:
+        if table not in _V16_TABLE_DEFINITIONS:
+            continue
         variant_omitted = variant_omissions.get(table, frozenset())
         omitted = _HISTORICAL_COMMON_OMISSIONS.get(table, frozenset()) | variant_omitted
         historical_columns = tuple(
@@ -651,7 +653,12 @@ def _historical_ddl_fingerprint(
     historical_indexes = frozenset(
         (name, sql)
         for name, sql in indexes
-        if name not in {"backups_source_group_idx", "environments_project_checkout_idx"}
+        if name
+        not in {
+            "backups_source_group_idx",
+            "environments_project_checkout_idx",
+            "project_database_bindings_identity_idx",
+        }
         and not (version == "v16" and name == "environments_one_active_branch")
     )
     historical_foreign_keys = tuple(
@@ -660,6 +667,7 @@ def _historical_ddl_fingerprint(
             tuple(fk for fk in rows if not _is_historical_common_omission(table, fk[1])),
         )
         for table, rows in foreign_keys
+        if table in _V16_TABLE_DEFINITIONS
     )
     historical_views = frozenset(
         (
@@ -777,12 +785,16 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
     expected_tables, expected_indexes, expected_foreign_keys, expected_view = (
         _reference_fingerprint()
     )
+    expected_tables = tuple(
+        item for item in expected_tables if item[0] != "project_database_bindings"
+    )
     legacy_indexes = expected_indexes - {
         "backups_source_group_idx",
         "environments_project_checkout_idx",
         "backups_project_idx",
         "restores_cluster_identity_idx",
         "database_events_cluster_identity_idx",
+        "project_database_bindings_identity_idx",
     }
     expected_foreign_keys = tuple(
         (table, () if table == "backups" else keys) for table, keys in expected_foreign_keys

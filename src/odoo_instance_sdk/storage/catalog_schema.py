@@ -211,6 +211,26 @@ database_events = Table(
     ),
 )
 
+project_database_bindings = Table(
+    "project_database_bindings",
+    metadata,
+    Column("project_id", Text, nullable=False),
+    Column("cluster_id", Text, nullable=False),
+    Column("db_host", Text, nullable=False),
+    Column("db_port", Integer, nullable=False),
+    Column("database_name", Text, nullable=False),
+    Column("bound_at", Text, nullable=False),
+    UniqueConstraint("project_id", "cluster_id", "db_host", "db_port", "database_name"),
+    Index(
+        "project_database_bindings_identity_idx",
+        "project_id",
+        "cluster_id",
+        "db_host",
+        "db_port",
+        "database_name",
+    ),
+)
+
 environments = Table(
     "environments",
     metadata,
@@ -374,6 +394,7 @@ CATALOG_TABLES = (
     "backup_events",
     "restores",
     "database_events",
+    "project_database_bindings",
     "environments",
     "environment_events",
     "environment_copy_journal",
@@ -393,6 +414,7 @@ CATALOG_INDEXES = (
     "restores_cluster_identity_idx",
     "database_events_cluster_idx",
     "database_events_cluster_identity_idx",
+    "project_database_bindings_identity_idx",
     "environments_active_idx",
     "environments_one_active_branch",
     "environments_project_checkout_idx",
