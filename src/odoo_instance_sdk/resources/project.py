@@ -36,7 +36,10 @@ class ProjectResource:
             InstanceConfigurationError,
             PostgresClusterError,
         )
-        from odoo_instance_sdk.internal.postgres_compose import inspect_volume_identity
+        from odoo_instance_sdk.internal.postgres_compose import (
+            inspect_container_identity,
+            inspect_volume_identity,
+        )
         from odoo_instance_sdk.internal.project_data_purge import (
             BackupPurgeAdapter,
             ComposeClusterPurgeAdapter,
@@ -128,9 +131,18 @@ class ProjectResource:
                                 str(claim.cluster_id),
                                 project_id=claim.project_id,
                             )
+                            container_verified = inspect_container_identity(
+                                cluster.compose_runner,
+                                f"{claim.compose_project}-postgres-1",
+                                str(claim.cluster_id),
+                                project_id=claim.project_id,
+                                compose_project=claim.compose_project,
+                                volume_name=claim.volume_name,
+                            )
                             snapshot = cluster.resource_snapshot()
                         except (OSError, ValueError, PostgresClusterError):
                             volume_verified = False
+                            container_verified = False
                             snapshot = None
                         container = getattr(snapshot, "container", None)
                         stopped = getattr(snapshot, "unavailability_reason", None) == "stopped"
@@ -153,7 +165,9 @@ class ProjectResource:
                                 if volume_verified and container is not None
                                 else None
                             ),
-                            active_container_owned=(volume_verified and container is not None),
+                            container_identity_verified=(
+                                volume_verified and container_verified and container is not None
+                            ),
                             reason=(
                                 None
                                 if volume_verified and (stopped or container is not None)

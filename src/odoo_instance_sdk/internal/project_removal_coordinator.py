@@ -351,7 +351,10 @@ def _projection(
             volumes = (volume_observation,)
             volume_observed = volume_observation.available and (
                 volume_observation.active is False
-                or (volume_observation.active is True and volume_observation.active_container_owned)
+                or (
+                    volume_observation.active is True
+                    and volume_observation.container_identity_verified
+                )
             )
         else:
             volume_observation = VolumeResourceSource(
