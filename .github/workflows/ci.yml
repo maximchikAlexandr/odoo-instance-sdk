@@ -115,6 +115,11 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - if: runner.os == 'macOS'
+        name: Install PostgreSQL client
+        run: |
+          brew install libpq
+          echo "$(brew --prefix libpq)/bin" >> "$GITHUB_PATH"
       - run: uv sync --frozen --group test
       - run: make compat
 
