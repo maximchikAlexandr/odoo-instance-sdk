@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -46,7 +47,13 @@ from odoo_instance_sdk.project import (
     RemoteSourceConfig,
     TestInstanceProjectConfig as RemoteTestInstanceConfig,
 )
-from odoo_instance_sdk.project_init import init_project, init_project_command
+from odoo_instance_sdk.project_init import (
+    _BootstrapFollowup,
+    _compose_followup_steps,
+    _execute_bootstrap_followup_phase,
+    init_project,
+    init_project_command,
+)
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance import (
     AuxiliaryRestoreSession,
@@ -1783,6 +1790,156 @@ def test_init_compose_failure_keeps_forgotten_project_hidden(
     catalog = BackupCatalog(db_path=catalog_path)
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     catalog.close()
+
+
+def test_init_bootstrap_publishes_observed_project_database_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    data_directory = root / ".odcli" / "filestore"
+    data_directory.mkdir(parents=True)
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    project_id = f"project_{repo_key(root, root / '.git')}"
+    catalog._register_project(project_id, root, root / ".git")
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose", "volume")
+    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose", "volume")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda: tmp_path / "catalog.sqlite3"
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.CREATED,
+    )
+    cluster = SimpleNamespace(
+        _project_id=project_id, endpoint_host="127.0.0.1", endpoint_port=15432
+    )
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        record_action=bootstrap.bootstrap_record_action(),
+        capture_inventory=True,
+    )
+    followup = _BootstrapFollowup(
+        cluster=cluster,  # type: ignore[arg-type]
+        plan=plan,
+        project_root=root,
+        data_directory=data_directory,
+        database_names=("odoo",),
+    )
+    context = MagicMock()
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="tmp\nodoo\npostgres\n",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+    _execute_bootstrap_followup_phase(context, followup)
+    assert catalog._project_bound_database_names(
+        project_id, claim.cluster_id, "127.0.0.1", 15432
+    ) == ("odoo",)
+    catalog.close()
+
+
+def test_init_bootstrap_retry_publishes_observed_binding_when_tmp_is_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    data_directory = root / ".odcli" / "filestore"
+    data_directory.mkdir(parents=True)
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    project_id = f"project_{repo_key(root, root / '.git')}"
+    catalog._register_project(project_id, root, root / ".git")
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose", "volume")
+    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose", "volume")
+    catalog._record_database_bootstrapped(
+        "127.0.0.1", 15432, "tmp", cluster_id=claim.cluster_id, data_directory=data_directory
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda: tmp_path / "catalog.sqlite3"
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.ALREADY_READY,
+    )
+    cluster = SimpleNamespace(
+        _project_id=project_id, endpoint_host="127.0.0.1", endpoint_port=15432
+    )
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        record_action=bootstrap.bootstrap_record_action(),
+        capture_inventory=True,
+    )
+    followup = _BootstrapFollowup(
+        cluster=cluster,  # type: ignore[arg-type]
+        plan=plan,
+        project_root=root,
+        data_directory=data_directory,
+        database_names=("odoo",),
+    )
+    context = MagicMock()
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="tmp\nodoo\npostgres\n",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+    _execute_bootstrap_followup_phase(context, followup)
+    assert catalog._project_bound_database_names(
+        project_id, claim.cluster_id, "127.0.0.1", 15432
+    ) == ("odoo",)
+    catalog.close()
+
+
+def test_deferred_init_materializes_password_for_database_inventory_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    (root / ".odcli").mkdir(parents=True)
+    postgres_dir = tmp_path / "postgres"
+    postgres_dir.mkdir()
+    (postgres_dir / "postgres-password").write_text("captured-secret\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
+        lambda _project_id: postgres_dir,
+    )
+    config = ProjectConfig(
+        repository_root=root,
+        default_source_database="odoo",
+        postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=15432),
+    )
+    compose, followup = _compose_followup_steps(root, config, dry_run=False, defer_actions=True)
+    assert followup.database_names == ("tmp", "odoo")
+    inventory = followup.plan.inventory_step
+    assert inventory is not None and inventory.runtime_environment_factory is not None
+    compose.password_state[0] = "runtime-secret"
+    environment, _cleanup, secrets = inventory.runtime_environment_factory()
+    assert dict(environment)["PGPASSWORD"] == "runtime-secret"
+    assert secrets == ("runtime-secret",)
 
 
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(

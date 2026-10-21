@@ -139,10 +139,14 @@ class ProjectResource:
             )
             recovery_endpoint = endpoint
             if endpoint is not None:
+                recovery_user = "odoo"
                 recovery_config = ProjectConfig(
                     repository_root=registration.repository_root,
                     postgres=PostgresProjectConfig(
-                        mode="compose", image="pgvector/pgvector:pg16", port=endpoint[1]
+                        mode="compose",
+                        image="pgvector/pgvector:pg16",
+                        port=endpoint[1],
+                        user=recovery_user,
                     ),
                 )
                 try:
@@ -158,9 +162,11 @@ class ProjectResource:
                             start_config=StartConfig(
                                 db_host=endpoint[0],
                                 db_port=endpoint[1],
+                                db_user=recovery_user,
                             ),
                             db_host=endpoint[0],
                             db_port=endpoint[1],
+                            db_user=recovery_user,
                         ),
                         _client=client,
                         _postgres_cluster=recovery_cluster,

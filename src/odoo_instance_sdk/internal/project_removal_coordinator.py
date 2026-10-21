@@ -300,8 +300,10 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
         registration.git_common_dir,
     )
     active_claim = claim if claim is not None and claim.state == "active" else None
+    active_cluster_id = str(active_claim.cluster_id) if active_claim is not None else None
     database_required = database_name is not None or active_claim is not None
     observed_databases = tuple(database_inventory.databases) if database_inventory else ()
+    owned_databases: tuple[DatabaseInventoryItem, ...] = ()
     if database_name is None and active_claim is not None and observed_databases:
         owned_databases = tuple(
             item for item in observed_databases if item.cluster_id == str(active_claim.cluster_id)
@@ -319,13 +321,14 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
             else item
             for item in observed_databases
         )
-    database_observed = bool(
-        active_claim is not None
-        and database_name is not None
-        and any(
-            item.name == database_name and item.cluster_id == str(active_claim.cluster_id)
+    if database_name is not None and active_claim is not None and not owned_databases:
+        owned_databases = tuple(
+            item
             for item in observed_databases
+            if item.name == database_name and item.cluster_id == str(active_claim.cluster_id)
         )
+    database_observed = bool(owned_databases) and all(
+        item.cluster_id == active_cluster_id for item in owned_databases
     )
     if database_required and database_name is not None and not database_observed:
         database_cluster = (
@@ -381,9 +384,7 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
             volume_observed = False
     database_measurement_complete = not database_required or database_observed
     database_inactive = not database_required or all(
-        item.active_sessions == 0
-        for item in observed_databases
-        if database_name is None or item.name == database_name
+        item.active_sessions == 0 for item in owned_databases
     )
     volume_inactive = active_claim is None or volume_observed
     required_observations_complete = (
@@ -394,6 +395,26 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
         and volume_observed
         and volume_inactive
     )
+    project_database_names = tuple(item.name for item in owned_databases)
+    if not project_database_names and database_name is not None:
+        project_database_names = (database_name,)
+    project_sources = tuple(
+        ProjectResourceSource(
+            project_id=registration.project_id,
+            repository_root=registration.repository_root,
+            runtime_database=name,
+            database_cluster=(str(claim.cluster_id) if claim is not None else None),
+            config_paths=tuple(path for kind, path in owned_paths if kind == "config"),
+            secret_paths=tuple(path for kind, path in owned_paths if kind == "secret"),
+            filestore_paths=tuple(path for kind, path in owned_paths if kind == "filestore"),
+            primary_python_environment_path=next(
+                (path for kind, path in owned_paths if kind == "python_environment"), None
+            ),
+            log_paths=tuple(path for kind, path in owned_paths if kind == "log"),
+            temp_paths=tuple(path for kind, path in owned_paths if kind == "temporary"),
+        )
+        for name in (project_database_names or (None,))
+    )
     inventory = collect_resource_inventory(
         catalog=catalog,
         database_inventory=database_inventory,
@@ -403,22 +424,7 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
             if database_measurement_complete
             else "project-scoped PostgreSQL observation unavailable or unproven"
         ),
-        projects=(
-            ProjectResourceSource(
-                project_id=registration.project_id,
-                repository_root=registration.repository_root,
-                runtime_database=database_name,
-                database_cluster=(str(claim.cluster_id) if claim is not None else None),
-                config_paths=tuple(path for kind, path in owned_paths if kind == "config"),
-                secret_paths=tuple(path for kind, path in owned_paths if kind == "secret"),
-                filestore_paths=tuple(path for kind, path in owned_paths if kind == "filestore"),
-                primary_python_environment_path=next(
-                    (path for kind, path in owned_paths if kind == "python_environment"), None
-                ),
-                log_paths=tuple(path for kind, path in owned_paths if kind == "log"),
-                temp_paths=tuple(path for kind, path in owned_paths if kind == "temporary"),
-            ),
-        ),
+        projects=project_sources,
         environments=environments,
         volumes=volumes,
         project_id=registration.project_id,
