@@ -456,6 +456,22 @@ class _RestoreMixin:
         return tuple(str(row["database_name"]) for row in rows)
 
     @_translate_sqlite_error
+    def project_bootstrapped_database_names(
+        self, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
+    ) -> tuple[str, ...]:
+        """Return databases explicitly bootstrapped on one claimed cluster."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT DISTINCT database_name FROM database_events
+               WHERE cluster_id = ? AND db_host = ? AND db_port = ?
+                 AND event_type = 'bootstrapped'
+               ORDER BY database_name""",
+            (identity, host, db_port),
+        ).fetchall()
+        return tuple(str(row["database_name"]) for row in rows)
+
+    @_translate_sqlite_error
     def has_tracked_database(
         self,
         db_host: str | None,

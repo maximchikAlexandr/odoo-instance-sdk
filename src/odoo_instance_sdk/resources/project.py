@@ -116,6 +116,7 @@ class ProjectResource:
         )
         instance = None
         recovered_source = False
+        recovery_endpoint: tuple[str, int] | None = None
         if (
             purge
             and project_config is None
@@ -136,6 +137,7 @@ class ProjectResource:
                 if endpoint_row is not None
                 else None
             )
+            recovery_endpoint = endpoint
             if endpoint is not None:
                 recovery_config = ProjectConfig(
                     repository_root=registration.repository_root,
@@ -193,10 +195,16 @@ class ProjectResource:
                         durable_names = set(
                             catalog.project_restored_database_names(registration.project_id)
                         )
+                        if recovery_endpoint is not None and claim is not None:
+                            durable_names.update(
+                                catalog.project_bootstrapped_database_names(
+                                    claim.cluster_id, *recovery_endpoint
+                                )
+                            )
                         observed_names = {
                             item.name
                             for item in database_inventory.databases
-                            if item.name not in {"postgres", "template0", "template1", "tmp"}
+                            if item.name not in {"postgres", "template0", "template1"}
                         }
                         authorized_names = observed_names & durable_names
                         if not authorized_names or observed_names - durable_names:
@@ -208,8 +216,7 @@ class ProjectResource:
                                     item
                                     for item in database_inventory.databases
                                     if item.name in authorized_names
-                                    and item.name
-                                    not in {"postgres", "template0", "template1", "tmp"}
+                                    and item.name not in {"postgres", "template0", "template1"}
                                 ),
                                 tracked=False,
                             )
