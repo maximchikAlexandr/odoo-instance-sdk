@@ -197,6 +197,13 @@ class ProjectResource:
                         )
                         if recovery_endpoint is not None and claim is not None:
                             durable_names.update(
+                                catalog.project_bound_database_names(
+                                    claim.project_id,
+                                    claim.cluster_id,
+                                    *recovery_endpoint,
+                                )
+                            )
+                            durable_names.update(
                                 catalog.project_bootstrapped_database_names(
                                     claim.cluster_id, *recovery_endpoint
                                 )

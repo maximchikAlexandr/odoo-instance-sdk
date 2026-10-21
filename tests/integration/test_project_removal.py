@@ -905,6 +905,17 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
         assert catalog.project_bootstrapped_database_names(
             claim.cluster_id, "127.0.0.1", 15432
         ) == ("tmp",)
+        catalog.record_project_database_binding(
+            legacy_project_id,
+            claim.cluster_id,
+            "127.0.0.1",
+            15432,
+            "odoo",
+        )
+        assert catalog.project_restored_database_names(project_id) == ()
+        assert catalog.project_bound_database_names(
+            legacy_project_id, claim.cluster_id, "127.0.0.1", 15432
+        ) == ("odoo",)
     shutil.rmtree(root)
     assert not root.exists()
     assert not common.exists()
@@ -945,6 +956,20 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
                         logical_size_bytes=1,
                         active_sessions=0,
                         is_default=False,
+                    ),
+                    *(
+                        (
+                            DatabaseInventoryItem(
+                                cluster="127.0.0.1:15432",
+                                cluster_id=str(claim.cluster_id),
+                                name="odoo",
+                                logical_size_bytes=1,
+                                active_sessions=0,
+                                is_default=False,
+                            ),
+                        )
+                        if claim_form == "legacy"
+                        else ()
                     ),
                     *(
                         (
