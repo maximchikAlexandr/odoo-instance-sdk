@@ -973,6 +973,7 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
                 stdout=json.dumps(
                     {
                         "Name": f"/{compose_project}-postgres-1",
+                        "Id": "owned-container",
                         "Config": {
                             "Labels": {
                                 "com.docker.compose.project": compose_project,
@@ -1178,11 +1179,11 @@ def test_public_remove_command_blocks_forget_for_mismatched_snapshot_container(
     if container_probe == "mismatch":
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
-            lambda *_args, **_kwargs: False,
+            lambda *_args, **_kwargs: "expected-container",
         )
     else:
 
-        def unavailable_container(*_args: object, **_kwargs: object) -> bool:
+        def unavailable_container(*_args: object, **_kwargs: object) -> str | None:
             raise OSError("container observation unavailable")
 
         monkeypatch.setattr(
@@ -1216,6 +1217,63 @@ def test_public_remove_command_blocks_forget_for_mismatched_snapshot_container(
     details = cast("dict[str, object]", error.value.details["removal"])
     assert details["failed_step"] == "project-removal:observations"
     assert database_executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert manifest.exists()
+    assert root.exists()
+    catalog.close()
+
+
+def test_public_remove_command_blocks_forget_when_required_observation_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text('[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8")
+    legacy_project_id = repo_key(root, root / ".git")
+    compose_project = f"odcli_pg_{legacy_project_id}"
+    volume_name = f"pgdata_{legacy_project_id}"
+    claim = catalog._ensure_postgres_cluster_pending(
+        legacy_project_id, compose_project, volume_name
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, legacy_project_id, compose_project, volume_name
+    )
+
+    def unavailable_inventory(*_args: object, **_kwargs: object) -> DatabaseInventoryResult:
+        raise OSError("database observation unavailable")
+
+    cluster = SimpleNamespace(
+        owned=True,
+        compose_runner=SimpleNamespace(),
+        resource_snapshot=lambda: (_ for _ in ()).throw(OSError("Compose observation unavailable")),
+    )
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(list_inventory=unavailable_inventory),
+        _postgres_cluster=cluster,
+    )
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=lambda _project: instance),
+        ),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
+        lambda *_args, **_kwargs: False,
+    )
+
+    command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert manifest.exists()
     assert root.exists()

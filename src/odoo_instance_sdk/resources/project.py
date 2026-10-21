@@ -131,7 +131,7 @@ class ProjectResource:
                                 str(claim.cluster_id),
                                 project_id=claim.project_id,
                             )
-                            container_verified = inspect_container_identity(
+                            inspected_container_id = inspect_container_identity(
                                 cluster.compose_runner,
                                 f"{claim.compose_project}-postgres-1",
                                 str(claim.cluster_id),
@@ -142,7 +142,7 @@ class ProjectResource:
                             snapshot = cluster.resource_snapshot()
                         except (OSError, ValueError, PostgresClusterError):
                             volume_verified = False
-                            container_verified = False
+                            inspected_container_id = None
                             snapshot = None
                         container = getattr(snapshot, "container", None)
                         stopped = getattr(snapshot, "unavailability_reason", None) == "stopped"
@@ -166,7 +166,10 @@ class ProjectResource:
                                 else None
                             ),
                             container_identity_verified=(
-                                volume_verified and container_verified and container is not None
+                                volume_verified
+                                and inspected_container_id is not None
+                                and container is not None
+                                and getattr(container, "id", None) == inspected_container_id
                             ),
                             reason=(
                                 None
