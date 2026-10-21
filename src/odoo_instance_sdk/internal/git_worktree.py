@@ -420,9 +420,32 @@ def worktree_remove(repo_root: Path, worktree: Path) -> None:
         raise GitError(f"git worktree remove failed: {stderr}")
 
 
-def worktree_is_dirty(worktree: Path, *, step_id: str | None = None) -> bool:
+def _git_status_argv(worktree: Path, *, hardened: bool) -> list[str]:
+    if hardened:
+        return [
+            "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            f"core.hooksPath={os.devnull}",
+            "-C",
+            str(worktree),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]
+    return ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"]
+
+
+def worktree_is_dirty(
+    worktree: Path,
+    *,
+    step_id: str | None = None,
+    hardened: bool = False,
+) -> bool:
     proc = _run(
-        ["git", "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"],
+        _git_status_argv(worktree, hardened=hardened),
         check=False,
         step_id=step_id,
     )

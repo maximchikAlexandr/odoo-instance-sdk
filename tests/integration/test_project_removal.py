@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -254,6 +257,84 @@ def test_public_forget_preserves_dirty_source_decision_across_execution(
 
     assert result.registration_state == "forgotten"
     assert untracked.exists()
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+def _git_probe_project_with_fsmonitor_canary(
+    tmp_path: Path,
+) -> tuple[BackupCatalog, str, Path, Path, Path]:
+    catalog, project_id, root = _catalog(tmp_path)
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True, text=True)
+    tracked = root / "tracked.txt"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(root), "add", "tracked.txt"), check=True)
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "baseline",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    marker = tmp_path / "fsmonitor-marker"
+    canary = tmp_path / "fsmonitor-canary.py"
+    canary.write_text(
+        "from pathlib import Path\n"
+        f"Path({json.dumps(str(marker))}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    canary_command = (
+        subprocess.list2cmdline((sys.executable, str(canary)))
+        if os.name == "nt"
+        else " ".join(shlex.quote(part) for part in (sys.executable, str(canary)))
+    )
+    subprocess.run(
+        ("git", "-C", str(root), "config", "core.fsmonitor", canary_command),
+        check=True,
+    )
+    return catalog, project_id, root, marker, root / ".git" / "index"
+
+
+def test_public_forget_git_probe_does_not_run_configured_fsmonitor(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root, marker, _index = _git_probe_project_with_fsmonitor_canary(tmp_path)
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+
+    result = ProjectResource(_client=cast("OdooClient", client)).remove(
+        ProjectSelector.from_project_id(project_id)
+    )
+
+    assert result.registration_state == "forgotten"
+    assert not marker.exists()
+    assert root.exists()
+    catalog.close()
+
+
+def test_public_forget_git_probe_preserves_index_bytes(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root, _marker, index = _git_probe_project_with_fsmonitor_canary(tmp_path)
+    index_before = index.read_bytes()
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+
+    result = ProjectResource(_client=cast("OdooClient", client)).remove(
+        ProjectSelector.from_project_id(project_id)
+    )
+
+    assert result.registration_state == "forgotten"
+    assert index.read_bytes() == index_before
     assert root.exists()
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     catalog.close()
