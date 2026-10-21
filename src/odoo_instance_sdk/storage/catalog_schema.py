@@ -219,6 +219,7 @@ project_database_bindings = Table(
     Column("db_host", Text, nullable=False),
     Column("db_port", Integer, nullable=False),
     Column("database_name", Text, nullable=False),
+    Column("database_oid", Integer, nullable=True),
     Column("bound_at", Text, nullable=False),
     UniqueConstraint("project_id", "cluster_id", "db_host", "db_port", "database_name"),
     Index(

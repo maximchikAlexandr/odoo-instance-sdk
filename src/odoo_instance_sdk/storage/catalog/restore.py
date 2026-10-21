@@ -498,12 +498,15 @@ class _RestoreMixin:
         db_host: str | None,
         db_port: int,
         database_name: str,
+        database_oid: int | None = None,
     ) -> None:
         """Record a database identity observed during successful project init."""
         project = str(project_id).strip()
         name = str(database_name).strip()
         if not project or not name or name in {"postgres", "template0", "template1"}:
             raise BackupCatalogError("project database binding identity is invalid")
+        if database_oid is not None and (type(database_oid) is not int or database_oid <= 0):
+            raise BackupCatalogError("project database binding PostgreSQL identity is invalid")
         host = normalize_db_host(db_host)
         identity = self._cluster_uuid(cluster_id)
         claim = self._get_postgres_cluster_by_id(identity)
@@ -512,10 +515,31 @@ class _RestoreMixin:
         with self._conn:
             self._conn.execute(
                 """INSERT OR IGNORE INTO project_database_bindings
-                   (project_id, cluster_id, db_host, db_port, database_name, bound_at)
-                   VALUES (?, ?, ?, ?, ?, datetime('now'))""",
-                (project, identity, host, db_port, name),
+                   (project_id, cluster_id, db_host, db_port, database_name, database_oid, bound_at)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+                (project, identity, host, db_port, name, database_oid),
             )
+
+    @_translate_sqlite_error
+    def _project_bound_database_records(
+        self, project_id: str, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
+    ) -> tuple[tuple[str, int | None], ...]:
+        """Return exact project database names and their durable PostgreSQL OIDs."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT database_name, database_oid FROM project_database_bindings
+               WHERE project_id = ? AND cluster_id = ? AND db_host = ? AND db_port = ?
+               ORDER BY database_name""",
+            (str(project_id), identity, host, db_port),
+        ).fetchall()
+        return tuple(
+            (
+                str(row["database_name"]),
+                int(row["database_oid"]) if row["database_oid"] is not None else None,
+            )
+            for row in rows
+        )
 
     @_translate_sqlite_error
     def _project_bound_database_names(

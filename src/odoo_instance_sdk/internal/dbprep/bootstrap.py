@@ -55,7 +55,8 @@ def candidate_database_names(
 _BOOTSTRAP_INIT_MODULE = "base"
 _BOOTSTRAP_READY_SQL = b"SELECT state FROM ir_module_module WHERE name = 'base'"
 _BOOTSTRAP_INVENTORY_SQL = (
-    b"SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname"
+    b"SELECT datname || E'\\t' || oid FROM pg_database "
+    b"WHERE NOT datistemplate AND datallowconn ORDER BY datname"
 )
 _BOOTSTRAP_CREATE_SQL = (
     b"SELECT 'CREATE DATABASE tmp' "
@@ -78,6 +79,14 @@ class BootstrapFailedError(InstanceConfigurationError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedDatabase:
+    """One database name paired with PostgreSQL's immutable catalog identity."""
+
+    name: str
+    database_oid: int
 
 
 class BootstrapOutcome(StrEnum):
@@ -297,7 +306,7 @@ def run_bootstrap_tmp(
     return BootstrapOutcome.CREATED
 
 
-def _read_database_inventory(result: object) -> tuple[str, ...]:
+def _read_database_inventory(result: object) -> tuple[ObservedDatabase, ...]:
     """Decode one successful, non-empty PostgreSQL inventory observation."""
     if getattr(result, "returncode", 1) != 0:
         raise BootstrapFailedError("database inventory observation failed")
@@ -309,10 +318,18 @@ def _read_database_inventory(result: object) -> tuple[str, ...]:
             raise BootstrapFailedError(
                 "database inventory observation was not valid UTF-8"
             ) from error
-    names = tuple(str(name).strip() for name in str(stdout).splitlines())
-    if not names or any(not name or any(ord(char) < 0x20 for char in name) for name in names):
+    observations: list[ObservedDatabase] = []
+    for line in str(stdout).splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) != 2 or not parts[0] or not parts[1].isdigit():
+            raise BootstrapFailedError("database inventory observation was invalid")
+        oid = int(parts[1])
+        if oid <= 0 or any(ord(char) < 0x20 and char != "\t" for char in line):
+            raise BootstrapFailedError("database inventory observation was invalid")
+        observations.append(ObservedDatabase(parts[0], oid))
+    if not observations:
         raise BootstrapFailedError("database inventory observation was invalid")
-    return tuple(dict.fromkeys(names))
+    return tuple({item.name: item for item in observations}.values())
 
 
 def execute_bootstrap_tmp(
@@ -320,7 +337,7 @@ def execute_bootstrap_tmp(
     plan: BootstrapTmpPlan,
     *,
     on_created: Callable[[], None] | None = None,
-    on_observed: Callable[[tuple[str, ...]], None] | None = None,
+    on_observed: Callable[[tuple[ObservedDatabase, ...]], None] | None = None,
 ) -> BootstrapOutcome:
     """Serialize the complete bootstrap boundary, including lifecycle record."""
     lock = (
@@ -337,7 +354,7 @@ def execute_bootstrap_tmp(
         context.action(plan.verify_action.step_id)
         outcome = run_bootstrap_tmp(context, plan)
         context.complete_action(plan.verify_action.step_id)
-        observed: tuple[str, ...] = ()
+        observed: tuple[ObservedDatabase, ...] = ()
         if plan.inventory_step is not None:
             observed = _read_database_inventory(context.process_prepared(plan.inventory_step))
             if on_observed is not None:
@@ -507,10 +524,10 @@ def record_bootstrap_event(cluster: PostgresCluster, data_directory: str | Path)
 
 
 def record_project_database_bindings(
-    cluster: PostgresCluster, database_names: tuple[str, ...]
+    cluster: PostgresCluster, observations: tuple[ObservedDatabase, ...]
 ) -> None:
-    """Persist only names observed on the exact active init cluster."""
-    if not database_names:
+    """Persist only identities observed on the exact active init cluster."""
+    if not observations:
         return
     from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -521,13 +538,14 @@ def record_project_database_bindings(
         catalog.close()
         raise BootstrapFailedError("database binding claim is not active")
     try:
-        for database_name in database_names:
+        for observation in observations:
             catalog._record_project_database_binding(
                 claim.project_id,
                 claim.cluster_id,
                 cluster.endpoint_host,
                 cluster.endpoint_port,
-                database_name,
+                observation.name,
+                database_oid=observation.database_oid,
             )
     except Exception as error:
         if isinstance(error, BootstrapFailedError):
@@ -540,7 +558,7 @@ def record_project_database_bindings(
 def record_observed_project_database_bindings(
     cluster: PostgresCluster,
     candidates: tuple[str | None, ...],
-    observed: tuple[str, ...],
+    observed: tuple[ObservedDatabase, ...],
     *,
     fresh_cluster: bool = False,
 ) -> None:
@@ -560,8 +578,8 @@ def record_observed_project_database_bindings(
         claim = catalog._get_postgres_cluster(cluster._project_id)
         if claim is None or claim.state != "active":
             return
-        existing = frozenset(
-            catalog._project_bound_database_names(
+        existing = dict(
+            catalog._project_bound_database_records(
                 claim.project_id,
                 claim.cluster_id,
                 cluster.endpoint_host,
@@ -570,8 +588,19 @@ def record_observed_project_database_bindings(
         )
     finally:
         catalog.close()
-    allowed = frozenset(filter(None, candidates)) if fresh_cluster else existing
-    record_project_database_bindings(cluster, tuple(name for name in observed if name in allowed))
+    if not fresh_cluster:
+        for observation in observed:
+            if (
+                observation.name in existing
+                and existing[observation.name] != observation.database_oid
+            ):
+                raise BootstrapFailedError(
+                    "database inventory identity changed for an existing project binding"
+                )
+    allowed = frozenset(filter(None, candidates)) if fresh_cluster else frozenset(existing)
+    record_project_database_bindings(
+        cluster, tuple(item for item in observed if item.name in allowed)
+    )
 
 
 def observed_project_database_binding_callback(
@@ -579,7 +608,7 @@ def observed_project_database_binding_callback(
     candidates: tuple[str | None, ...],
     *,
     fresh_cluster: bool,
-) -> Callable[[tuple[str, ...]], None]:
+) -> Callable[[tuple[ObservedDatabase, ...]], None]:
     """Build the captured init callback without widening the public boundary."""
     return lambda observed: record_observed_project_database_bindings(
         cluster, candidates, observed, fresh_cluster=fresh_cluster
@@ -588,4 +617,4 @@ def observed_project_database_binding_callback(
 
 def record_project_database_binding(cluster: PostgresCluster, database_name: str) -> None:
     """Compatibility wrapper for one already-observed database name."""
-    record_project_database_bindings(cluster, (database_name,))
+    raise BootstrapFailedError("database binding requires observed PostgreSQL identity")
