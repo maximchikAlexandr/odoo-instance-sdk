@@ -315,7 +315,10 @@ def run_bootstrap_tmp(
 
 
 def _inventory_shape_metadata(
-    result: ProcessResultLike, stdout: object = None, *, line_count: int | None = None
+    result: ProcessResultLike,
+    stdout: str | bytes | None = None,
+    *,
+    line_count: int | None = None,
 ) -> str:
     """Return bounded shape-only diagnostics for an inventory failure."""
     if not isinstance(result, ProcessResult):
