@@ -2048,10 +2048,11 @@ def test_deferred_init_fails_closed_when_database_inventory_is_empty(
 
 
 def test_database_inventory_invalid_shape_reports_bounded_metadata() -> None:
+    stdout = "\\t101\n\\t5\n\\t16385\n"
     result = ProcessResult(
         argv=("psql",),
         returncode=0,
-        stdout="secret-db-name\n",
+        stdout=stdout,
         stderr="",
         duration=0.0,
         cwd=None,
@@ -2061,11 +2062,14 @@ def test_database_inventory_invalid_shape_reports_bounded_metadata() -> None:
         _read_database_inventory(result)
     message = str(failure.value)
     assert "stdout_type=str" in message
-    assert "stdout_length=15" in message
-    assert "line_count=1" in message
+    assert f"stdout_length={len(stdout)}" in message
+    assert "line_count=3" in message
     assert "invalid_line=0" in message
     assert "field_count=1" in message
-    assert "secret-db-name" not in message
+    assert "delimiter_tab_count=0" in message
+    assert "delimiter_literal_backslash_t_count=3" in message
+    assert "first_delimiter=literal_backslash_t" in message
+    assert "101" not in message
 
 
 def test_database_inventory_valid_name_oid_shape_remains_observable() -> None:
@@ -2081,17 +2085,12 @@ def test_database_inventory_valid_name_oid_shape_remains_observable() -> None:
     assert _read_database_inventory(result) == (ObservedDatabase("owned-db", 101),)
 
 
-def test_inventory_prepared_subprocess_normalizes_delimiter_encoding(
+def test_inventory_prepared_subprocess_reports_bounded_delimiter_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     psql = tmp_path / "psql"
     psql.write_text(
-        "#!/bin/sh\n"
-        "if grep -q 'chr(9)' ; then\n"
-        "  printf 'owned-db\\t101\\npostgres\\t5\\ntmp\\t16385\\n'\n"
-        "else\n"
-        "  printf 'owned-db\\\\t101\\npostgres\\\\t5\\ntmp\\\\t16385\\n'\n"
-        "fi\n",
+        "#!/bin/sh\nprintf 'owned-db\\\\t101\\npostgres\\\\t5\\ntmp\\\\t16385\\n'\n",
         encoding="utf-8",
     )
     psql.chmod(0o755)
@@ -2110,11 +2109,14 @@ def test_inventory_prepared_subprocess_normalizes_delimiter_encoding(
     )
     assert plan.inventory_step is not None
     result = SubprocessExecutor().execute(plan.inventory_step)
-    assert _read_database_inventory(result) == (
-        ObservedDatabase("owned-db", 101),
-        ObservedDatabase("postgres", 5),
-        ObservedDatabase("tmp", 16385),
-    )
+    with pytest.raises(BootstrapFailedError) as failure:
+        _read_database_inventory(result)
+    message = str(failure.value)
+    assert "line_count=3" in message
+    assert "field_count=1" in message
+    assert "delimiter_tab_count=0" in message
+    assert "delimiter_literal_backslash_t_count=3" in message
+    assert "first_delimiter=literal_backslash_t" in message
 
 
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(
