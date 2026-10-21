@@ -194,6 +194,43 @@ def test_public_init_then_immediate_forget_revalidates_same_plan(
     catalog.close()
 
 
+def test_public_forget_refuses_reactivation_after_capture(tmp_path: Path) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    assert catalog.forget_project(project_id)
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id)
+    )
+    assert catalog.reactivate_project(project_id, root, root / ".git")
+
+    with pytest.raises(ProjectRemovalError, match="registration state changed"):
+        command.run()
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert root.exists()
+    catalog.close()
+
+
+def test_public_forget_refuses_nonblocking_resource_decision_drift(tmp_path: Path) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id)
+    )
+    _legacy_environment(catalog, "removed-after-capture", root)
+    catalog._conn.execute(
+        "UPDATE environments SET state = 'removed' WHERE id = ?", ("removed-after-capture",)
+    )
+    catalog._conn.commit()
+
+    with pytest.raises(ProjectRemovalError, match="plan is stale"):
+        command.run()
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert catalog.get_environment("removed-after-capture") is not None
+    catalog.close()
+
+
 class _AdapterRegistry:
     def __init__(self, adapters: Mapping[str, ProjectRemovalAdapter]) -> None:
         self.adapters = dict(adapters)
