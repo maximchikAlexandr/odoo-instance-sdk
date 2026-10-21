@@ -463,7 +463,7 @@ def _project_source_decision(
     existing: InternalRemovalDecision | None,
     *,
     git_status_step_id: str | None = None,
-    git_status_hardened: bool = False,
+    git_status_hardened: bool = True,
 ) -> InternalRemovalDecision:
     """Allow source deletion only when the registered Git identity still matches."""
     lexical_exists = project.repository_root.exists() or project.repository_root.is_symlink()
@@ -661,7 +661,7 @@ def build_project_removal_projection(  # noqa: C901
     compose: Iterable[RemovalComposeSource] = (),
     complete: bool = True,
     git_status_step_id: str | None = None,
-    git_status_hardened: bool = False,
+    git_status_hardened: bool = True,
 ) -> ProjectRemovalProjection:
     """Build a deterministic project-scoped removal projection.
 

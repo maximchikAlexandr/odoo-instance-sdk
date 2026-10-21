@@ -9,7 +9,7 @@ from pathlib import Path
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
-from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
+from odoo_instance_sdk.internal.git_worktree import project_git_status_argv, worktree_is_dirty
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -94,14 +94,7 @@ class FilesystemPurgeAdapter:
         status_step = (
             PreparedStep(
                 step_id=f"project-removal:filesystem:git-status:{decision.identity}",
-                argv=(
-                    "git",
-                    "-C",
-                    str(target.path),
-                    "status",
-                    "--porcelain",
-                    "--untracked-files=all",
-                ),
+                argv=project_git_status_argv(target.path),
                 read_only=True,
             )
             if decision.resource_type == "source" and (target.path / ".git" / "HEAD").is_file()
@@ -122,7 +115,8 @@ class FilesystemPurgeAdapter:
             if decision.resource_type == "source" and path.is_dir():
                 _assert_safe_directory(path, source=True)
             if decision.resource_type == "source" and (
-                status_step is None or worktree_is_dirty(path, step_id=status_step.step_id)
+                status_step is None
+                or worktree_is_dirty(path, step_id=status_step.step_id, hardened=True)
             ):
                 raise ConfigError("registered primary source is not a clean Git worktree")
             if path.exists():

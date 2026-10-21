@@ -267,12 +267,22 @@ def test_public_forget_preserves_dirty_source_decision_across_execution(
 
 def _git_probe_project_with_fsmonitor_canary(
     tmp_path: Path,
+    *,
+    include_manifest: bool = False,
 ) -> tuple[BackupCatalog, str, Path, Path, Path]:
     catalog, project_id, root = _catalog(tmp_path)
     subprocess.run(("git", "init", str(root)), check=True, capture_output=True, text=True)
     tracked = root / "tracked.txt"
     tracked.write_text("tracked\n", encoding="utf-8")
-    subprocess.run(("git", "-C", str(root), "add", "tracked.txt"), check=True)
+    paths_to_add = ["tracked.txt"]
+    if include_manifest:
+        gitignore = root / ".gitignore"
+        gitignore.write_text(".odcli/\n", encoding="utf-8")
+        manifest = root / ".odcli" / "project.toml"
+        manifest.parent.mkdir()
+        manifest.write_text("[project]\n", encoding="utf-8")
+        paths_to_add.append(".gitignore")
+    subprocess.run(("git", "-C", str(root), "add", *paths_to_add), check=True)
     subprocess.run(
         (
             "git",
@@ -339,6 +349,69 @@ def test_public_forget_git_probe_preserves_index_bytes(
     assert result.registration_state == "forgotten"
     assert index.read_bytes() == index_before
     assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+@pytest.mark.parametrize(
+    "confirmation",
+    [pytest.param(None, id="missing"), pytest.param("wrong-token", id="wrong")],
+)
+def test_public_purge_confirmation_does_not_run_fsmonitor_or_mutate_index(
+    tmp_path: Path,
+    confirmation: str | None,
+) -> None:
+    catalog, project_id, root, marker, index = _git_probe_project_with_fsmonitor_canary(
+        tmp_path,
+        include_manifest=True,
+    )
+    index_before = index.read_bytes()
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        instance=SimpleNamespace(from_project=lambda _project: None),
+    )
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=confirmation,
+    )
+
+    with pytest.raises(ProjectRemovalError, match="confirmation"):
+        command.run()
+
+    assert not marker.exists()
+    assert index.read_bytes() == index_before
+    assert (root / ".odcli" / "project.toml").exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_purge_hardened_source_probe_precedes_terminal_forget(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root, marker, _index = _git_probe_project_with_fsmonitor_canary(
+        tmp_path,
+        include_manifest=True,
+    )
+    foreign = tmp_path / "foreign-resource"
+    foreign.write_text("keep\n", encoding="utf-8")
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        instance=SimpleNamespace(from_project=lambda _project: None),
+    )
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    result = command.run()
+
+    assert result.completed[-1].action == "forget"
+    assert result.registration_state == "forgotten"
+    assert not root.exists()
+    assert foreign.exists()
+    assert not marker.exists()
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     catalog.close()
 
