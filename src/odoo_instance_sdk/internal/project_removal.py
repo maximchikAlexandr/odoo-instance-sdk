@@ -463,6 +463,7 @@ def _project_source_decision(
     existing: InternalRemovalDecision | None,
     *,
     git_status_step_id: str | None = None,
+    git_status_hardened: bool = False,
 ) -> InternalRemovalDecision:
     """Allow source deletion only when the registered Git identity still matches."""
     lexical_exists = project.repository_root.exists() or project.repository_root.is_symlink()
@@ -478,11 +479,16 @@ def _project_source_decision(
             from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
             from odoo_instance_sdk.internal.proc import active_context
 
-            clean = (
-                True
-                if active_context() is not None and git_status_step_id is None
-                else not worktree_is_dirty(root, step_id=git_status_step_id)
-            )
+            if active_context() is not None and git_status_step_id is None:
+                clean = True
+            elif git_status_hardened:
+                clean = not worktree_is_dirty(
+                    root,
+                    step_id=git_status_step_id,
+                    hardened=True,
+                )
+            else:
+                clean = not worktree_is_dirty(root, step_id=git_status_step_id)
         else:
             # The guarded source adapter performs the execution-time check;
             # an incomplete test/durable identity must not be treated as a
@@ -655,6 +661,7 @@ def build_project_removal_projection(  # noqa: C901
     compose: Iterable[RemovalComposeSource] = (),
     complete: bool = True,
     git_status_step_id: str | None = None,
+    git_status_hardened: bool = False,
 ) -> ProjectRemovalProjection:
     """Build a deterministic project-scoped removal projection.
 
@@ -679,6 +686,7 @@ def build_project_removal_projection(  # noqa: C901
         project,
         decisions.get(f"project:{project.project_id}"),
         git_status_step_id=git_status_step_id,
+        git_status_hardened=git_status_hardened,
     )
     for runtime in runtimes:
         if runtime.project_id == project.project_id:

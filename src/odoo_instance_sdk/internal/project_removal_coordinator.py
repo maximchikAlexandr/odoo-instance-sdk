@@ -8,6 +8,7 @@ runtime and data packages can consume the same captured decisions later.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -266,6 +267,7 @@ def _projection(
     database_inventory: DatabaseInventoryResult | None = None,
     volume_observation: VolumeResourceSource | None = None,
     git_status_step_id: str | None = None,
+    git_status_hardened: bool = False,
 ) -> ProjectRemovalProjection:
     environments = _environment_sources(catalog, registration)
     from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
@@ -411,6 +413,7 @@ def _projection(
         publications=_publication_sources(registration.project_id),
         complete=required_observations_complete,
         git_status_step_id=git_status_step_id,
+        git_status_hardened=git_status_hardened,
     )
 
 
@@ -421,16 +424,23 @@ def _planned_projection(
     database_inventory: DatabaseInventoryResult | None,
     volume_observation: VolumeResourceSource | None,
     git_status_step_id: str | None = None,
+    git_status_hardened: bool = False,
 ) -> ProjectRemovalProjection:
     """Build a projection while preserving the no-observation test seam."""
     if database_inventory is None and volume_observation is None:
-        return _projection(catalog, registration, git_status_step_id=git_status_step_id)
+        return _projection(
+            catalog,
+            registration,
+            git_status_step_id=git_status_step_id,
+            git_status_hardened=git_status_hardened,
+        )
     return _projection(
         catalog,
         registration,
         database_inventory=database_inventory,
         volume_observation=volume_observation,
         git_status_step_id=git_status_step_id,
+        git_status_hardened=git_status_hardened,
     )
 
 
@@ -606,6 +616,11 @@ def capture_project_removal_command(  # noqa: C901
             step_id=git_status_step_id,
             argv=(
                 "git",
+                "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                f"core.hooksPath={os.devnull}",
                 "-C",
                 str(registration.repository_root),
                 "status",
@@ -623,6 +638,7 @@ def capture_project_removal_command(  # noqa: C901
         database_inventory=database_inventory,
         volume_observation=volume_observation,
         git_status_step_id=git_status_step_id,
+        git_status_hardened=git_status_step_id is not None,
     )
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     decisions: tuple[ProjectResourceDecision, ...]
@@ -763,6 +779,7 @@ def capture_project_removal_command(  # noqa: C901
                     database_inventory=database_inventory,
                     volume_observation=volume_observation,
                     git_status_step_id=git_status_step_id,
+                    git_status_hardened=git_status_step_id is not None,
                 )
                 assert captured_forget_fingerprint is not None
                 if _forget_resource_fingerprint(current_projection) != captured_forget_fingerprint:
