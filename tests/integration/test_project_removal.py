@@ -901,6 +901,10 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
             data_directory=tmp_path / "data",
         )
         assert catalog.project_restored_database_names(project_id) == ("owned_db",)
+    else:
+        assert catalog.project_bootstrapped_database_names(
+            claim.cluster_id, "127.0.0.1", 15432
+        ) == ("tmp",)
     shutil.rmtree(root)
     assert not root.exists()
     assert not common.exists()
@@ -937,7 +941,7 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
                     DatabaseInventoryItem(
                         cluster="127.0.0.1:15432",
                         cluster_id=str(claim.cluster_id),
-                        name="owned_db",
+                        name="owned_db" if claim_form == "exact" else "tmp",
                         logical_size_bytes=1,
                         active_sessions=0,
                         is_default=False,
@@ -1002,7 +1006,7 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
         purge=True,
         confirmation=f"{root.name}:{project_id}",
     )
-    if include_unrelated_database or claim_form == "legacy":
+    if include_unrelated_database:
         with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
             command.run()
         assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
