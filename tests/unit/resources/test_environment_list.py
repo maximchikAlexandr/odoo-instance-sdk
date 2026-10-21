@@ -96,6 +96,7 @@ class TestEnvList:
         ]
         catalog.list_environments.assert_called_once_with(
             git_common_dir=str((tmp_path / ".git").resolve()),
+            repository_root=str(tmp_path.resolve()),
             project_id=f"project_{repo_key(tmp_path, tmp_path / '.git')}",
             include_removed=False,
         )
