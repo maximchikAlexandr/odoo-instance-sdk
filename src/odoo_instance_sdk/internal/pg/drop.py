@@ -215,6 +215,10 @@ def _assert_database_identity(
     *,
     expected_database_oid: int | None,
 ) -> None:
+    if expected_database_oid is None or not inspection.exists:
+        return
+    if type(inspection.database_oid) is not int or inspection.database_oid <= 0:
+        raise ConfigError("database drop database identity evidence is unavailable")
     if expected_database_oid is not None and inspection.database_oid != expected_database_oid:
         raise ConfigError("database drop database identity changed before mutation")
 
@@ -323,9 +327,11 @@ def _drop_ownership_evidence(  # noqa: C901
             cluster.endpoint_port,
         )
         bound_oid = next((oid for name, oid in bound_records if name == binding_database), None)
-        if not any(name == binding_database for name, _oid in bound_records) or (
-            expected_database_oid is not None
-            and (bound_oid is None or bound_oid != expected_database_oid)
+        if (
+            not any(name == binding_database for name, _oid in bound_records)
+            or type(bound_oid) is not int
+            or bound_oid <= 0
+            or (expected_database_oid is not None and bound_oid != expected_database_oid)
         ):
             raise ConfigError("database drop requires an exact current lifecycle event")
         return _DropOwnershipEvidence(
@@ -364,10 +370,9 @@ def _drop_ownership_evidence(  # noqa: C901
             or event["source_sha256"] is not None
             or not isinstance(event["data_directory"], str)
             or not _safe_bootstrap_data_directory(event["data_directory"])
-            or (
-                expected_database_oid is not None
-                and (bound_oid is None or bound_oid != expected_database_oid)
-            )
+            or type(bound_oid) is not int
+            or bound_oid <= 0
+            or (expected_database_oid is not None and bound_oid != expected_database_oid)
         ):
             raise ConfigError("database drop bootstrap ownership evidence does not match")
         return _DropOwnershipEvidence(
@@ -408,6 +413,29 @@ def _drop_ownership_evidence(  # noqa: C901
         or any(char not in "0123456789abcdef" for char in source_sha256)
     ):
         raise ConfigError("database drop restore binding provenance is invalid")
+    bound_oid = next(
+        (
+            oid
+            for name, oid in catalog._project_bound_database_records(
+                claim.project_id,
+                claim.cluster_id,
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+            )
+            if name == binding_database
+        ),
+        None,
+    )
+    restore_oid = binding["database_oid"]
+    if type(bound_oid) is int and type(restore_oid) is int and bound_oid != restore_oid:
+        raise ConfigError("database drop restore identity evidence does not match")
+    authorized_oid = bound_oid if type(bound_oid) is int else restore_oid
+    if (
+        type(authorized_oid) is not int
+        or authorized_oid <= 0
+        or (expected_database_oid is not None and authorized_oid != expected_database_oid)
+    ):
+        raise ConfigError("database drop restore identity evidence is unavailable")
     if (
         event["cluster_id"] != str(claim.cluster_id)
         or event["database_name"] != binding_database
@@ -586,6 +614,10 @@ def build_database_drop_command(  # noqa: C901
         if not isinstance(planning_result, ProcessResult):
             raise ConfigError("database safety inspection returned no process result")
         inspection = _decode_inspection(planning_result, database)
+        _assert_database_identity(
+            inspection,
+            expected_database_oid=expected_database_oid,
+        )
     project_default = project.default_source_database
     preconditions = _safety_preconditions(
         inspection,
@@ -720,7 +752,7 @@ def build_database_drop_command(  # noqa: C901
 
     def _execute_locked(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:  # noqa: C901
         planned_before_lock: _DropInspection | None = None
-        captured_database_oid = expected_database_oid
+        captured_database_oid = expected_database_oid if defer_planning else inspection.database_oid
         if defer_planning:
             planned_before_lock = _decode_inspection(
                 _process_result(context, planning_step_id), database
@@ -742,9 +774,7 @@ def build_database_drop_command(  # noqa: C901
             allow_environment_rollback_database=allow_environment_rollback_database,
             adopted_copy_claim=adopted_copy_claim,
             allow_reconciled_absent=idempotent_absent,
-            expected_database_oid=(
-                planned_before_lock.database_oid if planned_before_lock is not None else None
-            ),
+            expected_database_oid=captured_database_oid,
         )
         expected = expected_restore() if expected_restore is not None else None
         if command_origin == "database-restore-retry":

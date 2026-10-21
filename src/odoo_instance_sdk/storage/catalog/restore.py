@@ -41,6 +41,7 @@ class _RestoreMixin:
         source_sha256: str | None = None,
         cluster_id: uuid.UUID | str | None = None,
         data_directory: str | Path | None = None,
+        database_oid: int | None = None,
         state: RestoreState | str = RestoreState.COMPLETE,
     ) -> None:
         host = normalize_db_host(db_host)
@@ -53,6 +54,8 @@ class _RestoreMixin:
         data_dir = None if data_directory is None else str(data_directory)
         if data_dir is not None and not data_dir.strip():
             raise BackupCatalogError("data_directory must not be empty")
+        if database_oid is not None and (type(database_oid) is not int or database_oid <= 0):
+            raise BackupCatalogError("restore PostgreSQL identity is invalid")
         if identity is not None:
             claim = self._get_postgres_cluster_by_id(identity)
             if claim is None or claim.state != "active":
@@ -61,8 +64,8 @@ class _RestoreMixin:
             self._conn.execute(
                 """INSERT INTO restores
                    (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
-                    restored_at, cluster_id, data_directory, state)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)""",
+                   restored_at, cluster_id, data_directory, database_oid, state)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)""",
                 (
                     host,
                     db_port,
@@ -72,6 +75,7 @@ class _RestoreMixin:
                     digest,
                     identity,
                     data_dir,
+                    database_oid,
                     restore_state.value,
                 ),
             )
@@ -415,7 +419,7 @@ class _RestoreMixin:
             "list[sqlite3.Row]",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, restored_at, state "
+                "data_directory, database_oid, restored_at, state "
                 "FROM restores WHERE db_host=? AND db_port=? "
                 "ORDER BY database_name ASC, restored_at DESC, sequence DESC",
                 (host, db_port),
@@ -432,7 +436,7 @@ class _RestoreMixin:
             "sqlite3.Row | None",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, restored_at, state "
+                "data_directory, database_oid, restored_at, state "
                 "FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
                 "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
                 (host, db_port, database_name),
@@ -468,7 +472,7 @@ class _RestoreMixin:
                FROM restores r JOIN backups b ON b.id = r.backup_id
                WHERE b.project_id = ? AND b.state <> 'deleted'
                  AND r.state = 'complete' AND r.cluster_id = ?
-                 AND r.db_host = ? AND r.db_port = ?
+                 AND r.db_host = ? AND r.db_port = ? AND r.database_oid IS NOT NULL
                ORDER BY r.database_name""",
             (project_id, identity, host, db_port),
         ).fetchall()

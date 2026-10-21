@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0011"
+CATALOG_REVISION = "0012"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -418,7 +418,7 @@ _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
     "backups": frozenset({"source_name", "pinned"}),
     "environment_copy_journal": frozenset({"backup_ownership"}),
     "runtime": frozenset({"launch_identity_json"}),
-    "restores": frozenset({"source_kind", "source_sha256"}),
+    "restores": frozenset({"source_kind", "source_sha256", "database_oid"}),
     "database_events": frozenset({"source_kind", "source_sha256"}),
 }
 
@@ -769,6 +769,7 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> bool:
                 "ALTER TABLE restores ADD COLUMN state TEXT NOT NULL DEFAULT 'complete' "
                 "CHECK (state IN ('complete', 'incomplete'))"
             )
+            conn.execute("ALTER TABLE restores ADD COLUMN database_oid INTEGER")
             conn.execute(
                 "CREATE UNIQUE INDEX environments_one_active_branch "
                 "ON environments(git_common_dir, branch) WHERE state <> 'removed'"
@@ -825,7 +826,7 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
             expected_columns = tuple(
                 item
                 for item in expected_columns
-                if item[0] not in {"source_kind", "source_sha256", "state"}
+                if item[0] not in {"source_kind", "source_sha256", "state", "database_oid"}
             )
             expected_columns = tuple(
                 (name, type_name, 1 if name == "backup_id" and table == "restores" else required)
@@ -912,6 +913,7 @@ def _repair_known_v15_catalog(conn: sqlite3.Connection) -> bool:
                 "ALTER TABLE restores ADD COLUMN state TEXT NOT NULL DEFAULT 'complete' "
                 "CHECK (state IN ('complete', 'incomplete'))"
             )
+            conn.execute("ALTER TABLE restores ADD COLUMN database_oid INTEGER")
             if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise BackupCatalogError("legacy catalog has invalid foreign key references")
             conn.execute("PRAGMA user_version = 16")

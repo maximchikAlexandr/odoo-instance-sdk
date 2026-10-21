@@ -140,6 +140,7 @@ restores = Table(
         nullable=False,
         server_default="complete",
     ),
+    Column("database_oid", Integer),
     CheckConstraint(
         "(source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
         "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "

@@ -199,33 +199,19 @@ class ProjectResource:
                             project=project_config,
                         ).run()
                         durable_records = (
-                            set(
-                                catalog._project_bound_database_records(
+                            {
+                                (name, oid)
+                                for name, oid in catalog._project_bound_database_records(
                                     claim.project_id,
                                     claim.cluster_id,
                                     *recovery_endpoint,
                                 )
-                            )
+                                if isinstance(oid, int) and oid > 0
+                            }
                             if claim is not None and recovery_endpoint is not None
                             else set()
                         )
-                        restored_names = set(
-                            catalog._project_restored_database_names(
-                                registration.project_id,
-                                claim.cluster_id if claim is not None else "",
-                                *(recovery_endpoint or ("", 0)),
-                            )
-                            if claim is not None and recovery_endpoint is not None
-                            else ()
-                        )
-                        durable_names = set(restored_names)
-                        if recovery_endpoint is not None and claim is not None:
-                            durable_names.update(name for name, _oid in durable_records)
-                            durable_names.update(
-                                catalog._project_bootstrapped_database_names(
-                                    claim.cluster_id, *recovery_endpoint
-                                )
-                            )
+                        durable_names = {name for name, _oid in durable_records}
                         observed_names = {
                             item.name
                             for item in database_inventory.databases
@@ -235,7 +221,6 @@ class ProjectResource:
                             item
                             for item in database_inventory.databases
                             if (item.name, item.database_oid) in durable_records
-                            or item.name in restored_names
                         )
                         if not authorized_items or observed_names - durable_names:
                             database_inventory = None
