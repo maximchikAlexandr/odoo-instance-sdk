@@ -51,7 +51,11 @@ from odoo_instance_sdk.models.database_inventory import (
     DatabaseInventoryItem,
     DatabaseInventoryResult,
 )
-from odoo_instance_sdk.models.project_removal import ProjectResourceDecision, ProjectSelector
+from odoo_instance_sdk.models.project_removal import (
+    ProjectRemovalResult,
+    ProjectResourceDecision,
+    ProjectSelector,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.project_init import init_project
 from odoo_instance_sdk.resources.project import ProjectResource
@@ -714,6 +718,184 @@ def test_projection_fails_closed_for_unobserved_database_and_compose_volume(
             item for item in projection.decisions if item.identity == f"project:{project_id}"
         ).relationships
     )
+    catalog.close()
+
+
+@pytest.mark.parametrize("claim_form", ["exact", "legacy"])
+def test_catalog_claim_requires_captured_common_dir(tmp_path: Path, claim_form: str) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    legacy_project_id = repo_key(root, root / ".git")
+    claim_project_id = project_id if claim_form == "exact" else legacy_project_id
+    claim = catalog._ensure_postgres_cluster_pending(
+        claim_project_id,
+        f"odcli_pg_{claim_project_id}",
+        f"pgdata_{claim_project_id}",
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        claim_project_id,
+        f"odcli_pg_{claim_project_id}",
+        f"pgdata_{claim_project_id}",
+    )
+
+    assert catalog._get_postgres_cluster_for_project(project_id, root, None) is None
+    catalog.close()
+
+
+@pytest.mark.parametrize("claim_form", ["exact", "legacy"])
+@pytest.mark.parametrize("common_failure", ["captured-missing", "root-missing"])
+def test_coordinator_retains_resources_without_git_common_proof(
+    tmp_path: Path, claim_form: str, common_failure: str
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest_dir = root / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        '[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8"
+    )
+    legacy_project_id = repo_key(root, root / ".git")
+    claim_project_id = project_id if claim_form == "exact" else legacy_project_id
+    claim = catalog._ensure_postgres_cluster_pending(
+        claim_project_id,
+        f"odcli_pg_{claim_project_id}",
+        f"pgdata_{claim_project_id}",
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        claim_project_id,
+        f"odcli_pg_{claim_project_id}",
+        f"pgdata_{claim_project_id}",
+    )
+    captured_common = None if common_failure == "captured-missing" else root / ".git"
+    if common_failure == "root-missing":
+        (root / ".git").rmdir()
+
+    projection = coordinator_projection(
+        catalog,
+        ProjectRegistration(project_id, root, captured_common),
+    )
+
+    database = next(item for item in projection.decisions if item.resource_type == "database")
+    assert database.action == "retain"
+    assert all(
+        not (item.resource_type in {"database", "volume"} and item.action == "delete")
+        for item in projection.decisions
+    )
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
+@pytest.mark.parametrize("claim_form", ["exact", "legacy"])
+@pytest.mark.parametrize("common_failure", ["missing", "malformed", "drift"])
+def test_public_purge_refuses_invalid_git_common_for_postgres_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    claim_form: str,
+    common_failure: str,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest_dir = root / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        '[project]\ndefault_source_database = "owned_db"\n', encoding="utf-8"
+    )
+    legacy_project_id = repo_key(root, root / ".git")
+    claim_project_id = project_id if claim_form == "exact" else legacy_project_id
+    claim = catalog._ensure_postgres_cluster_pending(
+        claim_project_id,
+        f"odcli_pg_{claim_project_id}",
+        f"pgdata_{claim_project_id}",
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        claim_project_id,
+        f"odcli_pg_{claim_project_id}",
+        f"pgdata_{claim_project_id}",
+    )
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(
+                from_project=lambda _project: SimpleNamespace(
+                    databases=SimpleNamespace(
+                        list_inventory=lambda *_args, **_kwargs: DatabaseInventoryResult(
+                            cluster="127.0.0.1:5432",
+                            databases=(
+                                DatabaseInventoryItem(
+                                    cluster="127.0.0.1:5432",
+                                    cluster_id=None,
+                                    name="owned_db",
+                                    logical_size_bytes=1,
+                                    active_sessions=0,
+                                    is_default=True,
+                                ),
+                            ),
+                            tracked=True,
+                        )
+                    ),
+                    _postgres_cluster=SimpleNamespace(
+                        owned=True,
+                        compose_runner=SimpleNamespace(),
+                        resource_snapshot=lambda: SimpleNamespace(
+                            container=None,
+                            metrics=SimpleNamespace(volume_usage_bytes=1),
+                            unavailability_reason="stopped",
+                        ),
+                    ),
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
+        lambda *_args, **_kwargs: True,
+    )
+    database_executor = RecordingExecutor()
+
+    def capture_child(
+        _adapter: DatabasePurgeAdapter | ComposeClusterPurgeAdapter,
+        decision: ProjectResourceDecision,
+        *,
+        project_id: str,
+    ) -> Command[ProjectResourceDecision] | None:
+        del project_id
+        return cast(
+            "Command[ProjectResourceDecision]",
+            _process_child(database_executor, decision.identity),
+        )
+
+    if common_failure == "drift":
+        monkeypatch.setattr(DatabasePurgeAdapter, "capture", capture_child)
+        monkeypatch.setattr(ComposeClusterPurgeAdapter, "capture", capture_child)
+
+    def build_command() -> Command[ProjectRemovalResult]:
+        return ProjectResource(_client=client).remove_command(
+            ProjectSelector.from_project_id(project_id),
+            purge=True,
+            confirmation=f"{root.name}:{project_id}",
+        )
+
+    if common_failure == "drift":
+        command = build_command()
+        alternate_common = tmp_path / "alternate-common"
+        alternate_common.mkdir()
+        (root / ".git").rmdir()
+        (root / ".git").write_text(f"gitdir: {alternate_common}\n", encoding="utf-8")
+    elif common_failure == "missing":
+        (root / ".git").rmdir()
+        command = build_command()
+    else:
+        (root / ".git").rmdir()
+        (root / ".git").write_text("not-a-git-marker\n", encoding="utf-8")
+        command = build_command()
+    with pytest.raises(ProjectRemovalError, match="observation"):
+        command.run()
+
+    assert root.exists()
+    assert database_executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert catalog._get_postgres_cluster(claim_project_id) is not None
     catalog.close()
 
 

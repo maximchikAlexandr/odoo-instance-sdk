@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal, ParamSpec, TypeVar, cast
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
 )
+from odoo_instance_sdk.internal.repo_key import parse_git_common_dir, repo_key
 from odoo_instance_sdk.models import (
     Backup,
     BackupEvent,
@@ -90,6 +91,36 @@ class PostgresClusterClaim:
     state: str
     created_at: datetime
     activated_at: datetime | None = None
+
+
+def resolve_postgres_cluster_claim(
+    get_claim: Callable[[str], PostgresClusterClaim | None],
+    project_id: str,
+    repository_root: str | Path,
+    git_common_dir: str | Path | None,
+) -> PostgresClusterClaim | None:
+    """Select a claim only after proving the captured Git identity is live."""
+    if git_common_dir is None:
+        return None
+    try:
+        root, common = Path(repository_root).resolve(), Path(git_common_dir).resolve()
+        if parse_git_common_dir(root) != common:
+            return None
+    except (OSError, RuntimeError):
+        return None
+    claim = get_claim(project_id)
+    if claim is not None:
+        return claim
+    legacy_project_id = repo_key(root, common)
+    if project_id != f"project_{legacy_project_id}":
+        return None
+    legacy = get_claim(legacy_project_id)
+    if legacy is None or (
+        legacy.compose_project != f"odcli_pg_{legacy_project_id}"
+        or legacy.volume_name != f"pgdata_{legacy_project_id}"
+    ):
+        return None
+    return legacy
 
 
 @dataclass(frozen=True, slots=True)
