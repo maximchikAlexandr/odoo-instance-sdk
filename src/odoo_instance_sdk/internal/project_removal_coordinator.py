@@ -36,6 +36,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResultLike,
     RunContext,
     StepObserver,
+    SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.project_removal import (
     ProjectRegistration,
@@ -264,6 +265,7 @@ def _projection(
     *,
     database_inventory: DatabaseInventoryResult | None = None,
     volume_observation: VolumeResourceSource | None = None,
+    git_status_step_id: str | None = None,
 ) -> ProjectRemovalProjection:
     environments = _environment_sources(catalog, registration)
     from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
@@ -408,6 +410,7 @@ def _projection(
         runtimes=_project_runtime(catalog, registration),
         publications=_publication_sources(registration.project_id),
         complete=required_observations_complete,
+        git_status_step_id=git_status_step_id,
     )
 
 
@@ -417,15 +420,17 @@ def _planned_projection(
     *,
     database_inventory: DatabaseInventoryResult | None,
     volume_observation: VolumeResourceSource | None,
+    git_status_step_id: str | None = None,
 ) -> ProjectRemovalProjection:
     """Build a projection while preserving the no-observation test seam."""
     if database_inventory is None and volume_observation is None:
-        return _projection(catalog, registration)
+        return _projection(catalog, registration, git_status_step_id=git_status_step_id)
     return _projection(
         catalog,
         registration,
         database_inventory=database_inventory,
         volume_observation=volume_observation,
+        git_status_step_id=git_status_step_id,
     )
 
 
@@ -591,11 +596,33 @@ def capture_project_removal_command(  # noqa: C901
         _row_registration(row) for row in catalog.list_projects(include_forgotten=True)
     )
     registration = resolve_project_selector(selector, registrations)
+    git_status_step_id = (
+        f"project-removal:git-status:{registration.project_id}"
+        if (registration.repository_root / ".git" / "HEAD").is_file() and not purge
+        else None
+    )
+    source_status_step = (
+        PreparedStep(
+            step_id=git_status_step_id,
+            argv=(
+                "git",
+                "-C",
+                str(registration.repository_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ),
+            read_only=True,
+        )
+        if git_status_step_id is not None
+        else None
+    )
     projection = _planned_projection(
         catalog,
         registration,
         database_inventory=database_inventory,
         volume_observation=volume_observation,
+        git_status_step_id=git_status_step_id,
     )
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     decisions: tuple[ProjectResourceDecision, ...]
@@ -644,6 +671,8 @@ def capture_project_removal_command(  # noqa: C901
     captured_children: dict[str, PreparedCommand[ProjectResourceDecision]] = {}
     flattened_steps: list[PreparedAction | PreparedStep] = []
     child_executors: dict[str, ProcessExecutor] = {}
+    if source_status_step is not None:
+        flattened_steps.append(source_status_step)
     for decision in decisions:
         child: Command[ProjectResourceDecision] | None
         if not purge or decision.action == "retain":
@@ -733,6 +762,7 @@ def capture_project_removal_command(  # noqa: C901
                     current,
                     database_inventory=database_inventory,
                     volume_observation=volume_observation,
+                    git_status_step_id=git_status_step_id,
                 )
                 assert captured_forget_fingerprint is not None
                 if _forget_resource_fingerprint(current_projection) != captured_forget_fingerprint:
@@ -750,7 +780,7 @@ def capture_project_removal_command(  # noqa: C901
                         mode=mode,
                         failed_step="project-removal:preflight",
                     )
-                step = steps[0]
+                step = next(step for step in steps if isinstance(step, PreparedAction))
                 context.action(step.step_id)
                 if current.registration_state == "registered":
                     catalog.forget_project(registration.project_id, _lock_held=True)
@@ -879,7 +909,13 @@ def capture_project_removal_command(  # noqa: C901
                 retained=tuple(retained),
             )
 
-    executor: ProcessExecutor | None = _ChildExecutor(child_executors) if child_executors else None
+    executor: ProcessExecutor | None = (
+        _ChildExecutor(child_executors)
+        if child_executors
+        else SubprocessExecutor()
+        if source_status_step is not None
+        else None
+    )
     command = Command.create(plan, run, steps, executor=executor)
     _CONFIRMATION_VALUES[id(command)] = confirmation_value
     _CONFIRMATION_TOKENS[id(command)] = projection.expected_confirmation

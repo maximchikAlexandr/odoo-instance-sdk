@@ -461,6 +461,8 @@ def _inventory_decision(  # noqa: C901
 def _project_source_decision(
     project: ProjectRegistration,
     existing: InternalRemovalDecision | None,
+    *,
+    git_status_step_id: str | None = None,
 ) -> InternalRemovalDecision:
     """Allow source deletion only when the registered Git identity still matches."""
     lexical_exists = project.repository_root.exists() or project.repository_root.is_symlink()
@@ -476,7 +478,11 @@ def _project_source_decision(
             from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
             from odoo_instance_sdk.internal.proc import active_context
 
-            clean = True if active_context() is not None else not worktree_is_dirty(root)
+            clean = (
+                True
+                if active_context() is not None and git_status_step_id is None
+                else not worktree_is_dirty(root, step_id=git_status_step_id)
+            )
         else:
             # The guarded source adapter performs the execution-time check;
             # an incomplete test/durable identity must not be treated as a
@@ -648,6 +654,7 @@ def build_project_removal_projection(  # noqa: C901
     paths: Iterable[RemovalPathSource] = (),
     compose: Iterable[RemovalComposeSource] = (),
     complete: bool = True,
+    git_status_step_id: str | None = None,
 ) -> ProjectRemovalProjection:
     """Build a deterministic project-scoped removal projection.
 
@@ -669,7 +676,9 @@ def build_project_removal_projection(  # noqa: C901
         if decision is not None:
             decisions[decision.identity] = decision
     decisions[f"project:{project.project_id}"] = _project_source_decision(
-        project, decisions.get(f"project:{project.project_id}")
+        project,
+        decisions.get(f"project:{project.project_id}"),
+        git_status_step_id=git_status_step_id,
     )
     for runtime in runtimes:
         if runtime.project_id == project.project_id:
