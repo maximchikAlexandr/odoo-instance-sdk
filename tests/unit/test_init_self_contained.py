@@ -21,6 +21,8 @@ from odoo_instance_sdk.internal.dbprep.bootstrap import (
     BOOTSTRAP_DATABASE,
     BootstrapFailedError,
     BootstrapOutcome,
+    ObservedDatabase,
+    _read_database_inventory,
     bootstrap_tmp_plan,
     candidate_database_names,
     tmp_bootstrap_command,
@@ -2042,6 +2044,40 @@ def test_deferred_init_fails_closed_when_database_inventory_is_empty(
     )
     with pytest.raises(BootstrapFailedError, match="inventory observation was invalid"):
         _execute_bootstrap_followup_phase(context, followup)
+
+
+def test_database_inventory_invalid_shape_reports_bounded_metadata() -> None:
+    result = ProcessResult(
+        argv=("psql",),
+        returncode=0,
+        stdout="secret-db-name\n",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    with pytest.raises(BootstrapFailedError) as failure:
+        _read_database_inventory(result)
+    message = str(failure.value)
+    assert "stdout_type=str" in message
+    assert "stdout_length=15" in message
+    assert "line_count=1" in message
+    assert "invalid_line=0" in message
+    assert "field_count=1" in message
+    assert "secret-db-name" not in message
+
+
+def test_database_inventory_valid_name_oid_shape_remains_observable() -> None:
+    result = ProcessResult(
+        argv=("psql",),
+        returncode=0,
+        stdout="owned-db\t101\n",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    assert _read_database_inventory(result) == (ObservedDatabase("owned-db", 101),)
 
 
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(
