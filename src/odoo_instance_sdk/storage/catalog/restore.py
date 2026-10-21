@@ -443,6 +443,19 @@ class _RestoreMixin:
         return tuple(row["database_name"] for row in rows)
 
     @_translate_sqlite_error
+    def project_restored_database_names(self, project_id: str) -> tuple[str, ...]:
+        """Return database names backed by this project's durable restores."""
+        rows = self._conn.execute(
+            """SELECT DISTINCT r.database_name
+               FROM restores r JOIN backups b ON b.id = r.backup_id
+               WHERE b.project_id = ? AND b.state <> 'deleted'
+                 AND r.state = 'complete'
+               ORDER BY r.database_name""",
+            (project_id,),
+        ).fetchall()
+        return tuple(str(row["database_name"]) for row in rows)
+
+    @_translate_sqlite_error
     def has_tracked_database(
         self,
         db_host: str | None,

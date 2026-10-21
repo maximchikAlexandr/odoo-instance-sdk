@@ -93,7 +93,7 @@ class PostgresClusterClaim:
     activated_at: datetime | None = None
 
 
-def resolve_postgres_cluster_claim(
+def resolve_postgres_cluster_claim(  # noqa: C901 -- explicit identity gates
     get_claim: Callable[[str], PostgresClusterClaim | None],
     project_id: str,
     repository_root: str | Path,
@@ -104,7 +104,7 @@ def resolve_postgres_cluster_claim(
     A removed source root is a supported recovery state: the registration and
     claim are the durable ownership record, while the root itself cannot be
     used for a live Git probe.  This exception is deliberately narrower than
-    accepting a stale checkout.  It requires a real captured common directory,
+    accepting a stale checkout.  It requires a captured common-dir identity,
     a lexically absent (and non-symlink) root, and the same exact/validated
     claim identities used by the live path.  Existing roots still require a
     successful read-only Git common-dir proof.
@@ -115,18 +115,27 @@ def resolve_postgres_cluster_claim(
         lexical_root = Path(repository_root)
         root, common = lexical_root.resolve(), Path(git_common_dir).resolve()
         root_exists = lexical_root.exists()
-        if root_exists or lexical_root.is_symlink():
+        missing_root = not root_exists and not lexical_root.is_symlink()
+        if not missing_root:
             if parse_git_common_dir(root) != common:
                 return None
         elif not common.is_dir():
-            # A missing source is recoverable only while its captured Git
-            # common directory remains a durable, readable directory.
-            return None
+            # A normal clone loses its in-root common directory with the
+            # source.  Its captured lexical relationship remains durable
+            # evidence; an unrelated missing path does not.
+            try:
+                common.relative_to(root)
+            except ValueError:
+                return None
     except (OSError, RuntimeError):
         return None
     claim = get_claim(project_id)
     if claim is not None:
         return claim
+    if missing_root and not common.is_dir():
+        # Without the live Git identity, never turn a legacy path/key into an
+        # ownership claim.  Exact project claims remain eligible above.
+        return None
     legacy_project_id = repo_key(root, common)
     if project_id != f"project_{legacy_project_id}":
         return None

@@ -124,7 +124,6 @@ class ProjectResource:
             and not registration.repository_root.exists()
             and not registration.repository_root.is_symlink()
             and registration.git_common_dir is not None
-            and registration.git_common_dir.is_dir()
         ):
             endpoint_row = catalog._conn.execute(
                 """SELECT db_host, db_port FROM database_events
@@ -191,23 +190,46 @@ class ProjectResource:
                             catalog=catalog,
                             project=project_config,
                         ).run()
-                        database_inventory = DatabaseInventoryResult(
-                            cluster=database_inventory.cluster,
-                            databases=tuple(
-                                msgspec.structs.replace(
-                                    item,
-                                    cluster_id=(
-                                        str(claim.cluster_id)
-                                        if item.cluster_id is None and claim is not None
-                                        else item.cluster_id
-                                    ),
-                                )
-                                for item in database_inventory.databases
-                                if item.name not in {"postgres", "template0", "template1", "tmp"}
-                            ),
-                            tracked=False,
+                        durable_names = set(
+                            catalog.project_restored_database_names(registration.project_id)
                         )
-                        if database_inventory.databases:
+                        observed_names = {
+                            item.name
+                            for item in database_inventory.databases
+                            if item.name not in {"postgres", "template0", "template1", "tmp"}
+                        }
+                        authorized_names = observed_names & durable_names
+                        if not authorized_names or observed_names - durable_names:
+                            database_inventory = None
+                        else:
+                            database_inventory = DatabaseInventoryResult(
+                                cluster=database_inventory.cluster,
+                                databases=tuple(
+                                    item
+                                    for item in database_inventory.databases
+                                    if item.name in authorized_names
+                                    and item.name
+                                    not in {"postgres", "template0", "template1", "tmp"}
+                                ),
+                                tracked=False,
+                            )
+                        if database_inventory is not None:
+                            database_inventory = DatabaseInventoryResult(
+                                cluster=database_inventory.cluster,
+                                databases=tuple(
+                                    msgspec.structs.replace(
+                                        item,
+                                        cluster_id=(
+                                            str(claim.cluster_id)
+                                            if item.cluster_id is None and claim is not None
+                                            else item.cluster_id
+                                        ),
+                                    )
+                                    for item in database_inventory.databases
+                                ),
+                                tracked=False,
+                            )
+                        if database_inventory is not None and database_inventory.databases:
                             project_config = ProjectConfig(
                                 repository_root=registration.repository_root,
                                 default_source_database=database_inventory.databases[0].name,

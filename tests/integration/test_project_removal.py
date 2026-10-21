@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
@@ -842,13 +844,15 @@ def test_projection_recovers_owned_claim_after_source_root_is_removed(tmp_path: 
     catalog.close()
 
 
+@pytest.mark.parametrize("include_unrelated_database", [False, True])
 def test_public_purge_recovers_missing_source_with_owned_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    include_unrelated_database: bool,
 ) -> None:
     root = tmp_path / "source"
-    common = tmp_path / "shared-git"
-    root.mkdir()
-    common.mkdir()
+    common = root / ".git"
+    common.mkdir(parents=True)
     project_id = f"project_{repo_key(root, common)}"
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     catalog._register_project(project_id, root, common)
@@ -866,7 +870,31 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
         cluster_id=claim.cluster_id,
         data_directory=tmp_path / "data",
     )
-    root.rmdir()
+    backup_id = str(uuid.uuid4())
+    backup_path = tmp_path / "owned.zip"
+    backup_path.write_bytes(b"owned")
+    catalog.start_download(
+        backup_id,
+        "http://127.0.0.1:8069",
+        "owned_db",
+        "zip",
+        True,
+        backup_path,
+        project_id=project_id,
+    )
+    catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
+    catalog.record_restore(
+        "127.0.0.1",
+        15432,
+        "owned_db",
+        backup_id,
+        cluster_id=claim.cluster_id,
+        data_directory=tmp_path / "data",
+    )
+    assert catalog.project_restored_database_names(project_id) == ("owned_db",)
+    shutil.rmtree(root)
+    assert not root.exists()
+    assert not common.exists()
     assert catalog._get_postgres_cluster_for_project(project_id, root, common) is not None
     full_container_id = "b" * 64
     fake_cluster = SimpleNamespace(
@@ -903,18 +931,45 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
                         active_sessions=0,
                         is_default=False,
                     ),
+                    *(
+                        (
+                            DatabaseInventoryItem(
+                                cluster="127.0.0.1:15432",
+                                cluster_id=str(claim.cluster_id),
+                                name="foreign_db",
+                                logical_size_bytes=1,
+                                active_sessions=0,
+                                is_default=False,
+                            ),
+                        )
+                        if include_unrelated_database
+                        else ()
+                    ),
                 ),
                 tracked=False,
             )
         ),
     )
+
+    def inspect_volume(*args: object, **kwargs: object) -> bool:
+        assert args[1] == "pgdata_owned"
+        assert args[2] == str(claim.cluster_id)
+        assert kwargs["project_id"] == project_id
+        return True
+
+    def inspect_container(*args: object, **kwargs: object) -> str:
+        assert args[1] == "odcli_pg_owned-postgres-1"
+        assert args[2] == str(claim.cluster_id)
+        assert kwargs["project_id"] == project_id
+        assert kwargs["compose_project"] == "odcli_pg_owned"
+        assert kwargs["volume_name"] == "pgdata_owned"
+        return full_container_id
+
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity",
-        lambda *_args, **_kwargs: True,
+        "odoo_instance_sdk.internal.postgres_compose.inspect_volume_identity", inspect_volume
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity",
-        lambda *_args, **_kwargs: full_container_id,
+        "odoo_instance_sdk.internal.postgres_compose.inspect_container_identity", inspect_container
     )
     executor = RecordingExecutor()
 
@@ -936,10 +991,23 @@ def test_public_purge_recovers_missing_source_with_owned_claim(
         purge=True,
         confirmation=f"{root.name}:{project_id}",
     )
+    if include_unrelated_database:
+        with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+            command.run()
+        assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+        assert not executor.executed
+        catalog.close()
+        return
+
     result = command.run()
 
     assert result.registration_state == "forgotten"
-    assert tuple(step.step_id.split(":", 2)[1] for step in command.plan.steps[:2]) == (
+    child_steps = tuple(
+        step.step_id.split(":", 2)[1]
+        for step in command.plan.steps
+        if step.step_id.startswith("project-removal.database")
+    )
+    assert child_steps == (
         "database",
         "volume",
     )
