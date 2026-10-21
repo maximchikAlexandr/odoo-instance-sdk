@@ -64,6 +64,28 @@ def _catalog(tmp_path: Path) -> tuple[BackupCatalog, str, Path]:
     return catalog, project_id, root
 
 
+def _legacy_environment(catalog: BackupCatalog, environment_id: str, root: Path) -> None:
+    catalog.create_environment(
+        {
+            "id": environment_id,
+            "name": environment_id,
+            "repository_root": str(root),
+            "git_common_dir": str(root / ".git"),
+            "branch": "main",
+            "base_ref": "HEAD",
+            "worktree_path": str(root / "worktree"),
+            "generated_config_path": str(root / "odoo.conf"),
+            "python_environment_path": str(root / ".venv"),
+            "python_environment_owned": False,
+            "dependency_lock_path": str(root / "lock"),
+            "db_mode": "shared",
+            "runtime_json": "{}",
+            "state": "ready",
+            "created_at": "2026-01-01T00:00:00",
+        }
+    )
+
+
 def _projection(
     project_id: str,
     root: Path,
@@ -89,6 +111,24 @@ def _projection(
         decisions=decisions,
         fingerprint="project-removal-matrix",
     )
+
+
+def test_public_forget_refuses_matching_legacy_environment(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    _legacy_environment(catalog, "legacy-alpha", root)
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+
+    with pytest.raises(ProjectRemovalError, match="environment:legacy-alpha"):
+        ProjectResource(_client=cast("OdooClient", client)).remove(
+            ProjectSelector.from_project_id(project_id)
+        )
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert catalog.get_environment("legacy-alpha") is not None
+    assert root.exists()
+    catalog.close()
 
 
 class _AdapterRegistry:

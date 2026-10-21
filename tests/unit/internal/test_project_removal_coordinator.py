@@ -32,6 +32,28 @@ def _catalog(tmp_path: Path) -> tuple[BackupCatalog, str, Path]:
     return catalog, project_id, root
 
 
+def _legacy_environment(catalog: BackupCatalog, environment_id: str, root: Path) -> None:
+    catalog.create_environment(
+        {
+            "id": environment_id,
+            "name": environment_id,
+            "repository_root": str(root),
+            "git_common_dir": str(root / ".git"),
+            "branch": "main",
+            "base_ref": "HEAD",
+            "worktree_path": str(root / "worktree"),
+            "generated_config_path": str(root / "odoo.conf"),
+            "python_environment_path": str(root / ".venv"),
+            "python_environment_owned": False,
+            "dependency_lock_path": str(root / "lock"),
+            "db_mode": "shared",
+            "runtime_json": "{}",
+            "state": "ready",
+            "created_at": "2026-01-01T00:00:00",
+        }
+    )
+
+
 def test_forget_captures_one_mutating_terminal_action_and_preserves_resources(
     tmp_path: Path,
 ) -> None:
@@ -49,6 +71,85 @@ def test_forget_captures_one_mutating_terminal_action_and_preserves_resources(
     assert result.registration_state == "forgotten"
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     assert root.exists()
+    catalog.close()
+
+
+def test_forget_refuses_matching_legacy_environment_and_preserves_registration(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    _legacy_environment(catalog, "legacy-alpha", root)
+
+    with pytest.raises(ProjectRemovalError, match="environment:legacy-alpha"):
+        capture_project_removal_command(catalog, ProjectSelector.from_project_id(project_id))
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert catalog.get_environment("legacy-alpha") is not None
+    catalog.close()
+
+
+def test_forget_refuses_matching_legacy_runtime_and_preserves_runtime(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    _legacy_environment(catalog, "legacy-alpha", root)
+    catalog._upsert_runtime(
+        "environment",
+        "legacy-alpha",
+        root_pid=123,
+        create_time=1.0,
+        started_at="2026-01-01T00:00:00",
+        checkout_branch="main",
+        commit_sha="a" * 40,
+        http_url="http://127.0.0.1:8069",
+        http_port=8069,
+        database_name="demo",
+    )
+    catalog._conn.execute(
+        "UPDATE environments SET state = 'removed' WHERE id = ?", ("legacy-alpha",)
+    )
+    catalog._conn.commit()
+
+    with pytest.raises(ProjectRemovalError, match="runtime:environment:legacy-alpha"):
+        capture_project_removal_command(catalog, ProjectSelector.from_project_id(project_id))
+
+    assert catalog.get_runtime("environment", "legacy-alpha") is not None
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
+def test_foreign_legacy_environment_does_not_block_alpha_forget(tmp_path: Path) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    beta_root = tmp_path / "beta"
+    (beta_root / ".git").mkdir(parents=True)
+    _legacy_environment(catalog, "legacy-beta", beta_root)
+
+    result = capture_project_removal_command(
+        catalog, ProjectSelector.from_project_id(project_id)
+    ).run()
+
+    assert result.registration_state == "forgotten"
+    assert catalog.get_environment("legacy-beta") is not None
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert root.exists()
+    catalog.close()
+
+
+def test_forgotten_and_unknown_projects_keep_legacy_resources_unchanged(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    _legacy_environment(catalog, "legacy-alpha", root)
+    assert catalog.forget_project(project_id)
+
+    result = capture_project_removal_command(
+        catalog, ProjectSelector.from_project_id(project_id)
+    ).run()
+    assert result.registration_state == "forgotten"
+    assert catalog.get_environment("legacy-alpha") is not None
+
+    with pytest.raises(ValueError, match="unknown or non-unique"):
+        capture_project_removal_command(catalog, ProjectSelector.from_project_id("project-unknown"))
     catalog.close()
 
 
