@@ -62,7 +62,7 @@ def test_refresh_audit_updates_only_requested_overrides_and_existing_hashes() ->
 
     reviewed_overrides = cast("dict[str, str]", manifest["reviewed_overrides"])
     assert {name: reviewed_overrides[name] for name in FIXED_VERSIONS} == FIXED_VERSIONS
-    current_exceptions = cast(list[dict[str, object]], current["exceptions"])
+    current_exceptions = cast("list[dict[str, object]]", current["exceptions"])
     assert manifest["exceptions"] == [
         item for item in current_exceptions if item["package"] != "urllib3"
     ]
