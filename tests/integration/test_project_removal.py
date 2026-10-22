@@ -2012,9 +2012,7 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         legacy_project_id,
         catalog_holder,
         client,
-    ) = _observed_database_and_compose_removal_case(
-        tmp_path, monkeypatch, verification_error=None
-    )
+    ) = _observed_database_and_compose_removal_case(tmp_path, monkeypatch, verification_error=None)
     assert captured_fingerprint
     assert any("database" in step_id and "guarded-drop" in step_id for step_id in plan_step_ids)
     assert any(step_id.endswith(":destroy") for step_id in plan_step_ids)
@@ -2096,7 +2094,9 @@ def test_public_remove_command_refuses_unavailable_compose_postcondition_before_
     assert active_claim.volume_name == f"pgdata_{legacy_project_id}"
     assert catalog._conn.total_changes == changes_before_failure
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
-    assert database_executor.executed == []
+    assert [step.step_id for step in database_executor.executed] == [
+        "project-removal.database.guarded-drop:database:owned_db"
+    ]
     assert root.exists()
     catalog.close()
 
@@ -2116,9 +2116,7 @@ def test_compose_purge_retains_claim_when_cluster_lock_is_unavailable(
         cluster_project_id,
         _catalog_holder,
         _client,
-    ) = _observed_database_and_compose_removal_case(
-        tmp_path, monkeypatch, verification_error=None
-    )
+    ) = _observed_database_and_compose_removal_case(tmp_path, monkeypatch, verification_error=None)
     with exclusive_lock(postgres_cluster_lock_path(cluster_project_id)):
         with pytest.raises(ProjectRemovalError, match="project removal step failed"):
             command.run()

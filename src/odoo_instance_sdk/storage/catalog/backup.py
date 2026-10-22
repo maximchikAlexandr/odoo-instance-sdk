@@ -51,6 +51,9 @@ class _BackupMixin:
         db_path: Path
         _read_only: bool
 
+        @staticmethod
+        def _cluster_text(value: str, label: str) -> str: ...
+
         def _add_event(
             self,
             backup_id: str,
@@ -859,4 +862,3 @@ class _BackupMixin:
                 raise BackupNotAvailableError(
                     f"Backup {backup.id} content hash mismatch (tampered or modified)"
                 )
-
