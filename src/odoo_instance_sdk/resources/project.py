@@ -198,19 +198,25 @@ class ProjectResource:
                             catalog=catalog,
                             project=project_config,
                         ).run()
-                        durable_records = (
-                            {
-                                (name, oid)
-                                for name, oid in catalog._project_bound_database_records(
-                                    claim.project_id,
-                                    claim.cluster_id,
-                                    *recovery_endpoint,
+                        durable_records: set[tuple[str, int]] = set()
+                        if claim is not None and recovery_endpoint is not None:
+                            for owner_id in {registration.project_id, claim.project_id}:
+                                durable_records.update(
+                                    (name, oid)
+                                    for name, oid in catalog._project_bound_database_records(
+                                        owner_id,
+                                        claim.cluster_id,
+                                        *recovery_endpoint,
+                                    )
+                                    if type(oid) is int and oid > 0
                                 )
-                                if isinstance(oid, int) and oid > 0
-                            }
-                            if claim is not None and recovery_endpoint is not None
-                            else set()
-                        )
+                                durable_records.update(
+                                    catalog._project_restored_database_records(
+                                        owner_id,
+                                        claim.cluster_id,
+                                        *recovery_endpoint,
+                                    )
+                                )
                         durable_names = {name for name, _oid in durable_records}
                         observed_names = {
                             item.name
@@ -221,6 +227,11 @@ class ProjectResource:
                             item
                             for item in database_inventory.databases
                             if (item.name, item.database_oid) in durable_records
+                            and (
+                                item.cluster_id is None
+                                or claim is None
+                                or item.cluster_id == str(claim.cluster_id)
+                            )
                         )
                         if not authorized_items or observed_names - durable_names:
                             database_inventory = None
