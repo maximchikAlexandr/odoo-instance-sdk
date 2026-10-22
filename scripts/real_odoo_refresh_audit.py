@@ -40,8 +40,10 @@ def _exception_fields(entry: object) -> tuple[str, str, list[object]]:
 
 
 def _check_retired_urllib_exception(entries: list[Mapping[str, object]]) -> None:
+    if not entries:
+        return
     if len(entries) != 1:
-        raise AuditRefreshError("expected exactly one existing urllib3 exception entry")
+        raise AuditRefreshError("expected no more than one existing urllib3 exception entry")
     urllib = entries[0]
     package, version, advisories = _exception_fields(urllib)
     if (

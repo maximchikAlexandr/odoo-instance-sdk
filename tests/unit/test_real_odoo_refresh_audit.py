@@ -61,7 +61,9 @@ def test_refresh_audit_updates_only_requested_overrides_and_existing_hashes() ->
     manifest, findings = updated_manifest(current, _refreshed_lock(), _scanner_payload())
 
     assert {name: manifest["reviewed_overrides"][name] for name in FIXED_VERSIONS} == FIXED_VERSIONS
-    assert manifest["exceptions"] == current["exceptions"][:-1]
+    assert manifest["exceptions"] == [
+        item for item in current["exceptions"] if item["package"] != "urllib3"
+    ]
     assert len(findings) == sum(len(item["advisories"]) for item in manifest["exceptions"])
     assert manifest["lock_sha256"] != current["lock_sha256"]
 
