@@ -7,7 +7,6 @@ import os
 import shutil
 import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +15,13 @@ import pytest
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.exceptions import ProjectRemovalError
 from odoo_instance_sdk.models.project_removal import ProjectSelector
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from scripts.real_odoo_pins import E2E_PINS
 from tests.integration.real_odoo.archive import SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence, audit_no_leaks
-from tests.integration.real_odoo.conftest import E2ERuntime
+from tests.integration.real_odoo.conftest import E2ERuntime, odoo_runtime_python
 from tests.integration.real_odoo.focused_support import (
     _catalog_for_project,
     _project,
@@ -165,17 +166,35 @@ def test_public_project_forget_reinit_and_purge(
     monitor_document = _document(monitor)
     assert project_id not in json.dumps(monitor_document, sort_keys=True)
 
-    reinit = invoke(
+    reinit_config = ProjectConfig.load(project)
+    assert reinit_config.source_config is not None
+    reinit_args = [
         "init",
         "--project",
         str(project),
         "--no-input",
+        "--yes",
         "--allow-partial",
         "--odoo-bin",
         str(project / "odoo-bin"),
         "--python",
-        sys.executable,
-    )
+        str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        "--config",
+        str(project / reinit_config.source_config),
+        "--database",
+        target_runtime.topology.target_sentinel_database,
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        E2E_PINS.postgres_image,
+        "--postgres-port",
+        str(project_postgres_port),
+        "--postgres-user",
+        "odoo",
+    ]
+    if reinit_config.preferred_http_port is not None:
+        reinit_args.extend(("--http-port", str(reinit_config.preferred_http_port)))
+    reinit = invoke(*reinit_args)
     assert reinit.returncode == 0, reinit.stdout + reinit.stderr
     catalog = BackupCatalog(db_path=catalog_path)
     reactivated = catalog.get_project_for_lifecycle(project_id)
