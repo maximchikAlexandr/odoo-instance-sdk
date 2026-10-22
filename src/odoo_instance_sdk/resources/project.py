@@ -156,6 +156,12 @@ class ProjectResource:
                         compose_runner=None,
                         project_id=claim.project_id,
                     )
+                    password_file = recovery_cluster.password_file
+                    if password_file.is_symlink() or not password_file.is_file():
+                        raise OSError("owned Compose password is unavailable")
+                    recovery_password = password_file.read_text(encoding="utf-8").strip()
+                    if not recovery_password:
+                        raise OSError("owned Compose password is unavailable")
                     instance = OdooInstance(
                         config=InstanceConfig(
                             base_url="http://127.0.0.1:8069",
@@ -163,10 +169,12 @@ class ProjectResource:
                                 db_host=endpoint[0],
                                 db_port=endpoint[1],
                                 db_user=recovery_user,
+                                db_password=recovery_password,
                             ),
                             db_host=endpoint[0],
                             db_port=endpoint[1],
                             db_user=recovery_user,
+                            db_password=recovery_password,
                         ),
                         _client=client,
                         _postgres_cluster=recovery_cluster,
