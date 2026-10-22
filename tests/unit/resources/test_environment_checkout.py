@@ -724,7 +724,8 @@ class TestCheckoutPreflight:
         remote = MagicMock()
         remote.databases.names.return_value = ("staging_db",)
         remote.databases.backup.return_value = backup
-        monkeypatch.setattr(env_client, "instance", MagicMock(return_value=remote))
+        instance_factory = MagicMock(return_value=remote)
+        monkeypatch.setattr(env_client, "instance", instance_factory)
         monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "legacy-secret")
 
         store = SecretStore(user_root=tmp_path / "store")
@@ -764,7 +765,7 @@ class TestCheckoutPreflight:
 
         result = command.run()
         expected = "encrypted-secret" if store_state == "hit" else "legacy-secret"
-        env_client.instance.assert_called_once_with(
+        instance_factory.assert_called_once_with(
             "https://staging.example", master_password=expected
         )
         assert result.backup == backup

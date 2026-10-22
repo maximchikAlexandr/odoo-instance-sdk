@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -95,7 +95,7 @@ def _legacy_credentials(root: Path) -> tuple[Path, Path]:
     return mapping, environment
 
 
-def _identity_callback(tokens: list[str]):
+def _identity_callback(tokens: list[str]) -> Callable[[str, str], Mapping[str, JsonValue]]:
     def verify(host: str, token: str) -> Mapping[str, JsonValue]:
         assert host == "gitlab.example"
         tokens.append(token)
