@@ -23,6 +23,7 @@ from odoo_instance_sdk.commands.output import (
     run_or_preview,
 )
 from odoo_instance_sdk.config import OdooClientConfig
+from odoo_instance_sdk.exceptions import ProjectRemovalError
 from odoo_instance_sdk.internal.project_removal_coordinator import (
     expected_project_confirmation_for_command,
     set_project_confirmation,
@@ -130,6 +131,15 @@ def remove(
         )
     except click.exceptions.Exit:
         raise
+    except ProjectRemovalError as exc:
+        removal = exc.details.get("removal")
+        error_code = (
+            "confirmation_required"
+            if isinstance(removal, dict)
+            and removal.get("failed_step") == "project-removal:confirmation"
+            else None
+        )
+        fail(output_mode, "remove", exc, dry_run=dry_run, error_code=error_code)
     except Exception as exc:
         fail(output_mode, "remove", exc, dry_run=dry_run)
 
