@@ -14,30 +14,9 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields as dataclass_fields
 from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-from starlette.exceptions import HTTPException
-from starlette.middleware import Middleware
-from starlette.middleware.sessions import SessionMiddleware
-from starlette_admin import (
-    BaseAdmin,
-    BaseModelView,
-    ComputedField,
-    DateTimeField,
-    IntegerField,
-    PasswordField,
-    StringField,
-)
-from starlette_admin.auth import AdminUser
-from starlette_admin.auth.password import AuthProvider
-from starlette_admin.exceptions import ActionFailed, FormValidationError, LoginFailed
-from starlette_admin.filters.base import (
-    BaseFilter,
-    FilterApplyContext,
-    FilterDataType,
-    FilterValidationError,
-)
 
 from odoo_instance_sdk.exceptions import ConfigError, SecretStoreConflictError
 from odoo_instance_sdk.internal.paths import get_admin_config_path, get_catalog_path
@@ -53,9 +32,48 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     IncompleteOperation,
 )
 
+
+def _dashboard_symbol(module: str, name: str) -> Any:
+    return getattr(import_module(module), name)
+
+
+HTTPException = _dashboard_symbol("starlette.exceptions", "HTTPException")
+Middleware = _dashboard_symbol("starlette.middleware", "Middleware")
+SessionMiddleware = _dashboard_symbol("starlette.middleware.sessions", "SessionMiddleware")
+BaseAdmin = _dashboard_symbol("starlette_admin", "BaseAdmin")
+ComputedField = _dashboard_symbol("starlette_admin", "ComputedField")
+DateTimeField = _dashboard_symbol("starlette_admin", "DateTimeField")
+IntegerField = _dashboard_symbol("starlette_admin", "IntegerField")
+PasswordField = _dashboard_symbol("starlette_admin", "PasswordField")
+StringField = _dashboard_symbol("starlette_admin", "StringField")
+AdminUser = _dashboard_symbol("starlette_admin.auth", "AdminUser")
+ActionFailed = _dashboard_symbol("starlette_admin.exceptions", "ActionFailed")
+FormValidationError = _dashboard_symbol("starlette_admin.exceptions", "FormValidationError")
+LoginFailed = _dashboard_symbol("starlette_admin.exceptions", "LoginFailed")
+FilterDataType = _dashboard_symbol("starlette_admin.filters.base", "FilterDataType")
+FilterValidationError = _dashboard_symbol("starlette_admin.filters.base", "FilterValidationError")
+FilterApplyContext = Any
+
 if TYPE_CHECKING:
-    from starlette.requests import Request
-    from starlette_admin.filters.base import FilterGroup
+
+    class _DashboardBaseFilter:
+        name: str
+        label: str
+        data_type: object
+        has_value2: bool
+
+    class _DashboardAuthProvider:
+        def __init__(self) -> None: ...
+
+    class _DashboardBaseModelView:
+        pass
+
+    Request = Any
+    FilterGroup = Any
+else:
+    _DashboardBaseFilter = _dashboard_symbol("starlette_admin.filters.base", "BaseFilter")
+    _DashboardAuthProvider = _dashboard_symbol("starlette_admin.auth.password", "AuthProvider")
+    _DashboardBaseModelView = _dashboard_symbol("starlette_admin", "BaseModelView")
 
 _SESSION_KEY_MINIMUM = 32
 _ADMIN_USER = "admin"
@@ -63,7 +81,7 @@ _PRIVATE_BITS = stat.S_IRWXG | stat.S_IRWXO
 _ARGON2_HASH = re.compile(r"\$argon2(?:id|i|d)\$[A-Za-z0-9=,.$+/:-]+\Z")
 
 
-class _ExactFilter(BaseFilter):
+class _ExactFilter(_DashboardBaseFilter):
     name = "eq"
     label = "Equals"
     data_type = FilterDataType.STRING
@@ -72,7 +90,7 @@ class _ExactFilter(BaseFilter):
         return ctx.query
 
 
-class _DateRangeFilter(BaseFilter):
+class _DateRangeFilter(_DashboardBaseFilter):
     name = "between"
     label = "Between"
     data_type = FilterDataType.DATETIME
@@ -145,7 +163,7 @@ class AdminSettings:
         return cls(password_hash=password_hash, session_key=session_key)
 
 
-class _AdminAuth(AuthProvider):
+class _AdminAuth(_DashboardAuthProvider):
     def __init__(self, settings: AdminSettings) -> None:
         super().__init__()
         self._settings = settings
@@ -157,8 +175,7 @@ class _AdminAuth(AuthProvider):
         if username != _ADMIN_USER:
             raise LoginFailed("Invalid username or password")
         try:
-            from pwdlib import PasswordHash
-
+            PasswordHash = _dashboard_symbol("pwdlib", "PasswordHash")
             valid = PasswordHash.recommended().verify(password, self._settings.password_hash)
         except Exception as exc:
             raise LoginFailed("Invalid username or password") from exc
@@ -169,7 +186,7 @@ class _AdminAuth(AuthProvider):
     async def logout(self, request: Request) -> None:
         request.session.clear()
 
-    async def authenticate(self, request: Request) -> AdminUser | None:
+    async def authenticate(self, request: Request) -> Any:
         if request.session.get("admin_user") == _ADMIN_USER:
             return AdminUser(username=_ADMIN_USER)
         return None
@@ -352,11 +369,11 @@ def _request_revision(request: Request) -> int | None:
     return revision if revision > 0 else None
 
 
-def _conflict() -> ActionFailed:
+def _conflict() -> Any:
     return ActionFailed("Record changed; reload and retry.")
 
 
-class _ReadOnlyCatalogView(BaseModelView):
+class _ReadOnlyCatalogView(_DashboardBaseModelView):
     exporters = ()
     importers = ()
     actions = ()
@@ -664,7 +681,9 @@ class EnvironmentHistoryView(_ReadOnlyCatalogView):
         return tuple(result)
 
 
-class _SecretView(BaseModelView):
+class _SecretView(_DashboardBaseModelView):
+    key: str
+
     exporters = ()
     importers = ()
     actions = ()
@@ -678,11 +697,11 @@ class _SecretView(BaseModelView):
         return False
 
     async def validate(self, request: Request, data: dict[str, Any]) -> None:
-        from starlette_admin.types import RequestAction
+        request_action = _dashboard_symbol("starlette_admin.types", "RequestAction")
 
         errors: dict[str | int, Any] = {}
         if (
-            request.state.action == RequestAction.CREATE
+            request.state.action == request_action.CREATE
             and not str(data.get(self.secret_field) or "").strip()
         ):
             errors[self.secret_field] = "A nonblank secret is required."
@@ -893,7 +912,7 @@ class GitLabMemberSecretView(_SecretView):
         return len(pks)
 
 
-def mount_admin(app: Any, *, secure_cookie: bool = False) -> BaseAdmin:
+def mount_admin(app: Any, *, secure_cookie: bool = False) -> Any:
     """Mount authenticated Admin and return it for tests/introspection."""
     settings = AdminSettings.load()
     admin = BaseAdmin(
