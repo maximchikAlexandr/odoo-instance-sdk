@@ -24,8 +24,8 @@ from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lo
 from odoo_instance_sdk.internal.pg.drop import (
     DatabaseDropPartialError,
     DatabaseDropSafetyError,
-    _decode_inspection,
     _cleanup_proven_filestore,
+    _decode_inspection,
     build_database_drop_command,
 )
 from odoo_instance_sdk.internal.pg.drop_types import AdoptedCopyDatabaseClaim
