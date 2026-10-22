@@ -170,6 +170,33 @@ class MulticaOdooClient:
         """Resolve one human root creator from an already verified context."""
         return self.root_creator_command(context).run()
 
+    def project_commit_command(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        git_resource: GitResourceLike,
+        description: str,
+        ticket: str | None = None,
+        tag: str | None = None,
+    ) -> Command[CommandResult]:
+        """Build a project commit under the verified root human's identity."""
+        root = self.root_creator(context)
+        if (
+            root.workspace_id != context.workspace_id
+            or (context.root_issue_id is not None and root.root_issue_id != context.root_issue_id)
+            or (
+                context.root_creator_id is not None
+                and root.root_creator_id != context.root_creator_id
+            )
+        ):
+            raise ContextVerificationError("verified task root identity changed")
+        return git_resource.commit_command(
+            description=description,
+            ticket=ticket,
+            tag=tag,
+            member_id=root.root_creator_id,
+        )
+
     def credential_context_command(
         self,
         context: VerifiedTaskContext,

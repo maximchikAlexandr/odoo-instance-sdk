@@ -375,9 +375,13 @@ def _capture_adoption_command(  # noqa: C901
                 "database.backup.wait",
                 "database.restore.exists-before",
                 "database.restore.exists-after",
+                "database.restore.attachments",
             ):
                 if context.planned(step_id):  # type: ignore[attr-defined]
-                    context.skip(step_id)  # type: ignore[attr-defined]
+                    if step_id == "database.restore.attachments":
+                        context.process(step_id)  # type: ignore[attr-defined]
+                    else:
+                        context.skip(step_id)  # type: ignore[attr-defined]
         if restore_error is not None:
             raise restore_error
         value = uuid.uuid4()

@@ -178,6 +178,30 @@ def _process_result(
     )
 
 
+def _companion_result(step: PreparedStep, effects: dict[str, object]) -> ProcessResult | None:
+    if step.step_id == "update.verify.version":
+        return _process_result(step, returncode=cast("int", effects.get("verify_rc", 0)))
+    if step.step_id == "update.install.companion":
+        return _process_result(step, returncode=cast("int", effects.get("companion_install_rc", 0)))
+    if step.step_id == "update.verify.companion.version":
+        return _process_result(step, returncode=cast("int", effects.get("companion_verify_rc", 0)))
+    if step.step_id == "update.verify.companion.revisions":
+        return _process_result(
+            step,
+            stdout=str(
+                effects.get(
+                    "companion_revision_json",
+                    json.dumps({"odcli-multica": _SHA_B, "odoo-instance-sdk": _SHA_B}),
+                )
+            ),
+        )
+    if step.step_id == "update.recovery.companion":
+        return _process_result(
+            step, returncode=cast("int", effects.get("companion_rollback_rc", 0))
+        )
+    return None
+
+
 def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
     def factory(step):
         if step.step_id == "update.resolve":
@@ -213,11 +237,9 @@ def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
                 if cast("int", effects.get("maintenance_rc", 0)) == 0
                 else "",
             )
-        if step.step_id == "update.verify.version":
-            return _process_result(
-                step,
-                returncode=cast("int", effects.get("verify_rc", 0)),
-            )
+        companion_result = _companion_result(step, effects)
+        if companion_result is not None:
+            return companion_result
         if step.step_id == "update.recovery":
             return _process_result(step, returncode=cast("int", effects.get("rollback_rc", 0)))
         return _process_result(step)

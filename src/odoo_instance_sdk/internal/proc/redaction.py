@@ -99,7 +99,10 @@ _BEARER_VALUE = re.compile(r"\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNOR
 _JWT_VALUE = re.compile(
     r"(?:^|\s)eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:$|\s)",
 )
-_SAFE_ENV_KEY = re.compile(r"^(?:LANG|LC_[A-Z0-9_]+|TERM|TZ|PYTHONUNBUFFERED)$")
+_SAFE_ENV_KEY = re.compile(
+    r"^(?:LANG|LC_[A-Z0-9_]+|TERM|TZ|PYTHONUNBUFFERED|GIT_CONFIG_COUNT|"
+    r"GIT_CONFIG_(?:KEY|VALUE)_\d+|GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL))$"
+)
 _ASSIGNMENT_TOKENS = tuple(
     dict.fromkeys(
         prefilter_token
@@ -218,7 +221,11 @@ def captured_secret_values(step: PreparedStep) -> tuple[str, ...]:
     # copied into diagnostics: doing so would both widen the secret surface
     # and make harmless output depend on ambient process state.  Explicit
     # overrides are captured below and are always treated as private values.
-    values.extend(value for _key, value in step.environment_overrides if value)
+    values.extend(
+        value
+        for key, value in step.environment_overrides
+        if value and not _SAFE_ENV_KEY.fullmatch(str(key))
+    )
     return _argv_secret_values(step.argv, step.sensitive_argv_indices, initial=values)
 
 

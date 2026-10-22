@@ -39,6 +39,8 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import ProjectConfig, effective_ticket_settings
 from odoo_instance_sdk.resources.git_generic import GenericGitMixin
+from odoo_instance_sdk.resources.git_member_commit import member_commit_environment
+from odoo_instance_sdk.resources.git_runtime import worktree as _worktree
 from odoo_instance_sdk.resources.gitlab_mr import GitLabMergeRequestMixin
 
 if TYPE_CHECKING:
@@ -63,18 +65,6 @@ class _StepOptions(TypedDict):
     secret_values: Sequence[str]
     hooks_path: str | None
     runtime_environment: RuntimeEnvironmentFactory | None
-
-
-def _worktree(instance: OdooInstance) -> Path:
-    value = getattr(instance.config, "default_cwd", None)
-    if value is None:
-        start = getattr(instance.config, "start_config", None)
-        config_path = getattr(start, "config_path", None)
-        value = Path(config_path).parent if config_path else Path.cwd()
-    root = Path(value).resolve()
-    if not root.is_dir():
-        raise GitWorkflowError(f"Git worktree is unavailable: {root}")
-    return root
 
 
 def _text(value: str | bytes | None) -> str:
@@ -249,7 +239,9 @@ def _commit_context_from_results(
         first += resolved_ticket + " "
     message = first + description
     if link is not None:
-        message += "\n\n<" + link + ">"
+        # A trailing blank paragraph keeps git interpret-trailers hooks from
+        # parsing the bare URL's scheme colon as a trailer separator.
+        message += "\n\n" + link + "\n\n"
     return GitCommitContext(
         module=module,
         tag=resolved_tag,
@@ -513,26 +505,17 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
     ) -> Command[CommandResult]:
         identity_environment: Mapping[str, str] | None = None
         if repository is not None or member_id is not None:
-            if repository is None or member_id is None:
-                raise PlanValidationError("generic commit requires repository and member_id")
-            if context is not None or description is None:
-                raise PlanValidationError(
-                    "generic commit does not accept an Odoo commit context"
-                    if context is not None
-                    else "commit description is required"
-                )
-            from odoo_instance_sdk.internal.git_repository import resolve_repository
-
-            if not (snapshot := resolve_repository(repository)).initialized_odoo:
-                generic = self.generic_commit_command(
-                    description, repository=repository, member_id=member_id, ticket=ticket
-                )
+            identity_environment, generic = member_commit_environment(
+                self._instance,
+                context,
+                description,
+                repository,
+                member_id,
+                ticket,
+                self.generic_commit_command,
+            )
+            if generic is not None:
                 return cast("Command[CommandResult]", generic)
-            if snapshot.canonical_root != str(_worktree(self._instance)):
-                raise GitWorkflowError("initialized Odoo root is not the bound Git worktree")
-            from odoo_instance_sdk.internal.git_explicit import explicit_commit_environment
-
-            identity_environment = explicit_commit_environment(member_id, snapshot.host)
         from odoo_instance_sdk.execution import Command
         from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
 
@@ -563,7 +546,22 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
             root, "git.commit.verify-staged", ("diff", "--cached", "--name-status", "-z")
         )
         verify_tree = _step(root, "git.commit.verify-index-tree", ("write-tree",))
-        commit_step = _step(root, "git.commit", ("commit", "-m", context.message), environment=identity_environment, mutating=True)  # fmt: skip
+        commit_environment = dict(identity_environment or {})
+        if context.ticket_link is not None:
+            # A bare URL contains a colon, which `git interpret-trailers`
+            # otherwise rewrites as a malformed trailer in prepare hooks.
+            commit_environment.update(
+                GIT_CONFIG_COUNT="1",
+                GIT_CONFIG_KEY_0="trailer.separators",
+                GIT_CONFIG_VALUE_0=" ",
+            )
+        commit_step = _step(
+            root,
+            "git.commit",
+            ("commit", "-m", context.message),
+            environment=commit_environment,
+            mutating=True,
+        )
         all_steps = (
             *capture_steps,
             verify,

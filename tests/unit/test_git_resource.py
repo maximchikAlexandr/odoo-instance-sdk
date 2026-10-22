@@ -262,7 +262,7 @@ def test_commit_plan_previews_complete_configured_message(tmp_path: Path) -> Non
     commit_step = next(step for step in command.plan.process_steps if step.step_id == "git.commit")
     assert commit_step.argv[-2:] == (
         "-m",
-        f"[IMP] {tmp_path.name}: PROJ-123 change\\x0a\\x0a<https://tracker.test/PROJ-123>",
+        f"[IMP] {tmp_path.name}: PROJ-123 change\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a",
     )
 
 
@@ -287,10 +287,31 @@ def test_commit_preserves_ticket_link_with_trailer_hook(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     message = _git(tmp_path, "log", "-1", "--format=%B")
-    assert "<https://tracker.test/PROJ-123>" in message
+    assert "\n\nhttps://tracker.test/PROJ-123\n\nCo-authored-by:" in message
     assert "https: //" not in message
     assert "Co-authored-by: Test Agent <agent@example.test>" in message
     assert GitResource(_instance(tmp_path)).check(base="main").valid is True
+
+
+def test_check_keeps_legacy_angle_ticket_links_valid(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    _ticket_project(tmp_path)
+    _git(tmp_path, "add", ".odcli/project.toml")
+    _git(tmp_path, "commit", "-qm", "project config")
+    _git(tmp_path, "checkout", "-qb", "feature")
+    module = tmp_path / "addons" / "sale"
+    module.mkdir(parents=True)
+    (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+    (module / "models.py").write_text("value = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "addons/sale")
+    _git(
+        tmp_path,
+        "commit",
+        "-qm",
+        "[IMP] sale: PROJ-123 change\n\n<https://tracker.test/PROJ-123>",
+    )
+
+    assert GitResource(_instance(tmp_path)).check().valid is True
 
 
 def test_commit_in_worktree_without_manifest_uses_project_ticket_settings(
@@ -315,7 +336,7 @@ def test_commit_in_worktree_without_manifest_uses_project_ticket_settings(
     commit_step = next(step for step in command.plan.process_steps if step.step_id == "git.commit")
     assert commit_step.argv[-2:] == (
         "-m",
-        "[IMP] worktree: PROJ-123 change\\x0a\\x0a<https://tracker.test/PROJ-123>",
+        "[IMP] worktree: PROJ-123 change\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a",
     )
 
 
@@ -365,7 +386,7 @@ def test_commit_ticket_settings_come_from_binding_repository_root(
     ).commit_context("change", ticket="PROJ-123", tag="IMP")
     expected_url = f"{base_url.rstrip('/')}/PROJ-123"
     assert context.ticket_link == expected_url
-    assert context.message == (f"[IMP] {worktree.name}: PROJ-123 change\n\n<{expected_url}>")
+    assert context.message == (f"[IMP] {worktree.name}: PROJ-123 change\n\n{expected_url}\n\n")
 
 
 def test_commit_omitted_tag_freezes_add_inference_in_plan_and_execution(tmp_path: Path) -> None:

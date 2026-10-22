@@ -59,11 +59,37 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentDatabaseMode,
     EnvironmentState,
 )
+from odoo_instance_sdk.resources.environment.checkout_filestore import verify_copy_filestore
 from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
 from odoo_instance_sdk.resources.environment.checkout_source_runtime import _source_auxiliary_python
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 
 FIXED_NOW = datetime(2026, 9, 26, 21, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("rows", "valid"),
+    [("", True), ("6173736574", True), ("6d697373696e67", False), ("2e2e2f657363617065", False)],
+    ids=("no-attachments", "contained-file", "missing-file", "unsafe-path"),
+)
+def test_copy_filestore_verification_requires_contained_regular_files(
+    tmp_path: Path, rows: str, valid: bool
+) -> None:
+    from odoo_instance_sdk.exceptions import InstanceConfigurationError
+
+    from_result = ProcessResult(
+        argv=(), returncode=0, stdout=rows, stderr="", duration=0.0, cwd=None, environment=()
+    )
+    context = SimpleNamespace(process=lambda _step_id: from_result)
+    target = tmp_path / "data" / "filestore" / "target"
+    target.mkdir(parents=True)
+    (target / "asset").write_bytes(b"restored")
+
+    if valid:
+        verify_copy_filestore(context, tmp_path / "data", "target")
+    else:
+        with pytest.raises(InstanceConfigurationError):
+            verify_copy_filestore(context, tmp_path / "data", "target")
 
 
 def test_copy_source_manager_uses_existing_project_python_before_owned_venv(
@@ -670,7 +696,9 @@ class TestCheckoutPreflight:
         psql = tmp_path / "psql"
         marker = tmp_path / "psql-called"
         psql.write_text(
-            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
+            "#!/bin/sh\n"
+            'case "$*" in *convert_to*store_fname*) exit 0 ;; esac\n'
+            f'if [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
         )
         psql.chmod(0o755)
         monkeypatch.setattr(
@@ -832,7 +860,9 @@ class TestCheckoutPreflight:
         psql = tmp_path / "psql"
         marker = tmp_path / "psql-called"
         psql.write_text(
-            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
+            "#!/bin/sh\n"
+            'case "$*" in *convert_to*store_fname*) exit 0 ;; esac\n'
+            f'if [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
         )
         psql.chmod(0o755)
         monkeypatch.setattr(
@@ -1730,6 +1760,7 @@ class TestCheckoutCopy:
             "  printf 'probe failed\\n' >&2\n"
             "  exit 1\n"
             "fi\n"
+            'case "$*" in *convert_to*store_fname*) exit 0 ;; esac\n'
             'if [ "${ODCLI_TEST_PSQL_EXISTS_BEFORE:-}" = "1" ]; then\n'
             "  printf '1\\n'\n"
             "  exit 0\n"
@@ -2350,7 +2381,7 @@ class TestCheckoutCopy:
         )
         instance.databases.exists.assert_not_called()
 
-    def test_copy_consumes_exact_restore_probes_around_restore(
+    def test_copy_verifies_target_attachment_files_after_restore(
         self,
         env_client: OdooClient,
         project_manifest: Path,
@@ -2365,7 +2396,10 @@ class TestCheckoutCopy:
         original_process = RunContext.process
 
         def process(context: RunContext[object], step_id: str) -> object:
-            if step_id.startswith("database.restore.exists-"):
+            if (
+                step_id.startswith("database.restore.exists-")
+                or step_id == "database.restore.attachments"
+            ):
                 consumed.append(step_id)
             return original_process(context, step_id)
 
@@ -2377,6 +2411,7 @@ class TestCheckoutCopy:
         assert consumed == [
             "database.restore.exists-before",
             "database.restore.exists-after",
+            "database.restore.attachments",
         ]
         instance.databases._restore_after_verified_absence.assert_called_once_with(
             instance.databases.backup.return_value,

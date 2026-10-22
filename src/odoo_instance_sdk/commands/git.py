@@ -88,7 +88,11 @@ def git_group() -> None:
 @click.option("--ticket", default=None, help="Tracker-neutral Ticket key.")
 @click.option("--tag", default=None, help="Explicit uppercase commit prefix.")
 @click.option("--repo", default=None, type=click.Path(), help="Explicit Git repository root.")
-@click.option("--member-id", default=None, help="Selected GitLab member UUID.")
+@click.option(
+    "--member-id",
+    default=None,
+    help="Verified Multica member UUID for project identity, or explicit GitLab mode with --repo.",
+)
 @click.option("--dry-run", is_flag=True, help="Plan only.")
 @click.option("--yes", is_flag=True, help="Skip confirmation.")
 @output_options
@@ -106,8 +110,8 @@ def git_commit(
     json_output: bool,
 ) -> None:
     mode = resolve_output_mode(output_format, json_output)
-    if (repo is None) != (member_id is None):
-        raise click.UsageError("--repo and --member-id must be supplied together")
+    if repo is not None and member_id is None:
+        raise click.UsageError("--repo requires --member-id")
     if repo is not None and tag is not None:
         raise click.UsageError("--tag is valid only for project-aware Odoo commits")
     try:
@@ -119,8 +123,9 @@ def git_commit(
                     repository=repo,
                     member_id=member_id,
                     ticket=ticket,
+                    tag=tag,
                 )
-                if repo is not None and member_id is not None
+                if member_id is not None
                 else resource.commit_command(description=description, ticket=ticket, tag=tag)
             ),
             command_name="git.commit",

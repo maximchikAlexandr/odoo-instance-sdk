@@ -104,6 +104,30 @@ def test_root_creator_accepts_parent_in_another_project_of_same_workspace() -> N
     assert result.root_creator_id == "human-root"
 
 
+def test_project_commit_uses_only_verified_root_human_identity() -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "in_progress",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    child = Issue("child", "Child", "in_progress", project_id="project", parent_id="root")
+    git = SimpleNamespace(commit_command=lambda **kwargs: kwargs)
+
+    command = _client(child, root).project_commit_command(
+        _context(), git_resource=git, description="change", ticket="PROJ-1", tag="DOC"
+    )
+
+    assert command == {
+        "description": "change",
+        "ticket": "PROJ-1",
+        "tag": "DOC",
+        "member_id": "human-root",
+    }
+
+
 def test_git_askpass_helper_is_a_runnable_executable() -> None:
     helper = askpass_command()
     environment = os.environ.copy()

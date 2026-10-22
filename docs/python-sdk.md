@@ -381,6 +381,10 @@ rebases, validates the result, and can publish only the same branch to an SSH
 Configured ticket links use `ticket_link_enabled` and `ticket_base_url` in the
 project manifest. Historical vendor-specific settings are rejected or require
 actionable migration, and no external tracker or forge client is contacted.
+Generated messages place the bare HTTP(S) URL in the second paragraph; history
+validation also retains angle-bracketed links from existing commits and accepts
+standard `Co-authored-by` trailers. Project-aware `commit_command()` accepts a
+verified Multica member UUID without switching to explicit repository mode.
 
 Machine-readable CLI output uses the explicit leaf-local `--format json` or
 `--format toon` selector; the removed `--json` option is not a compatibility

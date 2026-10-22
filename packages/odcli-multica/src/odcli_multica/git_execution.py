@@ -48,6 +48,15 @@ class GitSync(Protocol):
 class GitResourceLike(GitPassthrough, GitSync, Protocol):
     def passthrough(self, args: Sequence[str]) -> CommandResult: ...
 
+    def commit_command(
+        self,
+        *,
+        description: str,
+        ticket: str | None = None,
+        tag: str | None = None,
+        member_id: str | None = None,
+    ) -> Command[CommandResult]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class GitCredentialSnapshot:
