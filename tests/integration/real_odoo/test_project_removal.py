@@ -145,7 +145,9 @@ def test_public_project_forget_reinit_and_purge(
         for row in catalog.list_projects(include_forgotten=True)
         if str(row["project_id"]) == project_id
     ]
-    registered_projects = catalog.list_projects()
+    registered_projects = [
+        row for row in catalog.list_projects() if str(row["project_id"]) == project_id
+    ]
     retained_environments = catalog._conn.execute(
         "SELECT state FROM environments WHERE id = ?",
         (environment_id,),
@@ -173,7 +175,6 @@ def test_public_project_forget_reinit_and_purge(
         str(project),
         "--no-input",
         "--yes",
-        "--allow-partial",
         "--odoo-bin",
         str(project / "odoo-bin"),
         "--python",
