@@ -1225,6 +1225,7 @@ def test_public_purge_recovers_missing_source_with_exact_claim(
         project_id,
         ("owned_db",),
         _seed_exact_restore,
+        recovery_password="test-recovery-password",
     )
     result = command.run()
     assert result.registration_state == "forgotten"
