@@ -345,6 +345,23 @@ def test_isolated_wheel_imports_rich_toon_and_runs_toon_env_list(tmp_path: Path)
         text=True,
     )
     assert imports.stdout.strip() == "rich toon"
+    optional_imports = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import importlib.util\n"
+                "for module in ('fastapi', 'starlette', 'starlette_admin', 'pwdlib', 'sqlcipher3', 'uvicorn'):\n"
+                "    assert importlib.util.find_spec(module) is None, module"
+            ),
+        ],
+        cwd=empty,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert optional_imports.returncode == 0, optional_imports.stderr
     result = subprocess.run(
         [str(odcli), "env", "list", "--all-projects", "--format", "toon"],
         cwd=empty,
@@ -420,7 +437,10 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
     }
     assert dashboard == {
         ("fastapi", ("<1.0", ">=0.141")),
+        ("pwdlib", ("<1.0", "[argon2]>=0.3")),
+        ("sqlcipher3", ("<1.0", ">=0.6")),
         ("starlette", ("<2.0", ">=1.3.1")),
+        ("starlette-admin", ("<2.0", ">=1.0")),
         ("uvicorn", ("<1.0", ">=0.30")),
     }
     assert provides_extra == {"dashboard"}

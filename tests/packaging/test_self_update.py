@@ -549,12 +549,13 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
             str(tool_python),
             "-c",
             (
-                "import fastapi, starlette, uvicorn; "
+                "import fastapi, starlette, starlette_admin, pwdlib, sqlcipher3, uvicorn; "
                 "from pathlib import Path; "
                 "root=Path(__import__('odoo_instance_sdk').__file__).parent / 'web' / 'dist'; "
                 "assert (root / 'index.html').is_file(); "
                 "assert any((root / 'assets').iterdir()); "
-                "print(f'{fastapi.__name__}:{starlette.__name__}:{uvicorn.__name__}')"
+                "print(f'{fastapi.__name__}:{starlette.__name__}:{starlette_admin.__name__}:'"
+                "f'{pwdlib.__name__}:{sqlcipher3.__name__}:{uvicorn.__name__}')"
             ),
         ],
         check=False,
@@ -563,7 +564,7 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
         env=env,
     )
     assert imports.returncode == 0, imports.stderr
-    assert imports.stdout.strip() == "fastapi:starlette:uvicorn"
+    assert imports.stdout.strip() == "fastapi:starlette:starlette_admin:pwdlib:sqlcipher3:uvicorn"
 
     readiness = _run_dashboard_monitor(odcli, env=env, port=18080 + (os.getpid() % 1000))
     assert readiness.error is None, readiness.error
@@ -599,7 +600,7 @@ def test_clean_vcs_install_builds_dashboard_assets_and_keeps_core_only_minimal(
             str(dashboard_python),
             "-c",
             (
-                "import fastapi, starlette, uvicorn, odoo_instance_sdk\n"
+                "import fastapi, starlette, starlette_admin, pwdlib, sqlcipher3, uvicorn, odoo_instance_sdk\n"
                 "from pathlib import Path\n"
                 "root = Path(odoo_instance_sdk.__file__).parent / 'web' / 'dist'\n"
                 "assert (root / 'index.html').is_file()\n"
@@ -630,6 +631,10 @@ def test_clean_vcs_install_builds_dashboard_assets_and_keeps_core_only_minimal(
             (
                 "import importlib.util\n"
                 "assert importlib.util.find_spec('fastapi') is None\n"
+                "assert importlib.util.find_spec('starlette') is None\n"
+                "assert importlib.util.find_spec('starlette_admin') is None\n"
+                "assert importlib.util.find_spec('pwdlib') is None\n"
+                "assert importlib.util.find_spec('sqlcipher3') is None\n"
                 "assert importlib.util.find_spec('uvicorn') is None"
             ),
         ],

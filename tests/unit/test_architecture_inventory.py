@@ -590,12 +590,27 @@ def test_runtime_dependency_inventory_is_exact_and_bounded() -> None:
         "dashboard": [
             "fastapi>=0.141,<1.0",
             "starlette>=1.3.1,<2.0",
+            "starlette-admin>=1.0,<2.0",
+            "pwdlib[argon2]>=0.3,<1.0",
+            "sqlcipher3>=0.6,<1.0",
             "uvicorn>=0.30,<1.0",
         ]
     }
     lock = (_REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
     assert 'name = "rich-click"' in lock
     assert '{ name = "rich-click", specifier = ">=1.9,<2" }' in lock
+    assert (
+        '{ name = "pwdlib", extras = ["argon2"], marker = "extra == \'dashboard\'", specifier = ">=0.3,<1.0" }'
+        in lock
+    )
+    assert (
+        '{ name = "sqlcipher3", marker = "extra == \'dashboard\'", specifier = ">=0.6,<1.0" }'
+        in lock
+    )
+    assert (
+        '{ name = "starlette-admin", marker = "extra == \'dashboard\'", specifier = ">=1.0,<2.0" }'
+        in lock
+    )
 
 
 def test_expression_assessment_records_both_checkpoints() -> None:
