@@ -92,6 +92,14 @@ def test_public_project_forget_reinit_and_purge(
         for row in catalog.list_projects(include_forgotten=True)
         if Path(str(row["repository_root"])).resolve() == project.resolve()
     )
+    registration = catalog.get_project_for_lifecycle(project_id)
+    assert registration is not None
+    claim = catalog._get_postgres_cluster_for_project(
+        project_id,
+        str(registration["repository_root"]),
+        str(registration["git_common_dir"]),
+    )
+    assert claim is not None and claim.state == "active"
     catalog.close()
     project_cluster = PostgresCluster.from_project(project)
     project_postgres_port = project_cluster.endpoint_port
@@ -207,6 +215,26 @@ def test_public_project_forget_reinit_and_purge(
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
     assert shared_resource.read_bytes() == b"shared resource\n"
 
+    # Read the durable catalogue and Docker independently before issuing a
+    # fresh full-id command. The purge must retire the exact legacy-aware
+    # claim only after both owned Compose resources have been verified absent.
+    catalog = BackupCatalog(db_path=catalog_path)
+    persisted = catalog.get_project_for_lifecycle(project_id)
+    assert persisted is not None
+    assert persisted["registration_state"] == "forgotten"
+    assert catalog._get_postgres_cluster(claim.project_id) is None
+    assert catalog._get_postgres_cluster_by_id(claim.cluster_id) is None
+    catalog.close()
+    for docker_args, label in (
+        (("docker", "inspect", claim.compose_project + "-postgres-1"), "container"),
+        (("docker", "volume", "inspect", claim.volume_name), "volume"),
+    ):
+        absent = subprocess.run(docker_args, capture_output=True, text=True, check=False)
+        assert absent.returncode != 0
+        assert "no such" in (absent.stdout + absent.stderr).lower(), (
+            f"{label} absence was not proven: {absent.stdout}{absent.stderr}"
+        )
+
     cleanup_audit = audit_no_leaks(
         target_runtime.run_id,
         ports=(project_postgres_port,),
@@ -224,6 +252,12 @@ def test_public_project_forget_reinit_and_purge(
     )
     assert repeated.returncode == 0, repeated.stdout + repeated.stderr
     assert _document(repeated)["result"]["registration_state"] == "forgotten"
+    catalog = BackupCatalog(db_path=catalog_path)
+    persisted_after_repeat = catalog.get_project_for_lifecycle(project_id)
+    assert persisted_after_repeat is not None
+    assert persisted_after_repeat["registration_state"] == "forgotten"
+    assert catalog._get_postgres_cluster(claim.project_id) is None
+    catalog.close()
     record(
         record_property,
         "E2E-CP-16",

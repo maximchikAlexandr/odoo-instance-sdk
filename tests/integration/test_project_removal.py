@@ -1761,8 +1761,11 @@ def test_projection_retains_dirty_primary_source_at_capture(tmp_path: Path) -> N
     catalog.close()
 
 
+@pytest.mark.parametrize("verification_error", [None, "Cannot connect to the Docker daemon"])
 def test_public_remove_command_executes_observed_database_and_compose_before_forget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verification_error: str | None,
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
     subprocess.run(("git", "init", str(root)), check=True, capture_output=True)
@@ -1904,7 +1907,7 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
                 argv=step.argv,
                 returncode=1,
                 stdout=stdout,
-                stderr="No such object",
+                stderr=verification_error or "No such object",
                 duration=0.0,
                 cwd=step.cwd,
                 environment=step.environment,
@@ -1949,6 +1952,17 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     plan_step_ids = tuple(step.step_id for step in command.plan.steps)
     assert any("database" in step_id and "guarded-drop" in step_id for step_id in plan_step_ids)
     assert any(step_id.endswith(":destroy") for step_id in plan_step_ids)
+    if verification_error is not None:
+        with pytest.raises(ProjectRemovalError, match="project removal step failed"):
+            command.run()
+        assert catalog._get_postgres_cluster(legacy_project_id) == claim
+        assert (
+            catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+        )
+        assert root.exists()
+        catalog.close()
+        return
+
     result = command.run()
 
     assert command.plan.fingerprint == captured_fingerprint
@@ -1972,6 +1986,32 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     assert result.completed[-1].action == "forget"
     assert not root.exists()
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert catalog._get_postgres_cluster(legacy_project_id) is None
+    catalog_path = catalog.db_path
+    catalog.close()
+
+    # A fresh command resolves only durable post-purge state. The successfully
+    # verified absent Compose resources must not leave a legacy claim that makes
+    # the next full-id purge look like an unavailable live observation.
+    catalog = BackupCatalog(db_path=catalog_path)
+    persisted = catalog.get_project_for_lifecycle(project_id)
+    assert persisted is not None
+    assert persisted["registration_state"] == "forgotten"
+    assert catalog._get_postgres_cluster(legacy_project_id) is None
+    repeat_command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    assert all("volume:" not in step.step_id for step in repeat_command.plan.steps)
+    assert all("compose:" not in step.step_id for step in repeat_command.plan.steps)
+    changes_before_repeat = catalog._conn.total_changes
+    repeated = repeat_command.run()
+    assert repeated.registration_state == "forgotten"
+    assert catalog._conn.total_changes == changes_before_repeat
+    persisted_after_repeat = catalog.get_project_for_lifecycle(project_id)
+    assert persisted_after_repeat is not None
+    assert persisted_after_repeat["registration_state"] == "forgotten"
     catalog.close()
 
 
@@ -2140,6 +2180,7 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
     details = cast("dict[str, object]", error.value.details["removal"])
     assert details["failed_step"] == "project-removal:observations"
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert catalog._get_postgres_cluster(legacy_project_id) == claim
     assert manifest.exists()
     assert root.exists()
     catalog.close()
