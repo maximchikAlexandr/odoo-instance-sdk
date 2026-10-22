@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,7 +16,7 @@ from odoo_instance_sdk.exceptions import (
     UnsupportedInstallError,
     UpdateError,
 )
-from odoo_instance_sdk.execution import ProcessStep
+from odoo_instance_sdk.execution import Command, ProcessStep
 from odoo_instance_sdk.internal.proc import RecordingExecutor
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
@@ -27,6 +27,12 @@ from odoo_instance_sdk.internal.self_update import (
     update,
     update_command,
 )
+from odoo_instance_sdk.internal.self_update_composition import (
+    InstalledCompanion,
+    _protected_tool_file,
+    read_uv_tool_companion,
+)
+from odoo_instance_sdk.models.update import UpdateResult
 
 from .self_update_test_support import (
     _ANCESTRY_STEPS,
@@ -445,7 +451,10 @@ def test_read_uv_tool_direct_url_uses_pep610_metadata(
         "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
         lambda: executable,
     )
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.which",
+        lambda name: "uv" if name == "uv" else None,
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update.get_user_root",
         lambda **_: tmp_path / ".odcli",
@@ -479,7 +488,10 @@ def test_read_uv_tool_direct_url_accepts_uv_bare_vcs_url(
         "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
         lambda: executable,
     )
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.which",
+        lambda name: "uv" if name == "uv" else None,
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update.get_user_root",
         lambda **_: tmp_path / ".odcli",
@@ -518,7 +530,10 @@ def test_read_uv_tool_direct_url_captures_uv_receipt_composition(
         "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
         lambda: executable,
     )
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.which",
+        lambda name: "uv" if name == "uv" else None,
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update.get_user_root",
         lambda **_: tmp_path / ".odcli",
@@ -560,7 +575,10 @@ def test_read_uv_tool_direct_url_rejects_ambiguous_uv_receipt(
             return receipt
 
     _patch_distribution(monkeypatch, _ReceiptDist())
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.which",
+        lambda name: "uv" if name == "uv" else None,
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
         lambda: tmp_path / "odcli",
@@ -642,6 +660,396 @@ def test_update_plan_contains_frozen_mutation_steps(
     verify = next(step for step in mutation_steps if step.step_id == "update.verify.version")
     assert verify.argv == (str(executable.absolute()), "--version")
     assert verify.read_only is True
+
+
+def test_update_plan_freezes_companion_install_and_revision_checks(
+    monkeypatch: pytest.MonkeyPatch, user_root: Path, tmp_path: Path
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    companion_launcher = tmp_path / "odcli-multica"
+    companion_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    companion_launcher.chmod(0o755)
+    companion_env = tmp_path / "tools" / "odcli-multica"
+    (companion_env / "bin").mkdir(parents=True)
+    _patch_distribution(monkeypatch, _FakeDist())
+    provenance = replace(
+        _provenance(executable=executable),
+        companion=InstalledCompanion(
+            launcher=companion_launcher,
+            environment=companion_env,
+            version="0.2.0",
+            package_sha=_SHA_A,
+            sdk_sha=_SHA_A,
+            source_repo="https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+        ),
+    )
+    _patch_provenance(monkeypatch, provenance)
+
+    command = update_command(ref=_SHA_B, executor=_executor_factory({}))
+    process_steps = [step for step in command.plan.steps if isinstance(step, ProcessStep)]
+    by_id = {step.step_id: step for step in process_steps}
+    assert "update.install.companion" in by_id
+    assert any("odcli-multica @" in arg for arg in by_id["update.install.companion"].argv)
+    assert _SHA_B in " ".join(by_id["update.install.companion"].argv)
+    assert by_id["update.verify.companion.version"].argv == (str(companion_launcher), "--version")
+    assert "update.verify.companion.revisions" in by_id
+    assert "update.recovery.companion" in by_id
+    assert any(step.step_id == "update.warn.companion" for step in command.plan.steps)
+
+
+def test_companion_revision_mismatch_keeps_two_tool_recovery_evidence(
+    monkeypatch: pytest.MonkeyPatch, user_root: Path, tmp_path: Path
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    companion_launcher = tmp_path / "odcli-multica"
+    companion_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    companion_launcher.chmod(0o755)
+    companion_env = tmp_path / "tools" / "odcli-multica"
+    (companion_env / "bin").mkdir(parents=True)
+    companion = InstalledCompanion(
+        launcher=companion_launcher,
+        environment=companion_env,
+        version="0.2.0",
+        package_sha=_SHA_A,
+        sdk_sha=_SHA_A,
+        source_repo="https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+    )
+    provenance = replace(_provenance(executable=executable), companion=companion)
+    _patch_distribution(monkeypatch, _FakeDist())
+    _patch_provenance(monkeypatch, provenance)
+    executor = _executor_factory(
+        {
+            "companion_revision_json": json.dumps(
+                {"odcli-multica": _SHA_B, "odoo-instance-sdk": _SHA_A}
+            )
+        }
+    )
+
+    result = update(ref=_SHA_B, executor=executor)
+
+    assert result.outcome == "update_incomplete"
+    assert result.recovery_argv == (str(executable), "update", "--ref", _SHA_B, "--yes")
+    assert result.journal_state == "present"
+    journal = json.loads((user_root / "update" / "journal.json").read_text(encoding="utf-8"))
+    snapshot = json.loads(
+        (user_root / "update" / "snapshot" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert journal["phase"] == "snapshot"
+    assert journal["companion"]["previous_sdk_sha"] == _SHA_A
+    assert snapshot["companion"]["previous_sha"] == _SHA_A
+    assert "update.verify.companion.revisions" in {step.step_id for step in executor.executed}
+    assert not any(step.step_id == "update.commit" for step in executor.executed)
+
+
+def test_companion_inspection_requires_receipt_and_both_vcs_revisions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    environment = tmp_path / "tools" / "odcli-multica"
+    launcher = environment / "bin" / "odcli-multica"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    receipt = environment / "uv-receipt.toml"
+    receipt.write_text(
+        "[tool]\nrequirements = ["
+        "{ name = 'odcli-multica', git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git' }, "
+        "{ name = 'odoo-instance-sdk', git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git' }"
+        "]\n",
+        encoding="utf-8",
+    )
+    site = environment / "lib" / "python3.12" / "site-packages"
+    for name, revision in (("odcli_multica", _SHA_A), ("odoo_instance_sdk", _SHA_B)):
+        metadata = site / f"{name}-0.1.0.dist-info"
+        metadata.mkdir(parents=True)
+        package = name.replace("_", "-")
+        (metadata / "METADATA").write_text(f"Name: {package}\nVersion: 0.1.0\n", encoding="utf-8")
+        (metadata / "direct_url.json").write_text(
+            json.dumps(
+                {
+                    "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                    "vcs_info": {"vcs": "git", "commit_id": revision},
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda _name: str(launcher),
+    )
+
+    result = read_uv_tool_companion(
+        source_repo="https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
+    )
+
+    assert result is not None
+    assert result.package_sha == _SHA_A
+    assert result.sdk_sha == _SHA_B
+    assert result.environment == environment
+
+
+def test_companion_reader_rejects_ambiguous_launcher_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launcher = tmp_path / "unexpected-name"
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda _name: str(launcher),
+    )
+
+    with pytest.raises(UnsupportedInstallError, match="launcher path is ambiguous"):
+        read_uv_tool_companion(source_repo="https://example.com/repo.git")
+
+
+def test_companion_reader_rejects_nonregular_launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launcher = tmp_path / "odcli-multica"
+    launcher.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda _name: str(launcher),
+    )
+
+    with pytest.raises(UnsupportedInstallError, match="not a regular file"):
+        read_uv_tool_companion(source_repo="https://example.com/repo.git")
+
+
+def test_companion_reader_rejects_unsupported_launcher_location(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launcher = tmp_path / "odcli-multica"
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda _name: str(launcher),
+    )
+
+    with pytest.raises(UnsupportedInstallError, match="outside a supported uv tool"):
+        read_uv_tool_companion(source_repo="https://example.com/repo.git")
+
+
+def test_companion_reader_rejects_nonexecutable_launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launcher = tmp_path / "tool" / "bin" / "odcli-multica"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o644)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda _name: str(launcher),
+    )
+
+    with pytest.raises(UnsupportedInstallError, match="escapes its protected environment"):
+        read_uv_tool_companion(source_repo="https://example.com/repo.git")
+
+
+def test_companion_reader_rejects_symlinked_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    environment = tmp_path / "tool"
+    launcher = environment / "bin" / "odcli-multica"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    outside_receipt = tmp_path / "receipt.toml"
+    outside_receipt.write_text("[tool]\nrequirements = []\n", encoding="utf-8")
+    (environment / "uv-receipt.toml").symlink_to(outside_receipt)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda _name: str(launcher),
+    )
+
+    with pytest.raises(UnsupportedInstallError, match="receipt is missing or unreadable"):
+        read_uv_tool_companion(source_repo="https://example.com/repo.git")
+
+
+def test_companion_metadata_rejects_unresolvable_and_escaping_paths(tmp_path: Path) -> None:
+    environment = tmp_path / "tool"
+    environment.mkdir()
+    metadata_dir = environment / "lib" / "package.dist-info"
+    metadata_dir.parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("metadata", encoding="utf-8")
+    escaping = metadata_dir / "METADATA"
+    escaping.parent.mkdir()
+    escaping.symlink_to(outside)
+
+    with pytest.raises(UpdateError, match="missing or unreadable"):
+        _protected_tool_file(environment, environment / "missing.json")
+    with pytest.raises(UpdateError, match="escapes its protected environment"):
+        _protected_tool_file(environment, escaping)
+
+
+def test_separate_uv_tool_companion_is_included_in_coordinated_update(
+    monkeypatch: pytest.MonkeyPatch, user_root: Path, tmp_path: Path
+) -> None:
+    core_launcher = tmp_path / "core-bin" / "odcli"
+    core_launcher.parent.mkdir()
+    core_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    core_launcher.chmod(0o755)
+    core_environment = tmp_path / "core-tool"
+    core_environment.mkdir()
+    core_receipt = core_environment / "uv-receipt.toml"
+    core_receipt.write_text(
+        "[tool]\nrequirements = ["
+        "{ name = 'odoo-instance-sdk', git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git' }"
+        "]\n",
+        encoding="utf-8",
+    )
+    companion_env = tmp_path / "tools" / "odcli-multica"
+    launcher = companion_env / "bin" / "odcli-multica"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    (companion_env / "uv-receipt.toml").write_text(
+        "[tool]\nrequirements = ["
+        "{ name = 'odcli-multica', git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git' }, "
+        "{ name = 'odoo-instance-sdk', git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git' }"
+        "]\n",
+        encoding="utf-8",
+    )
+    site = companion_env / "lib" / "python3.12" / "site-packages"
+    for name, revision in (("odcli_multica", _SHA_A), ("odoo_instance_sdk", _SHA_B)):
+        metadata = site / f"{name}-0.1.0.dist-info"
+        metadata.mkdir(parents=True)
+        package = name.replace("_", "-")
+        (metadata / "METADATA").write_text(f"Name: {package}\nVersion: 0.1.0\n", encoding="utf-8")
+        (metadata / "direct_url.json").write_text(
+            json.dumps(
+                {
+                    "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+                    "vcs_info": {"vcs": "git", "commit_id": revision},
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda name: str(launcher if name == "odcli-multica" else core_launcher),
+    )
+
+    class _CoreDistribution(_FakeDist):
+        def locate_file(self, _path: str) -> Path:
+            return core_receipt
+
+    _patch_distribution(monkeypatch, _CoreDistribution())
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._assert_runtime_environment",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
+        lambda: core_launcher,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_commands._verify_installed_revision",
+        lambda *_args, **_kwargs: None,
+    )
+
+    executor = _executor_factory({})
+    command = update_command(ref=_SHA_B, executor=executor)
+    result = command.run()
+    step_ids = {step.step_id for step in command.plan.steps}
+
+    assert result.outcome == "updated"
+    executed_ids = {step.step_id for step in executor.executed}
+    assert "update.install.companion" in executed_ids, (
+        "public update did not execute companion install"
+    )
+    assert "update.verify.companion.version" in executed_ids, (
+        "public update skipped companion version check"
+    )
+    assert "update.verify.companion.revisions" in executed_ids, (
+        "public update skipped companion revision check"
+    )
+    assert "update.install.companion" in step_ids
+    assert "update.verify.companion.version" in step_ids
+    assert "update.verify.companion.revisions" in step_ids
+    assert "update.recovery.companion" in step_ids
+    companion_install = next(
+        step
+        for step in command.plan.steps
+        if isinstance(step, ProcessStep) and step.step_id == "update.install.companion"
+    )
+    assert "odcli-multica @" in " ".join(companion_install.argv)
+    assert "odoo-instance-sdk @" in " ".join(companion_install.argv)
+    assert _SHA_B in " ".join(companion_install.argv)
+
+
+def test_separate_uv_tool_companion_rejects_ambiguous_source_provenance(
+    monkeypatch: pytest.MonkeyPatch, user_root: Path, tmp_path: Path
+) -> None:
+    core_launcher = tmp_path / "core-bin" / "odcli"
+    core_launcher.parent.mkdir()
+    core_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    core_launcher.chmod(0o755)
+    core_environment = tmp_path / "core-tool"
+    core_environment.mkdir()
+    core_receipt = core_environment / "uv-receipt.toml"
+    core_receipt.write_text(
+        "[tool]\nrequirements = ["
+        "{ name = 'odoo-instance-sdk', git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git' }"
+        "]\n",
+        encoding="utf-8",
+    )
+    environment = tmp_path / "tools" / "odcli-multica"
+    launcher = environment / "bin" / "odcli-multica"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    (environment / "uv-receipt.toml").write_text(
+        "[tool]\nrequirements = ["
+        "{ name = 'odcli-multica', git = 'https://example.com/untrusted.git' }, "
+        "{ name = 'odoo-instance-sdk', git = 'https://github.com/maximchikAlexandr/odoo-instance-sdk.git' }"
+        "]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_composition.shutil.which",
+        lambda name: str(launcher if name == "odcli-multica" else core_launcher),
+    )
+
+    class _CoreDistribution(_FakeDist):
+        def locate_file(self, _path: str) -> Path:
+            return core_receipt
+
+    _patch_distribution(monkeypatch, _CoreDistribution())
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._assert_runtime_environment",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
+        lambda: core_launcher,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": 10 * 1024**3})(),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._catalog_schema_version", lambda: "head"
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path", lambda: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path", lambda: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_commands._verify_installed_revision",
+        lambda *_args, **_kwargs: None,
+    )
+    result = update_command(ref=_SHA_B, executor=_executor_factory({})).run()
+
+    assert result.outcome == "unsupported_install"
+    assert result.next_step is not None and "source conflicts" in result.next_step
 
 
 def test_update_lock_conflict_propagates(
@@ -739,6 +1147,228 @@ def test_preflight_failed_reports_disk_bytes(
     assert "reserve" in message
     assert "available" in message
     assert str(reserve) in message
+
+
+def test_companion_preflight_failure_accounts_for_frozen_steps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    companion_launcher = tmp_path / "odcli-multica"
+    companion_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    companion_env = tmp_path / "tools" / "odcli-multica"
+    (companion_env / "bin").mkdir(parents=True)
+    companion = InstalledCompanion(
+        companion_launcher,
+        companion_env,
+        "0.2.0",
+        _SHA_A,
+        _SHA_A,
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+    )
+    _patch_distribution(monkeypatch, _FakeDist())
+    _patch_provenance(monkeypatch, replace(_provenance(executable=executable), companion=companion))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": 1})(),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._catalog_schema_version", lambda: "head"
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path", lambda: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path", lambda: None
+    )
+
+    result = update(ref=_SHA_B, executor=_executor_factory({}))
+
+    assert result.outcome == "preflight_failed"
+    assert result.next_step is not None and "available" in result.next_step
+
+
+def test_companion_verification_failure_returns_recoverable_update_result(
+    monkeypatch: pytest.MonkeyPatch, user_root: Path, tmp_path: Path
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    companion_launcher = tmp_path / "tools" / "odcli-multica" / "bin" / "odcli-multica"
+    companion_launcher.parent.mkdir(parents=True)
+    companion_launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    companion_launcher.chmod(0o755)
+    companion_env = companion_launcher.parent.parent
+    companion = InstalledCompanion(
+        companion_launcher,
+        companion_env,
+        "0.2.0",
+        _SHA_A,
+        _SHA_A,
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+    )
+    _patch_distribution(monkeypatch, _FakeDist())
+    _patch_provenance(monkeypatch, replace(_provenance(executable=executable), companion=companion))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": 10 * 1024**3})(),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._catalog_schema_version", lambda: "head"
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path", lambda: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path", lambda: None
+    )
+    executor = _executor_factory({"companion_verify_rc": 1})
+
+    result = update(ref=_SHA_B, executor=executor)
+
+    assert result.outcome == "update_incomplete"
+    assert result.journal_state == "present"
+    assert result.recovery_argv is not None
+    assert "update.verify.companion.version" in {step.step_id for step in executor.executed}
+    assert json.loads((user_root / "update" / "journal.json").read_text())["phase"] == "snapshot"
+
+
+def test_companion_update_command_verification_failure_keeps_recovery_evidence(
+    monkeypatch: pytest.MonkeyPatch, user_root: Path, tmp_path: Path
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    companion_launcher = tmp_path / "tools" / "odcli-multica" / "bin" / "odcli-multica"
+    companion_launcher.parent.mkdir(parents=True)
+    companion_launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    companion_launcher.chmod(0o755)
+    companion_env = companion_launcher.parent.parent
+    companion = InstalledCompanion(
+        companion_launcher,
+        companion_env,
+        "0.2.0",
+        _SHA_A,
+        _SHA_A,
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+    )
+    _patch_distribution(monkeypatch, _FakeDist())
+    _patch_provenance(monkeypatch, replace(_provenance(executable=executable), companion=companion))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": 10 * 1024**3})(),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._catalog_schema_version", lambda: "head"
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path", lambda: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path", lambda: None
+    )
+    executor = _executor_factory({"companion_verify_rc": 1})
+    command = update_command(ref=_SHA_B, executor=executor)
+
+    result = command.run()
+
+    assert result.outcome == "update_incomplete"
+    assert result.journal_state == "present"
+    assert result.recovery_argv is not None
+    assert "update.verify.companion.version" in {step.step_id for step in executor.executed}
+    assert json.loads((user_root / "update" / "journal.json").read_text())["phase"] == "snapshot"
+
+
+def _companion_verification_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    effects: dict[str, object],
+) -> tuple[Command[UpdateResult], RecordingExecutor]:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    companion_launcher = tmp_path / "tools" / "odcli-multica" / "bin" / "odcli-multica"
+    companion_launcher.parent.mkdir(parents=True)
+    companion_launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    companion_launcher.chmod(0o755)
+    companion = InstalledCompanion(
+        companion_launcher,
+        companion_launcher.parent.parent,
+        "0.2.0",
+        _SHA_A,
+        _SHA_A,
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+    )
+    _patch_distribution(monkeypatch, _FakeDist())
+    _patch_provenance(monkeypatch, replace(_provenance(executable=executable), companion=companion))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": 10 * 1024**3})(),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._catalog_schema_version", lambda: "head"
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path", lambda: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path", lambda: None
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._verify_installed_revision",
+        lambda *_args, **_kwargs: None,
+    )
+    executor = _executor_factory(effects)
+    return update_command(ref=_SHA_B, executor=executor), executor
+
+
+def test_companion_core_version_failure_accounts_for_companion_verification_steps(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    command, executor = _companion_verification_command(monkeypatch, tmp_path, {"verify_rc": 1})
+
+    result = command.run()
+
+    assert result.outcome == "update_incomplete"
+    assert result.next_step == "odcli --version failed after update"
+    assert result.recovery_argv is not None
+    assert result.snapshot_state == "present"
+    assert result.journal_state == "present"
+    executed_ids = {step.step_id for step in executor.executed}
+    assert "update.install.companion" in executed_ids
+    assert "update.verify.version" in executed_ids
+    assert "update.verify.companion.version" not in executed_ids
+    assert "update.verify.companion.revisions" not in executed_ids
+    assert json.loads((user_root / "update" / "journal.json").read_text())["phase"] == "snapshot"
+
+
+def test_companion_invalid_maintenance_result_accounts_for_verification_steps(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    command, executor = _companion_verification_command(
+        monkeypatch, tmp_path, {"maintenance_stdout": "{"}
+    )
+
+    result = command.run()
+
+    assert result.outcome == "update_incomplete"
+    assert result.next_step is not None and result.next_step.startswith(
+        "maintenance produced invalid JSON:"
+    )
+    assert result.recovery_argv is not None
+    assert result.snapshot_state == "present"
+    assert result.journal_state == "present"
+    executed_ids = {step.step_id for step in executor.executed}
+    assert "update.install.companion" in executed_ids
+    assert "update.verify.version" not in executed_ids
+    assert "update.verify.companion.version" not in executed_ids
+    assert "update.verify.companion.revisions" not in executed_ids
+    assert json.loads((user_root / "update" / "journal.json").read_text())["phase"] == "snapshot"
 
 
 def test_install_failure_rechecks_revision_before_failing(
