@@ -8,7 +8,6 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -1275,9 +1274,40 @@ def test_public_purge_recovers_missing_source_with_legacy_init_binding(
     catalog.close()
 
 
+def _assert_legacy_restore_completion(
+    command: Command[ProjectRemovalResult],
+    _executor: RecordingExecutor,
+    _catalog: BackupCatalog,
+    _project_id: str,
+) -> None:
+    assert any("database" in step.step_id for step in command.plan.steps)
+    result = command.run()
+    assert result.registration_state == "forgotten"
+    assert tuple(item.resource_type for item in result.completed) == (
+        "database",
+        "volume",
+        "project",
+    )
+
+
+def _assert_legacy_restore_replacement_refusal(
+    command: Command[ProjectRemovalResult],
+    executor: RecordingExecutor,
+    catalog: BackupCatalog,
+    project_id: str,
+) -> None:
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+
+
 @pytest.mark.parametrize(
-    ("recorded_oid", "observed_oid", "expected_completion"),
-    ((102, 102, True), (101, 202, False)),
+    ("recorded_oid", "observed_oid", "assert_result"),
+    (
+        (102, 102, _assert_legacy_restore_completion),
+        (101, 202, _assert_legacy_restore_replacement_refusal),
+    ),
     ids=("stable-restore", "same-name-replacement"),
 )
 def test_public_purge_handles_missing_source_with_legacy_restore_provenance(
@@ -1285,7 +1315,9 @@ def test_public_purge_handles_missing_source_with_legacy_restore_provenance(
     monkeypatch: pytest.MonkeyPatch,
     recorded_oid: int,
     observed_oid: int,
-    expected_completion: bool,
+    assert_result: Callable[
+        [Command[ProjectRemovalResult], RecordingExecutor, BackupCatalog, str], None
+    ],
 ) -> None:
     root = tmp_path / "source"
     legacy_project_id = repo_key(root, root / ".git")
@@ -1327,26 +1359,7 @@ def test_public_purge_handles_missing_source_with_legacy_restore_provenance(
         observed_oids={"owned_db": observed_oid},
     )
     assert project_id == registered_project_id
-    if expected_completion:
-        assert any("database" in step.step_id for step in command.plan.steps)
-    result: ProjectRemovalResult | None = None
-    with (
-        nullcontext()
-        if expected_completion
-        else pytest.raises(ProjectRemovalError, match="unavailable or unproven")
-    ):
-        result = command.run()
-    if expected_completion:
-        assert result is not None
-        assert result.registration_state == "forgotten"
-        assert tuple(item.resource_type for item in result.completed) == (
-            "database",
-            "volume",
-            "project",
-        )
-    else:
-        assert executor.executed == []
-        assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert_result(command, executor, catalog, project_id)
     catalog.close()
 
 
