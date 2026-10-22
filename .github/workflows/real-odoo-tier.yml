@@ -95,6 +95,7 @@ jobs:
           git -C "$cache" cat-file -e cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}
           resolved_commit=$(git -C "$cache" rev-parse 'cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}')
           test "$resolved_commit" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+          echo "verified_source_commit=$resolved_commit"
           echo "verified_source_commit=$resolved_commit" >> "$GITHUB_OUTPUT"
           git -C "$cache" show cd992ceebbaf343c03e1941d39cfe423d35ba6c6:requirements.txt > .cache/odoo-requirements.txt
           chmod 600 .cache/odoo-requirements.txt
