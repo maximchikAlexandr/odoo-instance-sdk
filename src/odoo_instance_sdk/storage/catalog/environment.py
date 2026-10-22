@@ -2,6 +2,7 @@ from __future__ import annotations  # noqa: I001 -- keep environment catalog hel
 
 import sqlite3
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -17,7 +18,13 @@ from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize
 from odoo_instance_sdk.storage.catalog.helpers import (
     CatalogValue as CatalogValue,
     CopyJournalStage as CopyJournalStage,
+    EnvironmentHistoryEvent as EnvironmentHistoryEvent,
+    EnvironmentHistoryPage as EnvironmentHistoryPage,
+    IncompleteOperation as IncompleteOperation,
+    IncompleteOperationPage as IncompleteOperationPage,
     MonitorCatalogSnapshot as MonitorCatalogSnapshot,
+    decode_catalog_cursor as decode_catalog_cursor,
+    encode_catalog_cursor as encode_catalog_cursor,
     _translate_sqlite_error as _translate_sqlite_error,
     normalize_db_host as normalize_db_host,
 )
@@ -285,6 +292,230 @@ class _EnvironmentMixin:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC, id DESC"
         return self._conn.execute(query, params).fetchall()
+
+    @staticmethod
+    def _catalogue_datetime(value: object, *, field: str) -> datetime:
+        if not isinstance(value, str) or not value.strip():
+            raise BackupCatalogError(f"{field} is invalid")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise BackupCatalogError(f"{field} is invalid") from exc
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+    @_translate_sqlite_error
+    def list_incomplete_operations(  # noqa: C901 -- typed filters and one bounded union query
+        self,
+        *,
+        object_type: str | None = None,
+        state: str | None = None,
+        occurred_after: datetime | None = None,
+        occurred_before: datetime | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> IncompleteOperationPage:
+        """Return bounded recorded incomplete/error states without raw payloads."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise BackupCatalogError("Incomplete operation limit must be between 1 and 1000")
+        allowed_types = {"backup", "restore", "environment"}
+        if object_type is not None and object_type not in allowed_types:
+            raise BackupCatalogError("incomplete operation type is invalid")
+        allowed_states = {
+            "downloading",
+            "failed",
+            "incomplete",
+            "creating",
+            "failed",
+            "removing",
+            "cleanup_failed",
+        }
+        if state is not None and state not in allowed_states:
+            raise BackupCatalogError("incomplete operation state is invalid")
+        after_value = (
+            None
+            if occurred_after is None
+            else self._catalogue_datetime(
+                occurred_after.isoformat() if isinstance(occurred_after, datetime) else None,
+                field="occurred_after",
+            )
+        )
+        before_value = (
+            None
+            if occurred_before is None
+            else self._catalogue_datetime(
+                occurred_before.isoformat() if isinstance(occurred_before, datetime) else None,
+                field="occurred_before",
+            )
+        )
+        if after_value is not None and before_value is not None and after_value > before_value:
+            raise BackupCatalogError("occurred date range is invalid")
+        after = None if cursor is None else decode_catalog_cursor(cursor)
+        clauses: list[str] = []
+        params: list[str | int] = []
+        if object_type is not None:
+            clauses.append("object_type = ?")
+            params.append(object_type)
+        if state is not None:
+            clauses.append("state = ?")
+            params.append(state)
+        if after_value is not None:
+            clauses.append("occurred_at >= ?")
+            params.append(after_value.isoformat())
+        if before_value is not None:
+            clauses.append("occurred_at <= ?")
+            params.append(before_value.isoformat())
+        if after is not None:
+            clauses.append("(occurred_at < ? OR (occurred_at = ? AND cursor_key > ?))")
+            params.extend((after[0], after[0], after[1]))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        query = (
+            "SELECT object_type, object_id, state, occurred_at, error, sequence, cursor_key "
+            "FROM ("
+            "SELECT 'backup' AS object_type, b.id AS object_id, b.state AS state, "
+            "COALESCE(b.failed_at, b.started_at) AS occurred_at, b.error_message AS error, "
+            "b.rowid AS sequence, 'backup:' || b.id AS cursor_key FROM backups b "
+            "WHERE b.state IN ('downloading', 'failed') "
+            "UNION ALL "
+            "SELECT 'restore', CAST(r.sequence AS TEXT), r.state, r.restored_at, NULL, "
+            "r.sequence, 'restore:' || CAST(r.sequence AS TEXT) FROM restores r "
+            "WHERE r.state = 'incomplete' "
+            "UNION ALL "
+            "SELECT 'environment', e.id, e.state, COALESCE(e.last_used_at, e.created_at), "
+            "e.last_error, e.rowid, 'environment:' || e.id FROM environments e "
+            "WHERE (e.state NOT IN ('ready', 'removed') OR e.last_error IS NOT NULL "
+            "OR e.recovery_json IS NOT NULL)"
+            ") "
+            f"{where} ORDER BY occurred_at DESC, cursor_key ASC LIMIT ?"
+        )
+        rows = self._conn.execute(query, (*params, limit + 1)).fetchall()
+        page_rows = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page_rows[-1]
+            next_cursor = encode_catalog_cursor(last["occurred_at"], last["cursor_key"])
+        try:
+            items = tuple(
+                IncompleteOperation(
+                    sequence=int(row["sequence"]),
+                    object_type=str(row["object_type"]),
+                    object_id=sanitize_last_error(str(row["object_id"])) or "unknown",
+                    state=str(row["state"]),
+                    occurred_at=self._catalogue_datetime(
+                        row["occurred_at"], field="incomplete operation time"
+                    ),
+                    error=sanitize_last_error(row["error"]),
+                )
+                for row in page_rows
+            )
+        except (TypeError, ValueError) as exc:
+            raise BackupCatalogError("incomplete operation is malformed") from exc
+        return IncompleteOperationPage(items=items, next_cursor=next_cursor)
+
+    @_translate_sqlite_error
+    def list_environment_history(  # noqa: C901 -- typed filters and one bounded query
+        self,
+        *,
+        environment_id: str | None = None,
+        project_id: str | None = None,
+        operation: str | None = None,
+        outcome: str | None = None,
+        occurred_after: datetime | None = None,
+        occurred_before: datetime | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> EnvironmentHistoryPage:
+        """Return stable, allowlisted environment event history."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise BackupCatalogError("Environment history limit must be between 1 and 1000")
+        if operation is not None and operation not in {
+            "checkout",
+            "sync",
+            "use",
+            "shell",
+            "remove",
+        }:
+            raise BackupCatalogError("environment history operation is invalid")
+        if outcome is not None and outcome not in {"started", "succeeded", "failed"}:
+            raise BackupCatalogError("environment history outcome is invalid")
+        after_value = (
+            None
+            if occurred_after is None
+            else self._catalogue_datetime(
+                occurred_after.isoformat() if isinstance(occurred_after, datetime) else None,
+                field="occurred_after",
+            )
+        )
+        before_value = (
+            None
+            if occurred_before is None
+            else self._catalogue_datetime(
+                occurred_before.isoformat() if isinstance(occurred_before, datetime) else None,
+                field="occurred_before",
+            )
+        )
+        if after_value is not None and before_value is not None and after_value > before_value:
+            raise BackupCatalogError("occurred date range is invalid")
+        after = None if cursor is None else decode_catalog_cursor(cursor)
+        clauses: list[str] = []
+        params: list[str | int] = []
+        if environment_id is not None:
+            clauses.append("ee.environment_id = ?")
+            params.append(environment_id)
+        if project_id is not None:
+            clauses.append("e.project_id = ?")
+            params.append(project_id)
+        if operation is not None:
+            clauses.append("ee.operation = ?")
+            params.append(operation)
+        if outcome is not None:
+            clauses.append("ee.outcome = ?")
+            params.append(outcome)
+        if after_value is not None:
+            clauses.append("ee.occurred_at >= ?")
+            params.append(after_value.isoformat())
+        if before_value is not None:
+            clauses.append("ee.occurred_at <= ?")
+            params.append(before_value.isoformat())
+        if after is not None:
+            clauses.append("(ee.occurred_at < ? OR (ee.occurred_at = ? AND ee.sequence > ?))")
+            params.extend((after[0], after[0], after[1]))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        query = (
+            "SELECT ee.sequence, ee.environment_id, e.name, e.project_id, ee.occurred_at, "
+            "ee.operation, ee.outcome, e.state, ee.message "
+            "FROM environment_events ee JOIN environments e ON e.id = ee.environment_id"
+            f"{where} ORDER BY ee.occurred_at DESC, ee.sequence ASC LIMIT ?"
+        )
+        rows = self._conn.execute(query, (*params, limit + 1)).fetchall()
+        page_rows = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page_rows[-1]
+            next_cursor = encode_catalog_cursor(last["occurred_at"], last["sequence"])
+        try:
+            items = tuple(
+                EnvironmentHistoryEvent(
+                    sequence=int(row["sequence"]),
+                    environment_id=sanitize_last_error(str(row["environment_id"])) or "unknown",
+                    environment_name=sanitize_last_error(str(row["name"])) or "unknown",
+                    project_id=(
+                        sanitize_last_error(str(row["project_id"]))
+                        if row["project_id"] is not None
+                        else None
+                    ),
+                    occurred_at=self._catalogue_datetime(
+                        row["occurred_at"], field="environment event time"
+                    ),
+                    operation=str(row["operation"]),
+                    outcome=str(row["outcome"]),
+                    state=str(row["state"]),
+                    message=sanitize_event_message(row["message"]),
+                )
+                for row in page_rows
+            )
+        except (TypeError, ValueError) as exc:
+            raise BackupCatalogError("environment history event is malformed") from exc
+        return EnvironmentHistoryPage(items=items, next_cursor=next_cursor)
 
     @_translate_sqlite_error
     def upsert_copy_journal(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import functools
+import json
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -116,6 +119,92 @@ class BackupProjectionPage:
 
 
 @dataclass(frozen=True, slots=True)
+class BackupSummary:
+    """Allowlisted backup fields suitable for an administrator read view."""
+
+    backup_id: uuid.UUID
+    project_id: str | None
+    project_label: str | None
+    source_label: str
+    database_name: str
+    format: BackupFormat
+    size_bytes: int | None
+    state: BackupState
+    downloaded_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class BackupSummaryPage:
+    """One bounded keyset page of safe backup summaries."""
+
+    items: tuple[BackupSummary, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BackupEventSummary:
+    """Allowlisted backup event fields; paths and raw messages are excluded."""
+
+    sequence: int
+    event_type: BackupEventType
+    occurred_at: datetime
+    validator: str | None
+    exit_code: int | None
+    message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class IncompleteOperation:
+    """A recorded nonterminal/error state without process or path evidence."""
+
+    sequence: int
+    object_type: str
+    object_id: str
+    state: str
+    occurred_at: datetime
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class IncompleteOperationPage:
+    items: tuple[IncompleteOperation, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentHistoryEvent:
+    """Allowlisted environment history fields for read-only catalogue views."""
+
+    sequence: int
+    environment_id: str
+    environment_name: str
+    project_id: str | None
+    occurred_at: datetime
+    operation: str
+    outcome: str
+    state: str
+    message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentHistoryPage:
+    items: tuple[EnvironmentHistoryEvent, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentBackupProvenance:
+    """Exact current-database source-backup evidence, or explicit unknown."""
+
+    backup_id: uuid.UUID | None
+    downloaded_at: datetime | None
+
+    @property
+    def known(self) -> bool:
+        return self.backup_id is not None and self.downloaded_at is not None
+
+
+@dataclass(frozen=True, slots=True)
 class BackupRetentionRecord:
     """Typed catalogue state captured for one retention decision."""
 
@@ -210,3 +299,24 @@ def _row_to_event(row: sqlite3.Row) -> BackupEvent:
 
 def normalize_db_host(value: str | None) -> str:
     return "socket" if value is None else value
+
+
+def encode_catalog_cursor(timestamp: str, key: str | int) -> str:
+    payload = json.dumps(
+        {"key": str(key), "timestamp": timestamp}, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_catalog_cursor(cursor: str) -> tuple[str, str]:
+    try:
+        payload = json.loads(
+            base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("utf-8")
+        )
+    except (ValueError, TypeError, KeyError, binascii.Error, json.JSONDecodeError) as exc:
+        raise BackupCatalogError("catalog cursor is invalid") from exc
+    timestamp = payload.get("timestamp") if isinstance(payload, dict) else None
+    key = payload.get("key") if isinstance(payload, dict) else None
+    if not isinstance(timestamp, str) or not isinstance(key, str) or not key:
+        raise BackupCatalogError("catalog cursor is invalid")
+    return timestamp, key

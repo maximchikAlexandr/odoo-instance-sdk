@@ -5,12 +5,14 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.models import Backup, BackupState, EnvironmentState, RestoreState
 from odoo_instance_sdk.storage.catalog.helpers import (
+    CurrentBackupProvenance,
     _row_to_backup,
     _translate_sqlite_error,
     normalize_db_host,
@@ -396,6 +398,66 @@ class _RestoreMixin:
         if row is None or row["restore_backup_id"] is None or row["restore_state"] != "complete":
             return None
         return _row_to_backup(row, require_file=False)
+
+    @_translate_sqlite_error
+    def current_database_backup_provenance(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+        *,
+        cluster_id: uuid.UUID | str | None,
+    ) -> CurrentBackupProvenance:
+        """Resolve freshness only from the latest exact current lifecycle event."""
+        if cluster_id is None:
+            return CurrentBackupProvenance(backup_id=None, downloaded_at=None)
+        identity = self._cluster_uuid(cluster_id)
+        event = self._latest_database_event(db_host, db_port, database_name)
+        if (
+            event is None
+            or event["event_type"] != "restored"
+            or event["source_kind"] != "catalogue"
+            or event["cluster_id"] != identity
+            or event["backup_id"] is None
+        ):
+            return CurrentBackupProvenance(backup_id=None, downloaded_at=None)
+        host = normalize_db_host(db_host)
+        restore = self._conn.execute(
+            "SELECT backup_id, source_kind, cluster_id, state FROM restores "
+            "WHERE db_host=? AND db_port=? AND database_name=? "
+            "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
+            (host, db_port, database_name),
+        ).fetchone()
+        if (
+            restore is None
+            or restore["backup_id"] != event["backup_id"]
+            or restore["source_kind"] != "catalogue"
+            or restore["cluster_id"] != identity
+            or restore["state"] != RestoreState.COMPLETE.value
+        ):
+            return CurrentBackupProvenance(backup_id=None, downloaded_at=None)
+        backup = self._conn.execute(
+            "SELECT id, state, downloaded_at FROM backups WHERE id=?", (event["backup_id"],)
+        ).fetchone()
+        if backup is None or backup["state"] != BackupState.AVAILABLE.value:
+            return CurrentBackupProvenance(backup_id=None, downloaded_at=None)
+        raw_downloaded_at = backup["downloaded_at"]
+        if not isinstance(raw_downloaded_at, str) or not raw_downloaded_at.strip():
+            return CurrentBackupProvenance(backup_id=None, downloaded_at=None)
+        try:
+            downloaded_at = datetime.fromisoformat(raw_downloaded_at)
+            backup_id = uuid.UUID(str(backup["id"]))
+        except (TypeError, ValueError) as exc:
+            raise BackupCatalogError("current backup provenance is malformed") from exc
+        if downloaded_at.tzinfo is None:
+            downloaded_at = downloaded_at.replace(tzinfo=UTC)
+        else:
+            downloaded_at = downloaded_at.astimezone(UTC)
+        return CurrentBackupProvenance(backup_id=backup_id, downloaded_at=downloaded_at)
+
+    # Keep the query discoverable under the terminology used by monitor callers.
+    latest_current_backup_provenance = current_database_backup_provenance
+    current_backup_provenance = current_database_backup_provenance
 
     @_translate_sqlite_error
     def _list_restore_bindings(self, db_host: str | None, db_port: int) -> list[sqlite3.Row]:

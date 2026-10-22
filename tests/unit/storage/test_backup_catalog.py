@@ -1098,6 +1098,86 @@ def test_has_tracked_database_true(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_safe_catalogue_pages_exclude_paths_and_raw_messages(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "safe-catalogue.db")
+    path = _create_backup_file(tmp_path, "safe.zip")
+    backup_id = _u("safe-catalogue")
+    catalog.start_download(
+        backup_id,
+        "https://private.example",
+        "safe-db",
+        "zip",
+        True,
+        path,
+        source_name="named-source",
+    )
+    catalog.fail_download(backup_id, "OSError", "password=secret /private/raw/path")
+    summary_page = catalog.list_backup_summaries(limit=1)
+    assert summary_page.items[0].source_label == "named-source"
+    assert summary_page.items[0].state is BackupState.FAILED
+    assert not hasattr(summary_page.items[0], "path")
+    events = catalog.list_backup_events(backup_id)
+    assert events[-1].message == "<redacted> <path>"
+    assert not hasattr(events[-1], "path")
+
+    environment_id = _u("safe-environment")
+    catalog.create_environment(
+        make_env(environment_id, state="failed", last_error="token=secret /private/error")
+    )
+    catalog.add_environment_event(
+        environment_id,
+        "sync",
+        "failed",
+        message="token=secret /private/event",
+    )
+    incomplete = catalog.list_incomplete_operations()
+    assert any(item.object_type == "environment" for item in incomplete.items)
+    assert all("/private" not in (item.error or "") for item in incomplete.items)
+    history = catalog.list_environment_history()
+    assert history.items[0].environment_id == environment_id
+    assert history.items[0].message == "<redacted> <path>"
+    catalog.close()
+
+
+def test_current_database_provenance_requires_latest_exact_completed_restore(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "current-provenance.db")
+    path = _create_backup_file(tmp_path, "provenance-current.zip")
+    backup_id = _u("current-provenance")
+    catalog.start_download(backup_id, "https://source.example", "db", "zip", True, path)
+    downloaded_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    catalog.success_download(backup_id, path.name, 1, "", downloaded_at=downloaded_at)
+    claim = catalog._ensure_postgres_cluster_pending("project", "compose", "volume")
+    claim = catalog._activate_postgres_cluster(claim.cluster_id, "project", "compose", "volume")
+
+    catalog.record_restore("localhost", 5432, "db", backup_id, cluster_id=claim.cluster_id)
+    known = catalog.current_database_backup_provenance(
+        "localhost", 5432, "db", cluster_id=claim.cluster_id
+    )
+    assert known.known
+    assert known.backup_id == uuid.UUID(backup_id)
+    assert known.downloaded_at == downloaded_at
+
+    catalog.record_database_dropped("localhost", 5432, "db")
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "db", cluster_id=claim.cluster_id
+    ).known
+
+    catalog.record_restore(
+        "localhost",
+        5432,
+        "db",
+        source_kind="local_archive",
+        source_sha256="a" * 64,
+        cluster_id=claim.cluster_id,
+    )
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "db", cluster_id=claim.cluster_id
+    ).known
+    catalog.close()
+
+
 def test_has_tracked_database_false(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     assert catalog.has_tracked_database("localhost", 5432, "ghost") is False
