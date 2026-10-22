@@ -1318,6 +1318,8 @@ def test_public_restore_publishes_oid_for_source_less_purge(
         http = make_http_client(post=make_response())
         with patch_open_odoo_http_client(http):
             instance.databases.restore_command(backup, "owned_db", executor=executor).run()
+        assert any(step.step_id == "database.restore.exists-after" for step in executor.executed)
+        http.post.assert_called_once()
 
     catalog, command, _executor, project_id = _capture_missing_source_purge(
         tmp_path,
