@@ -173,6 +173,7 @@ def test_public_project_forget_reinit_and_purge(
     reactivated = catalog.get_project_for_lifecycle(project_id)
     assert reactivated is not None
     assert reactivated["registration_state"] == "registered"
+    assert not catalog._project_purge_completed(project_id)
     assert len(catalog.list_projects(include_forgotten=True)) == 1
     catalog.close()
 
@@ -199,6 +200,9 @@ def test_public_project_forget_reinit_and_purge(
     with pytest.raises(ProjectRemovalError, match="stale"):
         drift_command.run()
     assert project.exists()
+    catalog = BackupCatalog(db_path=catalog_path)
+    assert not catalog._project_purge_completed(project_id)
+    catalog.close()
 
     wrong_confirmation = invoke(
         "remove",
@@ -210,6 +214,9 @@ def test_public_project_forget_reinit_and_purge(
     )
     assert wrong_confirmation.returncode == 1, wrong_confirmation.stdout + wrong_confirmation.stderr
     assert _document(wrong_confirmation)["error"]["code"] == "confirmation_required"
+    catalog = BackupCatalog(db_path=catalog_path)
+    assert not catalog._project_purge_completed(project_id)
+    catalog.close()
     if retain_source:
         # Match a caller-owned checkout whose remaining source fails the
         # registered Git provenance check after purge removes its manifest.
