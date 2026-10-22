@@ -236,10 +236,12 @@ def test_public_project_forget_reinit_and_purge(
     shutil.rmtree(drift_target)
     with pytest.raises(ProjectRemovalError) as drift_error:
         drift_command.run()
-    assert "stale" in str(drift_error.value), drift_error.value.details
+    assert "observation is unavailable or unproven" in str(drift_error.value)
     assert project.exists()
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
+    retained_claim = catalog._get_postgres_cluster(claim.project_id)
+    assert retained_claim is not None and retained_claim.state == "active"
     catalog.close()
 
     wrong_confirmation = invoke(
@@ -356,7 +358,7 @@ def test_public_project_forget_reinit_and_purge(
             },
             "monitor_hidden_after_forget": project_id
             not in json.dumps(monitor_document, sort_keys=True),
-            "drift_refusal": "stale",
+            "unavailable_observation_refusal": "project claim retained",
             "unrelated_project_preserved": True,
             "shared_resource_preserved": True,
             "purge": purge_document["result"]["registration_state"],
