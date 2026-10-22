@@ -439,7 +439,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     config_lines = [
         line
         for line in local_config.read_text(encoding="utf-8").splitlines()
-        if not line.lstrip().startswith("addons_path")
+        if not line.lstrip().startswith(("addons_path", "logfile"))
     ]
     config_lines.append(f"addons_path = {root / 'addons'}")
     local_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
