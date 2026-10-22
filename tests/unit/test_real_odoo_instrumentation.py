@@ -118,7 +118,7 @@ def test_bootstrap_rejects_injected_cache_key_mismatch(
     monkeypatch.setattr(
         bootstrap,
         "prerequisite_checks",
-        lambda _tier, _platform: {"docker": True},
+        lambda _tier, _platform, _diagnostics=None: {"docker": True},
     )
     monkeypatch.setenv("ODCLI_E2E_SOURCE_CACHE_KEY", "injected-wrong-key")
     output = tmp_path / "bootstrap.json"
