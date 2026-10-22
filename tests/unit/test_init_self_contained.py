@@ -34,7 +34,9 @@ from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessHandle,
+    ProcessOutputLimitError,
     ProcessResult,
+    ProcessTimeoutError,
     RecordingExecutor,
     RunContext,
     StepEvent,
@@ -2137,6 +2139,91 @@ def test_concurrent_inventory_runs_keep_private_payloads_execution_local(
         assert "202" not in rendered_events
         assert "stderr-preserved" in rendered_events
         assert "kind='completed'" in rendered_events
+
+
+def test_value_free_inventory_timeout_hides_stdout_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    psql = tmp_path / "psql"
+    psql.write_text(
+        "#!/bin/sh\nprintf 'timeout-db\\t101\\n'\nprintf 'stderr-preserved\\n' >&2\nsleep 2\n",
+        encoding="utf-8",
+    )
+    psql.chmod(0o755)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable", lambda: str(psql)
+    )
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        capture_inventory=True,
+    )
+    assert plan.inventory_step is not None
+    plan = replace(plan, inventory_step=replace(plan.inventory_step, timeout=0.5))
+
+    def _skip_bootstrap(context: RunContext[object], captured: object) -> BootstrapOutcome:
+        context.skip(captured.spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(captured.probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(captured.ready_step.step_id)  # type: ignore[attr-defined]
+        return BootstrapOutcome.ALREADY_READY
+
+    monkeypatch.setattr(bootstrap, "run_bootstrap_tmp", _skip_bootstrap)
+
+    def _run(context: RunContext[bool]) -> bool:
+        bootstrap.execute_bootstrap_tmp(context, plan)
+        return True
+
+    command = Command.create(
+        ExecutionPlan(
+            steps=tuple(step.public_projection() for step in plan.execution_steps),
+        ),
+        _run,
+        plan.execution_steps,
+        executor=SubprocessExecutor(),
+    )
+    events: list[StepEvent] = []
+    with pytest.raises(ProcessTimeoutError) as failure:
+        command.run(observer=events.append, observe_output=True)
+    message = str(failure.value)
+    rendered_events = " ".join(f"{event.chunk or ''} {event.error or ''}" for event in events)
+    assert failure.value.stdout_tail == ""
+    assert "timeout-db" not in message
+    assert "101" not in message
+    assert "timeout-db" not in rendered_events
+    assert "101" not in rendered_events
+    assert "stderr-preserved" in message
+    assert "stderr-preserved" in rendered_events
+    assert any(event.kind == "failed" for event in events)
+
+
+def test_value_free_windows_output_limit_tail_is_empty() -> None:
+    from odoo_instance_sdk.internal.proc.windows import _output_limit_error
+
+    step = PreparedStep(
+        step_id="init.bootstrap.databases",
+        argv=("psql",),
+        private_stdout_value_free=True,
+    )
+    error = _output_limit_error(
+        step,
+        duration=0.1,
+        stdout_tail=b"private-db\t202\n",
+        stderr_tail=b"stderr-preserved\n",
+        stdout_truncated=True,
+        stderr_truncated=False,
+    )
+    assert isinstance(error, ProcessOutputLimitError)
+    assert getattr(error, "stdout_tail") == ""
+    assert getattr(error, "stderr_tail") == "stderr-preserved\n"
+    assert "private-db" not in str(error)
+    assert "202" not in str(error)
 
 
 def test_init_database_candidates_exclude_system_databases() -> None:

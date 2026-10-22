@@ -339,7 +339,7 @@ def _run_pump(  # noqa: C901
             duration=time.perf_counter() - started,
             secrets=_captured_error_secrets(prepared),
             sensitive_indices=prepared.sensitive_argv_indices,
-            stdout_tail=bytes(tail_output[stdout]),
+            stdout_tail=b"" if prepared.private_stdout_value_free else bytes(tail_output[stdout]),
             stderr_tail=bytes(tail_output[stderr]),
             stdout_truncated=tail_truncated[stdout],
             stderr_truncated=tail_truncated[stderr],
