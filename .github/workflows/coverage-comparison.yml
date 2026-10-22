@@ -1,0 +1,473 @@
+name: Coverage comparison
+
+on:
+  push:
+    branches: [feat/MYL-546-fix-copy-update-commit-contracts-r3]
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: Exact MYL-547 before SHA (defaults to current round input)
+        default: 39dd3e5ee3f2c8299dc96a2e5c1cb3386826a5f1
+        required: false
+        type: string
+      candidate_sha:
+        description: Exact candidate commit (defaults to dispatched ref SHA)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            sha: ${{ github.event_name == 'push' && '39dd3e5ee3f2c8299dc96a2e5c1cb3386826a5f1' || (inputs.baseline_sha || '39dd3e5ee3f2c8299dc96a2e5c1cb3386826a5f1') }}
+          - label: candidate
+            sha: ${{ inputs.candidate_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          path: candidate-source
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Verify the exact baseline includes the test-only harness correction
+        if: matrix.label == 'baseline'
+        env:
+          EXPECTED_SHA: ${{ matrix.sha }}
+        shell: bash
+        run: |
+          baseline_sha=$(git rev-parse HEAD)
+          test "$baseline_sha" = "$EXPECTED_SHA"
+          patch=candidate-source/.github/workflows/coverage-baseline-test-harness.patch
+          git diff --exit-code -- src/odoo_instance_sdk packages/odcli-multica
+          grep -Fq 'ids=("stale", "contradictory", "malformed", "secret-bearing")' tests/unit/internal/test_database_replacement.py
+          grep -Fq 'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac' tests/unit/resources/test_environment_remove.py
+          {
+            echo "Baseline product SHA: $baseline_sha"
+            echo "Test-only harness correction: already present at exact baseline SHA; no overlay applied"
+            echo "Reference patch: $patch"
+            echo "Patch SHA-256: $(sha256sum "$patch" | cut -d ' ' -f1)"
+            echo "Patched test paths: tests/unit/internal/test_database_replacement.py, tests/unit/resources/test_environment_remove.py"
+            echo "Production changes in baseline worktree: none"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: uv sync --frozen --group test --all-packages
+      - name: Measure the offline test scope and preserve reports after failures
+        shell: bash
+        run: |
+          set +e
+          ulimit -n 4096
+          uv run pytest -o addopts='' -v --tb=short --strict-markers \
+            -m 'not real_odoo and not packaging and not dashboard and not serial' \
+            -n auto --dist loadscope --cov=odoo_instance_sdk --cov-branch --cov-report=
+          parallel_status=$?
+          uv run pytest -o addopts='' -v --tb=short --strict-markers \
+            -m 'serial and not real_odoo and not packaging and not dashboard' \
+            --cov=odoo_instance_sdk --cov-branch --cov-append \
+            --cov-report=xml --cov-report=json
+          serial_status=$?
+          if [ "$parallel_status" -ne 0 ]; then exit "$parallel_status"; fi
+          if [ "$serial_status" -ne 0 ]; then exit "$serial_status"; fi
+          uv run python scripts/check_coverage.py --coverage-json coverage.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-${{ matrix.label }}-${{ matrix.sha }}
+          path: |
+            coverage.xml
+            coverage.json
+          if-no-files-found: error
+          retention-days: 14
+
+  coverage-summary:
+    if: always()
+    needs: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage-artifacts
+          merge-multiple: false
+      - name: Compare exact-SHA line and branch coverage
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = Path("coverage-comparison.md")
+          rows = [
+              "Coverage scope: `--cov=odoo_instance_sdk --cov-branch`; Python 3.12; parallel offline tests plus serial tests, excluding only the repository's existing `real_odoo`, `packaging`, `dashboard`, and `serial` selectors from the parallel arm.",
+              "",
+              "| Arm | Exact SHA | Covered lines / total | Line coverage | Covered branches / total | Branch coverage |",
+              "| --- | --- | ---: | ---: | ---: | ---: |",
+          ]
+          for label in ("baseline", "candidate"):
+              matches = list(Path("coverage-artifacts").glob(f"coverage-{label}-*/coverage.json"))
+              if len(matches) != 1:
+                  raise SystemExit(f"expected one {label} coverage.json, got {matches}")
+              path = matches[0]
+              sha = path.parent.name.removeprefix(f"coverage-{label}-")
+              totals = json.loads(path.read_text(encoding="utf-8"))["totals"]
+              lines = totals["covered_lines"] + totals["missing_lines"]
+              branches = totals["num_branches"]
+              line_percent = 100 * totals["covered_lines"] / lines if lines else 100.0
+              branch_percent = (
+                  100 * totals["covered_branches"] / branches if branches else 100.0
+              )
+              rows.append(
+                  f"| {label} | `{sha}` | {totals['covered_lines']} / {lines} | "
+                  f"{line_percent:.4f}% | {totals['covered_branches']} / {branches} | "
+                  f"{branch_percent:.4f}% |"
+              )
+          rows.extend(
+              [
+                  "",
+                  "`self_update_composition.py` focus (same module in both arms; EF historical reference: 169/220 statements, 57/94 branches):",
+                  "",
+                  "| Arm | Exact SHA | Covered statements / total statements | Statement coverage | Covered branches / total | Branch coverage |",
+                  "| --- | --- | ---: | ---: | ---: | ---: |",
+              ]
+          )
+          for label in ("baseline", "candidate"):
+              matches = list(Path("coverage-artifacts").glob(f"coverage-{label}-*/coverage.json"))
+              path = matches[0]
+              sha = path.parent.name.removeprefix(f"coverage-{label}-")
+              files = json.loads(path.read_text(encoding="utf-8"))["files"]
+              module = next(
+                  info["summary"]
+                  for source, info in files.items()
+                  if source.endswith("internal/self_update_composition.py")
+              )
+              statements = module["num_statements"]
+              branches = module["num_branches"]
+              statement_percent = 100 * module["covered_lines"] / statements if statements else 100.0
+              branch_percent = 100 * module["covered_branches"] / branches if branches else 100.0
+              rows.append(
+                  f"| {label} | `{sha}` | {module['covered_lines']} / {statements} | "
+                  f"{statement_percent:.4f}% | {module['covered_branches']} / {branches} | "
+                  f"{branch_percent:.4f}% |"
+              )
+          report.write_text("\n".join(rows) + "\n", encoding="utf-8")
+          print(report.read_text(encoding="utf-8"))
+          PY
+          cat coverage-comparison.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-comparison-summary
+          path: coverage-comparison.md
+          if-no-files-found: error
+          retention-days: 14
+
+  package-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline-704
+            sha: 704753d44463a6df3ed01b142632d26b254b32e3
+          - label: candidate
+            sha: ${{ inputs.candidate_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Verify exact package coverage checkout
+        env:
+          EXPECTED_SHA: ${{ matrix.sha }}
+          WORKFLOW_EVENT: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_SHA"
+          actual_sha=$(git rev-parse HEAD)
+          test "$actual_sha" = "$EXPECTED_SHA"
+          {
+            printf 'workflow_event=%s\n' "$WORKFLOW_EVENT"
+            printf 'expected_sha=%s\nactual_sha=%s\n' "$EXPECTED_SHA" "$actual_sha"
+            printf 'suite=packages/odcli-multica/tests (full package suite)\n'
+            printf 'coverage_config=--cov=odcli_multica --cov-branch\n'
+          } | tee package-coverage-manifest.txt
+      - run: uv sync --frozen --group test --all-packages
+      - name: Measure the full Multica package test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_python=$(uv run python --version 2>&1)
+          case "$runtime_python" in
+            "Python 3.12."*) ;;
+            *) echo "expected Python 3.12 runtime, got: $runtime_python" >&2; exit 1 ;;
+          esac
+          printf 'runtime_python=%s\n' "$runtime_python" | tee -a package-coverage-manifest.txt
+          uv run python -m coverage --version | tee -a package-coverage-manifest.txt
+          uv run pytest -o addopts='' -v --tb=short --strict-markers \
+            packages/odcli-multica/tests \
+            --cov=odcli_multica --cov-branch \
+            --cov-report=xml:package-coverage.xml \
+            --cov-report=json:package-coverage.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: package-coverage-${{ matrix.label }}-${{ matrix.sha }}
+          path: |
+            package-coverage.xml
+            package-coverage.json
+            package-coverage-manifest.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  package-coverage-summary:
+    if: always()
+    needs: package-coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-coverage-*
+          path: package-coverage-artifacts
+          merge-multiple: false
+      - name: Compare exact-SHA package line and branch coverage
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          rows = [
+              "Package coverage scope: full `packages/odcli-multica/tests`; runtime is read from each post-sync manifest; `--cov=odcli_multica --cov-branch`.",
+              "",
+              "| Arm | Exact SHA | Runtime Python | Covered lines / total | Line coverage | Covered branches / total | Branch coverage |",
+              "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+          ]
+          module_rows = []
+          for label in ("baseline-704", "candidate"):
+              matches = list(
+                  Path("package-coverage-artifacts").glob(
+                      f"package-coverage-{label}-*/package-coverage.json"
+                  )
+              )
+              if len(matches) != 1:
+                  raise SystemExit(f"expected one {label} package report, got {matches}")
+              path = matches[0]
+              sha = path.parent.name.removeprefix(f"package-coverage-{label}-")
+              manifest_path = path.parent / "package-coverage-manifest.txt"
+              manifest = dict(
+                  line.split("=", 1)
+                  for line in manifest_path.read_text(encoding="utf-8").splitlines()
+                  if "=" in line
+              )
+              runtime_python = manifest.get("runtime_python", "")
+              if manifest.get("expected_sha") != sha or manifest.get("actual_sha") != sha:
+                  raise SystemExit(f"{label} manifest SHA does not match artifact SHA {sha}")
+              if not runtime_python.startswith("Python 3.12."):
+                  raise SystemExit(f"{label} manifest lacks confirmed Python 3.12 runtime: {runtime_python!r}")
+              totals = json.loads(path.read_text(encoding="utf-8"))["totals"]
+              lines = totals["covered_lines"] + totals["missing_lines"]
+              branches = totals["num_branches"]
+              line_percent = 100 * totals["covered_lines"] / lines if lines else 100.0
+              branch_percent = (
+                  100 * totals["covered_branches"] / branches if branches else 100.0
+              )
+              rows.append(
+                  f"| {label} | `{sha}` | {runtime_python} | {totals['covered_lines']} / {lines} | "
+                  f"{line_percent:.4f}% | {totals['covered_branches']} / {branches} | "
+                  f"{branch_percent:.4f}% |"
+              )
+              files = json.loads(path.read_text(encoding="utf-8"))["files"]
+              for suffix in ("client.py", "git_execution.py"):
+                  module = next(
+                      info["summary"]
+                      for source, info in files.items()
+                      if source.endswith(f"odcli_multica/{suffix}")
+                  )
+                  module_lines = module["covered_lines"] + module["missing_lines"]
+                  module_branches = module["num_branches"]
+                  module_line_percent = (
+                      100 * module["covered_lines"] / module_lines if module_lines else 100.0
+                  )
+                  module_branch_percent = (
+                      100 * module["covered_branches"] / module_branches
+                      if module_branches
+                      else 100.0
+                  )
+                  module_rows.append(
+                      f"| {label} | `{sha}` | `{suffix}` | "
+                      f"{module['covered_lines']} / {module_lines} | "
+                      f"{module_line_percent:.4f}% | "
+                      f"{module['covered_branches']} / {module_branches} | "
+                      f"{module_branch_percent:.4f}% |"
+                  )
+          rows.extend(
+              [
+                  "",
+                  "Module evidence for the extracted adapter:",
+                  "",
+                  "| Arm | Exact SHA | Module | Covered lines / total | Line coverage | Covered branches / total | Branch coverage |",
+                  "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+                  *module_rows,
+              ]
+          )
+          report = "\n".join(rows) + "\n"
+          Path("package-coverage-comparison.md").write_text(report, encoding="utf-8")
+          print(report)
+          PY
+          cat package-coverage-comparison.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-coverage-comparison-summary
+          path: package-coverage-comparison.md
+          if-no-files-found: error
+          retention-days: 14
+
+  public-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            sha: ${{ github.event_name == 'push' && '39dd3e5ee3f2c8299dc96a2e5c1cb3386826a5f1' || (inputs.baseline_sha || '39dd3e5ee3f2c8299dc96a2e5c1cb3386826a5f1') }}
+          - label: candidate
+            sha: ${{ inputs.candidate_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
+          path: candidate-source
+      - name: Assert exact public-regression checkouts
+        env:
+          EXPECTED_BASELINE_SHA: ${{ matrix.sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+          WORKFLOW_EVENT: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_BASELINE_SHA"
+          test -n "$EXPECTED_CANDIDATE_SHA"
+          actual_baseline_sha=$(git rev-parse HEAD)
+          actual_candidate_sha=$(git -C candidate-source rev-parse HEAD)
+          test "$actual_baseline_sha" = "$EXPECTED_BASELINE_SHA"
+          test "$actual_candidate_sha" = "$EXPECTED_CANDIDATE_SHA"
+          {
+            printf 'workflow_event=%s\n' "$WORKFLOW_EVENT"
+            printf 'matrix_label=%s\n' '${{ matrix.label }}'
+            printf 'expected_baseline_sha=%s\nactual_baseline_sha=%s\n' \
+              "$EXPECTED_BASELINE_SHA" "$actual_baseline_sha"
+            printf 'expected_candidate_sha=%s\nactual_candidate_sha=%s\n' \
+              "$EXPECTED_CANDIDATE_SHA" "$actual_candidate_sha"
+            printf 'test_overlay_paths=none (before overlay step)\n'
+          } | tee public-regressions-manifest.txt
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install exact-SHA project environment
+        run: uv sync --frozen --group test --all-packages
+      - name: Bring identical regression methods to the baseline checkout
+        if: matrix.label == 'baseline'
+        shell: bash
+        run: |
+          cp candidate-source/tests/unit/test_self_update.py tests/unit/test_self_update.py
+          cp candidate-source/tests/unit/test_git_resource.py tests/unit/test_git_resource.py
+          cp candidate-source/tests/unit/self_update_test_support.py tests/unit/self_update_test_support.py
+          cp candidate-source/tests/unit/resources/test_environment_checkout.py tests/unit/resources/test_environment_checkout.py
+          cp candidate-source/packages/odcli-multica/tests/test_credentials.py packages/odcli-multica/tests/test_credentials.py
+          git diff --exit-code -- src/odoo_instance_sdk packages/odcli-multica/src
+          printf 'test_overlay_paths=tests/unit/test_self_update.py,tests/unit/test_git_resource.py,tests/unit/self_update_test_support.py,tests/unit/resources/test_environment_checkout.py,packages/odcli-multica/tests/test_credentials.py\nbaseline_production_changes=none\n' >> public-regressions-manifest.txt
+      - name: Run the same public-boundary regressions on this exact SHA
+        shell: bash
+        run: |
+          set +e
+          uv run pytest -o addopts='' -q --tb=short \
+            tests/unit/test_self_update.py::test_separate_uv_tool_companion_is_included_in_coordinated_update \
+            tests/unit/test_self_update.py::test_companion_preflight_failure_accounts_for_frozen_steps \
+            tests/unit/test_self_update.py::test_companion_core_version_failure_accounts_for_companion_verification_steps \
+            tests/unit/test_self_update.py::test_companion_invalid_maintenance_result_accounts_for_verification_steps \
+            tests/unit/test_self_update.py::test_companion_verification_failure_returns_recoverable_update_result \
+            tests/unit/test_self_update.py::test_companion_update_command_verification_failure_keeps_recovery_evidence \
+            tests/unit/test_self_update.py::test_separate_uv_tool_companion_rejects_ambiguous_source_provenance \
+            tests/unit/test_self_update.py::test_companion_reader_rejects_ambiguous_launcher_path \
+            tests/unit/test_self_update.py::test_companion_reader_rejects_nonregular_launcher \
+            tests/unit/test_self_update.py::test_companion_reader_rejects_unsupported_launcher_location \
+            tests/unit/test_self_update.py::test_companion_reader_rejects_nonexecutable_launcher \
+            tests/unit/test_self_update.py::test_companion_reader_rejects_symlinked_receipt \
+            tests/unit/test_self_update.py::test_companion_metadata_rejects_unresolvable_and_escaping_paths \
+            tests/unit/test_git_resource.py::test_public_git_plan_and_output_redact_opaque_git_config_value \
+            tests/unit/resources/test_environment_checkout.py::TestCheckoutCopy::test_copy_public_checkout_accepts_empty_attachment_query \
+            tests/unit/resources/test_environment_checkout.py::TestCheckoutCopy::test_copy_public_checkout_accepts_contained_regular_attachment_file \
+            tests/unit/resources/test_environment_checkout.py::TestCheckoutCopy::test_copy_public_checkout_rejects_symlinked_filestore_root_before_ready \
+            tests/unit/resources/test_environment_checkout.py::TestCheckoutCopy::test_copy_public_checkout_rejects_data_dir_symlink_swapped_after_planning \
+            --junitxml=public-regressions-sdk.xml > public-regressions-sdk.log 2>&1
+          sdk_status=$?
+          (cd packages/odcli-multica && uv run pytest -o addopts='' -q --tb=short \
+            tests/test_credentials.py::test_project_commit_uses_only_verified_root_human_identity \
+            tests/test_credentials.py::test_project_commit_fails_closed_on_execution_time_root_creator_drift \
+            --junitxml=../../public-regressions-multica.xml > ../../public-regressions-multica.log 2>&1)
+          multica_status=$?
+          cat public-regressions-sdk.log public-regressions-multica.log
+          printf 'sdk_status=%s\nmultica_status=%s\n' "$sdk_status" "$multica_status"
+          if grep -qE 'INTERNALERROR|ERROR collecting' public-regressions-sdk.log public-regressions-multica.log; then
+            exit 2
+          fi
+          if [ "${{ matrix.label }}" = candidate ]; then
+            [ "$sdk_status" -eq 0 ] && [ "$multica_status" -eq 0 ]
+          else
+            [ "$sdk_status" -ne 0 ] && [ "$multica_status" -eq 0 ]
+            grep -Fq '1 failed, 18 passed' public-regressions-sdk.log || exit 3
+            grep -Fq '2 passed' public-regressions-multica.log || exit 3
+            for expected in \
+              'FAILED tests/unit/resources/test_environment_checkout.py::TestCheckoutCopy::test_copy_public_checkout_rejects_data_dir_symlink_swapped_after_planning'; do
+              grep -Fq "$expected" public-regressions-sdk.log public-regressions-multica.log || exit 3
+            done
+            grep -Fq 'public COPY accepted the external data_dir symlink after planning' public-regressions-sdk.log || exit 3
+            python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("public-regressions-sdk.xml").getroot()
+          cases = {case.attrib["name"]: case for case in root.iter("testcase")}
+          controls = {
+              "test_companion_verification_failure_returns_recoverable_update_result",
+              "test_companion_update_command_verification_failure_keeps_recovery_evidence",
+              "test_copy_public_checkout_accepts_empty_attachment_query",
+              "test_copy_public_checkout_accepts_contained_regular_attachment_file",
+          }
+          for name in controls:
+              matches = [case for case_name, case in cases.items() if case_name.startswith(name)]
+              assert len(matches) == 1, (name, tuple(cases))
+              assert not any(child.tag in {"failure", "error"} for child in matches[0]), (
+                  name,
+                  ET.tostring(matches[0], encoding="unicode"),
+              )
+          PY
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-regressions-${{ matrix.label }}-${{ matrix.sha }}
+          path: |
+            public-regressions-sdk.log
+            public-regressions-multica.log
+            public-regressions-sdk.xml
+            public-regressions-multica.xml
+            public-regressions-manifest.txt
+          if-no-files-found: error
+          retention-days: 14
