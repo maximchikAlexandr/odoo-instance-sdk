@@ -355,7 +355,8 @@ class TestList:
                     "sys.stderr.flush(); time.sleep(2)"
                 ),
             ),
-            stdin=b"987654321\\n", timeout=0.1,
+            stdin=b"987654321\\n",
+            timeout=0.1,
         )
 
         def run(context: RunContext[RestoreResult]) -> RestoreResult:
