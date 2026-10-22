@@ -905,6 +905,7 @@ def _capture_missing_source_purge(  # noqa: C901
     prepare_catalog: Callable[[BackupCatalog, str, object, Path], None] | None = None,
     real_children: bool = False,
     observed_oids: Mapping[str, int] | None = None,
+    recovery_password: str | None = None,
 ) -> tuple[BackupCatalog, Command[ProjectRemovalResult], RecordingExecutor, str]:
     root = tmp_path / "source"
     common = root / ".git"
@@ -962,6 +963,10 @@ def _capture_missing_source_purge(  # noqa: C901
     full_container_id = "b" * 64
     compose_project = f"odcli_pg_{claim_project_id}"
     volume_name = f"pgdata_{claim_project_id}"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
+        lambda project_id: tmp_path / "postgres" / str(project_id),
+    )
     fake_cluster = PostgresCluster(
         _repository_root=root,
         _project_id=claim_project_id,
@@ -974,6 +979,9 @@ def _capture_missing_source_purge(  # noqa: C901
             inspect_volume_identity=lambda *_args, **_kwargs: True,
         ),
     )
+    if recovery_password is not None:
+        fake_cluster.password_file.parent.mkdir(parents=True, exist_ok=True)
+        fake_cluster.password_file.write_text(recovery_password, encoding="utf-8")
     monkeypatch.setattr(
         PostgresCluster,
         "resource_snapshot",
@@ -1053,6 +1061,8 @@ def _capture_missing_source_purge(  # noqa: C901
             _executor: SubprocessExecutor, step: PreparedStep, **_kwargs: object
         ) -> ProcessResult:
             step_id = step.step_id
+            if recovery_password is not None and step_id.startswith("database.drop"):
+                assert dict(step.environment_snapshot).get("PGPASSWORD") == recovery_password
             if "verify-volume" in step_id or "verify-container" in step_id:
                 return ProcessResult(
                     argv=step.argv,
@@ -1329,6 +1339,7 @@ def test_public_restore_publishes_oid_for_source_less_purge(
         prepare_catalog=restore_with_public_command,
         real_children=True,
         observed_oids={"owned_db": 19557},
+        recovery_password="test-recovery-password",
     )
     claim = catalog._get_postgres_cluster(legacy_project_id)
     assert claim is not None
@@ -1446,6 +1457,7 @@ def test_public_purge_recovers_missing_source_with_legacy_init_binding(
         ("tmp", "odoo"),
         publish_observed=_publish_observed_init_binding,
         real_children=True,
+        recovery_password="test-recovery-password",
     )
     result = command.run()
     assert result.registration_state == "forgotten"
@@ -1542,6 +1554,7 @@ def test_public_purge_handles_missing_source_with_legacy_restore_provenance(
         seed_legacy_restore,
         real_children=True,
         observed_oids={"owned_db": observed_oid},
+        recovery_password="test-recovery-password",
     )
     assert project_id == registered_project_id
     assert_result(command, executor, catalog, project_id)
