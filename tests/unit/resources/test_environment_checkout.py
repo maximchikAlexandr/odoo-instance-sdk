@@ -1921,7 +1921,18 @@ class TestCheckoutCopy:
         branch: str,
         instance: OdooInstance,
     ) -> OdooInstance:
+        from odoo_instance_sdk.internal.proc import active_context
         from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        restore_method = cast("Any", instance.databases._restore_after_verified_absence)
+        if restore_method.side_effect is None:
+
+            def consume_restore_probe(*_args: object, **_kwargs: object) -> None:
+                context = active_context()
+                assert context is not None
+                context.process("database.restore.exists-after")
+
+            restore_method.side_effect = consume_restore_probe
 
         InstanceFactory.from_config = MagicMock(return_value=instance)  # type: ignore[method-assign]
         opts = EnvironmentCheckoutOptions(
@@ -1958,6 +1969,11 @@ class TestCheckoutCopy:
         )
         monkeypatch.setattr(type(instance.databases), "names", lambda _self: database_names)
         restore = MagicMock()
+        restore.side_effect = lambda *_args, **_kwargs: (
+            __import__("odoo_instance_sdk.internal.proc", fromlist=("active_context",))
+            .active_context()
+            .process("database.restore.exists-after")
+        )
         monkeypatch.setattr(instance.databases, "_restore_after_verified_absence", restore)
         return restore
 

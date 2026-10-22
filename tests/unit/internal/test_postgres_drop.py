@@ -2042,6 +2042,19 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
     action = PreparedAction(
         step_id="database.restore.local-archive", action="restore-local-archive", mutating=True
     )
+    after = instance.databases._psql_probe_for("feature_db", "database.restore.exists-after")
+    assert after is not None
+    executor = RecordingExecutor(
+        result_factory=lambda step: ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=("102\n" if step.step_id == after.step_id else ""),
+            stderr="",
+            duration=0.0,
+            cwd=step.cwd,  # type: ignore[attr-defined]
+            environment=step.environment,  # type: ignore[attr-defined]
+        )
+    )
     http = MagicMock()
     http.post.return_value.is_error = False
     http_context = MagicMock()
@@ -2052,7 +2065,10 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
         instance.databases._restore_local_archive(payload, "feature_db")
 
     command = Command.create(
-        ExecutionPlan(steps=(action.public_projection(),)), callback, (action,)
+        ExecutionPlan(steps=(action.public_projection(), after.public_projection())),
+        callback,
+        (action, after),
+        executor=executor,
     )
     monkeypatch.chdir(tmp_path)
     with (
@@ -2070,7 +2086,7 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
     assert binding["data_directory"] == str(configured_data.resolve())
 
     result = build_database_drop_command(
-        instance, project_manifest, "feature_db", executor=_executor()
+        instance, project_manifest, "feature_db", executor=_executor(database_oid=102)
     ).run()
 
     assert result.filestore_state == "deleted"

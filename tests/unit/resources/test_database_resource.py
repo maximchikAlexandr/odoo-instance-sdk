@@ -1836,7 +1836,7 @@ class TestRestore:
                 after.step_id: ProcessResult(
                     argv=after.argv,
                     returncode=0,
-                    stdout="1\n",
+                    stdout="19557\n",
                     stderr="",
                     duration=0.0,
                     cwd=after.cwd,
@@ -1849,9 +1849,7 @@ class TestRestore:
         def callback(context: RunContext[RestoreResult]) -> RestoreResult:
             context.action(action.step_id)
             context.process(before.step_id)
-            result = inst.databases._restore_after_verified_absence(backup, "newdb")
-            context.process(after.step_id)
-            return result
+            return inst.databases._restore_after_verified_absence(backup, "newdb")
 
         command = Command.create(
             ExecutionPlan(
@@ -1886,7 +1884,7 @@ class TestRestore:
         ]
         list_method.assert_not_called()
         mock_catalog.record_restore.assert_called_once_with(
-            "localhost", 5432, "newdb", str(backup.id)
+            "localhost", 5432, "newdb", str(backup.id), database_oid=19557
         )
 
     def test_default_timeout_uses_long_running_backup_budget(

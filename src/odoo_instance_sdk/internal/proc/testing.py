@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import cast
 
 from . import (
@@ -17,6 +17,12 @@ from . import (
     event_for_step,
 )
 from .run import ProcessHandle, ProcessResult, _notify, _notify_output, _safe_error
+
+
+def _redact_private_stdout(prepared: PreparedStep, result: ProcessResult) -> ProcessResult:
+    if not prepared.private_stdout_value_free:
+        return result
+    return replace(result, stdout=None if result.stdout is None else "")
 
 
 @dataclass(slots=True)
@@ -34,7 +40,7 @@ class RecordingExecutor:
     stdout_chunks: tuple[str, ...] = ()
     stderr_chunks: tuple[str, ...] = ()
 
-    def execute(
+    def execute(  # noqa: C901
         self,
         step: PreparedProcess,
         *,
@@ -72,6 +78,8 @@ class RecordingExecutor:
             )
             raise
         if isinstance(result, ProcessResult):
+            if prepared.private_stdout_consumer is not None:
+                prepared.private_stdout_consumer(result.stdout)
             if observe_output:
                 if self.stdout_chunks:
                     for chunk in self.stdout_chunks:
@@ -89,6 +97,7 @@ class RecordingExecutor:
                         )
                 else:
                     _notify_output(observer, prepared, result.stderr, "stderr")
+            result = _redact_private_stdout(prepared, result)
             returncode = result.returncode
         else:
             returncode = None
