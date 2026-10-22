@@ -512,6 +512,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                     "reason": None,
                     "route_identity": None,
                 },
+                "backup_freshness": {"downloaded_at": None, "age_seconds": None},
             }
         ],
         "environments": [
@@ -582,6 +583,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                     "other_files_bytes": 1,
                 },
                 "pgadmin": {"state": "eligible"},
+                "backup_freshness": {"downloaded_at": None, "age_seconds": None},
             }
         ],
         "observation": None,
