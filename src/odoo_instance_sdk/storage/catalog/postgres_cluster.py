@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.storage.catalog.helpers import (
-    PostgresClusterClaim as PostgresClusterClaim,
-    resolve_postgres_cluster_claim as resolve_postgres_cluster_claim,
-    _row_to_cluster_claim as _row_to_cluster_claim,
-    _translate_sqlite_error as _translate_sqlite_error,
+    PostgresClusterClaim,
+    _row_to_cluster_claim,
+    _translate_sqlite_error,
+    resolve_postgres_cluster_claim,
 )
 
 

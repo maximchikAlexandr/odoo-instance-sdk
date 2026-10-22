@@ -6,8 +6,8 @@ from pathlib import Path
 
 from odoo_instance_sdk.storage.catalog.backup import _BackupMixin
 from odoo_instance_sdk.storage.catalog.environment import _EnvironmentMixin
-from odoo_instance_sdk.storage.catalog.postgres_cluster import _PostgresClusterMixin
 from odoo_instance_sdk.storage.catalog.helpers import *  # noqa: F403
+from odoo_instance_sdk.storage.catalog.postgres_cluster import _PostgresClusterMixin
 from odoo_instance_sdk.storage.catalog.restore import _RestoreMixin
 
 

@@ -1926,9 +1926,10 @@ def _observed_database_and_compose_removal_case(
                 and absence_observed is not None
             ):
                 absence_observed.set()
-                if continue_after_absence is not None:
-                    if not continue_after_absence.wait(timeout=10):
-                        raise TimeoutError("purge test was not released after absence proof")
+                if continue_after_absence is not None and not continue_after_absence.wait(
+                    timeout=10
+                ):
+                    raise TimeoutError("purge test was not released after absence proof")
             return ProcessResult(
                 argv=step.argv,
                 returncode=1,
@@ -2113,9 +2114,11 @@ def test_compose_purge_retains_claim_when_cluster_lock_is_unavailable(
         _catalog_holder,
         _client,
     ) = _observed_database_and_compose_removal_case(tmp_path, monkeypatch, verification_error=None)
-    with exclusive_lock(postgres_cluster_lock_path(cluster_project_id)):
-        with pytest.raises(ProjectRemovalError, match="project removal step failed"):
-            command.run()
+    with (
+        exclusive_lock(postgres_cluster_lock_path(cluster_project_id)),
+        pytest.raises(ProjectRemovalError, match="project removal step failed"),
+    ):
+        command.run()
 
     retained_claim = catalog._get_postgres_cluster(cluster_project_id)
     assert retained_claim is not None
