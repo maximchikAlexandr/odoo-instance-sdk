@@ -392,7 +392,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             "--odoo-bin",
             str(bootstrap_odoo_bin),
             "--python",
-            E2E_PINS.cpython,
+            sys.executable,
             "--config",
             str(bootstrap_config),
             "--database",
