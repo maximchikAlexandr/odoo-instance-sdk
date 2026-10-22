@@ -167,7 +167,6 @@ def test_public_project_forget_reinit_and_purge(
     assert project_id not in json.dumps(monitor_document, sort_keys=True)
 
     reinit_config = ProjectConfig.load(project)
-    assert reinit_config.source_config is not None
     reinit_args = [
         "init",
         "--project",
@@ -180,7 +179,7 @@ def test_public_project_forget_reinit_and_purge(
         "--python",
         str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
         "--config",
-        str(project / reinit_config.source_config),
+        str(target_runtime.config_file),
         "--database",
         target_runtime.topology.target_sentinel_database,
         "--postgres",
