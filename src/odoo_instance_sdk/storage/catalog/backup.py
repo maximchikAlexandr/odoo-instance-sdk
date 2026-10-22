@@ -29,6 +29,7 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.storage.catalog.helpers import (
     _READ_ONLY_PROJECT_SCOPE as _READ_ONLY_PROJECT_SCOPE,
     BackupEnvironmentLink as BackupEnvironmentLink,
+    BackupEventPage as BackupEventPage,
     BackupEventSummary as BackupEventSummary,
     BackupProjection as BackupProjection,
     BackupProjectionPage as BackupProjectionPage,
@@ -45,6 +46,8 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     _row_to_cluster_claim as _row_to_cluster_claim,
     _row_to_event as _row_to_event,
     _translate_sqlite_error as _translate_sqlite_error,
+    decode_catalog_cursor as decode_catalog_cursor,
+    encode_catalog_cursor as encode_catalog_cursor,
     normalize_db_host as normalize_db_host,
 )
 from odoo_instance_sdk.storage.catalog_migrate import ensure_catalog_migrated
@@ -559,15 +562,16 @@ class _BackupMixin:
             clauses.append("b.state = ?")
             params.append(backup_state.value)
         if after_value is not None:
-            clauses.append("b.downloaded_at >= ?")
+            clauses.append("julianday(b.downloaded_at) >= julianday(?)")
             params.append(after_value.isoformat())
         if before_value is not None:
-            clauses.append("b.downloaded_at <= ?")
+            clauses.append("julianday(b.downloaded_at) <= julianday(?)")
             params.append(before_value.isoformat())
         if after is not None:
             clauses.append(
-                "(COALESCE(b.downloaded_at, b.started_at) < ? OR "
-                "(COALESCE(b.downloaded_at, b.started_at) = ? AND b.id > ?))"
+                "(julianday(COALESCE(b.downloaded_at, b.started_at)) < julianday(?) OR "
+                "(julianday(COALESCE(b.downloaded_at, b.started_at)) = julianday(?) "
+                "AND b.id > ?))"
             )
             params.extend((after[0], after[0], after[1]))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
@@ -576,7 +580,7 @@ class _BackupMixin:
             "b.size_bytes, b.state, b.downloaded_at, "
             "COALESCE(b.downloaded_at, b.started_at) AS catalogue_time "
             "FROM backups b LEFT JOIN projects p ON p.project_id = b.project_id"
-            f"{where} ORDER BY catalogue_time DESC, b.id ASC LIMIT ?"
+            f"{where} ORDER BY julianday(catalogue_time) DESC, b.id ASC LIMIT ?"
         )
         rows = self._conn.execute(query, (*params, limit + 1)).fetchall()
         page_rows = rows[:limit]
@@ -590,18 +594,48 @@ class _BackupMixin:
         )
 
     @_translate_sqlite_error
-    def list_backup_events(self, backup_id: str) -> tuple[BackupEventSummary, ...]:
+    def list_backup_events(
+        self,
+        backup_id: str,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> BackupEventPage:
         """Return only safe event fields for one backup detail view."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise BackupCatalogError("Backup event limit must be between 1 and 1000")
         canonical_id = self._canonical_backup_id(backup_id)
         if self.get_by_id(canonical_id) is None:
             raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+        after = None if cursor is None else decode_catalog_cursor(cursor)
+        after_sequence: int | None = None
+        if after is not None:
+            try:
+                after_sequence = int(after[1])
+            except ValueError as exc:
+                raise BackupCatalogError("catalog cursor is invalid") from exc
+        clauses = ["backup_id = ?"]
+        params: list[str | int] = [canonical_id]
+        if after is not None and after_sequence is not None:
+            clauses.append(
+                "(julianday(occurred_at) > julianday(?) OR "
+                "(julianday(occurred_at) = julianday(?) AND sequence > ?))"
+            )
+            params.extend((after[0], after[0], after_sequence))
         rows = self._conn.execute(
             "SELECT sequence, event_type, occurred_at, validator, exit_code, message "
-            "FROM backup_events WHERE backup_id=? ORDER BY occurred_at ASC, sequence ASC",
-            (canonical_id,),
+            "FROM backup_events WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY julianday(occurred_at) ASC, sequence ASC LIMIT ?",
+            (*params, limit + 1),
         ).fetchall()
+        page_rows = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page_rows[-1]
+            next_cursor = encode_catalog_cursor(last["occurred_at"], last["sequence"])
         try:
-            return tuple(
+            items = tuple(
                 BackupEventSummary(
                     sequence=int(row["sequence"]),
                     event_type=BackupEventType(str(row["event_type"])),
@@ -614,10 +648,11 @@ class _BackupMixin:
                     exit_code=row["exit_code"],
                     message=sanitize_event_message(row["message"]),
                 )
-                for row in rows
+                for row in page_rows
             )
         except (TypeError, ValueError) as exc:
             raise BackupCatalogError("backup event is malformed") from exc
+        return BackupEventPage(items=items, next_cursor=next_cursor)
 
     @staticmethod
     def _projection_file_data(path_value: str | None) -> tuple[bool, int | None]:

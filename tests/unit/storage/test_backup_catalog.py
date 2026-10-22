@@ -1117,8 +1117,8 @@ def test_safe_catalogue_pages_exclude_paths_and_raw_messages(tmp_path: Path) -> 
     assert summary_page.items[0].state is BackupState.FAILED
     assert not hasattr(summary_page.items[0], "path")
     events = catalog.list_backup_events(backup_id)
-    assert events[-1].message == "<redacted> <path>"
-    assert not hasattr(events[-1], "path")
+    assert events.items[-1].message == "<redacted> <path>"
+    assert not hasattr(events.items[-1], "path")
 
     environment_id = _u("safe-environment")
     catalog.create_environment(
@@ -1174,6 +1174,228 @@ def test_current_database_provenance_requires_latest_exact_completed_restore(
     )
     assert not catalog.current_database_backup_provenance(
         "localhost", 5432, "db", cluster_id=claim.cluster_id
+    ).known
+    catalog.close()
+
+
+def test_all_safe_catalogue_pages_are_bounded_and_timestamp_normalized(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "paged-catalogue.db")
+    downloaded_at = "2026-01-02 12:00:00"
+    backup_ids: list[str] = []
+    for index in range(3):
+        backup_id = _u(f"paged-backup-{index}")
+        path = _create_backup_file(tmp_path, f"paged-{index}.zip")
+        catalog.start_download(backup_id, "https://source.example", "db", "zip", True, path)
+        catalog.success_download(backup_id, path.name, index + 1, "")
+        backup_ids.append(backup_id)
+    catalog._conn.execute(
+        "UPDATE backups SET downloaded_at=? WHERE id IN (?, ?, ?)",
+        (downloaded_at, *backup_ids),
+    )
+    first_backup = backup_ids[0]
+    catalog.record_validation(first_backup, BackupValidationStatus.VALID)
+    catalog._conn.execute(
+        "UPDATE backup_events SET occurred_at=? WHERE backup_id=?",
+        (downloaded_at, first_backup),
+    )
+    catalog._conn.commit()
+
+    summary_page = catalog.list_backup_summaries(
+        downloaded_after=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
+        downloaded_before=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
+        limit=1,
+    )
+    summary_ids = [item.backup_id for item in summary_page.items]
+    while summary_page.next_cursor is not None:
+        summary_page = catalog.list_backup_summaries(limit=1, cursor=summary_page.next_cursor)
+        summary_ids.extend(item.backup_id for item in summary_page.items)
+    assert len(summary_ids) == 3
+    assert len(set(summary_ids)) == 3
+    with pytest.raises(BackupCatalogError, match="limit"):
+        catalog.list_backup_summaries(limit=1001)
+    with pytest.raises(BackupCatalogError, match="filter"):
+        catalog.list_backup_summaries(state="failed' OR 1=1")
+    assert catalog.list_backup_summaries(database_name="' OR 1=1").items == ()
+
+    event_page = catalog.list_backup_events(first_backup, limit=1)
+    event_sequences = [item.sequence for item in event_page.items]
+    while event_page.next_cursor is not None:
+        event_page = catalog.list_backup_events(
+            first_backup, limit=1, cursor=event_page.next_cursor
+        )
+        event_sequences.extend(item.sequence for item in event_page.items)
+    assert event_sequences == sorted(event_sequences)
+    assert len(event_sequences) == 3
+    assert len(set(event_sequences)) == 3
+    with pytest.raises(BackupCatalogError, match="limit"):
+        catalog.list_backup_events(first_backup, limit=1001)
+
+    environment_ids: list[str] = []
+    for index in range(2):
+        environment_id = _u(f"paged-environment-{index}")
+        catalog.create_environment(
+            make_env(
+                environment_id,
+                branch=f"branch-{index}",
+                state="failed",
+                created_at=downloaded_at,
+                last_error="password=hidden /private/error",
+            )
+        )
+        environment_ids.append(environment_id)
+    incomplete_page = catalog.list_incomplete_operations(
+        occurred_after=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
+        occurred_before=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
+        limit=1,
+    )
+    incomplete_ids = [item.object_id for item in incomplete_page.items]
+    while incomplete_page.next_cursor is not None:
+        incomplete_page = catalog.list_incomplete_operations(
+            limit=1, cursor=incomplete_page.next_cursor
+        )
+        incomplete_ids.extend(item.object_id for item in incomplete_page.items)
+    assert set(incomplete_ids) == set(environment_ids)
+    assert all("/private" not in (item.error or "") for item in incomplete_page.items)
+    with pytest.raises(BackupCatalogError, match="type"):
+        catalog.list_incomplete_operations(object_type="environment' OR 1=1")
+    with pytest.raises(BackupCatalogError, match="limit"):
+        catalog.list_incomplete_operations(limit=1001)
+
+    history_environment = environment_ids[0]
+    for operation in ("sync", "use", "remove"):
+        catalog.add_environment_event(
+            history_environment, operation, "failed", message="token=hidden"
+        )
+    catalog._conn.execute(
+        "UPDATE environment_events SET occurred_at=? WHERE environment_id=?",
+        (downloaded_at, history_environment),
+    )
+    catalog._conn.commit()
+    history_page = catalog.list_environment_history(
+        environment_id=history_environment,
+        occurred_after=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
+        occurred_before=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
+        limit=1,
+    )
+    history_sequences = [item.sequence for item in history_page.items]
+    while history_page.next_cursor is not None:
+        history_page = catalog.list_environment_history(
+            environment_id=history_environment, limit=1, cursor=history_page.next_cursor
+        )
+        history_sequences.extend(item.sequence for item in history_page.items)
+    assert len(history_sequences) == 3
+    assert len(set(history_sequences)) == 3
+    assert all(
+        item.message == "<redacted>"
+        for item in catalog.list_environment_history(environment_id=history_environment).items
+    )
+    with pytest.raises(BackupCatalogError, match="operation"):
+        catalog.list_environment_history(operation="sync' OR 1=1")
+    with pytest.raises(BackupCatalogError, match="limit"):
+        catalog.list_environment_history(limit=1001)
+    catalog.close()
+
+
+def test_current_provenance_unknown_matrix(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "provenance-matrix.db")
+    claim = catalog._ensure_postgres_cluster_pending("project", "compose", "volume")
+    claim = catalog._activate_postgres_cluster(claim.cluster_id, "project", "compose", "volume")
+    other_claim = catalog._ensure_postgres_cluster_pending("other-project", "other", "other-volume")
+    other_claim = catalog._activate_postgres_cluster(
+        other_claim.cluster_id, "other-project", "other", "other-volume"
+    )
+
+    def add_backup(label: str) -> str:
+        backup_id = _u(label)
+        path = _create_backup_file(tmp_path, f"{label}.zip")
+        catalog.start_download(backup_id, "https://source.example", label, "zip", True, path)
+        catalog.success_download(
+            backup_id,
+            path.name,
+            1,
+            "",
+            downloaded_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        return backup_id
+
+    completed_id = add_backup("completed")
+    replacement_id = add_backup("replacement")
+    catalog.record_restore("localhost", 5432, "db", completed_id, cluster_id=claim.cluster_id)
+    catalog.record_restore("localhost", 5432, "db", replacement_id, cluster_id=claim.cluster_id)
+    replacement = catalog.current_database_backup_provenance(
+        "localhost", 5432, "db", cluster_id=claim.cluster_id
+    )
+    assert replacement.backup_id == uuid.UUID(replacement_id)
+
+    catalog.record_database_dropped("localhost", 5432, "db")
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "db", cluster_id=claim.cluster_id
+    ).known
+
+    local_id = "local-db"
+    catalog.record_restore(
+        "localhost",
+        5432,
+        local_id,
+        source_kind="local_archive",
+        source_sha256="a" * 64,
+        cluster_id=claim.cluster_id,
+    )
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, local_id, cluster_id=claim.cluster_id
+    ).known
+
+    incomplete_id = add_backup("incomplete")
+    catalog.record_restore(
+        "localhost",
+        5432,
+        "incomplete-db",
+        incomplete_id,
+        cluster_id=claim.cluster_id,
+        state="incomplete",
+    )
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "incomplete-db", cluster_id=claim.cluster_id
+    ).known
+
+    catalog._record_database_bootstrapped(
+        "localhost", 5432, "tmp", cluster_id=claim.cluster_id, data_directory=tmp_path / "data"
+    )
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "tmp", cluster_id=claim.cluster_id
+    ).known
+
+    null_id = add_backup("null-time")
+    catalog._conn.execute("UPDATE backups SET downloaded_at=NULL WHERE id=?", (null_id,))
+    catalog._conn.commit()
+    catalog.record_restore("localhost", 5432, "null-db", null_id, cluster_id=claim.cluster_id)
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "null-db", cluster_id=claim.cluster_id
+    ).known
+
+    deleted_id = add_backup("deleted")
+    catalog.record_restore("localhost", 5432, "deleted-db", deleted_id, cluster_id=claim.cluster_id)
+    catalog.record_deletion(deleted_id)
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "deleted-db", cluster_id=claim.cluster_id
+    ).known
+
+    missing = catalog.current_database_backup_provenance(
+        "localhost", 5432, "missing-db", cluster_id=claim.cluster_id
+    )
+    assert not missing.known
+    mismatch = catalog.current_database_backup_provenance(
+        "localhost", 5432, "incomplete-db", cluster_id=other_claim.cluster_id
+    )
+    assert not mismatch.known
+    assert not catalog.current_database_backup_provenance(
+        "other-host", 5432, "db", cluster_id=claim.cluster_id
+    ).known
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5433, "db", cluster_id=claim.cluster_id
+    ).known
+    assert not catalog.current_database_backup_provenance(
+        "localhost", 5432, "other-db", cluster_id=claim.cluster_id
     ).known
     catalog.close()
 

@@ -359,13 +359,16 @@ class _EnvironmentMixin:
             clauses.append("state = ?")
             params.append(state)
         if after_value is not None:
-            clauses.append("occurred_at >= ?")
+            clauses.append("julianday(occurred_at) >= julianday(?)")
             params.append(after_value.isoformat())
         if before_value is not None:
-            clauses.append("occurred_at <= ?")
+            clauses.append("julianday(occurred_at) <= julianday(?)")
             params.append(before_value.isoformat())
         if after is not None:
-            clauses.append("(occurred_at < ? OR (occurred_at = ? AND cursor_key > ?))")
+            clauses.append(
+                "(julianday(occurred_at) < julianday(?) OR "
+                "(julianday(occurred_at) = julianday(?) AND cursor_key > ?))"
+            )
             params.extend((after[0], after[0], after[1]))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         query = (
@@ -385,7 +388,7 @@ class _EnvironmentMixin:
             "WHERE (e.state NOT IN ('ready', 'removed') OR e.last_error IS NOT NULL "
             "OR e.recovery_json IS NOT NULL)"
             ") "
-            f"{where} ORDER BY occurred_at DESC, cursor_key ASC LIMIT ?"
+            f"{where} ORDER BY julianday(occurred_at) DESC, cursor_key ASC LIMIT ?"
         )
         rows = self._conn.execute(query, (*params, limit + 1)).fetchall()
         page_rows = rows[:limit]
@@ -471,20 +474,23 @@ class _EnvironmentMixin:
             clauses.append("ee.outcome = ?")
             params.append(outcome)
         if after_value is not None:
-            clauses.append("ee.occurred_at >= ?")
+            clauses.append("julianday(ee.occurred_at) >= julianday(?)")
             params.append(after_value.isoformat())
         if before_value is not None:
-            clauses.append("ee.occurred_at <= ?")
+            clauses.append("julianday(ee.occurred_at) <= julianday(?)")
             params.append(before_value.isoformat())
         if after is not None:
-            clauses.append("(ee.occurred_at < ? OR (ee.occurred_at = ? AND ee.sequence > ?))")
+            clauses.append(
+                "(julianday(ee.occurred_at) < julianday(?) OR "
+                "(julianday(ee.occurred_at) = julianday(?) AND ee.sequence > ?))"
+            )
             params.extend((after[0], after[0], after[1]))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         query = (
             "SELECT ee.sequence, ee.environment_id, e.name, e.project_id, ee.occurred_at, "
             "ee.operation, ee.outcome, e.state, ee.message "
             "FROM environment_events ee JOIN environments e ON e.id = ee.environment_id"
-            f"{where} ORDER BY ee.occurred_at DESC, ee.sequence ASC LIMIT ?"
+            f"{where} ORDER BY julianday(ee.occurred_at) DESC, ee.sequence ASC LIMIT ?"
         )
         rows = self._conn.execute(query, (*params, limit + 1)).fetchall()
         page_rows = rows[:limit]

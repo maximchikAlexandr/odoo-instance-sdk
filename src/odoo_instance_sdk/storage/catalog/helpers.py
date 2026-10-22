@@ -154,6 +154,14 @@ class BackupEventSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class BackupEventPage:
+    """One bounded keyset page of safe backup events."""
+
+    items: tuple[BackupEventSummary, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class IncompleteOperation:
     """A recorded nonterminal/error state without process or path evidence."""
 
