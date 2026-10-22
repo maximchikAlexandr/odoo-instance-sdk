@@ -25,7 +25,12 @@ from odoo_instance_sdk.exceptions import (
     NonLocalInstanceError,
     RestoreFailedError,
 )
-from odoo_instance_sdk.internal.proc import ProcessResult, ProcessTimeoutError, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
+    ProcessResult,
+    ProcessTimeoutError,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.internal.transport import (
     TransportError,
     TransportStatusError,
@@ -216,6 +221,92 @@ class TestList:
         with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             dbs = instance.databases.list()
         assert [db.name for db in dbs] == ["db1", "db2", "db3"]
+
+    def test_restore_command_persists_oid_from_post_restore_identity_probe(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_bytes(b"fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client, db_user="odoo")
+        mock_catalog = MagicMock()
+        executor = RecordingExecutor(
+            result_factory=lambda step: ProcessResult(
+                argv=(prepared := cast("PreparedStep", step)).argv,
+                returncode=0,
+                stdout="19557\n" if prepared.step_id == "database.restore.exists-after" else "",
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+        )
+
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
+        ):
+            mock_client.get_catalog.return_value = mock_catalog
+            instance.databases.restore_command(backup, "newdb", executor=executor).run()
+
+        assert any(step.step_id == "database.restore.exists-after" for step in executor.executed)
+        assert mock_catalog.record_restore.call_args.kwargs["database_oid"] == 19557
+
+    def test_active_restore_uses_captured_identity_probe_for_catalogue_binding(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction
+
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_bytes(b"fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client, db_user="odoo")
+        before = instance.databases._psql_probe_for("newdb", "database.restore.exists-before")
+        after = instance.databases._psql_probe_for("newdb", "database.restore.exists-after")
+        assert before is not None
+        assert after is not None
+        action = PreparedAction("restore-wrapper", action="restore", mutating=True)
+        executor = RecordingExecutor(
+            result_factory=lambda step: ProcessResult(
+                argv=(prepared := cast("PreparedStep", step)).argv,
+                returncode=0,
+                stdout="19557\n" if prepared.step_id == after.step_id else "",
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+        )
+
+        def run(context: object) -> RestoreResult:
+            typed = cast("Any", context)
+            typed.action(action.step_id)
+            result = instance.databases.restore(backup, "newdb")
+            typed.complete_action(action.step_id)
+            return result
+
+        command = Command.create(
+            ExecutionPlan(
+                steps=(
+                    action.public_projection(),
+                    before.public_projection(),
+                    after.public_projection(),
+                )
+            ),
+            run,
+            (action, before, after),
+            executor=executor,
+        )
+        mock_catalog = MagicMock()
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
+        ):
+            mock_client.get_catalog.return_value = mock_catalog
+            command.run()
+
+        assert mock_catalog.record_restore.call_args.kwargs["database_oid"] == 19557
 
     def test_with_cluster_key_populates_backup(self, client: OdooClient) -> None:
         mock_cm = _mock_http({"result": ["prod", "staging"]})

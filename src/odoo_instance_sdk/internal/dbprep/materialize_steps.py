@@ -212,7 +212,7 @@ def _preparation_process_steps(
                     database="postgres",
                     args=(
                         "-c",
-                        f"SELECT 1 FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
+                        f"SELECT oid FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
                     ),
                     _trusted_args=("-t", "-A"),
                     timeout=30.0,
