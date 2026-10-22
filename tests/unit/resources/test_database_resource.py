@@ -374,6 +374,7 @@ class TestList:
             (action, before, after),
             executor=SubprocessExecutor(),
         )
+
         def probe_for(_name: str, step_id: str) -> PreparedStep:
             return before if step_id == before.step_id else after
 
