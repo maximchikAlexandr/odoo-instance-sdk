@@ -30,7 +30,7 @@ from scripts.real_odoo_pins import E2E_PINS
 from .archive import SourceBackupPlan
 from .cleanup import FailureEvidence, compose_down, replace_http_port
 from .compose import ComposeLifecycle, reserve_ports
-from .conftest import E2ERuntime
+from .conftest import E2ERuntime, odoo_runtime_python
 from .failures import assert_secret_free, write_failure_evidence
 from .test_critical_path import _remove_owned_fixture_tree
 
@@ -376,6 +376,10 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     bootstrap_config = root / "focused-odoo.conf"
     shutil.copy2(runtime.config_file, bootstrap_config)
     replace_http_port(bootstrap_config, public_http_port)
+    with bootstrap_config.open("a", encoding="utf-8") as stream:
+        stream.write(f"logfile = {root / 'odoo.log'}\n")
+    bootstrap_config.chmod(0o600)
+    odoo_python = odoo_runtime_python(runtime, root, bootstrap_odoo_bin)
     command = shutil.which("odcli")
     if command is None:
         pytest.fail("odcli executable is required for focused public leaves")
@@ -392,7 +396,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             "--odoo-bin",
             str(bootstrap_odoo_bin),
             "--python",
-            sys.executable,
+            str(odoo_python),
             "--config",
             str(bootstrap_config),
             "--database",
