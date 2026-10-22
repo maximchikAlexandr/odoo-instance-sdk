@@ -413,7 +413,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
             "init",
             "--project",
             str(project),
-            "--no-input",
+            "--yes",
             "--allow-partial",
             "--odoo-bin",
             str(odoo_bin_path),
