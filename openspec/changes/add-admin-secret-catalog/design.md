@@ -8,16 +8,18 @@ Repository rules require lazy optional dashboard imports, SDK-first boundaries, 
 
 ### Ponytail full gate
 
-Only one genuinely new subsystem is retained: the encrypted secret store, because neither the operational catalogue nor environment files can satisfy encrypted editable records with independent key loss semantics. Existing alternatives are reused everywhere else:
+Only one genuinely new subsystem is retained: the encrypted secret store, because neither the operational catalogue nor environment files can satisfy encrypted editable records with independent key loss semantics. The fresh audit found that the repository already supplies most surrounding behavior, so the implementation SHALL extend those seams directly rather than add parallel layers:
 
 - Admin host/auth: mount Starlette Admin inside the current FastAPI application; no second server, user table, custom login form, or authorization framework.
-- Administrator settings: extend the owner-only user config convention; no settings database.
-- Catalogue screens: add bounded read projections over `BackupCatalog`; no reporting database, ORM mirror, import/export layer, or write service.
+- Administrator settings: reuse `internal.paths`, owner-only `O_NOFOLLOW` validation, and atomic file-write patterns; add only the two new path/config values, with no settings database or generic filesystem wrapper.
+- Secret mutations: expose the minimum create/update/delete methods on the SQLCipher store adapter and call them from Admin; no SDK `Command` hierarchy, repository/service facade, or duplicated DTO mapping.
+- Catalogue screens: extend the existing `BackupProjection`/keyset page and `BackupCatalog` environment/event read seams with one shared allowlisted projection per screen; no generic query layer, reporting database, ORM mirror, import/export layer, or write service.
 - Error safety: reuse the existing sanitizer and define allowlisted projections; no generic exception renderer.
-- Backup age: join current completed restore/database provenance to `backups.downloaded_at` during the canonical snapshot; no timestamp cache or server-created-time discovery.
+- Backup age: extend existing restore/database-event lookup and canonical monitor planning to join `backups.downloaded_at`; no timestamp cache, second endpoint, or server-created-time discovery.
 - Remote Odoo resolution: insert one URL-keyed secret lookup before the existing environment chain; no second source resolver or database field in the secret record.
 - GitLab resolution: insert one member-id/normalized-host lookup before the existing mapping/environment chain; retain the generated internal token-key mechanism.
-- Concurrency: use a per-record revision compare-and-swap inside SQLCipher transactions; no lock service or event-sourcing framework.
+- Concurrency: use a per-record revision compare-and-swap inside the same SQLCipher transaction methods; no lock service, unit-of-work abstraction, or event-sourcing framework.
+- Verification: extend existing dashboard/package tests, real-Odoo coverage, `e2e_gitlab_member_workflow.py`, and the test-repository numbered-slot wrapper; no new umbrella coordinator or second validator/evidence framework.
 
 ## Goals / Non-Goals
 
@@ -50,7 +52,7 @@ Alternative: reuse Caddy Basic Auth. Rejected because local loopback mode has no
 
 ### 2. One encrypted store, separate random key file, two record types
 
-One SQLCipher database below the user data root stores schema metadata plus `remote_odoo_secret` and `gitlab_member_secret` records. A distinct random key file below the user config root is created atomically with mode `0600`; the database and parent private directories are owner-only. `ODCLI_SECRET_KEY_FILE` may override only the key-file path. Raw key material is never accepted in environment variables.
+One small SQLCipher adapter below the user data root stores schema metadata plus `remote_odoo_secret` and `gitlab_member_secret` records. It uses the selected DBAPI directly and reuses repository owner-only/atomic-file patterns rather than introducing a general persistence framework. A distinct random key file below the user config root is created atomically with mode `0600`; the database and parent private directories are owner-only. `ODCLI_SECRET_KEY_FILE` may override only the key-file path. Raw key material is never accepted in environment variables.
 
 Odoo identity is canonical normalized base URL and stores one nonblank master password; it never stores a database. GitLab identity is normalized opaque member ID plus normalized lowercase HTTPS host and stores login, token, and an automatically generated stable internal token key. Records include an integer revision and timestamps. Uniqueness is enforced on each identity.
 
@@ -60,7 +62,7 @@ Alternative: put encrypted rows in `catalog.sqlite3`. Rejected because the catal
 
 ### 3. Secret fields are write-only and updates are compare-and-swap
 
-Admin list/detail/form projections never return password, token, ciphertext, key identifiers, or length-derived placeholders. Create requires a nonblank secret. Edit submits the record revision; blank secret inputs retain the existing secret, while nonblank values replace it. Delete also checks the revision. A stale update/delete returns a bounded conflict and preserves the newer record. Separate identities commit independently through short transactions and SQLite busy handling.
+Admin list/detail/form projections never return password, token, ciphertext, key identifiers, or length-derived placeholders. Starlette Admin calls the store adapter's direct methods; no separate Query/Command/service layer is added. Create requires a nonblank secret. Edit submits the record revision; blank secret inputs retain the existing secret, while nonblank values replace it. Delete also checks the revision. A stale update/delete returns a bounded conflict and preserves the newer record. Separate identities commit independently through short transactions and SQLite busy handling.
 
 The draft's “two administrators” wording is interpreted as two concurrent editor sessions/processes authenticated with the one configured administrator identity; it does not add a second account.
 
@@ -74,15 +76,15 @@ Wrong key, corrupt/unreadable store, invalid record, blank decrypted value, dupl
 
 Alternative: merge field-by-field with `.env`. Rejected because it makes provenance ambiguous and can combine mismatched credentials.
 
-### 5. Catalogue Admin uses explicit bounded query models
+### 5. Catalogue Admin extends existing bounded projections
 
-`BackupCatalog` gains typed read-only page queries with stable `(timestamp, sequence/id)` ordering and bounded page size. Filters are typed exact/date-range parameters, never SQL fragments. The three projections are:
+`BackupCatalog` already provides `BackupProjection`, `BackupProjectionPage`, keyset pagination, environment rows, event rows, restore provenance, and typed public/private SDK boundaries. The change extends those exact read seams with stable `(timestamp, sequence/id)` ordering, bounded page size, and the minimum allowlisted fields required by the three screens. Filters are typed exact/date-range parameters, never SQL fragments. The shared projections are:
 
 - backups with download time, safe source label, database, format, byte size, lifecycle status, project identity/display hint, and a detail page of allowlisted backup events;
 - incomplete operations/errors from nonterminal backup/restore/environment/recovery state with object kind/identity, state, time, and `sanitize_last_error` output;
 - environment history with project/environment display identity, timestamp, operation, and bounded result/state.
 
-Raw filesystem paths, repository roots, `runtime_json`, `applied_settings_json`, configuration payloads, command output, and raw messages/errors are never selected into public/Admin DTOs. Views expose no create/edit/delete action.
+Raw filesystem paths, repository roots, `runtime_json`, `applied_settings_json`, configuration payloads, command output, and raw messages/errors are never selected into the shared safe projections. Admin consumes those projections directly and exposes no create/edit/delete action; it SHALL NOT introduce a second DTO/conversion layer.
 
 Alternative: bind Starlette Admin directly to catalogue SQLAlchemy tables. Rejected because generic model introspection would expose unsafe columns and write actions.
 
@@ -103,7 +105,7 @@ Alternative: make all dependencies core. Rejected because it breaks the establis
 ## Risks / Trade-offs
 
 - [SQLCipher wheels/builds vary across Linux, macOS, and Windows] → pin one supported DBAPI in the optional extra, add isolated-package/import tests and compatibility checks, and fail with an actionable dependency error rather than opening the file as plain SQLite.
-- [A generic Admin integration may accidentally expose model fields or actions] → use explicit DTO-backed custom views, deny mutation for catalogue resources, and contract-test routes/actions and response keys.
+- [A generic Admin integration may accidentally expose model fields or actions] → use custom views backed directly by the shared allowlisted catalogue projections, deny mutation for catalogue resources, and contract-test routes/actions and response keys.
 - [Secret lookup changes high-value authentication paths] → test exact hit/absent/error matrices at remote Odoo and GitLab public boundaries and retain the existing fallback function unchanged behind one adapter.
 - [Catalogue rows can change between pages] → use deterministic ordering and short read transactions; pagination is a live view, not a snapshot/export guarantee.
 - [Restore provenance may be stale or ambiguous] → require exact current cluster/database identity and a completed catalogue restore; uncertainty is rendered as unknown.
