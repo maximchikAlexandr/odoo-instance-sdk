@@ -26,4 +26,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Retain the nullable completion marker on downgrade."""
-    pass
