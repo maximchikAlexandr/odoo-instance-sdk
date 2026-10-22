@@ -44,6 +44,7 @@ class ProjectResource:
             container_id_matches_snapshot,
             inspect_container_identity,
             inspect_volume_identity,
+            read_owned_password_file,
         )
         from odoo_instance_sdk.internal.project_data_purge import (
             BackupPurgeAdapter,
@@ -156,12 +157,7 @@ class ProjectResource:
                         compose_runner=None,
                         project_id=claim.project_id,
                     )
-                    password_file = recovery_cluster.password_file
-                    if password_file.is_symlink() or not password_file.is_file():
-                        raise OSError("owned Compose password is unavailable")
-                    recovery_password = password_file.read_text(encoding="utf-8").strip()
-                    if not recovery_password:
-                        raise OSError("owned Compose password is unavailable")
+                    recovery_password = read_owned_password_file(recovery_cluster.password_file)
                     instance = OdooInstance(
                         config=InstanceConfig(
                             base_url="http://127.0.0.1:8069",

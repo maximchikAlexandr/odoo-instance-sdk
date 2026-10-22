@@ -254,22 +254,37 @@ def render_compose_yaml(
     )
 
 
+def read_owned_password_file(path: Path) -> str:
+    """Read an existing owner-controlled Compose password without mutating it."""
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        raise PostgresComposeInvalidError("postgres password file is unavailable") from None
+    if not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode):
+        raise PostgresComposeInvalidError("postgres password file must be a regular file")
+    if hasattr(os, "getuid") and existing.st_uid != os.getuid():
+        raise PostgresComposeInvalidError(
+            "postgres password file must be owned by the current user"
+        )
+    password = path.read_text(encoding="utf-8").strip()
+    if not password:
+        raise PostgresComposeInvalidError("postgres password file must not be empty")
+    return password
+
+
 def ensure_password_file(path: Path) -> str:
     """Create the password file with mode 0600 if missing; never overwrite existing."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        existing = os.lstat(path)
+        os.lstat(path)
     except FileNotFoundError:
         existing = None
+    else:
+        existing = True
     if existing is not None:
-        if not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode):
-            raise PostgresComposeInvalidError("postgres password file must be a regular file")
-        if hasattr(os, "getuid") and existing.st_uid != os.getuid():
-            raise PostgresComposeInvalidError(
-                "postgres password file must be owned by the current user"
-            )
+        password = read_owned_password_file(path)
         os.chmod(path, 0o600)
-        return path.read_text(encoding="utf-8").strip()
+        return password
     password = secrets.token_urlsafe(32)
     try:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
