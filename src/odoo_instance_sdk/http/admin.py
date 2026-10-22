@@ -11,8 +11,8 @@ import os
 import re
 import stat
 import tomllib
-from collections.abc import Sequence
-from dataclasses import dataclass, fields as dataclass_fields
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, fields as dataclass_fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,6 +42,7 @@ from starlette_admin.filters.base import (
 from odoo_instance_sdk.exceptions import ConfigError, SecretStoreConflictError
 from odoo_instance_sdk.internal.paths import get_admin_config_path, get_catalog_path
 from odoo_instance_sdk.internal.resource_inventory import open_catalog_read_only
+from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.internal.secret_store import (
     GitLabMemberSecret,
     RemoteOdooSecret,
@@ -61,6 +62,11 @@ _SESSION_KEY_MINIMUM = 32
 _ADMIN_USER = "admin"
 _PRIVATE_BITS = stat.S_IRWXG | stat.S_IRWXO
 _ARGON2_HASH = re.compile(r"\$argon2(?:id|i|d)\$[A-Za-z0-9=,.$+/:-]+\Z")
+_JSON_SECRET = re.compile(
+    r'(["\']?(?:password|passwd|secret|token|api[_-]?key|admin_passwd|db_password|master_pwd)'
+    r'["\']?\s*[:=]\s*)(?:"[^"]*"|\'[^\']*\'|[^,\s}]+)',
+    re.IGNORECASE,
+)
 
 
 class _ExactFilter(BaseFilter):
@@ -192,11 +198,11 @@ def _page(items: Sequence[Any], *, skip: int, limit: int, q: str | None) -> tupl
     return values[skip : skip + min(limit, 1000)]
 
 
-def _filter_values(
+def _filter_values(  # noqa: C901 -- reject malformed trees before typed catalogue APIs
     filters: FilterGroup | None,
     *,
     exact_fields: frozenset[str],
-    date_fields: frozenset[str],
+    date_fields: Mapping[str, tuple[str, str]],
 ) -> dict[str, Any]:
     """Convert the Admin filter tree into the existing typed catalog inputs."""
     if filters is None or filters.is_empty():
@@ -216,10 +222,13 @@ def _filter_values(
         if field in date_fields and rule.filter == "between":
             if not isinstance(rule.value, datetime) or not isinstance(rule.value2, datetime):
                 raise HTTPException(400, "Catalogue date range is invalid")
-            if f"{field}_after" in result or f"{field}_before" in result:
+            if rule.value > rule.value2:
+                raise HTTPException(400, "Catalogue date range is reversed")
+            after_key, before_key = date_fields[field]
+            if after_key in result or before_key in result:
                 raise HTTPException(400, "Duplicate catalogue filter")
-            result[f"{field}_after"] = rule.value
-            result[f"{field}_before"] = rule.value2
+            result[after_key] = rule.value
+            result[before_key] = rule.value2
             continue
         raise HTTPException(400, "Unsupported catalogue filter")
     return result
@@ -231,47 +240,140 @@ def _validate_choice(values: dict[str, Any], field: str, choices: frozenset[str]
         raise HTTPException(400, f"Unsupported catalogue value for {field}")
 
 
-def _validate_sort_query(request: Request, fields: frozenset[str]) -> None:
-    for value in request.query_params.getlist("sort"):
-        try:
-            field, direction = value.rsplit("__", 1)
-        except ValueError as exc:
-            raise HTTPException(400, "Unsupported catalogue sort") from exc
-        if field not in fields or direction not in {"asc", "desc"}:
-            raise HTTPException(400, "Unsupported catalogue sort")
+def _validate_backup_filters(values: dict[str, Any]) -> None:
+    _validate_choice(values, "format", frozenset({"zip", "dump"}))
+    _validate_choice(
+        values,
+        "state",
+        frozenset({"downloading", "available", "failed", "deleted"}),
+    )
 
 
-def _sort_items(
-    items: Sequence[Any],
-    *,
-    request: Request,
-    sorts: Sequence[tuple[str, str]] | None,
-    fields: frozenset[str],
-) -> tuple[Any, ...]:
-    _validate_sort_query(request, fields)
-    if not request.query_params.getlist("sort"):
-        return tuple(items)
-    result = list(items)
-    for field, direction in reversed(tuple(sorts or ())):
-        if field not in fields or direction not in {"asc", "desc"}:
-            raise HTTPException(400, "Unsupported catalogue sort")
-        result.sort(
-            key=lambda item: (getattr(item, field) is None, getattr(item, field)),
-            reverse=direction == "desc",
+def _validate_incomplete_filters(values: dict[str, Any]) -> None:
+    _validate_choice(values, "object_type", frozenset({"backup", "restore", "environment"}))
+    _validate_choice(
+        values,
+        "state",
+        frozenset(
+            {
+                "downloading",
+                "failed",
+                "incomplete",
+                "creating",
+                "removing",
+                "cleanup_failed",
+            }
+        ),
+    )
+
+
+def _validate_environment_filters(values: dict[str, Any]) -> None:
+    _validate_choice(
+        values,
+        "operation",
+        frozenset({"checkout", "sync", "use", "shell", "remove"}),
+    )
+    _validate_choice(values, "outcome", frozenset({"started", "succeeded", "failed"}))
+
+
+def _validate_sort_query(request: Request) -> None:
+    if request.query_params.getlist("sort"):
+        raise HTTPException(400, "Catalogue sorting is unsupported; use canonical order")
+
+
+def _query_match(item: Any, q: str | None) -> bool:
+    if not q:
+        return True
+    needle = q.casefold()
+    return (
+        needle
+        in " ".join(str(getattr(item, field.name)) for field in dataclass_fields(item)).casefold()
+    )
+
+
+def _safe_text(value: str | None) -> str | None:
+    text = sanitize_last_error(value)
+    return None if text is None else _JSON_SECRET.sub(r'\1"<redacted>"', text)
+
+
+def _safe_catalog_item(item: Any) -> Any:
+    if isinstance(item, BackupSummary):
+        return replace(
+            item,
+            project_id=_safe_text(item.project_id),
+            project_label=_safe_text(item.project_label),
+            source_label=_safe_text(item.source_label) or "remote source",
+            database_name=_safe_text(item.database_name) or "unknown",
         )
-    return tuple(result)
+    if isinstance(item, IncompleteOperation):
+        return replace(
+            item,
+            object_id=_safe_text(item.object_id) or "unknown",
+            error=_safe_text(item.error),
+        )
+    if isinstance(item, EnvironmentHistoryEvent):
+        return replace(
+            item,
+            environment_id=_safe_text(item.environment_id) or "unknown",
+            environment_name=_safe_text(item.environment_name) or "unknown",
+            project_id=_safe_text(item.project_id),
+            message=_safe_text(sanitize_event_message(item.message)),
+        )
+    return item
 
 
-def _read_catalog_pages(fetch: Any, **kwargs: Any) -> tuple[Any, ...]:
-    """Read typed catalog pages; every underlying query remains capped at 1000."""
+def _read_catalog_pages(
+    fetch: Any,
+    *,
+    skip: int,
+    limit: int,
+    q: str | None,
+    **kwargs: Any,
+) -> tuple[Any, ...]:
+    """Read only the canonical keyset rows needed for one Admin page."""
+    if limit <= 0:
+        return ()
+    needed = skip + min(limit, 1000)
     cursor: str | None = None
     result: list[Any] = []
     while True:
-        page = fetch(**kwargs, limit=1000, cursor=cursor)
-        result.extend(page.items)
+        page_limit = min(1000, max(1, needed - len(result)))
+        page = fetch(**kwargs, limit=page_limit, cursor=cursor)
+        result.extend(
+            safe_item
+            for item in page.items
+            if _query_match(safe_item := _safe_catalog_item(item), q)
+        )
+        if len(result) >= needed:
+            return tuple(result[skip:needed])
         cursor = page.next_cursor
         if cursor is None:
-            return tuple(result)
+            return tuple(result[skip:])
+
+
+def _count_catalog_pages(fetch: Any, *, q: str | None, **kwargs: Any) -> int:
+    """Count pages without materializing their projections in memory."""
+    cursor: str | None = None
+    total = 0
+    while True:
+        page = fetch(**kwargs, limit=1000, cursor=cursor)
+        total += sum(_query_match(_safe_catalog_item(item), q) for item in page.items)
+        cursor = page.next_cursor
+        if cursor is None:
+            return total
+
+
+def _find_catalog_item(fetch: Any, predicate: Any, **kwargs: Any) -> Any | None:
+    cursor: str | None = None
+    while True:
+        page = fetch(**kwargs, limit=1000, cursor=cursor)
+        for item in page.items:
+            safe_item = _safe_catalog_item(item)
+            if predicate(safe_item):
+                return safe_item
+        cursor = page.next_cursor
+        if cursor is None:
+            return None
 
 
 def _revision_token(value: Any) -> tuple[str, int | None]:
@@ -338,7 +440,7 @@ async def _backup_events(request: Request, obj: BackupSummary) -> str:
         page = catalog.list_backup_events(str(obj.backup_id), limit=100)
         return "; ".join(
             f"{event.event_type.value} at {event.occurred_at.isoformat()}"
-            + (f": {event.message}" if event.message else "")
+            + (f": {sanitize_event_message(event.message)}" if event.message else "")
             for event in page.items
         )
     finally:
@@ -376,61 +478,42 @@ class BackupView(_ReadOnlyCatalogView):
             exact_fields=frozenset(
                 {"project_id", "source_label", "database_name", "format", "state"}
             ),
-            date_fields=frozenset({"downloaded_at"}),
+            date_fields={"downloaded_at": ("downloaded_after", "downloaded_before")},
         )
-        _validate_choice(filter_values, "format", frozenset({"zip", "dump"}))
-        _validate_choice(
-            filter_values,
-            "state",
-            frozenset({"downloading", "available", "failed", "deleted"}),
-        )
-        _validate_sort_query(
-            request,
-            frozenset(
-                {
-                    "backup_id",
-                    "project_id",
-                    "project_label",
-                    "source_label",
-                    "database_name",
-                    "format",
-                    "size_bytes",
-                    "state",
-                    "downloaded_at",
-                }
-            ),
-        )
+        _validate_backup_filters(filter_values)
+        _validate_sort_query(request)
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return ()
         try:
-            items = _read_catalog_pages(catalog.list_backup_summaries, **filter_values)
-            items = _sort_items(
-                items,
-                request=request,
-                sorts=sorts,
-                fields=frozenset(
-                    {
-                        "backup_id",
-                        "project_id",
-                        "project_label",
-                        "source_label",
-                        "database_name",
-                        "format",
-                        "size_bytes",
-                        "state",
-                        "downloaded_at",
-                    }
-                ),
+            return _read_catalog_pages(
+                catalog.list_backup_summaries,
+                skip=skip,
+                limit=limit,
+                q=q,
+                **filter_values,
             )
-            return _page(items, skip=skip, limit=limit, q=q)
         finally:
             catalog.close()
 
     async def count(
         self, request: Request, q: str | None = None, filters: FilterGroup | None = None
     ) -> int:
-        return len(await self.find_all(request, q=q, limit=-1, filters=filters))
+        filter_values = _filter_values(
+            filters,
+            exact_fields=frozenset(
+                {"project_id", "source_label", "database_name", "format", "state"}
+            ),
+            date_fields={"downloaded_at": ("downloaded_after", "downloaded_before")},
+        )
+        _validate_backup_filters(filter_values)
+        catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
+        if catalog is None:
+            return 0
+        try:
+            return _count_catalog_pages(catalog.list_backup_summaries, q=q, **filter_values)
+        finally:
+            catalog.close()
 
     async def find_by_pk(self, request: Request, pk: Any) -> BackupSummary | None:
         del request
@@ -438,8 +521,10 @@ class BackupView(_ReadOnlyCatalogView):
         if catalog is None:
             return None
         try:
-            page = _read_catalog_pages(catalog.list_backup_summaries)
-            return next((item for item in page if str(item.backup_id) == str(pk)), None)
+            return _find_catalog_item(
+                catalog.list_backup_summaries,
+                lambda item: str(item.backup_id) == str(pk),
+            )
         finally:
             catalog.close()
 
@@ -477,53 +562,53 @@ class IncompleteOperationView(_ReadOnlyCatalogView):
         filter_values = _filter_values(
             filters,
             exact_fields=frozenset({"object_type", "state"}),
-            date_fields=frozenset({"occurred_at"}),
+            date_fields={"occurred_at": ("occurred_after", "occurred_before")},
         )
-        _validate_choice(
-            filter_values,
-            "object_type",
-            frozenset({"backup", "restore", "environment"}),
-        )
-        _validate_choice(
-            filter_values,
-            "state",
-            frozenset(
-                {
-                    "downloading",
-                    "failed",
-                    "incomplete",
-                    "creating",
-                    "removing",
-                    "cleanup_failed",
-                }
-            ),
-        )
-        fields = frozenset({"sequence", "object_type", "object_id", "state", "occurred_at"})
-        _validate_sort_query(request, fields)
+        _validate_incomplete_filters(filter_values)
+        _validate_sort_query(request)
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return ()
         try:
-            items = _read_catalog_pages(catalog.list_incomplete_operations, **filter_values)
-            items = _sort_items(items, request=request, sorts=sorts, fields=fields)
-            return _page(items, skip=skip, limit=limit, q=q)
+            return _read_catalog_pages(
+                catalog.list_incomplete_operations,
+                skip=skip,
+                limit=limit,
+                q=q,
+                **filter_values,
+            )
         finally:
             catalog.close()
 
     async def count(
         self, request: Request, q: str | None = None, filters: FilterGroup | None = None
     ) -> int:
-        return len(await self.find_all(request, q=q, limit=-1, filters=filters))
+        filter_values = _filter_values(
+            filters,
+            exact_fields=frozenset({"object_type", "state"}),
+            date_fields={"occurred_at": ("occurred_after", "occurred_before")},
+        )
+        _validate_incomplete_filters(filter_values)
+        catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
+        if catalog is None:
+            return 0
+        try:
+            return _count_catalog_pages(catalog.list_incomplete_operations, q=q, **filter_values)
+        finally:
+            catalog.close()
 
     async def find_by_pk(self, request: Request, pk: Any) -> IncompleteOperation | None:
-        return next(
-            (
-                item
-                for item in await self.find_all(request, limit=-1)
-                if str(item.sequence) == str(pk)
-            ),
-            None,
-        )
+        del request
+        catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
+        if catalog is None:
+            return None
+        try:
+            return _find_catalog_item(
+                catalog.list_incomplete_operations,
+                lambda item: str(item.sequence) == str(pk),
+            )
+        finally:
+            catalog.close()
 
     async def find_by_pks(self, request: Request, pks: list[Any]) -> Sequence[IncompleteOperation]:
         result: list[IncompleteOperation] = []
@@ -562,55 +647,53 @@ class EnvironmentHistoryView(_ReadOnlyCatalogView):
         filter_values = _filter_values(
             filters,
             exact_fields=frozenset({"environment_id", "project_id", "operation", "outcome"}),
-            date_fields=frozenset({"occurred_at"}),
+            date_fields={"occurred_at": ("occurred_after", "occurred_before")},
         )
-        _validate_choice(
-            filter_values,
-            "operation",
-            frozenset({"checkout", "sync", "use", "shell", "remove"}),
-        )
-        _validate_choice(
-            filter_values,
-            "outcome",
-            frozenset({"started", "succeeded", "failed"}),
-        )
-        fields = frozenset(
-            {
-                "sequence",
-                "environment_id",
-                "environment_name",
-                "project_id",
-                "occurred_at",
-                "operation",
-                "outcome",
-                "state",
-            }
-        )
-        _validate_sort_query(request, fields)
+        _validate_environment_filters(filter_values)
+        _validate_sort_query(request)
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return ()
         try:
-            items = _read_catalog_pages(catalog.list_environment_history, **filter_values)
-            items = _sort_items(items, request=request, sorts=sorts, fields=fields)
-            return _page(items, skip=skip, limit=limit, q=q)
+            return _read_catalog_pages(
+                catalog.list_environment_history,
+                skip=skip,
+                limit=limit,
+                q=q,
+                **filter_values,
+            )
         finally:
             catalog.close()
 
     async def count(
         self, request: Request, q: str | None = None, filters: FilterGroup | None = None
     ) -> int:
-        return len(await self.find_all(request, q=q, limit=-1, filters=filters))
+        filter_values = _filter_values(
+            filters,
+            exact_fields=frozenset({"environment_id", "project_id", "operation", "outcome"}),
+            date_fields={"occurred_at": ("occurred_after", "occurred_before")},
+        )
+        _validate_environment_filters(filter_values)
+        catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
+        if catalog is None:
+            return 0
+        try:
+            return _count_catalog_pages(catalog.list_environment_history, q=q, **filter_values)
+        finally:
+            catalog.close()
 
     async def find_by_pk(self, request: Request, pk: Any) -> EnvironmentHistoryEvent | None:
-        return next(
-            (
-                item
-                for item in await self.find_all(request, limit=-1)
-                if str(item.sequence) == str(pk)
-            ),
-            None,
-        )
+        del request
+        catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
+        if catalog is None:
+            return None
+        try:
+            return _find_catalog_item(
+                catalog.list_environment_history,
+                lambda item: str(item.sequence) == str(pk),
+            )
+        finally:
+            catalog.close()
 
     async def find_by_pks(
         self, request: Request, pks: list[Any]

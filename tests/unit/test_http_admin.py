@@ -269,6 +269,32 @@ def test_catalogue_resources_are_exactly_three_read_only_views(
         == 400
     )
     assert client.get("/admin/backups/list", params={"sort": "unknown__asc"}).status_code == 400
+    for key, field in (
+        ("backups", "downloaded_at"),
+        ("incomplete-operations", "occurred_at"),
+        ("environment-history", "occurred_at"),
+    ):
+        assert (
+            client.get(
+                f"/admin/{key}/list",
+                params={"filter": f"{field}__between=2025-01-01T00:00:00Z..2025-01-02T00:00:00Z"},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.get(
+                f"/admin/{key}/list",
+                params={"filter": f"{field}__between=not-a-date..2025-01-02T00:00:00Z"},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.get(
+                f"/admin/{key}/list",
+                params={"filter": f"{field}__between=2025-01-02T00:00:00Z..2025-01-01T00:00:00Z"},
+            ).status_code
+            == 400
+        )
 
 
 def test_catalogue_filters_reject_adversarial_inputs_and_follow_all_pages(
@@ -317,7 +343,7 @@ def test_catalogue_filters_reject_adversarial_inputs_and_follow_all_pages(
 
         def list_backup_summaries(self, **kwargs: object) -> BackupSummaryPage:
             cursor = kwargs["cursor"]
-            assert kwargs["limit"] == 1000
+            assert 1 <= kwargs["limit"] <= 1000
             self.cursors.append(cursor if isinstance(cursor, str) else None)
             return (
                 BackupSummaryPage(first, "page-2")
@@ -345,8 +371,91 @@ def test_catalogue_filters_reject_adversarial_inputs_and_follow_all_pages(
                 _request(), filters=FilterGroup(rules=[FilterRule("state", "contains", "x")])
             )
         )
-    with pytest.raises(HTTPException, match="Unsupported catalogue sort"):
+    with pytest.raises(HTTPException, match="Catalogue sorting is unsupported"):
         asyncio.run(BackupView().find_all(_request("sort=secret__asc")))
+
+
+def test_catalogue_http_projection_redacts_unsafe_persisted_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+
+    from odoo_instance_sdk.http import admin as admin_module
+    from odoo_instance_sdk.models.backup import BackupFormat, BackupState
+    from odoo_instance_sdk.storage.catalog.helpers import (
+        BackupEventPage,
+        BackupSummary,
+        BackupSummaryPage,
+        EnvironmentHistoryEvent,
+        EnvironmentHistoryPage,
+        IncompleteOperation,
+        IncompleteOperationPage,
+    )
+
+    raw_path = "/private/raw/odoo/admin.toml"
+    raw_json = '{"admin_passwd":"raw-secret","config":"/private/raw/config.json"}'
+    raw_command = "odoo --config /private/raw/odoo.conf admin_passwd=raw-secret"
+    now = datetime.now(UTC)
+
+    class Catalog:
+        def list_backup_summaries(self, **_: object) -> BackupSummaryPage:
+            return BackupSummaryPage(
+                (
+                    BackupSummary(
+                        uuid.uuid4(),
+                        raw_path,
+                        raw_json,
+                        raw_path,
+                        raw_json,
+                        BackupFormat.DUMP,
+                        1,
+                        BackupState.AVAILABLE,
+                        now,
+                    ),
+                ),
+                None,
+            )
+
+        def list_backup_events(self, *_args: object, **_kwargs: object) -> BackupEventPage:
+            return BackupEventPage((), None)
+
+        def list_incomplete_operations(self, **_: object) -> IncompleteOperationPage:
+            return IncompleteOperationPage(
+                (IncompleteOperation(1, "backup", raw_path, "failed", now, raw_command),), None
+            )
+
+        def list_environment_history(self, **_: object) -> EnvironmentHistoryPage:
+            return EnvironmentHistoryPage(
+                (
+                    EnvironmentHistoryEvent(
+                        1,
+                        "env-1",
+                        raw_path,
+                        raw_json,
+                        now,
+                        "sync",
+                        "failed",
+                        "active",
+                        raw_command,
+                    ),
+                ),
+                None,
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(admin_module, "get_catalog_path", lambda **_: Path("catalog"))
+    monkeypatch.setattr(admin_module, "open_catalog_read_only", lambda _path: Catalog())
+    _, client, _ = _authenticated_client(root)
+    for key in ("backups", "incomplete-operations", "environment-history"):
+        response = client.get(f"/admin/{key}/list")
+        assert response.status_code == 200
+        assert raw_path not in response.text
+        assert raw_json not in response.text
+        assert raw_command not in response.text
+        assert "raw-secret" not in response.text
 
 
 def test_secret_form_is_write_only_and_creates_direct_store_record(
