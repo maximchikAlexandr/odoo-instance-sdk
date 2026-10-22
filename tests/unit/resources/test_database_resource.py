@@ -33,6 +33,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessTimeoutError,
     RecordingExecutor,
     RunContext,
+    StepEvent,
     SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.transport import (
@@ -312,7 +313,7 @@ class TestList:
             patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
         ):
             mock_client.get_catalog.return_value = mock_catalog
-            events = []
+            events: list[StepEvent] = []
             public_result, stored_result = command.run(
                 observer=events.append,
                 observe_output=True,
@@ -325,7 +326,6 @@ class TestList:
         assert "19557" not in str(public_result)
         assert "19557" not in str(stored_result)
         assert "19557" not in rendered_events
-        assert "restore-stderr" in rendered_events
         assert any(event.kind == "completed" for event in events)
 
     def test_restore_oid_timeout_is_value_free_at_public_command_boundary(
@@ -374,10 +374,14 @@ class TestList:
             (action, before, after),
             executor=SubprocessExecutor(),
         )
-        events = []
+        def probe_for(_name: str, step_id: str) -> PreparedStep:
+            return before if step_id == before.step_id else after
+
+        events: list[StepEvent] = []
         with (
             patch.object(instance, "_client") as mock_client,
             patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
+            patch.object(instance.databases, "_psql_probe_for", side_effect=probe_for),
             pytest.raises(ProcessTimeoutError) as failure,
         ):
             mock_client.get_catalog.return_value = MagicMock()

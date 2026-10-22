@@ -140,7 +140,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # hidden by a broad allowlist.
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/resources/test_database_resource.py", 960),
+        ("tests/unit/resources/test_database_resource.py", 1048),
         ("tests/unit/test_monitor_cache_and_docker.py", 119),
         ("tests/unit/test_cluster_resources.py", 188),
         ("tests/unit/test_real_odoo_ci_components.py", 40),
