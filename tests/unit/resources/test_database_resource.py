@@ -332,7 +332,7 @@ class TestList:
         self, client: OdooClient, tmp_path: Path
     ) -> None:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
-        from odoo_instance_sdk.internal.proc import PreparedAction
+        from odoo_instance_sdk.internal.proc import PreparedAction, active_context
 
         backup_path = tmp_path / "test.zip"
         backup_path.write_bytes(b"fake content")
@@ -375,14 +375,22 @@ class TestList:
             executor=SubprocessExecutor(),
         )
 
-        def probe_for(_name: str, step_id: str) -> PreparedStep:
-            return before if step_id == before.step_id else after
+        def verify(*_args: object, step_id: str | None = None, **_kwargs: object) -> bool:
+            assert step_id == before.step_id
+            assert step_id is not None
+            context = active_context()
+            assert context is not None
+            result = cast("ProcessResult", context.process(step_id))
+            return bool(result.stdout)
 
         events: list[StepEvent] = []
         with (
             patch.object(instance, "_client") as mock_client,
             patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
-            patch.object(instance.databases, "_psql_probe_for", side_effect=probe_for),
+            patch(
+                "odoo_instance_sdk.resources.database.backup_restore_parts.queries._verify_database_via_psql",
+                side_effect=verify,
+            ),
             pytest.raises(ProcessTimeoutError) as failure,
         ):
             mock_client.get_catalog.return_value = MagicMock()
