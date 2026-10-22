@@ -1224,8 +1224,6 @@ class TestBackupProvenance:
         headers: dict[str, str],
         expected_total: int | None,
     ) -> None:
-        from odoo_instance_sdk.internal.proc import StepEvent
-
         response = make_response()
         response.headers = {"content-disposition": 'attachment; filename="demo.zip"', **headers}
         response.iter_bytes.return_value = [b"back", b"up"]
