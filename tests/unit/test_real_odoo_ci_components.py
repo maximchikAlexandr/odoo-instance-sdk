@@ -271,9 +271,7 @@ def test_full_bootstrap_rejects_audit_before_source_cache_probe(
     monkeypatch.setattr(bootstrap, "_version_is_exact", lambda _command, _expected: True)
     monkeypatch.setattr(bootstrap, "_image_manifest_is_pinned", lambda _image, _digest: True)
     monkeypatch.setattr(bootstrap, "python_resolution_lock_is_valid", lambda: True)
-    monkeypatch.setattr(
-        bootstrap, "python_resolution_audit_is_valid", lambda *, diagnostics: False
-    )
+    monkeypatch.setattr(bootstrap, "python_resolution_audit_is_valid", lambda *, diagnostics: False)
     source_probe_calls: list[bool] = []
 
     def source_revision_probe() -> bool:
