@@ -526,6 +526,7 @@ def _assert_partial_purge_failure_details(
     assert details["completed"][0]["identity"] == completed_identity  # type: ignore[index]
     assert details["remaining"][0]["identity"] == failed_identity  # type: ignore[index]
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert not catalog._project_purge_completed(project_id)
     return details
 
 
@@ -612,6 +613,7 @@ def test_partial_purge_failure_captured_process_is_publicly_truthful_and_retryab
     )
     assert result.completed[-1].action == "forget"
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert catalog._project_purge_completed(project_id)
     catalog.close()
 
 
@@ -688,6 +690,7 @@ def test_partial_purge_failure_in_process_action_is_publicly_truthful_and_retrya
     assert result.completed[-1].action == "forget"
     assert not failed_resource.exists()
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert catalog._project_purge_completed(project_id)
     catalog.close()
 
 
