@@ -93,7 +93,6 @@ class GitLabMemberSecret:
     member_id: str
     host: str
     login: str
-    token_key: str
     revision: int
     created_at: str
     updated_at: str
@@ -101,7 +100,7 @@ class GitLabMemberSecret:
     def __repr__(self) -> str:
         return (
             f"GitLabMemberSecret(member_id={self.member_id!r}, host={self.host!r}, "
-            f"login={self.login!r}, token_key={self.token_key!r}, "
+            f"login={self.login!r}, "
             f"revision={self.revision!r}, created_at={self.created_at!r}, "
             f"updated_at={self.updated_at!r})"
         )
@@ -637,13 +636,12 @@ class SecretStore:
         finally:
             connection.close()
         return GitLabMemberSecret(
-            normalized_member,
-            normalized_host,
-            safe_login,
-            token_key,
-            1,
-            timestamp,
-            timestamp,
+            member_id=normalized_member,
+            host=normalized_host,
+            login=safe_login,
+            revision=1,
+            created_at=timestamp,
+            updated_at=timestamp,
         )
 
     def update_gitlab_member(
@@ -707,13 +705,12 @@ class SecretStore:
                 )
             connection.commit()
             return GitLabMemberSecret(
-                normalized_member,
-                normalized_host,
-                safe_login,
-                _text(row[1], label="token key"),
-                current + 1,
-                _text(row[3], label="created timestamp"),
-                timestamp,
+                member_id=normalized_member,
+                host=normalized_host,
+                login=safe_login,
+                revision=current + 1,
+                created_at=_text(row[3], label="created timestamp"),
+                updated_at=timestamp,
             )
         except SecretStoreError:
             with contextlib.suppress(Exception):
@@ -814,7 +811,6 @@ def _gitlab_projection(row: _SqlRow) -> GitLabMemberSecret:
         member_id=_text(row[0], label="member ID"),
         host=_text(row[1], label="host"),
         login=_text(row[2], label="login"),
-        token_key=_text(row[3], label="token key"),
         revision=_revision(row[4]),
         created_at=_text(row[5], label="created timestamp"),
         updated_at=_text(row[6], label="updated timestamp"),
