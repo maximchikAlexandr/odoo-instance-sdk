@@ -1274,6 +1274,109 @@ def test_public_purge_recovers_missing_source_with_legacy_init_binding(
     catalog.close()
 
 
+def test_public_purge_recovers_missing_source_with_legacy_restore_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+    registered_project_id = f"project_{legacy_project_id}"
+
+    def seed_legacy_restore(
+        catalog: BackupCatalog, _claim_project_id: str, claim: object, data_directory: Path
+    ) -> None:
+        backup_id = str(uuid.uuid4())
+        backup_path = data_directory.parent / "owned.zip"
+        backup_path.write_bytes(b"owned")
+        catalog.start_download(
+            backup_id,
+            "http://127.0.0.1:8069",
+            "owned_db",
+            "zip",
+            True,
+            backup_path,
+            project_id=registered_project_id,
+        )
+        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
+        catalog.record_restore(
+            "127.0.0.1",
+            15432,
+            "owned_db",
+            backup_id,
+            cluster_id=getattr(claim, "cluster_id"),
+            data_directory=data_directory,
+            database_oid=102,
+        )
+
+    catalog, command, _executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        legacy_project_id,
+        ("owned_db",),
+        seed_legacy_restore,
+        real_children=True,
+    )
+    assert project_id == registered_project_id
+    assert any("database" in step.step_id for step in command.plan.steps)
+    result = command.run()
+    assert result.registration_state == "forgotten"
+    assert tuple(item.resource_type for item in result.completed) == (
+        "database",
+        "volume",
+        "project",
+    )
+    catalog.close()
+
+
+def test_public_purge_refuses_missing_source_with_legacy_restore_oid_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+    registered_project_id = f"project_{legacy_project_id}"
+
+    def seed_legacy_restore(
+        catalog: BackupCatalog, _claim_project_id: str, claim: object, data_directory: Path
+    ) -> None:
+        backup_id = str(uuid.uuid4())
+        backup_path = data_directory.parent / "owned.zip"
+        backup_path.write_bytes(b"owned")
+        catalog.start_download(
+            backup_id,
+            "http://127.0.0.1:8069",
+            "owned_db",
+            "zip",
+            True,
+            backup_path,
+            project_id=registered_project_id,
+        )
+        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
+        catalog.record_restore(
+            "127.0.0.1",
+            15432,
+            "owned_db",
+            backup_id,
+            cluster_id=getattr(claim, "cluster_id"),
+            data_directory=data_directory,
+            database_oid=101,
+        )
+
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        legacy_project_id,
+        ("owned_db",),
+        seed_legacy_restore,
+        real_children=True,
+        observed_oids={"owned_db": 202},
+    )
+    assert project_id == registered_project_id
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
 def test_public_purge_refuses_missing_source_with_foreign_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
