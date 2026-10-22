@@ -41,6 +41,7 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_odoo_config,
 )
 from odoo_instance_sdk.internal.pgadmin import PgAdminPhaseHandle
+from odoo_instance_sdk.internal.proc import ProcessResult
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
 from odoo_instance_sdk.models import (
@@ -60,6 +61,7 @@ from odoo_instance_sdk.resources.environment.checkout_artifacts import (
     _skip_planned_pgadmin_database_probe,
     _sync_applied_settings,
 )
+from odoo_instance_sdk.resources.environment.checkout_filestore import verify_copy_filestore
 from odoo_instance_sdk.resources.environment.checkout_planning import (
     _PGADMIN_LIFECYCLE_TIMEOUT,
     EnvironmentDatabaseMode,
@@ -83,7 +85,6 @@ if TYPE_CHECKING:
         PreparedAction,
         PreparedStep,
         ProcessExecutor,
-        ProcessResult,
         RunContext,
         Step,
     )
@@ -132,6 +133,7 @@ class _SettingsMixin(_CheckoutInventoryMixin):
         cfg_dict: Mapping[str, str],
         source_db: str,
         target_db: str,
+        data_dir: Path | None,
         repo_root: Path,
         project: ProjectConfig,
         remote_name: str | None,
@@ -232,6 +234,16 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             target_db,
             expected_exists=True,
         )
+        attachment_result = context.process_prepared(
+            context.prepared("database.restore.attachments")
+        )
+        if not isinstance(attachment_result, ProcessResult):
+            raise InstanceConfigurationError("target attachment query returned an invalid result")
+        raw_data_dir = cfg_dict.get("data_dir")
+        target_data_dir = data_dir or (
+            Path(raw_data_dir).expanduser().absolute() if raw_data_dir else None
+        )
+        verify_copy_filestore(attachment_result, target_data_dir, target_db)
         catalog.upsert_copy_journal(
             str(env_id),
             target_database=target_db,

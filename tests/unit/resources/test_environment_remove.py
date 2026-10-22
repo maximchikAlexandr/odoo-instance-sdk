@@ -491,6 +491,7 @@ class TestCopyRemoveRecovery:
         marker = tmp_path / "psql-called"
         executable.write_text(
             "#!/bin/sh\n"
+            'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
             "  printf '1\\n'\n"
             "else\n"
@@ -977,7 +978,8 @@ class TestCopyRemoveRecovery:
         executable = tmp_path / "psql"
         marker = tmp_path / "psql-called"
         executable.write_text(
-            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf \'1\\n\'; else : > "{marker}"; fi\n'
+            f'#!/bin/sh\ncase "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
+            f'if [ -f "{marker}" ]; then printf \'1\\n\'; else : > "{marker}"; fi\n'
         )
         executable.chmod(0o755)
         monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
@@ -1010,6 +1012,7 @@ class TestRetainedReplacementRemove:
         marker = tmp_path / "psql-called"
         executable.write_text(
             "#!/bin/sh\n"
+            'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
             "  printf '1\\n'\n"
             "else\n"
@@ -1183,6 +1186,7 @@ class TestCopyRestoreClusterIdentity:
             "  printf '1\\n'\n"
             "  exit 0\n"
             "fi\n"
+            'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
             "  printf '1\\n'\n"
             "else\n"
@@ -1473,6 +1477,7 @@ class TestEnvRemoveForceConnections:
         marker = tmp_path / "psql-called"
         executable.write_text(
             "#!/bin/sh\n"
+            'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
             "  printf '1\\n'\n"
             "else\n"

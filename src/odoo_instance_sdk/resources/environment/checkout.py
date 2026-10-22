@@ -45,7 +45,6 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment.checkout_api import _CheckoutApiMixin
 from odoo_instance_sdk.resources.environment.checkout_artifacts import (
-    _capture_checkout_stage,
     _checkout_steps,
     _normalize_checkout_stage,
     _planning_error_outcome,
@@ -73,6 +72,9 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _resolve_checkout_hash_lock,
 )
 from odoo_instance_sdk.resources.environment.checkout_source_runtime import _source_auxiliary_python
+from odoo_instance_sdk.resources.environment.checkout_stages import (
+    capture_checkout_stage as _capture_checkout_stage,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -153,6 +155,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
             cfg_dict: Mapping[str, str],
             source_db: str,
             target_db: str,
+            data_dir: Path | None,
             repo_root: Path,
             project: ProjectConfig,
             remote_name: str | None,
@@ -713,9 +716,18 @@ class _CheckoutMixin(_CheckoutApiMixin):
         instance = self._client.instance.from_config(plan.source_config)
         if not isinstance(instance, OdooInstance) or instance.config.start_config is None:
             return None
+        raw_data_dir = plan.config_values.get("data_dir")
+        data_dir = plan.data_dir or (
+            Path(raw_data_dir).expanduser().absolute() if raw_data_dir else None
+        )
+        if data_dir is None:
+            raise PlanValidationError("COPY auxiliary restore requires a captured data_dir")
         python_bin = _source_auxiliary_python(plan)
         instance.config = replace(
             instance.config,
+            start_config=(
+                msgspec.structs.replace(instance.config.start_config, data_dir=str(data_dir))
+            ),
             command_prefix=(python_bin, plan.odoo_bin),
             default_cwd=Path(plan.runtime_cwd) if plan.adopted else plan.repo_root,
             default_run_args=plan.project.default_run_args,
