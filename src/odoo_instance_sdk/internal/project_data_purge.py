@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -459,57 +460,59 @@ class ComposeClusterPurgeAdapter:
         def run(  # noqa: C901 -- guard, effect, and postcondition are one transaction
             context: RunContext[ProjectResourceDecision],
         ) -> ProjectResourceDecision:
-            context.action(action.step_id)
-            if not self._claim_matches(target):
-                raise ConfigError("Compose cluster claim changed before destruction")
-            if target.dependency_check is None:
-                raise ConfigError("Compose cluster exclusive-use evidence is unavailable")
-            if target.dependency_check():
-                raise ConfigError("Compose cluster has a retained or active dependency")
-            volume = _json_object(context.process(volume_inspect.step_id), label="volume")
-            container = _json_object(context.process(container_inspect.step_id), label="container")
-            if volume is not None and not _identity_labels(volume, container=False, target=target):
-                raise ConfigError("Compose volume labels do not match the active project claim")
-            if container is not None and not _identity_labels(
-                container, container=True, target=target
-            ):
-                raise ConfigError("Compose container labels or volume mount do not match the claim")
-            # Recheck immediately after both live Docker identities are known;
-            # the capture-time and pre-inspection checks are not sufficient to
-            # authorize a mutation if a dependent resource appeared meanwhile.
-            if not self._claim_matches(target):
-                raise ConfigError("Compose cluster claim changed before destruction")
-            if target.dependency_check():
-                raise ConfigError("Compose cluster has a retained or active dependency")
-            if container is not None:
-                stop_result = context.process(stop.step_id)
-                if isinstance(stop_result, ProcessResult) and stop_result.returncode != 0:
-                    raise ConfigError("Compose container stop failed")
-                remove_result = context.process(remove_container.step_id)
-                if isinstance(remove_result, ProcessResult) and remove_result.returncode != 0:
-                    raise ConfigError("Compose container removal failed")
-            else:
-                skip(context, stop)
-                skip(context, remove_container)
-            if volume is not None:
-                remove_result = context.process(remove_volume.step_id)
-                if isinstance(remove_result, ProcessResult) and remove_result.returncode != 0:
-                    raise ConfigError("Compose volume removal failed")
-            else:
-                skip(context, remove_volume)
-            verified_volume = context.process(verify_volume.step_id)
-            verified_container = context.process(verify_container.step_id)
-            _require_absent(verified_volume, label="volume")
-            _require_absent(verified_container, label="container")
-            if not self._catalog._remove_postgres_cluster_claim(
-                target.cluster_id,
-                target.claim_project_id or target.project_id,
-                target.compose_project,
-                target.volume_name,
-            ):
-                raise ConfigError("Compose cluster claim changed after resource removal")
-            context.complete_action(action.step_id)
-            return decision
+            cluster_project_id = target.claim_project_id or target.project_id
+            with exclusive_lock(postgres_cluster_lock_path(cluster_project_id)):
+                context.action(action.step_id)
+                if not self._claim_matches(target):
+                    raise ConfigError("Compose cluster claim changed before destruction")
+                if target.dependency_check is None:
+                    raise ConfigError("Compose cluster exclusive-use evidence is unavailable")
+                if target.dependency_check():
+                    raise ConfigError("Compose cluster has a retained or active dependency")
+                volume = _json_object(context.process(volume_inspect.step_id), label="volume")
+                container = _json_object(context.process(container_inspect.step_id), label="container")
+                if volume is not None and not _identity_labels(volume, container=False, target=target):
+                    raise ConfigError("Compose volume labels do not match the active project claim")
+                if container is not None and not _identity_labels(
+                    container, container=True, target=target
+                ):
+                    raise ConfigError("Compose container labels or volume mount do not match the claim")
+                # Recheck immediately after both live Docker identities are known;
+                # the capture-time and pre-inspection checks are not sufficient to
+                # authorize a mutation if a dependent resource appeared meanwhile.
+                if not self._claim_matches(target):
+                    raise ConfigError("Compose cluster claim changed before destruction")
+                if target.dependency_check():
+                    raise ConfigError("Compose cluster has a retained or active dependency")
+                if container is not None:
+                    stop_result = context.process(stop.step_id)
+                    if isinstance(stop_result, ProcessResult) and stop_result.returncode != 0:
+                        raise ConfigError("Compose container stop failed")
+                    remove_result = context.process(remove_container.step_id)
+                    if isinstance(remove_result, ProcessResult) and remove_result.returncode != 0:
+                        raise ConfigError("Compose container removal failed")
+                else:
+                    skip(context, stop)
+                    skip(context, remove_container)
+                if volume is not None:
+                    remove_result = context.process(remove_volume.step_id)
+                    if isinstance(remove_result, ProcessResult) and remove_result.returncode != 0:
+                        raise ConfigError("Compose volume removal failed")
+                else:
+                    skip(context, remove_volume)
+                verified_volume = context.process(verify_volume.step_id)
+                verified_container = context.process(verify_container.step_id)
+                _require_absent(verified_volume, label="volume")
+                _require_absent(verified_container, label="container")
+                if not self._catalog._remove_postgres_cluster_claim(
+                    target.cluster_id,
+                    target.claim_project_id or target.project_id,
+                    target.compose_project,
+                    target.volume_name,
+                ):
+                    raise ConfigError("Compose cluster claim changed after resource removal")
+                context.complete_action(action.step_id)
+                return decision
 
         return Command.from_prepared(
             ExecutionPlan(steps=tuple(step.public_projection() for step in prepared_steps)),
