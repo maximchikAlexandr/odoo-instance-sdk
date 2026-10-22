@@ -25,23 +25,34 @@ on:
           - refresh-dependencies
         default: full
         required: true
+      mode:
+        description: "Select project-removal proof, focused nodes, or the full tier"
+        type: choice
+        options:
+          - project-removal
+          - targeted
+          - full
+        default: full
+        required: true
 
 permissions:
   contents: read
 
 jobs:
   real-odoo-targeted:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.operation == 'full' && inputs.mode != 'full')
     uses: ./.github/workflows/real-odoo-tier.yml
     with:
-      mode: targeted
+      mode: ${{ github.event_name == 'push' && 'targeted' || inputs.mode }}
 
   real-odoo-full:
     needs: real-odoo-targeted
     if: >-
       always() &&
       (github.event_name != 'push' || needs.real-odoo-targeted.result == 'success') &&
-      (github.event_name != 'workflow_dispatch' || inputs.operation != 'refresh-dependencies')
+      (github.event_name != 'workflow_dispatch' || (inputs.operation != 'refresh-dependencies' && inputs.mode == 'full'))
     uses: ./.github/workflows/real-odoo-tier.yml
     with:
       mode: full
