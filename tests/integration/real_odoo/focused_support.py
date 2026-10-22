@@ -387,7 +387,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             "init",
             "--project",
             str(root),
-            "--no-input",
+            "--yes",
             "--allow-partial",
             "--odoo-bin",
             str(bootstrap_odoo_bin),
