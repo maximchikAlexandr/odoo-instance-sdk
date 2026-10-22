@@ -92,6 +92,33 @@ def test_copy_filestore_verification_requires_contained_regular_files(
             verify_copy_filestore(context, tmp_path / "data", "target")
 
 
+@pytest.mark.parametrize("kind", ("symlink", "fifo"))
+def test_copy_filestore_verification_rejects_symlinked_and_non_regular_targets(
+    tmp_path: Path, kind: str
+) -> None:
+    target = tmp_path / "data" / "filestore" / "target"
+    target.mkdir(parents=True)
+    entry = target / "asset"
+    if kind == "symlink":
+        (target / "regular-asset").write_bytes(b"restored")
+        entry.symlink_to(target / "regular-asset")
+    else:
+        os.mkfifo(entry)
+    result = ProcessResult(
+        argv=(),
+        returncode=0,
+        stdout="6173736574",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    context = SimpleNamespace(process=lambda _step_id: result)
+
+    with pytest.raises(InstanceConfigurationError):
+        verify_copy_filestore(context, tmp_path / "data", "target")
+
+
 def test_copy_source_manager_uses_existing_project_python_before_owned_venv(
     tmp_path: Path,
 ) -> None:

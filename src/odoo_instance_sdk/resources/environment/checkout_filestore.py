@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -43,6 +44,27 @@ def copy_attachment_probe(plan: _CheckoutPlan) -> PreparedStep:
     ).prepared_step
 
 
+def _verify_regular_filestore_entry(root: Path, relative: PurePosixPath, store_fname: str) -> None:
+    candidate = root
+    for index, part in enumerate(relative.parts):
+        candidate /= part
+        try:
+            mode = candidate.lstat().st_mode
+        except OSError as exc:
+            raise InstanceConfigurationError(
+                f"restored attachment file is missing: {store_fname!r}"
+            ) from exc
+        if stat.S_ISLNK(mode):
+            raise InstanceConfigurationError("target attachment path contains a symlink")
+        if index < len(relative.parts) - 1:
+            if not stat.S_ISDIR(mode):
+                raise InstanceConfigurationError("target attachment path is not a directory")
+        elif not stat.S_ISREG(mode):
+            raise InstanceConfigurationError(
+                f"restored attachment file is not regular: {store_fname!r}"
+            )
+
+
 def verify_copy_filestore(
     context: _AttachmentProbeContext, data_dir: Path | None, target_db: str
 ) -> None:
@@ -82,12 +104,4 @@ def verify_copy_filestore(
             or any(part in {"", ".", ".."} for part in relative.parts)
         ):
             raise InstanceConfigurationError("target attachment path is unsafe")
-        candidate = (root / Path(*relative.parts)).resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError as exc:
-            raise InstanceConfigurationError("target attachment path escapes filestore") from exc
-        if not candidate.is_file():
-            raise InstanceConfigurationError(
-                f"restored attachment file is missing: {store_fname!r}"
-            )
+        _verify_regular_filestore_entry(root, relative, store_fname)
