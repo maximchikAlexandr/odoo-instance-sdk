@@ -294,7 +294,7 @@ class _EnvironmentMixin:
         return self._conn.execute(query, params).fetchall()
 
     @staticmethod
-    def _catalogue_datetime(value: object, *, field: str) -> datetime:
+    def _catalogue_datetime(value: CatalogValue, *, field: str) -> datetime:
         if not isinstance(value, str) or not value.strip():
             raise BackupCatalogError(f"{field} is invalid")
         try:

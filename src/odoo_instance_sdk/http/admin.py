@@ -11,12 +11,12 @@ import os
 import re
 import stat
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, fields as dataclass_fields
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Never, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, SecretStoreConflictError
 from odoo_instance_sdk.internal.paths import get_admin_config_path, get_catalog_path
@@ -33,11 +33,38 @@ from odoo_instance_sdk.storage.catalog.helpers import (
 )
 
 
-def _dashboard_symbol(module: str, name: str) -> Any:
-    return getattr(import_module(module), name)
+def _dashboard_symbol(module: str, name: str) -> type:
+    return cast("type", getattr(import_module(module), name))
 
 
-HTTPException = _dashboard_symbol("starlette.exceptions", "HTTPException")
+class _AdminException(Exception):
+    msg: str
+
+
+class _FilterDataType(Protocol):
+    STRING: str
+    DATETIME: str
+
+
+class _PasswordVerifier(Protocol):
+    def verify(self, password: str, password_hash: str) -> bool: ...
+
+
+class _PasswordHashFactory(Protocol):
+    def recommended(self) -> _PasswordVerifier: ...
+
+
+class _RequestAction(Protocol):
+    CREATE: str
+
+
+class _AdminUser:
+    username: str
+
+    def __init__(self, username: str) -> None: ...
+
+
+HTTPException = cast("type[Exception]", _dashboard_symbol("starlette.exceptions", "HTTPException"))
 Middleware = _dashboard_symbol("starlette.middleware", "Middleware")
 SessionMiddleware = _dashboard_symbol("starlette.middleware.sessions", "SessionMiddleware")
 BaseAdmin = _dashboard_symbol("starlette_admin", "BaseAdmin")
@@ -46,20 +73,105 @@ DateTimeField = _dashboard_symbol("starlette_admin", "DateTimeField")
 IntegerField = _dashboard_symbol("starlette_admin", "IntegerField")
 PasswordField = _dashboard_symbol("starlette_admin", "PasswordField")
 StringField = _dashboard_symbol("starlette_admin", "StringField")
-AdminUser = _dashboard_symbol("starlette_admin.auth", "AdminUser")
-ActionFailed = _dashboard_symbol("starlette_admin.exceptions", "ActionFailed")
-FormValidationError = _dashboard_symbol("starlette_admin.exceptions", "FormValidationError")
-LoginFailed = _dashboard_symbol("starlette_admin.exceptions", "LoginFailed")
-FilterDataType = _dashboard_symbol("starlette_admin.filters.base", "FilterDataType")
-FilterValidationError = _dashboard_symbol("starlette_admin.filters.base", "FilterValidationError")
-FilterApplyContext = Any
+AdminUser = cast("type[_AdminUser]", _dashboard_symbol("starlette_admin.auth", "AdminUser"))
+ActionFailed = cast(
+    "type[_AdminException]", _dashboard_symbol("starlette_admin.exceptions", "ActionFailed")
+)
+FormValidationError = cast(
+    "type[_AdminException]", _dashboard_symbol("starlette_admin.exceptions", "FormValidationError")
+)
+LoginFailed = cast(
+    "type[_AdminException]", _dashboard_symbol("starlette_admin.exceptions", "LoginFailed")
+)
+FilterDataType = cast(
+    "_FilterDataType", _dashboard_symbol("starlette_admin.filters.base", "FilterDataType")
+)
+FilterValidationError = cast(
+    "type[Exception]", _dashboard_symbol("starlette_admin.filters.base", "FilterValidationError")
+)
+
+
+class _FilterContext(Protocol):
+    query: str
+
+
+class _FilterRule(Protocol):
+    field: str
+    filter: str
+    value: str | datetime | None
+    value2: str | datetime | None
+
+
+class _FilterGroup(Protocol):
+    logic: str
+    rules: Sequence[_FilterRule]
+
+    def is_empty(self) -> bool: ...
+
+
+class _RequestQueryParams(Protocol):
+    def get(self, key: str, default: str | None = None) -> str | None: ...
+
+    def getlist(self, key: str) -> list[str]: ...
+
+
+class _RequestState(Protocol):
+    action: str
+
+
+class _Request(Protocol):
+    query_params: _RequestQueryParams
+    session: MutableMapping[str, str]
+    state: _RequestState
+
+
+class _AdminPrincipal(Protocol):
+    username: str
+
+
+class _DashboardDataType(Protocol):
+    name: str
+
+
+class _DashboardApp(Protocol):
+    __class__: type
+
+
+class _DashboardAdmin(Protocol):
+    def add_view(self, view: _DashboardBaseModelView) -> None: ...
+
+    def mount_to(self, app: _DashboardApp) -> None: ...
+
+
+_T = TypeVar("_T")
+_T_co = TypeVar("_T_co", covariant=True)
+
+
+class _CatalogPage(Protocol[_T_co]):
+    @property
+    def items(self) -> Sequence[_T_co]: ...
+
+    @property
+    def next_cursor(self) -> str | None: ...
+
+
+class _CatalogFetcher(Protocol[_T_co]):
+    def __call__(
+        self, *, limit: int, cursor: str | None, **kwargs: _FilterValue
+    ) -> _CatalogPage[_T_co]: ...
+
+
+_FilterValue = str | int | bool | datetime | None
+_FormValue = str | int | None
+_PrimaryKey = str | int
 
 if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
 
     class _DashboardBaseFilter:
         name: str
         label: str
-        data_type: object
+        data_type: str
         has_value2: bool
 
     class _DashboardAuthProvider:
@@ -68,8 +180,8 @@ if TYPE_CHECKING:
     class _DashboardBaseModelView:
         pass
 
-    Request = Any
-    FilterGroup = Any
+    Request = _Request
+    FilterGroup = _FilterGroup
 else:
     _DashboardBaseFilter = _dashboard_symbol("starlette_admin.filters.base", "BaseFilter")
     _DashboardAuthProvider = _dashboard_symbol("starlette_admin.auth.password", "AuthProvider")
@@ -86,7 +198,7 @@ class _ExactFilter(_DashboardBaseFilter):
     label = "Equals"
     data_type = FilterDataType.STRING
 
-    def apply(self, ctx: FilterApplyContext) -> Any:
+    def apply(self, ctx: _FilterContext) -> str:
         return ctx.query
 
 
@@ -103,7 +215,7 @@ class _DateRangeFilter(_DashboardBaseFilter):
             raise FilterValidationError("invalid datetime") from exc
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
-    def apply(self, ctx: FilterApplyContext) -> Any:
+    def apply(self, ctx: _FilterContext) -> str:
         return ctx.query
 
 
@@ -175,7 +287,7 @@ class _AdminAuth(_DashboardAuthProvider):
         if username != _ADMIN_USER:
             raise LoginFailed("Invalid username or password")
         try:
-            PasswordHash = _dashboard_symbol("pwdlib", "PasswordHash")
+            PasswordHash = cast("_PasswordHashFactory", _dashboard_symbol("pwdlib", "PasswordHash"))
             valid = PasswordHash.recommended().verify(password, self._settings.password_hash)
         except Exception as exc:
             raise LoginFailed("Invalid username or password") from exc
@@ -186,24 +298,24 @@ class _AdminAuth(_DashboardAuthProvider):
     async def logout(self, request: Request) -> None:
         request.session.clear()
 
-    async def authenticate(self, request: Request) -> Any:
+    async def authenticate(self, request: Request) -> _AdminUser | None:
         if request.session.get("admin_user") == _ADMIN_USER:
             return AdminUser(username=_ADMIN_USER)
         return None
 
 
-def _page(items: Sequence[Any], *, skip: int, limit: int, q: str | None) -> tuple[Any, ...]:
+def _dataclass_text(item: _T) -> str:
+    return " ".join(
+        str(getattr(item, field.name))
+        for field in dataclass_fields(cast("DataclassInstance", item))
+    )
+
+
+def _page(items: Sequence[_T], *, skip: int, limit: int, q: str | None) -> tuple[_T, ...]:
     values = tuple(items)
     if q:
         needle = q.casefold()
-        values = tuple(
-            item
-            for item in values
-            if needle
-            in " ".join(
-                str(getattr(item, field.name)) for field in dataclass_fields(item)
-            ).casefold()
-        )
+        values = tuple(item for item in values if needle in _dataclass_text(item).casefold())
     if limit < 0:
         return values[skip:]
     return values[skip : skip + min(limit, 1000)]
@@ -214,13 +326,13 @@ def _filter_values(  # noqa: C901 -- reject malformed trees before typed catalog
     *,
     exact_fields: frozenset[str],
     date_fields: Mapping[str, tuple[str, str]],
-) -> dict[str, Any]:
+) -> dict[str, _FilterValue]:
     """Convert the Admin filter tree into the existing typed catalog inputs."""
     if filters is None or filters.is_empty():
         return {}
     if filters.logic != "and":
         raise HTTPException(400, "Only conjunctive catalogue filters are supported")
-    result: dict[str, Any] = {}
+    result: dict[str, _FilterValue] = {}
     for rule in filters.rules:
         if hasattr(rule, "rules"):
             raise HTTPException(400, "Nested catalogue filters are unsupported")
@@ -245,13 +357,15 @@ def _filter_values(  # noqa: C901 -- reject malformed trees before typed catalog
     return result
 
 
-def _validate_choice(values: dict[str, Any], field: str, choices: frozenset[str]) -> None:
+def _validate_choice(
+    values: Mapping[str, _FilterValue], field: str, choices: frozenset[str]
+) -> None:
     value = values.get(field)
     if value is not None and value not in choices:
         raise HTTPException(400, f"Unsupported catalogue value for {field}")
 
 
-def _validate_backup_filters(values: dict[str, Any]) -> None:
+def _validate_backup_filters(values: Mapping[str, _FilterValue]) -> None:
     _validate_choice(values, "format", frozenset({"zip", "dump"}))
     _validate_choice(
         values,
@@ -260,7 +374,7 @@ def _validate_backup_filters(values: dict[str, Any]) -> None:
     )
 
 
-def _validate_incomplete_filters(values: dict[str, Any]) -> None:
+def _validate_incomplete_filters(values: Mapping[str, _FilterValue]) -> None:
     _validate_choice(values, "object_type", frozenset({"backup", "restore", "environment"}))
     _validate_choice(
         values,
@@ -278,7 +392,7 @@ def _validate_incomplete_filters(values: dict[str, Any]) -> None:
     )
 
 
-def _validate_environment_filters(values: dict[str, Any]) -> None:
+def _validate_environment_filters(values: Mapping[str, _FilterValue]) -> None:
     _validate_choice(
         values,
         "operation",
@@ -292,30 +406,27 @@ def _validate_sort_query(request: Request) -> None:
         raise HTTPException(400, "Catalogue sorting is unsupported; use canonical order")
 
 
-def _query_match(item: Any, q: str | None) -> bool:
+def _query_match(item: _T, q: str | None) -> bool:
     if not q:
         return True
     needle = q.casefold()
-    return (
-        needle
-        in " ".join(str(getattr(item, field.name)) for field in dataclass_fields(item)).casefold()
-    )
+    return needle in _dataclass_text(item).casefold()
 
 
 def _read_catalog_pages(
-    fetch: Any,
+    fetch: _CatalogFetcher[_T],
     *,
     skip: int,
     limit: int,
     q: str | None,
-    **kwargs: Any,
-) -> tuple[Any, ...]:
+    **kwargs: _FilterValue,
+) -> tuple[_T, ...]:
     """Read only the canonical keyset rows needed for one Admin page."""
     if limit <= 0:
         return ()
     needed = skip + min(limit, 1000)
     cursor: str | None = None
-    result: list[Any] = []
+    result: list[_T] = []
     while True:
         page_limit = min(1000, max(1, needed - len(result)))
         page = fetch(**kwargs, limit=page_limit, cursor=cursor)
@@ -327,7 +438,9 @@ def _read_catalog_pages(
             return tuple(result[skip:])
 
 
-def _count_catalog_pages(fetch: Any, *, q: str | None, **kwargs: Any) -> int:
+def _count_catalog_pages(
+    fetch: _CatalogFetcher[_T], *, q: str | None, **kwargs: _FilterValue
+) -> int:
     """Count pages without materializing their projections in memory."""
     cursor: str | None = None
     total = 0
@@ -339,7 +452,11 @@ def _count_catalog_pages(fetch: Any, *, q: str | None, **kwargs: Any) -> int:
             return total
 
 
-def _find_catalog_item(fetch: Any, predicate: Any, **kwargs: Any) -> Any | None:
+def _find_catalog_item(
+    fetch: _CatalogFetcher[_T],
+    predicate: Callable[[_T], bool],
+    **kwargs: _FilterValue,
+) -> _T | None:
     cursor: str | None = None
     while True:
         page = fetch(**kwargs, limit=1000, cursor=cursor)
@@ -351,7 +468,7 @@ def _find_catalog_item(fetch: Any, predicate: Any, **kwargs: Any) -> Any | None:
             return None
 
 
-def _revision_token(value: Any) -> tuple[str, int | None]:
+def _revision_token(value: _PrimaryKey) -> tuple[str, int | None]:
     identity, separator, raw_revision = str(value).rpartition("|")
     if separator and raw_revision.isdigit() and int(raw_revision) > 0:
         return identity, int(raw_revision)
@@ -369,7 +486,14 @@ def _request_revision(request: Request) -> int | None:
     return revision if revision > 0 else None
 
 
-def _conflict() -> Any:
+def _form_revision(data: Mapping[str, _FormValue]) -> int:
+    value = data["revision"]
+    if value is None:
+        raise _conflict()
+    return int(value)
+
+
+def _conflict() -> _AdminException:
     return ActionFailed("Record changed; reload and retry.")
 
 
@@ -396,13 +520,13 @@ class _ReadOnlyCatalogView(_DashboardBaseModelView):
     def can_import(self, request: Request) -> bool:
         return False
 
-    async def create(self, request: Request, data: dict[str, Any]) -> Any:
+    async def create(self, request: Request, data: dict[str, _FormValue]) -> Never:
         raise PermissionError("catalogue resources are read-only")
 
-    async def edit(self, request: Request, pk: Any, data: dict[str, Any]) -> Any:
+    async def edit(self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]) -> Never:
         raise PermissionError("catalogue resources are read-only")
 
-    async def delete(self, request: Request, pks: list[Any]) -> int:
+    async def delete(self, request: Request, pks: list[_PrimaryKey]) -> Never:
         raise PermissionError("catalogue resources are read-only")
 
 
@@ -462,7 +586,7 @@ class BackupView(_ReadOnlyCatalogView):
             return ()
         try:
             return _read_catalog_pages(
-                catalog.list_backup_summaries,
+                cast("_CatalogFetcher[BackupSummary]", catalog.list_backup_summaries),
                 skip=skip,
                 limit=limit,
                 q=q,
@@ -486,24 +610,30 @@ class BackupView(_ReadOnlyCatalogView):
         if catalog is None:
             return 0
         try:
-            return _count_catalog_pages(catalog.list_backup_summaries, q=q, **filter_values)
+            return _count_catalog_pages(
+                cast("_CatalogFetcher[BackupSummary]", catalog.list_backup_summaries),
+                q=q,
+                **filter_values,
+            )
         finally:
             catalog.close()
 
-    async def find_by_pk(self, request: Request, pk: Any) -> BackupSummary | None:
+    async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> BackupSummary | None:
         del request
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return None
         try:
             return _find_catalog_item(
-                catalog.list_backup_summaries,
+                cast("_CatalogFetcher[BackupSummary]", catalog.list_backup_summaries),
                 lambda item: str(item.backup_id) == str(pk),
             )
         finally:
             catalog.close()
 
-    async def find_by_pks(self, request: Request, pks: list[Any]) -> Sequence[BackupSummary]:
+    async def find_by_pks(
+        self, request: Request, pks: list[_PrimaryKey]
+    ) -> Sequence[BackupSummary]:
         result: list[BackupSummary] = []
         for pk in pks:
             item = await self.find_by_pk(request, pk)
@@ -546,7 +676,7 @@ class IncompleteOperationView(_ReadOnlyCatalogView):
             return ()
         try:
             return _read_catalog_pages(
-                catalog.list_incomplete_operations,
+                cast("_CatalogFetcher[IncompleteOperation]", catalog.list_incomplete_operations),
                 skip=skip,
                 limit=limit,
                 q=q,
@@ -568,24 +698,30 @@ class IncompleteOperationView(_ReadOnlyCatalogView):
         if catalog is None:
             return 0
         try:
-            return _count_catalog_pages(catalog.list_incomplete_operations, q=q, **filter_values)
+            return _count_catalog_pages(
+                cast("_CatalogFetcher[IncompleteOperation]", catalog.list_incomplete_operations),
+                q=q,
+                **filter_values,
+            )
         finally:
             catalog.close()
 
-    async def find_by_pk(self, request: Request, pk: Any) -> IncompleteOperation | None:
+    async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> IncompleteOperation | None:
         del request
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return None
         try:
             return _find_catalog_item(
-                catalog.list_incomplete_operations,
+                cast("_CatalogFetcher[IncompleteOperation]", catalog.list_incomplete_operations),
                 lambda item: str(item.sequence) == str(pk),
             )
         finally:
             catalog.close()
 
-    async def find_by_pks(self, request: Request, pks: list[Any]) -> Sequence[IncompleteOperation]:
+    async def find_by_pks(
+        self, request: Request, pks: list[_PrimaryKey]
+    ) -> Sequence[IncompleteOperation]:
         result: list[IncompleteOperation] = []
         for pk in pks:
             item = await self.find_by_pk(request, pk)
@@ -631,7 +767,7 @@ class EnvironmentHistoryView(_ReadOnlyCatalogView):
             return ()
         try:
             return _read_catalog_pages(
-                catalog.list_environment_history,
+                cast("_CatalogFetcher[EnvironmentHistoryEvent]", catalog.list_environment_history),
                 skip=skip,
                 limit=limit,
                 q=q,
@@ -653,25 +789,29 @@ class EnvironmentHistoryView(_ReadOnlyCatalogView):
         if catalog is None:
             return 0
         try:
-            return _count_catalog_pages(catalog.list_environment_history, q=q, **filter_values)
+            return _count_catalog_pages(
+                cast("_CatalogFetcher[EnvironmentHistoryEvent]", catalog.list_environment_history),
+                q=q,
+                **filter_values,
+            )
         finally:
             catalog.close()
 
-    async def find_by_pk(self, request: Request, pk: Any) -> EnvironmentHistoryEvent | None:
+    async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> EnvironmentHistoryEvent | None:
         del request
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return None
         try:
             return _find_catalog_item(
-                catalog.list_environment_history,
+                cast("_CatalogFetcher[EnvironmentHistoryEvent]", catalog.list_environment_history),
                 lambda item: str(item.sequence) == str(pk),
             )
         finally:
             catalog.close()
 
     async def find_by_pks(
-        self, request: Request, pks: list[Any]
+        self, request: Request, pks: list[_PrimaryKey]
     ) -> Sequence[EnvironmentHistoryEvent]:
         result: list[EnvironmentHistoryEvent] = []
         for pk in pks:
@@ -696,10 +836,12 @@ class _SecretView(_DashboardBaseModelView):
     def can_import(self, request: Request) -> bool:
         return False
 
-    async def validate(self, request: Request, data: dict[str, Any]) -> None:
-        request_action = _dashboard_symbol("starlette_admin.types", "RequestAction")
+    async def validate(self, request: Request, data: dict[str, _FormValue]) -> None:
+        request_action = cast(
+            "_RequestAction", _dashboard_symbol("starlette_admin.types", "RequestAction")
+        )
 
-        errors: dict[str | int, Any] = {}
+        errors: dict[str | int, str] = {}
         if (
             request.state.action == request_action.CREATE
             and not str(data.get(self.secret_field) or "").strip()
@@ -759,12 +901,14 @@ class RemoteOdooSecretView(_SecretView):
     ) -> int:
         return len(await self.find_all(request, q=q, limit=-1, filters=filters))
 
-    async def find_by_pk(self, request: Request, pk: Any) -> RemoteOdooSecret | None:
+    async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> RemoteOdooSecret | None:
         del request
         identity, _revision = _revision_token(pk)
         return self._store().get_remote_odoo(identity)
 
-    async def find_by_pks(self, request: Request, pks: list[Any]) -> Sequence[RemoteOdooSecret]:
+    async def find_by_pks(
+        self, request: Request, pks: list[_PrimaryKey]
+    ) -> Sequence[RemoteOdooSecret]:
         result: list[RemoteOdooSecret] = []
         for pk in pks:
             item = await self.find_by_pk(request, pk)
@@ -772,7 +916,7 @@ class RemoteOdooSecretView(_SecretView):
                 result.append(item)
         return tuple(result)
 
-    async def create(self, request: Request, data: dict[str, Any]) -> RemoteOdooSecret:
+    async def create(self, request: Request, data: dict[str, _FormValue]) -> RemoteOdooSecret:
         return self._store().create_remote_odoo(
             str(data["base_url"]), str(data.get("master_password") or "")
         )
@@ -781,18 +925,20 @@ class RemoteOdooSecretView(_SecretView):
         del request
         return f"{obj.base_url}|{obj.revision}"
 
-    async def edit(self, request: Request, pk: Any, data: dict[str, Any]) -> RemoteOdooSecret:
+    async def edit(
+        self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
+    ) -> RemoteOdooSecret:
         identity, _revision = _revision_token(pk)
         try:
             return self._store().update_remote_odoo(
                 identity,
-                revision=int(data["revision"]),
+                revision=_form_revision(data),
                 master_password=str(data.get("master_password") or ""),
             )
         except SecretStoreConflictError as exc:
             raise FormValidationError({"revision": _conflict().msg}) from exc
 
-    async def delete(self, request: Request, pks: list[Any]) -> int:
+    async def delete(self, request: Request, pks: list[_PrimaryKey]) -> int:
         for pk in pks:
             identity, token_revision = _revision_token(pk)
             revision = _request_revision(request) or token_revision
@@ -859,7 +1005,7 @@ class GitLabMemberSecretView(_SecretView):
     ) -> int:
         return len(await self.find_all(request, q=q, limit=-1, filters=filters))
 
-    async def find_by_pk(self, request: Request, pk: Any) -> GitLabMemberSecret | None:
+    async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> GitLabMemberSecret | None:
         del request
         try:
             identity, _revision = _revision_token(pk)
@@ -868,7 +1014,9 @@ class GitLabMemberSecretView(_SecretView):
             return None
         return self._store().get_gitlab_member(member_id, host)
 
-    async def find_by_pks(self, request: Request, pks: list[Any]) -> Sequence[GitLabMemberSecret]:
+    async def find_by_pks(
+        self, request: Request, pks: list[_PrimaryKey]
+    ) -> Sequence[GitLabMemberSecret]:
         result: list[GitLabMemberSecret] = []
         for pk in pks:
             item = await self.find_by_pk(request, pk)
@@ -876,7 +1024,7 @@ class GitLabMemberSecretView(_SecretView):
                 result.append(item)
         return tuple(result)
 
-    async def create(self, request: Request, data: dict[str, Any]) -> GitLabMemberSecret:
+    async def create(self, request: Request, data: dict[str, _FormValue]) -> GitLabMemberSecret:
         return self._store().create_gitlab_member(
             str(data["member_id"]),
             str(data["host"]),
@@ -884,21 +1032,23 @@ class GitLabMemberSecretView(_SecretView):
             str(data.get("token") or ""),
         )
 
-    async def edit(self, request: Request, pk: Any, data: dict[str, Any]) -> GitLabMemberSecret:
+    async def edit(
+        self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
+    ) -> GitLabMemberSecret:
         identity, _revision = _revision_token(pk)
         member_id, host = identity.split("|", 1)
         try:
             return self._store().update_gitlab_member(
                 member_id,
                 host,
-                revision=int(data["revision"]),
+                revision=_form_revision(data),
                 login=str(data["login"]),
                 token=str(data.get("token") or ""),
             )
         except SecretStoreConflictError as exc:
             raise FormValidationError({"revision": _conflict().msg}) from exc
 
-    async def delete(self, request: Request, pks: list[Any]) -> int:
+    async def delete(self, request: Request, pks: list[_PrimaryKey]) -> int:
         for pk in pks:
             identity, token_revision = _revision_token(pk)
             revision = _request_revision(request) or token_revision
@@ -912,7 +1062,7 @@ class GitLabMemberSecretView(_SecretView):
         return len(pks)
 
 
-def mount_admin(app: Any, *, secure_cookie: bool = False) -> Any:
+def mount_admin(app: _DashboardApp, *, secure_cookie: bool = False) -> _DashboardAdmin:
     """Mount authenticated Admin and return it for tests/introspection."""
     settings = AdminSettings.load()
     admin = BaseAdmin(
@@ -936,7 +1086,7 @@ def mount_admin(app: Any, *, secure_cookie: bool = False) -> Any:
     admin.add_view(RemoteOdooSecretView())
     admin.add_view(GitLabMemberSecretView())
     admin.mount_to(app)
-    return admin
+    return cast("_DashboardAdmin", admin)
 
 
 __all__ = [
