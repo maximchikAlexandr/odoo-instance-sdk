@@ -258,6 +258,7 @@ class PreparedStep:
     private_stdout_consumer: Callable[[str | bytes | None], None] | None = field(
         default=None, repr=False, compare=False
     )
+    private_stdout_value_free: bool = field(default=False, repr=False, compare=True)
 
     def __repr__(self) -> str:
         """Render only the already-redacted public process projection."""

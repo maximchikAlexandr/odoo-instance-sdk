@@ -535,6 +535,8 @@ class SubprocessExecutor:
                         sensitive_indices=prepared.sensitive_argv_indices,
                     ),
                 )
+            if prepared.private_stdout_value_free:
+                result = replace(result, stdout=None if result.stdout is None else "")
             return result
         finally:
             if runtime_cleanup is not None:

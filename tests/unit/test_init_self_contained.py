@@ -6,7 +6,9 @@ import os
 import shutil
 import sqlite3
 import subprocess
-from dataclasses import dataclass
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,6 +19,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.dbprep.bootstrap import (
     BOOTSTRAP_DATABASE,
     BootstrapFailedError,
@@ -34,6 +37,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResult,
     RecordingExecutor,
     RunContext,
+    StepObserver,
     SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.project_init import (
@@ -2013,7 +2017,109 @@ def test_deferred_inventory_parses_private_stdout_before_redaction(
     assert observed == [(ObservedDatabase("owned-db", 101),)]
     result = context.results["init.bootstrap.databases"]
     assert isinstance(result, ProcessResult)
-    assert result.stdout == "owned-db\\x09101\n"
+    assert result.stdout == ""
+
+
+def test_concurrent_inventory_runs_keep_private_payloads_execution_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    root = tmp_path / "project"
+    root.mkdir()
+    psql = tmp_path / "psql"
+    psql.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$INVENTORY_PAYLOAD\"\n",
+        encoding="utf-8",
+    )
+    psql.chmod(0o755)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable", lambda: str(psql)
+    )
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        capture_inventory=True,
+    )
+    assert plan.inventory_step is not None
+
+    class _BarrierExecutor:
+        def __init__(self) -> None:
+            self.barrier = threading.Barrier(2)
+            self.delegate = SubprocessExecutor()
+            self.payloads = iter(("alpha-private\t101", "beta-private\t202"))
+            self.lock = threading.Lock()
+
+        def execute(
+            self,
+            step: PreparedStep,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResult:
+            if step.step_id == "init.bootstrap.databases":
+                with self.lock:
+                    payload = next(self.payloads)
+                self.barrier.wait(timeout=5.0)
+                environment = dict(step.environment_snapshot)
+                environment["INVENTORY_PAYLOAD"] = payload
+                step = replace(
+                    step,
+                    environment_snapshot=tuple(sorted(environment.items())),
+                )
+            return self.delegate.execute(
+                step,
+                observer=observer,
+                observe_output=observe_output,
+            )
+
+        def spawn(self, step: PreparedStep, **kwargs: object) -> ProcessHandle:
+            raise AssertionError(f"unexpected spawn: {step.step_id}")
+
+    executor = _BarrierExecutor()
+
+    def _skip_bootstrap(context: RunContext[object], plan: object) -> BootstrapOutcome:
+        context.skip(plan.spawn_step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.probe_step.step_id)  # type: ignore[attr-defined]
+        context.skip(plan.ready_step.step_id)  # type: ignore[attr-defined]
+        return BootstrapOutcome.ALREADY_READY
+
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        _skip_bootstrap,
+    )
+
+    def _run_once(
+        context: RunContext[tuple[tuple[ObservedDatabase, ...], ProcessResult]],
+    ) -> tuple[tuple[ObservedDatabase, ...], ProcessResult]:
+        observed: list[tuple[ObservedDatabase, ...]] = []
+        bootstrap.execute_bootstrap_tmp(context, plan, on_observed=observed.append)
+        result = context.results["init.bootstrap.databases"]
+        assert isinstance(result, ProcessResult)
+        return observed[0], result
+
+    command = Command.create(
+        ExecutionPlan(
+            steps=tuple(step.public_projection() for step in plan.execution_steps),
+        ),
+        _run_once,
+        plan.execution_steps,
+        executor=executor,
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: command.run(), (0, 1)))
+
+    assert {item[0] for item in results} == {
+        (ObservedDatabase("alpha-private", 101),),
+        (ObservedDatabase("beta-private", 202),),
+    }
+    assert all(item[1].stdout == "" for item in results)
 
 
 def test_init_database_candidates_exclude_system_databases() -> None:
@@ -2132,6 +2238,8 @@ def test_database_inventory_valid_name_oid_shape_remains_observable() -> None:
 def test_inventory_prepared_subprocess_reports_bounded_delimiter_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
     psql = tmp_path / "psql"
     raw_values = (
         "owned-db",
@@ -2160,17 +2268,26 @@ def test_inventory_prepared_subprocess_reports_bounded_delimiter_shape(
         capture_inventory=True,
     )
     assert plan.inventory_step is not None
-    result = SubprocessExecutor().execute(plan.inventory_step)
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.ALREADY_READY,
+    )
+    context: RunContext[object] = RunContext(plan.execution_steps, SubprocessExecutor())
     with pytest.raises(BootstrapFailedError) as failure:
-        _read_database_inventory(result)
+        bootstrap.execute_bootstrap_tmp(context, plan)
     message = str(failure.value)
     assert "line_count=3" in message
     assert "field_count=1" in message
     assert "delimiter_tab_count=0" in message
     assert "delimiter_literal_backslash_t_count=3" in message
     assert "first_delimiter=literal_backslash_t" in message
+    result = context.results["init.bootstrap.databases"]
+    assert isinstance(result, ProcessResult)
+    assert result.stdout == ""
     for raw_value in raw_values:
         assert raw_value not in message
+        assert raw_value not in str(result.stdout)
 
 
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(
