@@ -350,12 +350,12 @@ class TestList:
                 sys.executable,
                 "-c",
                 (
-                    "import sys,time; sys.stdout.write('restore-oid-987654321\\n'); "
+                    "import sys,time; sys.stdout.write(sys.stdin.read()); "
                     "sys.stderr.write('restore-stderr\\n'); sys.stdout.flush(); "
                     "sys.stderr.flush(); time.sleep(2)"
                 ),
             ),
-            timeout=0.1,
+            stdin=b"987654321\\n", timeout=0.1,
         )
 
         def run(context: RunContext[RestoreResult]) -> RestoreResult:
