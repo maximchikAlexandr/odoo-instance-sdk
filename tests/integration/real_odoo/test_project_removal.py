@@ -47,7 +47,6 @@ def _document(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("retain_source", [False, True], ids=["removed-source", "retained-source"])
-@pytest.mark.e2e_smoke
 def test_public_project_forget_reinit_and_purge(
     tmp_path: Path,
     target_runtime: E2ERuntime,
