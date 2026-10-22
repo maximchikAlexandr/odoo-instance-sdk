@@ -58,7 +58,7 @@ jobs:
           python-version: "3.12.13"
           version: "0.13.4"
           enable-cache: false
-      - name: Verify immutable Odoo source and write reviewed overrides
+      - name: Verify immutable Odoo source and reviewed overrides
         run: |
           set -euo pipefail
           source_cache=.cache/odoo-source-refresh
@@ -70,23 +70,9 @@ jobs:
           test "$resolved_commit" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6
           git -C "$source_cache" show cd992ceebbaf343c03e1941d39cfe423d35ba6c6:requirements.txt > /tmp/odoo19-requirements.txt
           echo "requirements_sha256=$(shasum -a 256 /tmp/odoo19-requirements.txt | cut -d' ' -f1)"
-          cat > /tmp/odoo19-overrides.txt <<'OVERRIDES'
-          cbor2==5.9.0
-          certifi==2026.10.19
-          cryptography==46.0.7
-          idna==3.15
-          jinja2==3.1.6
-          lxml==6.1.1
-          lxml-html-clean==0.4.5
-          pillow==13.0.0
-          pyopenssl==26.0.0
-          python-ldap==3.4.5
-          requests==2.32.5
-          urllib3==2.8.0
-          werkzeug==3.1.9
-          zeep==4.3.3
-          OVERRIDES
+          cp tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.overrides.txt /tmp/odoo19-overrides.txt
           chmod 600 /tmp/odoo19-requirements.txt /tmp/odoo19-overrides.txt
+          echo "overrides_sha256=$(shasum -a 256 /tmp/odoo19-overrides.txt | cut -d' ' -f1)"
           uv_version=$(uv --version | awk '{print $2}')
           echo "uv_version=$uv_version"
           test "$uv_version" = 0.13.4
