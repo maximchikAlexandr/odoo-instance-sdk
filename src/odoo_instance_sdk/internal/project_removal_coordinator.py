@@ -300,6 +300,23 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
         registration.repository_root,
         registration.git_common_dir,
     )
+    if (
+        registration.registration_state == "forgotten"
+        and not manifest_present
+        and catalog._project_purge_completed(registration.project_id)
+        and claim is None
+        and catalog._conn.execute(
+            "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1",
+            (registration.project_id,),
+        ).fetchone()
+        is None
+    ):
+        # A successful purge removes the project manifest and retires its
+        # durable database/Compose ownership claims. A caller-owned source
+        # checkout may remain, so its directory existing is not evidence that
+        # the purged config is still required. Registered and claimed projects
+        # continue through the normal fail-closed observation checks above.
+        config_evidence_complete = True
     active_claim = claim if claim is not None and claim.state == "active" else None
     active_cluster_id = str(active_claim.cluster_id) if active_claim is not None else None
     database_required = database_name is not None or active_claim is not None
@@ -951,6 +968,16 @@ def capture_project_removal_command(  # noqa: C901
                     completed=tuple(completed),
                     retained=tuple(retained),
                     remaining=tuple(remaining),
+                )
+            if not catalog._mark_project_purge_completed(registration.project_id):
+                raise _error(
+                    "project registration changed before purge completion was recorded",
+                    current_projection,
+                    mode=mode,
+                    failed_step="project-removal:finalize",
+                    decisions=decisions,
+                    completed=tuple(completed),
+                    retained=tuple(retained),
                 )
             return ProjectRemovalResult(
                 project_id=registration.project_id,
