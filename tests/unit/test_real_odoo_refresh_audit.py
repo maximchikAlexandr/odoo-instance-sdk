@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -58,7 +59,9 @@ def _scanner_payload(*, add_unapproved: bool = False) -> dict[str, object]:
 
 def test_refresh_audit_updates_only_requested_overrides_and_existing_hashes() -> None:
     current = json.loads(AUDIT_PATH.read_text(encoding="utf-8"))
-    manifest, findings = updated_manifest(current, _refreshed_lock(), _scanner_payload())
+    refreshed_lock = _refreshed_lock()
+    current["lock_sha256"] = "0" * 64
+    manifest, findings = updated_manifest(current, refreshed_lock, _scanner_payload())
 
     reviewed_overrides = cast("dict[str, str]", manifest["reviewed_overrides"])
     assert {name: reviewed_overrides[name] for name in FIXED_VERSIONS} == FIXED_VERSIONS
@@ -67,6 +70,7 @@ def test_refresh_audit_updates_only_requested_overrides_and_existing_hashes() ->
         item for item in current_exceptions if item["package"] != "urllib3"
     ]
     assert len(findings) == sum(len(item["advisories"]) for item in manifest["exceptions"])
+    assert manifest["lock_sha256"] == hashlib.sha256(refreshed_lock).hexdigest()
     assert manifest["lock_sha256"] != current["lock_sha256"]
 
 
