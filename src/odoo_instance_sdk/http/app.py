@@ -196,6 +196,17 @@ def create_app(  # noqa: C901
                 else None,
             )
         )
+        from odoo_instance_sdk.internal.paths import get_admin_config_path
+
+        admin_config = get_admin_config_path(ensure_exists=False)
+        # An unconfigured local installation remains an API-capable monitor,
+        # but never exposes an unauthenticated Admin surface.  Once the
+        # explicit owner-only config exists, invalid values fail closed at
+        # startup through AdminSettings.load().
+        if admin_config.exists() or admin_config.is_symlink():
+            from odoo_instance_sdk.http.admin import mount_admin
+
+            app.state.admin = mount_admin(app, secure_cookie=external_proxy is not None)
         if static_assets:
             if not _WEB_DIST.is_dir():
                 raise RuntimeError(
