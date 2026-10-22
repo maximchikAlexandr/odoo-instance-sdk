@@ -24,6 +24,8 @@ FIXED_OVERRIDES = {
     "urllib3": "2.8.0",
     "werkzeug": "3.1.9",
 }
+
+
 class AuditRefreshError(ValueError):
     """Raised when the real scanner result cannot be accepted without a waiver."""
 
@@ -51,7 +53,9 @@ def _check_retired_urllib_exception(entries: list[Mapping[str, object]]) -> None
         or version != "2.6.3"
         or set(advisories) != {"PYSEC-2026-141", "PYSEC-2026-142"}
     ):
-        raise AuditRefreshError("urllib3 exception differs from the two explicitly retired findings")
+        raise AuditRefreshError(
+            "urllib3 exception differs from the two explicitly retired findings"
+        )
 
 
 def _expected_findings(entries: object) -> tuple[set[tuple[str, str, str]], list[object]]:
@@ -95,7 +99,9 @@ def updated_manifest(
 
     locked_versions = _locked_package_versions(lock_bytes)
     if any(locked_versions.get(package) != version for package, version in FIXED_OVERRIDES.items()):
-        raise AuditRefreshError("generated fixture lock does not contain all required fixed versions")
+        raise AuditRefreshError(
+            "generated fixture lock does not contain all required fixed versions"
+        )
 
     result = copy.deepcopy(dict(current))
     overrides = result.get("reviewed_overrides")
