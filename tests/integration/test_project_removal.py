@@ -8,6 +8,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -1271,8 +1272,17 @@ def test_public_purge_recovers_missing_source_with_legacy_init_binding(
     catalog.close()
 
 
-def test_public_purge_recovers_missing_source_with_legacy_restore_provenance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("recorded_oid", "observed_oid", "expected_completion"),
+    ((102, 102, True), (101, 202, False)),
+    ids=("stable-restore", "same-name-replacement"),
+)
+def test_public_purge_handles_missing_source_with_legacy_restore_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_oid: int,
+    observed_oid: int,
+    expected_completion: bool,
 ) -> None:
     root = tmp_path / "source"
     legacy_project_id = repo_key(root, root / ".git")
@@ -1301,60 +1311,7 @@ def test_public_purge_recovers_missing_source_with_legacy_restore_provenance(
             backup_id,
             cluster_id=getattr(claim, "cluster_id"),
             data_directory=data_directory,
-            database_oid=102,
-        )
-
-    catalog, command, _executor, project_id = _capture_missing_source_purge(
-        tmp_path,
-        monkeypatch,
-        legacy_project_id,
-        ("owned_db",),
-        seed_legacy_restore,
-        real_children=True,
-    )
-    assert project_id == registered_project_id
-    assert any("database" in step.step_id for step in command.plan.steps)
-    result = command.run()
-    assert result.registration_state == "forgotten"
-    assert tuple(item.resource_type for item in result.completed) == (
-        "database",
-        "volume",
-        "project",
-    )
-    catalog.close()
-
-
-def test_public_purge_refuses_missing_source_with_legacy_restore_oid_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "source"
-    legacy_project_id = repo_key(root, root / ".git")
-    registered_project_id = f"project_{legacy_project_id}"
-
-    def seed_legacy_restore(
-        catalog: BackupCatalog, _claim_project_id: str, claim: object, data_directory: Path
-    ) -> None:
-        backup_id = str(uuid.uuid4())
-        backup_path = data_directory.parent / "owned.zip"
-        backup_path.write_bytes(b"owned")
-        catalog.start_download(
-            backup_id,
-            "http://127.0.0.1:8069",
-            "owned_db",
-            "zip",
-            True,
-            backup_path,
-            project_id=registered_project_id,
-        )
-        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
-        catalog.record_restore(
-            "127.0.0.1",
-            15432,
-            "owned_db",
-            backup_id,
-            cluster_id=getattr(claim, "cluster_id"),
-            data_directory=data_directory,
-            database_oid=101,
+            database_oid=recorded_oid,
         )
 
     catalog, command, executor, project_id = _capture_missing_source_purge(
@@ -1364,13 +1321,29 @@ def test_public_purge_refuses_missing_source_with_legacy_restore_oid_replacement
         ("owned_db",),
         seed_legacy_restore,
         real_children=True,
-        observed_oids={"owned_db": 202},
+        observed_oids={"owned_db": observed_oid},
     )
     assert project_id == registered_project_id
-    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
-        command.run()
-    assert executor.executed == []
-    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    if expected_completion:
+        assert any("database" in step.step_id for step in command.plan.steps)
+    result: ProjectRemovalResult | None = None
+    with (
+        nullcontext()
+        if expected_completion
+        else pytest.raises(ProjectRemovalError, match="unavailable or unproven")
+    ):
+        result = command.run()
+    if expected_completion:
+        assert result is not None
+        assert result.registration_state == "forgotten"
+        assert tuple(item.resource_type for item in result.completed) == (
+            "database",
+            "volume",
+            "project",
+        )
+    else:
+        assert executor.executed == []
+        assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()
 
 
