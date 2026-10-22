@@ -37,6 +37,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResult,
     RecordingExecutor,
     RunContext,
+    StepEvent,
     StepObserver,
     SubprocessExecutor,
 )
@@ -2029,7 +2030,7 @@ def test_concurrent_inventory_runs_keep_private_payloads_execution_local(
     root.mkdir()
     psql = tmp_path / "psql"
     psql.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$INVENTORY_PAYLOAD\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$INVENTORY_PAYLOAD\"\nprintf 'stderr-preserved\\n' >&2\n",
         encoding="utf-8",
     )
     psql.chmod(0o755)
@@ -2112,14 +2113,30 @@ def test_concurrent_inventory_runs_keep_private_payloads_execution_local(
         plan.execution_steps,
         executor=executor,
     )
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _index: command.run(), (0, 1)))
 
-    assert {item[0] for item in results} == {
+    def _run_with_events(
+        _index: int,
+    ) -> tuple[tuple[tuple[ObservedDatabase, ...], ProcessResult], list[StepEvent]]:
+        events: list[StepEvent] = []
+        result = command.run(observer=events.append, observe_output=True)
+        return result, events
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        runs = list(pool.map(_run_with_events, (0, 1)))
+
+    assert {item[0][0] for item in runs} == {
         (ObservedDatabase("alpha-private", 101),),
         (ObservedDatabase("beta-private", 202),),
     }
-    assert all(item[1].stdout == "" for item in results)
+    assert all(item[0][1].stdout == "" for item in runs)
+    for _result, events in runs:
+        rendered_events = " ".join(map(str, events))
+        assert "alpha-private" not in rendered_events
+        assert "beta-private" not in rendered_events
+        assert "101" not in rendered_events
+        assert "202" not in rendered_events
+        assert "stderr-preserved" in rendered_events
+        assert "kind='completed'" in rendered_events
 
 
 def test_init_database_candidates_exclude_system_databases() -> None:

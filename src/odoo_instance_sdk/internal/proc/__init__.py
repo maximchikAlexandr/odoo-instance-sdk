@@ -397,6 +397,7 @@ class _StreamingStepObserver:
 
         self._observer = observer
         self._step = step
+        self._suppress_stdout = step.private_stdout_value_free
         secrets = captured_secret_values(step)
         self._redactors = {
             stream: IncrementalStreamRedactor(secrets=secrets, field=stream)
@@ -404,6 +405,8 @@ class _StreamingStepObserver:
         }
 
     def __call__(self, event: StepEvent) -> None:
+        if event.kind == "stdout" and self._suppress_stdout:
+            return
         if event.kind in {"stdout", "stderr"}:
             if event.chunk:
                 chunk = self._redactors[event.kind].feed(event.chunk)
@@ -421,6 +424,8 @@ class _StreamingStepObserver:
             return
         if event.kind in {"completed", "failed"}:
             for stream in ("stdout", "stderr"):
+                if stream == "stdout" and self._suppress_stdout:
+                    continue
                 chunk = self._redactors[stream].flush()
                 if not chunk:
                     continue
