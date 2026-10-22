@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.real_odoo_ci import capture_cleanup
 from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
+from scripts.real_odoo_ci import capture_cleanup
 from scripts.real_odoo_pins import E2E_PINS
 from scripts.real_odoo_secrets import write_secret_registry
 
