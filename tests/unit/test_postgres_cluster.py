@@ -898,13 +898,16 @@ def test_existing_password_symlink_is_rejected(tmp_path: Path) -> None:
 def test_read_existing_password_requires_current_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import postgres_compose
     from odoo_instance_sdk.internal.postgres_compose import read_owned_password_file
 
     password = tmp_path / "postgres-password"
     password.write_text("existing-password\n")
     owner = password.stat().st_uid
-    monkeypatch.setattr(postgres_compose.os, "getuid", lambda: owner + 1, raising=False)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.os.getuid",
+        lambda: owner + 1,
+        raising=False,
+    )
 
     with pytest.raises(PostgresComposeInvalidError, match="owned by the current user"):
         read_owned_password_file(password)
