@@ -114,7 +114,8 @@ class _BackupMixin:
                    ON CONFLICT(project_id) DO UPDATE SET
                      repository_root=excluded.repository_root,
                      git_common_dir=excluded.git_common_dir,
-                     registration_state='registered'""",
+                     registration_state='registered',
+                     purge_completed_at=NULL""",
                 (project_id, str(root), str(common)),
             )
 
@@ -213,13 +214,35 @@ class _BackupMixin:
             cursor = self._conn.execute(
                 "UPDATE projects SET repository_root = COALESCE(?, repository_root), "
                 "git_common_dir = COALESCE(?, git_common_dir), "
-                "registration_state = 'registered' "
+                "registration_state = 'registered', purge_completed_at = NULL "
                 "WHERE project_id = ? AND registration_state = 'forgotten'",
                 (
                     str(canonical_root) if canonical_root is not None else None,
                     str(canonical_common) if canonical_common is not None else None,
                     project_id,
                 ),
+            )
+        return cursor.rowcount == 1
+
+    @_translate_sqlite_error
+    def _project_purge_completed(self, project_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM projects WHERE project_id = ? AND purge_completed_at IS NOT NULL",
+            (project_id,),
+        ).fetchone()
+        return row is not None
+
+    @_translate_sqlite_error
+    def _mark_project_purge_completed(self, project_id: str) -> bool:
+        """Persist successful purge only after every captured action completed."""
+        if self._project_purge_completed(project_id):
+            return True
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE projects SET purge_completed_at = datetime('now') "
+                "WHERE project_id = ? AND registration_state = 'forgotten' "
+                "AND purge_completed_at IS NULL",
+                (project_id,),
             )
         return cursor.rowcount == 1
 

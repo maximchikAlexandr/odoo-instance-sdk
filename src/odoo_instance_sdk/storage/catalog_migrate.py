@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0012"
+CATALOG_REVISION = "0013"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -402,7 +402,7 @@ def _ddl_fingerprint(
 
 
 _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
-    "projects": frozenset({"registration_state"}),
+    "projects": frozenset({"registration_state", "purge_completed_at"}),
     "environments": frozenset(
         {
             "project_id",
