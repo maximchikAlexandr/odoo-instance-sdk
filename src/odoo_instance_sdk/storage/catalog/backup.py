@@ -987,3 +987,25 @@ class _BackupMixin:
             ).fetchone()
             assert activated is not None
             return _row_to_cluster_claim(activated)
+
+    @_translate_sqlite_error
+    def _remove_postgres_cluster_claim(
+        self,
+        cluster_id: uuid.UUID | str,
+        project_id: str,
+        compose_project: str,
+        volume_name: str,
+    ) -> bool:
+        """Forget one exact active claim after its owned Compose resources are absent."""
+        identifier = self._cluster_uuid(cluster_id)
+        project = self._cluster_text(project_id, "project_id")
+        compose = self._cluster_text(compose_project, "compose_project")
+        volume = self._cluster_text(volume_name, "volume_name")
+        with self._conn:
+            cursor = self._conn.execute(
+                """DELETE FROM postgres_clusters
+                   WHERE cluster_id = ? AND project_id = ? AND compose_project = ?
+                     AND volume_name = ? AND state = 'active'""",
+                (identifier, project, compose, volume),
+            )
+            return cursor.rowcount == 1

@@ -501,6 +501,13 @@ class ComposeClusterPurgeAdapter:
             verified_container = context.process(verify_container.step_id)
             _require_absent(verified_volume, label="volume")
             _require_absent(verified_container, label="container")
+            if not self._catalog._remove_postgres_cluster_claim(
+                target.cluster_id,
+                target.claim_project_id or target.project_id,
+                target.compose_project,
+                target.volume_name,
+            ):
+                raise ConfigError("Compose cluster claim changed after resource removal")
             context.complete_action(action.step_id)
             return decision
 
