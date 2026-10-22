@@ -381,73 +381,61 @@ def test_catalogue_http_projection_redacts_unsafe_persisted_values(
     root = _admin_root(tmp_path, monkeypatch)
     _write_admin_config(root)
 
-    from odoo_instance_sdk.http import admin as admin_module
-    from odoo_instance_sdk.models.backup import BackupFormat, BackupState
-    from odoo_instance_sdk.storage.catalog.helpers import (
-        BackupEventPage,
-        BackupSummary,
-        BackupSummaryPage,
-        EnvironmentHistoryEvent,
-        EnvironmentHistoryPage,
-        IncompleteOperation,
-        IncompleteOperationPage,
-    )
+    from odoo_instance_sdk.internal.applied_settings import LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.storage.catalog import BackupCatalog
 
     raw_path = "/private/raw/odoo/admin.toml"
     raw_json = '{"admin_passwd":"raw-secret","config":"/private/raw/config.json"}'
     raw_command = "odoo --config /private/raw/odoo.conf admin_passwd=raw-secret"
     now = datetime.now(UTC)
 
-    class Catalog:
-        def list_backup_summaries(self, **_: object) -> BackupSummaryPage:
-            return BackupSummaryPage(
-                (
-                    BackupSummary(
-                        uuid.uuid4(),
-                        raw_path,
-                        raw_json,
-                        raw_path,
-                        raw_json,
-                        BackupFormat.DUMP,
-                        1,
-                        BackupState.AVAILABLE,
-                        now,
-                    ),
-                ),
-                None,
-            )
+    backup_id = str(uuid.uuid4())
+    catalog = BackupCatalog(db_path=get_catalog_path(ensure_exists=True))
+    catalog.start_download(
+        backup_id,
+        raw_path,
+        raw_json,
+        "dump",
+        False,
+        Path(raw_path),
+        source_name=raw_path,
+    )
+    catalog.fail_download(backup_id, "raw-error", raw_command)
+    catalog.create_environment(
+        {
+            "id": "env-raw",
+            "name": raw_path,
+            "repository_root": raw_path,
+            "git_common_dir": raw_path,
+            "branch": "main",
+            "base_ref": "main",
+            "worktree_path": raw_path,
+            "generated_config_path": raw_path,
+            "python_environment_path": raw_path,
+            "python_environment_owned": False,
+            "dependency_lock_path": raw_path,
+            "db_mode": "copy",
+            "source_db_name": raw_json,
+            "target_db_name": raw_json,
+            "runtime_json": raw_json,
+            "state": "failed",
+            "created_at": now.isoformat(),
+            "last_used_at": now.isoformat(),
+            "last_error": raw_command,
+            "applied_settings_json": LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
+            "recovery_json": raw_json,
+            "checkout_repository_root": raw_path,
+            "checkout_git_common_dir": raw_path,
+            "checkout_commit_sha": raw_json,
+            "code_ownership": "sdk_owned",
+            "artifact_root": raw_path,
+            "adoption_input_fingerprint": raw_json,
+        }
+    )
+    catalog.add_environment_event("env-raw", "sync", "failed", message=raw_command)
+    catalog.close()
 
-        def list_backup_events(self, *_args: object, **_kwargs: object) -> BackupEventPage:
-            return BackupEventPage((), None)
-
-        def list_incomplete_operations(self, **_: object) -> IncompleteOperationPage:
-            return IncompleteOperationPage(
-                (IncompleteOperation(1, "backup", raw_path, "failed", now, raw_command),), None
-            )
-
-        def list_environment_history(self, **_: object) -> EnvironmentHistoryPage:
-            return EnvironmentHistoryPage(
-                (
-                    EnvironmentHistoryEvent(
-                        1,
-                        "env-1",
-                        raw_path,
-                        raw_json,
-                        now,
-                        "sync",
-                        "failed",
-                        "active",
-                        raw_command,
-                    ),
-                ),
-                None,
-            )
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(admin_module, "get_catalog_path", lambda **_: Path("catalog"))
-    monkeypatch.setattr(admin_module, "open_catalog_read_only", lambda _path: Catalog())
     _, client, _ = _authenticated_client(root)
     for key in ("backups", "incomplete-operations", "environment-history"):
         response = client.get(f"/admin/{key}/list")

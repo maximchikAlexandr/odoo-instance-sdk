@@ -113,7 +113,11 @@ def valid_admin_config_for_non_admin_tests(
 ) -> None:
     """Give ordinary non-headless HTTP tests the required private Admin config."""
     del isolated_cli_catalogue
-    if request.path.name == "test_http_admin.py":
+    if request.path.name not in {
+        "test_http_contract.py",
+        "test_http_runtime.py",
+        "test_serve.py",
+    }:
         return
     from pwdlib import PasswordHash
 

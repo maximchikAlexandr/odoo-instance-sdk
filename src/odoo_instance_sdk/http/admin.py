@@ -12,7 +12,7 @@ import re
 import stat
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields as dataclass_fields, replace
+from dataclasses import dataclass, fields as dataclass_fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,7 +42,6 @@ from starlette_admin.filters.base import (
 from odoo_instance_sdk.exceptions import ConfigError, SecretStoreConflictError
 from odoo_instance_sdk.internal.paths import get_admin_config_path, get_catalog_path
 from odoo_instance_sdk.internal.resource_inventory import open_catalog_read_only
-from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.internal.secret_store import (
     GitLabMemberSecret,
     RemoteOdooSecret,
@@ -62,11 +61,6 @@ _SESSION_KEY_MINIMUM = 32
 _ADMIN_USER = "admin"
 _PRIVATE_BITS = stat.S_IRWXG | stat.S_IRWXO
 _ARGON2_HASH = re.compile(r"\$argon2(?:id|i|d)\$[A-Za-z0-9=,.$+/:-]+\Z")
-_JSON_SECRET = re.compile(
-    r'(["\']?(?:password|passwd|secret|token|api[_-]?key|admin_passwd|db_password|master_pwd)'
-    r'["\']?\s*[:=]\s*)(?:"[^"]*"|\'[^\']*\'|[^,\s}]+)',
-    re.IGNORECASE,
-)
 
 
 class _ExactFilter(BaseFilter):
@@ -291,37 +285,6 @@ def _query_match(item: Any, q: str | None) -> bool:
     )
 
 
-def _safe_text(value: str | None) -> str | None:
-    text = sanitize_last_error(value)
-    return None if text is None else _JSON_SECRET.sub(r'\1"<redacted>"', text)
-
-
-def _safe_catalog_item(item: Any) -> Any:
-    if isinstance(item, BackupSummary):
-        return replace(
-            item,
-            project_id=_safe_text(item.project_id),
-            project_label=_safe_text(item.project_label),
-            source_label=_safe_text(item.source_label) or "remote source",
-            database_name=_safe_text(item.database_name) or "unknown",
-        )
-    if isinstance(item, IncompleteOperation):
-        return replace(
-            item,
-            object_id=_safe_text(item.object_id) or "unknown",
-            error=_safe_text(item.error),
-        )
-    if isinstance(item, EnvironmentHistoryEvent):
-        return replace(
-            item,
-            environment_id=_safe_text(item.environment_id) or "unknown",
-            environment_name=_safe_text(item.environment_name) or "unknown",
-            project_id=_safe_text(item.project_id),
-            message=_safe_text(sanitize_event_message(item.message)),
-        )
-    return item
-
-
 def _read_catalog_pages(
     fetch: Any,
     *,
@@ -339,11 +302,7 @@ def _read_catalog_pages(
     while True:
         page_limit = min(1000, max(1, needed - len(result)))
         page = fetch(**kwargs, limit=page_limit, cursor=cursor)
-        result.extend(
-            safe_item
-            for item in page.items
-            if _query_match(safe_item := _safe_catalog_item(item), q)
-        )
+        result.extend(item for item in page.items if _query_match(item, q))
         if len(result) >= needed:
             return tuple(result[skip:needed])
         cursor = page.next_cursor
@@ -357,7 +316,7 @@ def _count_catalog_pages(fetch: Any, *, q: str | None, **kwargs: Any) -> int:
     total = 0
     while True:
         page = fetch(**kwargs, limit=1000, cursor=cursor)
-        total += sum(_query_match(_safe_catalog_item(item), q) for item in page.items)
+        total += sum(_query_match(item, q) for item in page.items)
         cursor = page.next_cursor
         if cursor is None:
             return total
@@ -368,9 +327,8 @@ def _find_catalog_item(fetch: Any, predicate: Any, **kwargs: Any) -> Any | None:
     while True:
         page = fetch(**kwargs, limit=1000, cursor=cursor)
         for item in page.items:
-            safe_item = _safe_catalog_item(item)
-            if predicate(safe_item):
-                return safe_item
+            if predicate(item):
+                return item
         cursor = page.next_cursor
         if cursor is None:
             return None
@@ -440,7 +398,7 @@ async def _backup_events(request: Request, obj: BackupSummary) -> str:
         page = catalog.list_backup_events(str(obj.backup_id), limit=100)
         return "; ".join(
             f"{event.event_type.value} at {event.occurred_at.isoformat()}"
-            + (f": {sanitize_event_message(event.message)}" if event.message else "")
+            + (f": {event.message}" if event.message else "")
             for event in page.items
         )
     finally:
