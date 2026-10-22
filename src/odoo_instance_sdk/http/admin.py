@@ -13,9 +13,11 @@ import stat
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, fields as dataclass_fields
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette_admin import (
@@ -29,9 +31,15 @@ from starlette_admin import (
 )
 from starlette_admin.auth import AdminUser
 from starlette_admin.auth.password import AuthProvider
-from starlette_admin.exceptions import FormValidationError, LoginFailed
+from starlette_admin.exceptions import ActionFailed, FormValidationError, LoginFailed
+from starlette_admin.filters.base import (
+    BaseFilter,
+    FilterApplyContext,
+    FilterDataType,
+    FilterValidationError,
+)
 
-from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.exceptions import ConfigError, SecretStoreConflictError
 from odoo_instance_sdk.internal.paths import get_admin_config_path, get_catalog_path
 from odoo_instance_sdk.internal.resource_inventory import open_catalog_read_only
 from odoo_instance_sdk.internal.secret_store import (
@@ -53,6 +61,32 @@ _SESSION_KEY_MINIMUM = 32
 _ADMIN_USER = "admin"
 _PRIVATE_BITS = stat.S_IRWXG | stat.S_IRWXO
 _ARGON2_HASH = re.compile(r"\$argon2(?:id|i|d)\$[A-Za-z0-9=,.$+/:-]+\Z")
+
+
+class _ExactFilter(BaseFilter):
+    name = "eq"
+    label = "Equals"
+    data_type = FilterDataType.STRING
+
+    def apply(self, ctx: FilterApplyContext) -> Any:
+        return ctx.query
+
+
+class _DateRangeFilter(BaseFilter):
+    name = "between"
+    label = "Between"
+    data_type = FilterDataType.DATETIME
+    has_value2 = True
+
+    def parse_value(self, raw: str) -> datetime:
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise FilterValidationError("invalid datetime") from exc
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    def apply(self, ctx: FilterApplyContext) -> Any:
+        return ctx.query
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -158,6 +192,110 @@ def _page(items: Sequence[Any], *, skip: int, limit: int, q: str | None) -> tupl
     return values[skip : skip + min(limit, 1000)]
 
 
+def _filter_values(
+    filters: FilterGroup | None,
+    *,
+    exact_fields: frozenset[str],
+    date_fields: frozenset[str],
+) -> dict[str, Any]:
+    """Convert the Admin filter tree into the existing typed catalog inputs."""
+    if filters is None or filters.is_empty():
+        return {}
+    if filters.logic != "and":
+        raise HTTPException(400, "Only conjunctive catalogue filters are supported")
+    result: dict[str, Any] = {}
+    for rule in filters.rules:
+        if hasattr(rule, "rules"):
+            raise HTTPException(400, "Nested catalogue filters are unsupported")
+        field = rule.field
+        if field in exact_fields and rule.filter == "eq":
+            if field in result:
+                raise HTTPException(400, "Duplicate catalogue filter")
+            result[field] = str(rule.value)
+            continue
+        if field in date_fields and rule.filter == "between":
+            if not isinstance(rule.value, datetime) or not isinstance(rule.value2, datetime):
+                raise HTTPException(400, "Catalogue date range is invalid")
+            if f"{field}_after" in result or f"{field}_before" in result:
+                raise HTTPException(400, "Duplicate catalogue filter")
+            result[f"{field}_after"] = rule.value
+            result[f"{field}_before"] = rule.value2
+            continue
+        raise HTTPException(400, "Unsupported catalogue filter")
+    return result
+
+
+def _validate_choice(values: dict[str, Any], field: str, choices: frozenset[str]) -> None:
+    value = values.get(field)
+    if value is not None and value not in choices:
+        raise HTTPException(400, f"Unsupported catalogue value for {field}")
+
+
+def _validate_sort_query(request: Request, fields: frozenset[str]) -> None:
+    for value in request.query_params.getlist("sort"):
+        try:
+            field, direction = value.rsplit("__", 1)
+        except ValueError as exc:
+            raise HTTPException(400, "Unsupported catalogue sort") from exc
+        if field not in fields or direction not in {"asc", "desc"}:
+            raise HTTPException(400, "Unsupported catalogue sort")
+
+
+def _sort_items(
+    items: Sequence[Any],
+    *,
+    request: Request,
+    sorts: Sequence[tuple[str, str]] | None,
+    fields: frozenset[str],
+) -> tuple[Any, ...]:
+    _validate_sort_query(request, fields)
+    if not request.query_params.getlist("sort"):
+        return tuple(items)
+    result = list(items)
+    for field, direction in reversed(tuple(sorts or ())):
+        if field not in fields or direction not in {"asc", "desc"}:
+            raise HTTPException(400, "Unsupported catalogue sort")
+        result.sort(
+            key=lambda item: (getattr(item, field) is None, getattr(item, field)),
+            reverse=direction == "desc",
+        )
+    return tuple(result)
+
+
+def _read_catalog_pages(fetch: Any, **kwargs: Any) -> tuple[Any, ...]:
+    """Read typed catalog pages; every underlying query remains capped at 1000."""
+    cursor: str | None = None
+    result: list[Any] = []
+    while True:
+        page = fetch(**kwargs, limit=1000, cursor=cursor)
+        result.extend(page.items)
+        cursor = page.next_cursor
+        if cursor is None:
+            return tuple(result)
+
+
+def _revision_token(value: Any) -> tuple[str, int | None]:
+    identity, separator, raw_revision = str(value).rpartition("|")
+    if separator and raw_revision.isdigit() and int(raw_revision) > 0:
+        return identity, int(raw_revision)
+    return str(value), None
+
+
+def _request_revision(request: Request) -> int | None:
+    raw = request.query_params.get("revision")
+    if raw is None:
+        return None
+    try:
+        revision = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return revision if revision > 0 else None
+
+
+def _conflict() -> ActionFailed:
+    return ActionFailed("Record changed; reload and retry.")
+
+
 class _ReadOnlyCatalogView(BaseModelView):
     exporters = ()
     importers = ()
@@ -213,14 +351,14 @@ class BackupView(_ReadOnlyCatalogView):
     pk_attr = "backup_id"
     fields = (
         StringField("backup_id", read_only=True),
-        StringField("project_id", read_only=True),
+        StringField("project_id", read_only=True, filters=[_ExactFilter]),
         StringField("project_label", read_only=True),
-        StringField("source_label", read_only=True),
-        StringField("database_name", read_only=True),
-        StringField("format", read_only=True),
+        StringField("source_label", read_only=True, filters=[_ExactFilter]),
+        StringField("database_name", read_only=True, filters=[_ExactFilter]),
+        StringField("format", read_only=True, filters=[_ExactFilter]),
         IntegerField("size_bytes", read_only=True),
-        StringField("state", read_only=True),
-        DateTimeField("downloaded_at", read_only=True),
+        StringField("state", read_only=True, filters=[_ExactFilter]),
+        DateTimeField("downloaded_at", read_only=True, filters=[_DateRangeFilter]),
         ComputedField("events", getter=_backup_events, read_only=True),
     )
 
@@ -233,13 +371,59 @@ class BackupView(_ReadOnlyCatalogView):
         sorts: Sequence[tuple[str, str]] | None = None,
         filters: FilterGroup | None = None,
     ) -> Sequence[BackupSummary]:
-        del request, sorts, filters
+        filter_values = _filter_values(
+            filters,
+            exact_fields=frozenset(
+                {"project_id", "source_label", "database_name", "format", "state"}
+            ),
+            date_fields=frozenset({"downloaded_at"}),
+        )
+        _validate_choice(filter_values, "format", frozenset({"zip", "dump"}))
+        _validate_choice(
+            filter_values,
+            "state",
+            frozenset({"downloading", "available", "failed", "deleted"}),
+        )
+        _validate_sort_query(
+            request,
+            frozenset(
+                {
+                    "backup_id",
+                    "project_id",
+                    "project_label",
+                    "source_label",
+                    "database_name",
+                    "format",
+                    "size_bytes",
+                    "state",
+                    "downloaded_at",
+                }
+            ),
+        )
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return ()
         try:
-            page = catalog.list_backup_summaries(limit=1000)
-            return _page(page.items, skip=skip, limit=limit, q=q)
+            items = _read_catalog_pages(catalog.list_backup_summaries, **filter_values)
+            items = _sort_items(
+                items,
+                request=request,
+                sorts=sorts,
+                fields=frozenset(
+                    {
+                        "backup_id",
+                        "project_id",
+                        "project_label",
+                        "source_label",
+                        "database_name",
+                        "format",
+                        "size_bytes",
+                        "state",
+                        "downloaded_at",
+                    }
+                ),
+            )
+            return _page(items, skip=skip, limit=limit, q=q)
         finally:
             catalog.close()
 
@@ -254,8 +438,8 @@ class BackupView(_ReadOnlyCatalogView):
         if catalog is None:
             return None
         try:
-            page = catalog.list_backup_summaries(limit=1000)
-            return next((item for item in page.items if str(item.backup_id) == str(pk)), None)
+            page = _read_catalog_pages(catalog.list_backup_summaries)
+            return next((item for item in page if str(item.backup_id) == str(pk)), None)
         finally:
             catalog.close()
 
@@ -274,10 +458,10 @@ class IncompleteOperationView(_ReadOnlyCatalogView):
     pk_attr = "sequence"
     fields = (
         IntegerField("sequence", read_only=True),
-        StringField("object_type", read_only=True),
+        StringField("object_type", read_only=True, filters=[_ExactFilter]),
         StringField("object_id", read_only=True),
-        StringField("state", read_only=True),
-        DateTimeField("occurred_at", read_only=True),
+        StringField("state", read_only=True, filters=[_ExactFilter]),
+        DateTimeField("occurred_at", read_only=True, filters=[_DateRangeFilter]),
         StringField("error", read_only=True),
     )
 
@@ -290,14 +474,39 @@ class IncompleteOperationView(_ReadOnlyCatalogView):
         sorts: Sequence[tuple[str, str]] | None = None,
         filters: FilterGroup | None = None,
     ) -> Sequence[IncompleteOperation]:
-        del request, sorts, filters
+        filter_values = _filter_values(
+            filters,
+            exact_fields=frozenset({"object_type", "state"}),
+            date_fields=frozenset({"occurred_at"}),
+        )
+        _validate_choice(
+            filter_values,
+            "object_type",
+            frozenset({"backup", "restore", "environment"}),
+        )
+        _validate_choice(
+            filter_values,
+            "state",
+            frozenset(
+                {
+                    "downloading",
+                    "failed",
+                    "incomplete",
+                    "creating",
+                    "removing",
+                    "cleanup_failed",
+                }
+            ),
+        )
+        fields = frozenset({"sequence", "object_type", "object_id", "state", "occurred_at"})
+        _validate_sort_query(request, fields)
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return ()
         try:
-            return _page(
-                catalog.list_incomplete_operations(limit=1000).items, skip=skip, limit=limit, q=q
-            )
+            items = _read_catalog_pages(catalog.list_incomplete_operations, **filter_values)
+            items = _sort_items(items, request=request, sorts=sorts, fields=fields)
+            return _page(items, skip=skip, limit=limit, q=q)
         finally:
             catalog.close()
 
@@ -331,12 +540,12 @@ class EnvironmentHistoryView(_ReadOnlyCatalogView):
     pk_attr = "sequence"
     fields = (
         IntegerField("sequence", read_only=True),
-        StringField("environment_id", read_only=True),
+        StringField("environment_id", read_only=True, filters=[_ExactFilter]),
         StringField("environment_name", read_only=True),
-        StringField("project_id", read_only=True),
-        DateTimeField("occurred_at", read_only=True),
-        StringField("operation", read_only=True),
-        StringField("outcome", read_only=True),
+        StringField("project_id", read_only=True, filters=[_ExactFilter]),
+        DateTimeField("occurred_at", read_only=True, filters=[_DateRangeFilter]),
+        StringField("operation", read_only=True, filters=[_ExactFilter]),
+        StringField("outcome", read_only=True, filters=[_ExactFilter]),
         StringField("state", read_only=True),
         StringField("message", read_only=True),
     )
@@ -350,14 +559,41 @@ class EnvironmentHistoryView(_ReadOnlyCatalogView):
         sorts: Sequence[tuple[str, str]] | None = None,
         filters: FilterGroup | None = None,
     ) -> Sequence[EnvironmentHistoryEvent]:
-        del request, sorts, filters
+        filter_values = _filter_values(
+            filters,
+            exact_fields=frozenset({"environment_id", "project_id", "operation", "outcome"}),
+            date_fields=frozenset({"occurred_at"}),
+        )
+        _validate_choice(
+            filter_values,
+            "operation",
+            frozenset({"checkout", "sync", "use", "shell", "remove"}),
+        )
+        _validate_choice(
+            filter_values,
+            "outcome",
+            frozenset({"started", "succeeded", "failed"}),
+        )
+        fields = frozenset(
+            {
+                "sequence",
+                "environment_id",
+                "environment_name",
+                "project_id",
+                "occurred_at",
+                "operation",
+                "outcome",
+                "state",
+            }
+        )
+        _validate_sort_query(request, fields)
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return ()
         try:
-            return _page(
-                catalog.list_environment_history(limit=1000).items, skip=skip, limit=limit, q=q
-            )
+            items = _read_catalog_pages(catalog.list_environment_history, **filter_values)
+            items = _sort_items(items, request=request, sorts=sorts, fields=fields)
+            return _page(items, skip=skip, limit=limit, q=q)
         finally:
             catalog.close()
 
@@ -465,7 +701,8 @@ class RemoteOdooSecretView(_SecretView):
 
     async def find_by_pk(self, request: Request, pk: Any) -> RemoteOdooSecret | None:
         del request
-        return self._store().get_remote_odoo(str(pk))
+        identity, _revision = _revision_token(pk)
+        return self._store().get_remote_odoo(identity)
 
     async def find_by_pks(self, request: Request, pks: list[Any]) -> Sequence[RemoteOdooSecret]:
         result: list[RemoteOdooSecret] = []
@@ -480,18 +717,31 @@ class RemoteOdooSecretView(_SecretView):
             str(data["base_url"]), str(data.get("master_password") or "")
         )
 
+    async def get_pk_value(self, request: Request, obj: RemoteOdooSecret) -> str:
+        del request
+        return f"{obj.base_url}|{obj.revision}"
+
     async def edit(self, request: Request, pk: Any, data: dict[str, Any]) -> RemoteOdooSecret:
-        return self._store().update_remote_odoo(
-            str(pk),
-            revision=int(data["revision"]),
-            master_password=str(data.get("master_password") or ""),
-        )
+        identity, _revision = _revision_token(pk)
+        try:
+            return self._store().update_remote_odoo(
+                identity,
+                revision=int(data["revision"]),
+                master_password=str(data.get("master_password") or ""),
+            )
+        except SecretStoreConflictError as exc:
+            raise FormValidationError({"revision": _conflict().msg}) from exc
 
     async def delete(self, request: Request, pks: list[Any]) -> int:
         for pk in pks:
-            record = self._store().get_remote_odoo(str(pk))
-            if record is not None:
-                self._store().delete_remote_odoo(record.base_url, revision=record.revision)
+            identity, token_revision = _revision_token(pk)
+            revision = _request_revision(request) or token_revision
+            if revision is None:
+                raise _conflict()
+            try:
+                self._store().delete_remote_odoo(identity, revision=revision)
+            except SecretStoreConflictError as exc:
+                raise _conflict() from exc
         return len(pks)
 
 
@@ -530,7 +780,7 @@ class GitLabMemberSecretView(_SecretView):
 
     async def get_pk_value(self, request: Request, obj: GitLabMemberSecret) -> str:
         del request
-        return f"{obj.member_id}|{obj.host}"
+        return f"{obj.member_id}|{obj.host}|{obj.revision}"
 
     async def find_all(
         self,
@@ -552,7 +802,8 @@ class GitLabMemberSecretView(_SecretView):
     async def find_by_pk(self, request: Request, pk: Any) -> GitLabMemberSecret | None:
         del request
         try:
-            member_id, host = str(pk).split("|", 1)
+            identity, _revision = _revision_token(pk)
+            member_id, host = identity.split("|", 1)
         except ValueError:
             return None
         return self._store().get_gitlab_member(member_id, host)
@@ -574,22 +825,30 @@ class GitLabMemberSecretView(_SecretView):
         )
 
     async def edit(self, request: Request, pk: Any, data: dict[str, Any]) -> GitLabMemberSecret:
-        member_id, host = str(pk).split("|", 1)
-        return self._store().update_gitlab_member(
-            member_id,
-            host,
-            revision=int(data["revision"]),
-            login=str(data["login"]),
-            token=str(data.get("token") or ""),
-        )
+        identity, _revision = _revision_token(pk)
+        member_id, host = identity.split("|", 1)
+        try:
+            return self._store().update_gitlab_member(
+                member_id,
+                host,
+                revision=int(data["revision"]),
+                login=str(data["login"]),
+                token=str(data.get("token") or ""),
+            )
+        except SecretStoreConflictError as exc:
+            raise FormValidationError({"revision": _conflict().msg}) from exc
 
     async def delete(self, request: Request, pks: list[Any]) -> int:
         for pk in pks:
-            record = await self.find_by_pk(request, pk)
-            if record is not None:
-                self._store().delete_gitlab_member(
-                    record.member_id, record.host, revision=record.revision
-                )
+            identity, token_revision = _revision_token(pk)
+            revision = _request_revision(request) or token_revision
+            if revision is None:
+                raise _conflict()
+            try:
+                member_id, host = identity.split("|", 1)
+                self._store().delete_gitlab_member(member_id, host, revision=revision)
+            except SecretStoreConflictError as exc:
+                raise _conflict() from exc
         return len(pks)
 
 
