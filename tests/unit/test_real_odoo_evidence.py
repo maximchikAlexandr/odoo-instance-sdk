@@ -8,7 +8,7 @@ from typing import Literal
 import pytest
 
 from scripts import real_odoo_evidence as evidence, real_odoo_timing as timing
-from scripts.real_odoo_secrets import secret_variants, write_secret_registry
+from scripts.real_odoo_secrets import read_secret_registry, secret_variants, write_secret_registry
 from tests.unit.real_odoo_ci_support import _evidence_contract
 
 
@@ -40,6 +40,17 @@ def test_evidence_is_bounded_and_canary_safe(tmp_path: Path) -> None:
         assert "odoo.log" not in names
         assert "postgres.log" not in names
         assert "compose.log" not in names
+
+
+def test_owner_only_empty_registry_is_valid_before_any_runtime_secrets_exist(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "secret-registry.json"
+
+    write_secret_registry(registry, ())
+
+    assert registry.stat().st_mode & 0o077 == 0
+    assert read_secret_registry(registry) == ()
 
 
 def test_evidence_rejects_canary_and_writes_minimal_error(tmp_path: Path) -> None:
