@@ -3,7 +3,7 @@
 - [ ] 1.1 Add the optional dashboard secret-management dependencies, owner-only administrator/key/store path models, strict regular-file/mode validation, and core-import/package compatibility coverage.
 - [ ] 1.2 Implement SQLCipher schema initialization for remote Odoo and GitLab identities, stable internal token keys, record revisions, atomic key/database creation, and fail-closed partial/wrong/corrupt store handling.
 - [ ] 1.3 Implement typed secret create/update/delete commands with write-only fields, blank-on-edit retention, compare-and-swap conflicts, bounded SQLite busy handling, and complete redaction tests.
-- [ ] 1.4 Mount Starlette Admin authentication/session handling in non-headless monitor composition, add explicit secret resource views and monitor navigation, and test login/logout, unsafe configuration, unauthorized access, proxy/Host behavior, and headless exclusion.
+- [ ] 1.4 Mount Starlette Admin authentication/session handling in non-headless monitor composition, add explicit secret resource views, and test login/logout, unsafe configuration, unauthorized access, proxy/Host behavior, and headless exclusion without editing the monitor React application.
 
 ## 2. Credential resolver integration
 
@@ -22,7 +22,7 @@
 
 - [ ] 4.1 Add an exact current-database provenance query covering completed catalogue restore, replacement/drop/bootstrap/local-archive/incomplete/missing/null/mismatched-cluster cases.
 - [ ] 4.2 Extend frozen monitor models, snapshot planning/collection, msgspec/OpenAPI bridge, and generated TypeScript with exact UTC download time, nonnegative age, and explicit unknown state.
-- [ ] 4.3 Render download timestamp/age or the exact unknown label on project and environment database cards without a second request, and add Python schema plus React known/unknown/clock-skew regressions.
+- [ ] 4.3 Add the same-origin Admin navigation link and render download timestamp/age or the exact unknown label on project and environment database cards without a second request; own all shared monitor React application/styles/tests and add Python schema plus React navigation/known/unknown/clock-skew regressions.
 
 ## 5. Packaging, documentation, and compatibility
 
