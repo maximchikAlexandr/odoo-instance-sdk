@@ -1770,6 +1770,7 @@ def _observed_database_and_compose_removal_case(
     *,
     absence_observed: threading.Event | None = None,
     continue_after_absence: threading.Event | None = None,
+    container_absent: bool = False,
 ) -> tuple[
     BackupCatalog,
     str,
@@ -1904,6 +1905,16 @@ def _observed_database_and_compose_removal_case(
                 }
             )
         elif step.step_id.endswith("inspect-container"):
+            if container_absent:
+                return ProcessResult(
+                    argv=step.argv,
+                    returncode=1,
+                    stdout="",
+                    stderr="No such container",
+                    duration=0.0,
+                    cwd=step.cwd,
+                    environment=step.environment,
+                )
             stdout = json.dumps(
                 {
                     "Name": f"/{compose_project}-postgres-1",
@@ -2126,6 +2137,43 @@ def test_compose_purge_retains_claim_when_cluster_lock_is_unavailable(
     assert compose_executor.executed == []
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert root.exists()
+    catalog.close()
+
+
+def test_public_remove_command_retires_claim_when_owned_container_is_already_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        catalog,
+        project_id,
+        root,
+        command,
+        _fingerprint,
+        _step_ids,
+        database_executor,
+        compose_executor,
+        cluster_project_id,
+        _catalog_holder,
+        _client,
+    ) = _observed_database_and_compose_removal_case(
+        tmp_path, monkeypatch, verification_error=None, container_absent=True
+    )
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert [step.step_id.rsplit(":", 1)[-1] for step in compose_executor.executed] == [
+        "inspect-volume",
+        "inspect-container",
+        "remove-volume",
+        "verify-volume",
+        "verify-container",
+    ]
+    assert [step.step_id for step in database_executor.executed] == [
+        "project-removal.database.guarded-drop:database:owned_db"
+    ]
+    assert catalog._get_postgres_cluster(cluster_project_id) is None
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert not root.exists()
     catalog.close()
 
 
