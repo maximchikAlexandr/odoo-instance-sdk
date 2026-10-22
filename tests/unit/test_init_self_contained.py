@@ -2203,18 +2203,18 @@ def test_value_free_inventory_timeout_hides_stdout_tail(
     assert any(event.kind == "failed" for event in events)
 
 
-def test_value_free_windows_output_limit_tail_is_empty() -> None:
+def test_value_free_restore_oid_windows_output_limit_tail_is_empty() -> None:
     from odoo_instance_sdk.internal.proc.windows import _output_limit_error
 
     step = PreparedStep(
-        step_id="init.bootstrap.databases",
+        step_id="database.restore.exists-after",
         argv=("psql",),
         private_stdout_value_free=True,
     )
     error = _output_limit_error(
         step,
         duration=0.1,
-        stdout_tail=b"private-db\t202\n",
+        stdout_tail=b"restore-oid-987654321\n",
         stderr_tail=b"stderr-preserved\n",
         stdout_truncated=True,
         stderr_truncated=False,
@@ -2222,8 +2222,8 @@ def test_value_free_windows_output_limit_tail_is_empty() -> None:
     assert isinstance(error, ProcessOutputLimitError)
     assert getattr(error, "stdout_tail") == ""
     assert getattr(error, "stderr_tail") == "stderr-preserved\n"
-    assert "private-db" not in str(error)
-    assert "202" not in str(error)
+    assert "restore-oid-987654321" not in str(error)
+    assert "987654321" not in str(error)
 
 
 def test_init_database_candidates_exclude_system_databases() -> None:
