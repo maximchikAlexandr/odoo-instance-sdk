@@ -470,13 +470,19 @@ class ComposeClusterPurgeAdapter:
                 if target.dependency_check():
                     raise ConfigError("Compose cluster has a retained or active dependency")
                 volume = _json_object(context.process(volume_inspect.step_id), label="volume")
-                container = _json_object(context.process(container_inspect.step_id), label="container")
-                if volume is not None and not _identity_labels(volume, container=False, target=target):
+                container = _json_object(
+                    context.process(container_inspect.step_id), label="container"
+                )
+                if volume is not None and not _identity_labels(
+                    volume, container=False, target=target
+                ):
                     raise ConfigError("Compose volume labels do not match the active project claim")
                 if container is not None and not _identity_labels(
                     container, container=True, target=target
                 ):
-                    raise ConfigError("Compose container labels or volume mount do not match the claim")
+                    raise ConfigError(
+                        "Compose container labels or volume mount do not match the claim"
+                    )
                 # Recheck immediately after both live Docker identities are known;
                 # the capture-time and pre-inspection checks are not sufficient to
                 # authorize a mutation if a dependent resource appeared meanwhile.
