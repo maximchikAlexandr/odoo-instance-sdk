@@ -10,8 +10,9 @@ import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
-from odoo_instance_sdk.exceptions import GitLabPublicationError
+from odoo_instance_sdk.exceptions import GitLabCredentialError, GitLabPublicationError
 from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.models import (
     GitLabCredentialContext,
     GitLabCredentialIdentity,
@@ -75,6 +76,124 @@ def _identity() -> tuple[GitLabCredentialContext, GitLabIdentity]:
     )
 
 
+def _legacy_credentials(root: Path) -> tuple[Path, Path]:
+    directory = root / "credentials"
+    directory.mkdir(mode=0o700)
+    mapping = directory / "gitlab-credentials.toml"
+    mapping.write_text(
+        "[[mappings]]\n"
+        f'user_id = "{MEMBER}"\n'
+        'host = "gitlab.example"\n'
+        'login = "alice"\n'
+        'token_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    environment = directory / ".env"
+    environment.write_text("ODCLI_GITLAB_TOKEN_ALICE=file-token\n", encoding="utf-8")
+    environment.chmod(0o600)
+    return mapping, environment
+
+
+def _identity_callback(tokens: list[str]):
+    def verify(host: str, token: str) -> Mapping[str, JsonValue]:
+        assert host == "gitlab.example"
+        tokens.append(token)
+        return {"id": 7, "username": "alice", "name": "Alice Example", "email": "alice@example.test"}
+
+    return verify
+
+
+@pytest.mark.parametrize("store_state", ["hit", "absence"], ids=["encrypted-hit", "exact-absence"])
+def test_public_merge_request_resolves_store_before_legacy_without_leaking_secrets(
+    tmp_path: Path, store_state: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "repo"
+    _repo(root)
+    description = tmp_path / "description.md"
+    description.write_text("body\n", encoding="utf-8")
+    store_root = tmp_path / "store"
+    store = SecretStore(user_root=store_root)
+    mapping, environment = _legacy_credentials(tmp_path)
+    if store_state == "hit":
+        store.create_gitlab_member(MEMBER, "gitlab.example", "alice", "encrypted-token")
+    identity_tokens: list[str] = []
+    transport = _Transport()
+
+    command = _resource(root).merge_request_command(
+        repository=root,
+        member_id=MEMBER,
+        target="main",
+        title="Create feature",
+        description_file=description,
+        user_root=store_root,
+        mapping_path=mapping,
+        environment_path=environment,
+        process_environment={"ODCLI_GITLAB_TOKEN_ALICE": "process-token"},
+        identity_transport=_identity_callback(identity_tokens),
+        publication_transport=transport,
+    )
+    assert "encrypted-token" not in repr(command.plan)
+    assert "process-token" not in repr(command.plan)
+    result = command.run()
+
+    expected = "encrypted-token" if store_state == "hit" else "process-token"
+    assert identity_tokens == [expected]
+    assert transport.tokens == [expected]
+    assert expected not in repr(result)
+    assert "database" not in repr(result).casefold()
+    assert expected not in caplog.text
+
+
+@pytest.mark.parametrize("store_state", ["broken", "invalid"], ids=["broken-store", "invalid-record"])
+def test_public_merge_request_fails_closed_for_store_errors_without_legacy_fallback(
+    tmp_path: Path, store_state: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "repo"
+    _repo(root)
+    description = tmp_path / "description.md"
+    description.write_text("body\n", encoding="utf-8")
+    store_root = tmp_path / "store"
+    store = SecretStore(user_root=store_root)
+    store.create_gitlab_member(MEMBER, "gitlab.example", "alice", "encrypted-token")
+    if store_state == "broken":
+        store.key_path.unlink()
+    else:
+        driver = __import__("sqlcipher3.dbapi2", fromlist=["connect"])
+        connection = driver.connect(str(store.store_path))
+        connection.execute(f'PRAGMA key = "x\'{store.key_path.read_bytes().hex()}\'"')
+        connection.execute("UPDATE gitlab_member_secret SET token = ''")
+        connection.commit()
+        connection.close()
+    mapping, environment = _legacy_credentials(tmp_path)
+    identity_tokens: list[str] = []
+    transport = _Transport()
+
+    with pytest.raises(GitLabCredentialError) as failure:
+        _resource(root).merge_request_command(
+            repository=root,
+            member_id=MEMBER,
+            target="main",
+            title="Create feature",
+            description_file=description,
+            user_root=store_root,
+            mapping_path=mapping,
+            environment_path=environment,
+            process_environment={"ODCLI_GITLAB_TOKEN_ALICE": "legacy-token"},
+            identity_transport=_identity_callback(identity_tokens),
+            publication_transport=transport,
+        )
+
+    text = repr(failure.value)
+    assert "encrypted-token" not in text
+    assert "legacy-token" not in text
+    assert "database" not in text.casefold()
+    assert identity_tokens == []
+    assert transport.calls == []
+    assert "encrypted-token" not in caplog.text
+    assert "legacy-token" not in caplog.text
+
+
 class _Transport(GitLabPublicationTransport):
     def __init__(
         self,
@@ -87,6 +206,7 @@ class _Transport(GitLabPublicationTransport):
         self.upload_markdown = upload_markdown
         self.mutation_error = mutation_error
         self.calls: list[str] = []
+        self.tokens: list[str] = []
         self.mutation_descriptions: list[str] = []
         self.uploaded_contents: list[bytes] = []
 
@@ -94,6 +214,7 @@ class _Transport(GitLabPublicationTransport):
         self, _credential: GitLabCredentialContext, _project: str
     ) -> Mapping[str, JsonValue]:
         self.calls.append("project")
+        self.tokens.append(_credential._token)
         return {"id": 42}
 
     def list_open_merge_requests(

@@ -26,6 +26,8 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentConflictError,
     EnvironmentNotFoundError,
     InstanceConfigurationError,
+    SecretStoreCorruptError,
+    SecretStoreRecordError,
     StalePlanError,
 )
 from odoo_instance_sdk.execution import Command, JsonValue
@@ -33,6 +35,7 @@ from odoo_instance_sdk.internal.applied_settings import (
     LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     decode_applied_settings,
 )
+from odoo_instance_sdk.internal.dbprep import source as source_module
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -42,6 +45,7 @@ from odoo_instance_sdk.internal.proc import (
     RecordingExecutor,
     StepObserver,
 )
+from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
@@ -50,6 +54,7 @@ from odoo_instance_sdk.models import (
     BackupProvenanceStatus,
     Database,
     DatabasePreparationAction,
+    DatabaseRefreshOptions,
     NoBackup,
     StartConfig,
 )
@@ -699,6 +704,186 @@ class TestCheckoutPreflight:
         journal = env_client.get_catalog().get_copy_journal(str(env.id))
         assert env.backup_id == remote_backup.id
         assert journal is not None and journal["backup_ownership"] == "borrowed"
+
+    @pytest.mark.parametrize(
+        "store_state",
+        ["hit", "absence", "broken", "invalid"],
+        ids=["encrypted-hit", "exact-absence", "broken-store", "invalid-record"],
+    )
+    def test_public_remote_refresh_credential_boundary_is_fail_closed(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        store_state: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _add_named_remote_config(project_manifest)
+        backup = _valid_retained_backup(tmp_path, branch="main")
+        remote = MagicMock()
+        remote.databases.names.return_value = ("staging_db",)
+        remote.databases.backup.return_value = backup
+        monkeypatch.setattr(env_client, "instance", MagicMock(return_value=remote))
+        monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "legacy-secret")
+
+        store = SecretStore(user_root=tmp_path / "store")
+        if store_state == "hit":
+            store.create_remote_odoo("https://staging.example", "encrypted-secret")
+        elif store_state in {"broken", "invalid"}:
+            store.create_remote_odoo("https://staging.example", "encrypted-secret")
+            if store_state == "broken":
+                store.key_path.unlink()
+            else:
+                driver = __import__("sqlcipher3.dbapi2", fromlist=["connect"])
+                connection = driver.connect(str(store.store_path))
+                connection.execute(f'PRAGMA key = "x\'{store.key_path.read_bytes().hex()}\'"')
+                connection.execute("UPDATE remote_odoo_secret SET master_password = ''")
+                connection.commit()
+                connection.close()
+        monkeypatch.setattr(source_module, "SecretStore", lambda user_root=None: store)
+
+        command = env_client.environments.refresh_database_command(
+            project_manifest,
+            options=DatabaseRefreshOptions(remote_name="staging"),
+        )
+        assert "encrypted-secret" not in repr(command.plan)
+        assert "legacy-secret" not in repr(command.plan)
+        if store_state in {"broken", "invalid"}:
+            error_type = (
+                SecretStoreCorruptError if store_state == "broken" else SecretStoreRecordError
+            )
+            with pytest.raises(error_type) as failure:
+                command.run()
+            assert "encrypted-secret" not in repr(failure.value)
+            assert "legacy-secret" not in repr(failure.value)
+            remote.databases.backup.assert_not_called()
+            assert "encrypted-secret" not in caplog.text
+            assert "legacy-secret" not in caplog.text
+            return
+
+        result = command.run()
+        expected = "encrypted-secret" if store_state == "hit" else "legacy-secret"
+        env_client.instance.assert_called_once_with(
+            "https://staging.example", master_password=expected
+        )
+        assert result.backup == backup
+        assert expected not in repr(result)
+        assert expected not in caplog.text
+
+    @pytest.mark.parametrize(
+        "store_state",
+        ["hit", "absence", "broken", "invalid"],
+        ids=["encrypted-hit", "exact-absence", "broken-store", "invalid-record"],
+    )
+    def test_public_copy_credential_boundary_is_fail_closed(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        _fake_auxiliary_lifecycle: None,
+        store_state: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        _add_named_remote_config(project_manifest)
+        local = _copy_instance(env_client)
+        remote_backup = _valid_retained_backup(project_manifest, branch="main")
+        remote_backup = Backup(
+            id=remote_backup.id,
+            source_base_url=remote_backup.source_base_url,
+            database_name="staging_db",
+            format=remote_backup.format,
+            filestore_requested=remote_backup.filestore_requested,
+            path=remote_backup.path,
+            filename=remote_backup.filename,
+            size_bytes=remote_backup.size_bytes,
+            sha256=remote_backup.sha256,
+            downloaded_at=remote_backup.downloaded_at,
+            source_git_branch=remote_backup.source_git_branch,
+            source_name="staging",
+        )
+        remote = MagicMock()
+
+        def record_remote_backup(*_args: object, **_kwargs: object) -> Backup:
+            _record_backup(env_client, remote_backup)
+            return remote_backup
+
+        remote.databases.backup.side_effect = record_remote_backup
+        local.databases._restore_after_verified_absence.side_effect = (
+            lambda selected, target, **_kwargs: env_client.get_catalog().record_restore(
+                "localhost", 5432, target, str(selected.id)
+            )
+        )
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=local))
+        monkeypatch.setattr(InstanceFactory, "__call__", lambda *_args, **_kwargs: remote)
+        monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "legacy-secret")
+
+        store = SecretStore(user_root=tmp_path / "store")
+        if store_state == "hit":
+            store.create_remote_odoo("https://staging.example", "encrypted-secret")
+        elif store_state in {"broken", "invalid"}:
+            store.create_remote_odoo("https://staging.example", "encrypted-secret")
+            if store_state == "broken":
+                store.key_path.unlink()
+            else:
+                driver = __import__("sqlcipher3.dbapi2", fromlist=["connect"])
+                connection = driver.connect(str(store.store_path))
+                connection.execute(f'PRAGMA key = "x\'{store.key_path.read_bytes().hex()}\'"')
+                connection.execute("UPDATE remote_odoo_secret SET master_password = ''")
+                connection.commit()
+                connection.close()
+        monkeypatch.setattr(source_module, "SecretStore", lambda user_root=None: store)
+        psql = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        psql.write_text(
+            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
+        )
+        psql.chmod(0o755)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable", lambda: str(psql)
+        )
+
+        if store_state in {"broken", "invalid"}:
+            with pytest.raises((SecretStoreCorruptError, SecretStoreRecordError)):
+                env_client.environments.checkout(
+                    project_manifest,
+                    f"feat/public-copy-{store_state}",
+                    options=EnvironmentCheckoutOptions(
+                        python=str(fake_python),
+                        db_mode=EnvironmentDatabaseMode.COPY,
+                        remote_name="staging",
+                        target_database=f"staging_copy_{store_state}",
+                    ),
+                )
+            remote.databases.backup.assert_not_called()
+            environments = env_client.environments.list(project=project_manifest)
+            assert len(environments) == 1
+            assert environments[0].state is EnvironmentState.FAILED
+            assert "encrypted-secret" not in caplog.text
+            assert "legacy-secret" not in caplog.text
+            return
+
+        env = env_client.environments.checkout(
+            project_manifest,
+            f"feat/public-copy-{store_state}",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                remote_name="staging",
+                target_database=f"staging_copy_{store_state}",
+            ),
+        )
+
+        expected = "encrypted-secret" if store_state == "hit" else "legacy-secret"
+        remote.databases.backup.assert_called_once()
+        assert local.databases._restore_after_verified_absence.called
+        assert env.backup_id == remote_backup.id
+        assert expected not in repr(env)
+        assert expected not in caplog.text
 
     def test_retained_corrupt_archive_fails_before_environment_mutation(
         self,
