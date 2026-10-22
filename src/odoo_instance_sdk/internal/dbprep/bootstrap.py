@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -121,9 +122,15 @@ class _InventoryProbeCapture:
         return value
 
 
-def _inventory_capture(step: PreparedStep) -> _InventoryProbeCapture | None:
-    owner = getattr(step.private_stdout_consumer, "__self__", None)
-    return owner if isinstance(owner, _InventoryProbeCapture) else None
+_INVENTORY_CAPTURE: ContextVar[_InventoryProbeCapture | None] = ContextVar(
+    "inventory_probe_capture", default=None
+)
+
+
+def _capture_inventory_stdout(value: str | bytes | None) -> None:
+    capture = _INVENTORY_CAPTURE.get()
+    if capture is not None:
+        capture.capture(value)
 
 
 class BootstrapOutcome(StrEnum):
@@ -264,7 +271,6 @@ def bootstrap_tmp_plan(
         db_password=db_password,
         step_id=_BOOTSTRAP_READY_STEP_ID,
     )
-    inventory_capture = _InventoryProbeCapture()
     inventory_step = (
         replace(
             _bootstrap_sql_step(
@@ -276,7 +282,8 @@ def bootstrap_tmp_plan(
                 database="postgres",
                 stdin=_BOOTSTRAP_INVENTORY_SQL,
             ),
-            private_stdout_consumer=inventory_capture.capture,
+            private_stdout_consumer=_capture_inventory_stdout,
+            private_stdout_value_free=True,
         )
         if capture_inventory
         else None
@@ -488,9 +495,13 @@ def execute_bootstrap_tmp(
         context.complete_action(plan.verify_action.step_id)
         observed: tuple[ObservedDatabase, ...] = ()
         if plan.inventory_step is not None:
-            result = context.process_prepared(plan.inventory_step)
-            capture = _inventory_capture(plan.inventory_step)
-            if capture is not None and isinstance(result, ProcessResult):
+            capture = _InventoryProbeCapture()
+            token = _INVENTORY_CAPTURE.set(capture)
+            try:
+                result = context.process_prepared(plan.inventory_step)
+            finally:
+                _INVENTORY_CAPTURE.reset(token)
+            if isinstance(result, ProcessResult):
                 result = replace(result, stdout=capture.take(result))
             observed = _read_database_inventory(result)
             if on_observed is not None:
