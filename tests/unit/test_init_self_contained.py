@@ -1972,6 +1972,50 @@ def test_deferred_init_materializes_password_for_database_inventory_probe(
     assert secrets == ("runtime-secret",)
 
 
+def test_deferred_inventory_parses_private_stdout_before_redaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    root = tmp_path / "project"
+    (root / ".odcli").mkdir(parents=True)
+    postgres_dir = tmp_path / "postgres"
+    postgres_dir.mkdir()
+    (postgres_dir / "postgres-password").write_text("captured-secret\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
+        lambda _project_id: postgres_dir,
+    )
+    psql = tmp_path / "psql"
+    psql.write_text("#!/bin/sh\nprintf 'owned-db\\t101\\n'\n", encoding="utf-8")
+    psql.chmod(0o755)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable", lambda: str(psql)
+    )
+    config = ProjectConfig(
+        repository_root=root,
+        default_source_database="binta_target",
+        postgres=PostgresProjectConfig(
+            mode="compose", image="postgres:16", port=15432, user="odoo"
+        ),
+    )
+    compose, followup = _compose_followup_steps(root, config, dry_run=False, defer_actions=True)
+    compose.password_state[0] = "runtime-secret"
+    plan = followup.plan
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.ALREADY_READY,
+    )
+    context: RunContext[object] = RunContext(plan.execution_steps, SubprocessExecutor())
+    observed: list[tuple[ObservedDatabase, ...]] = []
+    bootstrap.execute_bootstrap_tmp(context, plan, on_observed=observed.append)
+    assert observed == [(ObservedDatabase("owned-db", 101),)]
+    result = context.results["init.bootstrap.databases"]
+    assert isinstance(result, ProcessResult)
+    assert result.stdout == "owned-db\\x09101\n"
+
+
 def test_init_database_candidates_exclude_system_databases() -> None:
     assert candidate_database_names("postgres", "template1", "odoo") == ("tmp", "odoo")
 
