@@ -241,8 +241,10 @@ def _run_pinned_python_audit(
             timeout=120.0,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        failure = "scanner_timeout" if isinstance(error, subprocess.TimeoutExpired) else (
-            f"scanner_execution_error:{type(error).__name__}"
+        failure = (
+            "scanner_timeout"
+            if isinstance(error, subprocess.TimeoutExpired)
+            else (f"scanner_execution_error:{type(error).__name__}")
         )
         _record_audit_diagnostic(diagnostics, failure)
         return None
@@ -379,8 +381,8 @@ def python_resolution_audit_is_valid(  # noqa: C901
         _record_audit_diagnostic(
             diagnostics,
             "scanner_advisory_mismatch:"
-            f"unexpected_count={len(unexpected)};unexpected_sample={unexpected[:20]};"
-            f"missing_count={len(missing)};missing_sample={missing[:20]}",
+            f"unexpected_count={len(unexpected)};unexpected_sample={unexpected[:64]};"
+            f"missing_count={len(missing)};missing_sample={missing[:64]}",
         )
         return False
     return True

@@ -246,9 +246,10 @@ def test_python_resolution_audit_rejects_unknown_scanner_finding() -> None:
     finding = ("unexpected", "1.0", "CVE-unknown")
     findings.add(finding)
     diagnostics: list[str] = []
-    assert bootstrap.python_resolution_audit_is_valid(
-        scanner_result=findings, diagnostics=diagnostics
-    ) is False
+    assert (
+        bootstrap.python_resolution_audit_is_valid(scanner_result=findings, diagnostics=diagnostics)
+        is False
+    )
     assert diagnostics == [
         "scanner_advisory_mismatch:unexpected_count=1;"
         f"unexpected_sample={[finding]};missing_count=0;missing_sample=[]"

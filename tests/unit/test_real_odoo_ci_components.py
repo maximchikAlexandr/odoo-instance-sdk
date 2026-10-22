@@ -271,7 +271,9 @@ def test_full_bootstrap_rejects_audit_before_source_cache_probe(
     monkeypatch.setattr(bootstrap, "_version_is_exact", lambda _command, _expected: True)
     monkeypatch.setattr(bootstrap, "_image_manifest_is_pinned", lambda _image, _digest: True)
     monkeypatch.setattr(bootstrap, "python_resolution_lock_is_valid", lambda: True)
-    monkeypatch.setattr(bootstrap, "python_resolution_audit_is_valid", lambda: False)
+    monkeypatch.setattr(
+        bootstrap, "python_resolution_audit_is_valid", lambda *, diagnostics: False
+    )
     source_probe_calls: list[bool] = []
 
     def source_revision_probe() -> bool:
@@ -403,13 +405,13 @@ def test_full_workflow_initializes_private_registry_before_pretest_failure_paths
     package_step = workflow.index("Package bounded E2E evidence")
     initialization = workflow[initialize:bootstrap_step]
 
-    assert "test ! -L \"$ODCLI_E2E_SECRET_REGISTRY\"" in initialization
+    assert 'test ! -L "$ODCLI_E2E_SECRET_REGISTRY"' in initialization
     assert "write_secret_registry(path, ())" in initialization
     assert "read_secret_registry(path)" in initialization
     assert initialize < bootstrap_step < package_step
     assert "secret_registry_initialized=owner-only" in initialization
     assert "rev-parse 'cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}'" in workflow
-    assert "test \"$resolved_commit\" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6" in workflow
+    assert 'test "$resolved_commit" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6' in workflow
 
 
 def test_owned_process_cleanup_targets_the_whole_session(
