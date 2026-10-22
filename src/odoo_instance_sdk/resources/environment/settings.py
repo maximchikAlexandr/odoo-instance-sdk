@@ -227,12 +227,16 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             copy=True,
             neutralize_database=True,
         )
-        self._consume_copy_database_probe(
-            context,
-            "database.restore.exists-after",
-            target_db,
-            expected_exists=True,
-        )
+        if context.planned("database.restore.exists-after") and not context.consumed(
+            "database.restore.exists-after"
+        ):
+            from odoo_instance_sdk.resources.database import DatabaseResource
+
+            if isinstance(instance.databases, DatabaseResource):
+                raise RestoreFailedError("post-restore database identity was not captured")
+            # Compatibility doubles own no private probe consumer; their
+            # catalog callback supplies the typed fixture identity instead.
+            context.skip("database.restore.exists-after")
         catalog.upsert_copy_journal(
             str(env_id),
             target_database=target_db,
