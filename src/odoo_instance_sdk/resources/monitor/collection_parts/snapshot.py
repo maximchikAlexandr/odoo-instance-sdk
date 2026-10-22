@@ -33,6 +33,7 @@ from odoo_instance_sdk.internal.storage_footprint import (
 )
 from odoo_instance_sdk.models import (
     SNAPSHOT_SECTIONS,
+    BackupFreshnessSnapshot,
     ClusterEndpoint,
     ClusterResourceSnapshot,
     ClusterSnapshot,
@@ -64,6 +65,7 @@ from odoo_instance_sdk.resources.monitor.planning import (
     _stopped_runtime,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from odoo_instance_sdk.storage.catalog.helpers import CurrentBackupProvenance
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
@@ -99,6 +101,7 @@ class _SnapshotMixin:
         *,
         probe_results: dict[str, ProcessResult] | None = None,
         sections: frozenset[SnapshotSection] | None = None,
+        generated_at: datetime | None = None,
     ) -> tuple[
         tuple[ProjectSummary, ...],
         tuple[EnvironmentSnapshot, ...],
@@ -149,6 +152,9 @@ class _SnapshotMixin:
                         publication_routes,
                         publication_error,
                     ),
+                    backup_freshness=self._freshness(
+                        plan.backup_provenance, generated_at=generated_at
+                    ),
                 )
             )
             environments.extend(
@@ -161,6 +167,8 @@ class _SnapshotMixin:
                     publication_error=publication_error,
                     sections=selected,
                     section_outcomes=section_outcomes,
+                    generated_at=generated_at,
+                    backup_provenance=item.backup_provenance,
                 )
                 for item in sorted(plan.environments, key=lambda item: str(item.row["id"]))
             )
@@ -169,6 +177,18 @@ class _SnapshotMixin:
             tuple(sorted(environments, key=lambda item: item.id)),
             section_outcomes,
         )
+
+    @staticmethod
+    def _freshness(
+        provenance: CurrentBackupProvenance | None, *, generated_at: datetime | None
+    ) -> BackupFreshnessSnapshot:
+        if provenance is None or generated_at is None:
+            return BackupFreshnessSnapshot()
+        downloaded_at = getattr(provenance, "downloaded_at", None)
+        if downloaded_at is None:
+            return BackupFreshnessSnapshot()
+        age_seconds = max(0.0, (generated_at - downloaded_at).total_seconds())
+        return BackupFreshnessSnapshot(downloaded_at=downloaded_at, age_seconds=age_seconds)
 
     @staticmethod
     def _publication_snapshot(
@@ -427,6 +447,8 @@ class _SnapshotMixin:
         publication_error: str | None = None,
         sections: frozenset[SnapshotSection] | None = None,
         section_outcomes: dict[SnapshotSection, str] | None = None,
+        generated_at: datetime | None = None,
+        backup_provenance: CurrentBackupProvenance | None = None,
     ) -> EnvironmentSnapshot:
         selected = sections if sections is not None else frozenset(SNAPSHOT_SECTIONS)
         env_id = str(row["id"])
@@ -515,7 +537,6 @@ class _SnapshotMixin:
             if "postgresql" in selected
             else PgAdminEligibility(state=PgAdminEligibilityState.DATABASE_UNRESOLVED)
         )
-
         return EnvironmentSnapshot(
             id=env_id,
             project_id=plan.project_id,
@@ -538,6 +559,10 @@ class _SnapshotMixin:
                 runtime,
                 publication_routes,
                 publication_error,
+            ),
+            backup_freshness=self._freshness(
+                backup_provenance,
+                generated_at=generated_at,
             ),
         )
 

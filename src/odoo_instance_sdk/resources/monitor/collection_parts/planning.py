@@ -30,6 +30,7 @@ from odoo_instance_sdk.resources.monitor.planning import (
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.catalog.helpers import CurrentBackupProvenance
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
@@ -133,14 +134,39 @@ class _SnapshotPlanningMixin:
                 )
             else:
                 cluster, state = None, None
+            project_runtime = project_runtime_by_id.get(resolved_project_id)
+            environments_with_provenance = tuple(
+                _EnvironmentPlan(
+                    item.row,
+                    item.runtime,
+                    self._current_backup_provenance(
+                        catalog,
+                        cluster=cluster,
+                        database=(
+                            item.row["target_db_name"]
+                            if str(item.row["db_mode"]) == "copy"
+                            else item.row["source_db_name"]
+                        ),
+                    ),
+                )
+                for item in environments
+            )
+            project_provenance = self._current_backup_provenance(
+                catalog,
+                cluster=cluster,
+                database=(
+                    project_runtime["database_name"] if project_runtime is not None else None
+                ),
+            )
             plans.append(
                 _ProjectPlan(
                     resolved_project_id,
                     repo_root,
                     cluster,
                     state,
-                    tuple(environments),
-                    project_runtime=project_runtime_by_id.get(resolved_project_id),
+                    environments_with_provenance,
+                    project_runtime=project_runtime,
+                    backup_provenance=project_provenance,
                 )
             )
         for resolved_project_id, repo_root in project_details.items():
@@ -159,6 +185,14 @@ class _SnapshotPlanningMixin:
                 )
             else:
                 cluster, state = None, None
+            project_runtime = project_runtime_by_id.get(resolved_project_id)
+            project_provenance = self._current_backup_provenance(
+                catalog,
+                cluster=cluster,
+                database=(
+                    project_runtime["database_name"] if project_runtime is not None else None
+                ),
+            )
             plans.append(
                 _ProjectPlan(
                     resolved_project_id,
@@ -166,7 +200,8 @@ class _SnapshotPlanningMixin:
                     cluster,
                     state,
                     (),
-                    project_runtime=project_runtime_by_id.get(resolved_project_id),
+                    project_runtime=project_runtime,
+                    backup_provenance=project_provenance,
                 )
             )
         return _SnapshotPlan(
@@ -177,6 +212,31 @@ class _SnapshotPlanningMixin:
             frozenset(cpu_points),
             sections,
         )
+
+    @staticmethod
+    def _current_backup_provenance(
+        catalog: BackupCatalog,
+        *,
+        cluster: PostgresCluster | None,
+        database: str | None,
+    ) -> CurrentBackupProvenance | None:
+        """Read exact current provenance without making freshness fatal."""
+        if cluster is None or database is None or not str(database).strip():
+            return None
+        try:
+            claim = catalog._get_postgres_cluster(cluster._project_id)
+            if claim is None or claim.state != "active":
+                return None
+            return catalog.current_database_backup_provenance(
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+                str(database),
+                cluster_id=claim.cluster_id,
+            )
+        except Exception:
+            # Freshness is additive: unavailable/malformed provenance must not
+            # hide otherwise useful runtime and environment sections.
+            return None
 
     @staticmethod
     def _snapshot_observation(

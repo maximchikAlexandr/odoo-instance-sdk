@@ -1,6 +1,37 @@
 {
   "components": {
     "schemas": {
+      "BackupFreshnessSnapshot": {
+        "additionalProperties": false,
+        "description": "Proven source-backup age for one displayed database.\n\n    Both fields are null when the current database provenance is unknown.  A\n    known timestamp always carries its non-negative age from the snapshot\n    generation time; this keeps clock skew visible without inventing a date.",
+        "properties": {
+          "age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "downloaded_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [],
+        "title": "BackupFreshnessSnapshot",
+        "type": "object"
+      },
       "ClusterContainer": {
         "additionalProperties": false,
         "properties": {
@@ -362,6 +393,13 @@
           },
           "artifacts": {
             "$ref": "#/components/schemas/EnvironmentArtifacts"
+          },
+          "backup_freshness": {
+            "$ref": "#/components/schemas/BackupFreshnessSnapshot",
+            "default": {
+              "age_seconds": null,
+              "downloaded_at": null
+            }
           },
           "branch": {
             "type": "string"
@@ -748,6 +786,13 @@
       "ProjectSummary": {
         "additionalProperties": false,
         "properties": {
+          "backup_freshness": {
+            "$ref": "#/components/schemas/BackupFreshnessSnapshot",
+            "default": {
+              "age_seconds": null,
+              "downloaded_at": null
+            }
+          },
           "cluster": {
             "anyOf": [
               {

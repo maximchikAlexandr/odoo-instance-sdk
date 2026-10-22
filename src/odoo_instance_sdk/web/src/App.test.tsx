@@ -122,6 +122,26 @@ function snapshotForState(state: PgAdminEligibilityState): Snapshot {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("App", () => {
+  it("links to same-origin Admin and renders proven or unknown backup freshness", async () => {
+    const downloadedAt = "2026-08-19T00:00:00Z";
+    const fresh: Snapshot = {
+      ...snapshot,
+      projects: snapshot.projects.map((project) => project.id === "project_c"
+        ? { ...project, backup_freshness: { downloaded_at: downloadedAt, age_seconds: 432000 } }
+        : project),
+      environments: snapshot.environments.map((environment) => environment.id === "a"
+        ? { ...environment, backup_freshness: { downloaded_at: downloadedAt, age_seconds: 432000 } }
+        : environment),
+    };
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(fresh) as never);
+    render(<MantineProvider><App /></MantineProvider>);
+
+    expect(await screen.findAllByText(downloadedAt)).toHaveLength(2);
+    expect(screen.getAllByText("(5 days old)")).toHaveLength(2);
+    expect(screen.getAllByText("Backup download date unknown")).toHaveLength(3);
+    expect(screen.getByRole("link", { name: "Admin" }).getAttribute("href")).toBe("/admin");
+  });
+
   it("uses the same compact cards for projects and worktrees and preserves publication navigation", async () => {
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
     const open = vi.spyOn(window, "open").mockImplementation(() => null);

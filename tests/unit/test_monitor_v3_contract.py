@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import msgspec
 import pytest
@@ -8,6 +10,7 @@ import pytest
 import odoo_instance_sdk as sdk
 from odoo_instance_sdk.exceptions import ProjectManifestNotFoundError
 from odoo_instance_sdk.models import (
+    BackupFreshnessSnapshot,
     EnvironmentSnapshot,
     EnvironmentState,
     HttpError,
@@ -20,7 +23,9 @@ from odoo_instance_sdk.models import (
     PostgresClusterState,
 )
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.resources.monitor.collection_parts.snapshot import _SnapshotMixin
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from odoo_instance_sdk.storage.catalog.helpers import CurrentBackupProvenance
 from tests.unit.monitor_support import (
     FakeDockerProvider,
     FakePostgresCluster,
@@ -37,6 +42,7 @@ def test_pgadmin_http_models_are_public_exports_with_exact_fields() -> None:
     assert sdk.PgAdminOpenRequest is PgAdminOpenRequest
     assert sdk.PgAdminOpenResult is PgAdminOpenResult
     assert sdk.PgAdminOpenState is PgAdminOpenState
+    assert sdk.BackupFreshnessSnapshot is BackupFreshnessSnapshot
     assert sdk.HttpError is HttpError
     assert sdk.HttpErrorCode is HttpErrorCode
     assert tuple(field.name for field in msgspec.structs.fields(PgAdminEligibility)) == ("state",)
@@ -65,6 +71,7 @@ def test_pgadmin_http_models_are_public_exports_with_exact_fields() -> None:
         "storage",
         "pgadmin",
         "publication",
+        "backup_freshness",
     )
 
 
@@ -81,6 +88,26 @@ def test_pgadmin_http_models_are_frozen_and_reject_unknown_fields() -> None:
         PgAdminOpenResult(state=PgAdminOpenState.STARTED, url="http://127.0.0.1", extra="rejected")  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         HttpError(code=HttpErrorCode.invalid_request, message="invalid", extra="rejected")  # type: ignore[call-arg]
+
+
+def test_backup_freshness_is_explicit_and_clamps_clock_skew() -> None:
+    downloaded_at = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    generated_at = downloaded_at - timedelta(seconds=5)
+
+    assert BackupFreshnessSnapshot() == BackupFreshnessSnapshot(
+        downloaded_at=None, age_seconds=None
+    )
+    with pytest.raises(ValueError, match="unknown"):
+        BackupFreshnessSnapshot(age_seconds=1)
+    with pytest.raises(ValueError, match="non-negative"):
+        BackupFreshnessSnapshot(downloaded_at=downloaded_at, age_seconds=-1)
+
+    freshness = _SnapshotMixin._freshness(
+        CurrentBackupProvenance(backup_id=uuid4(), downloaded_at=downloaded_at),
+        generated_at=generated_at,
+    )
+    assert freshness.downloaded_at == downloaded_at
+    assert freshness.age_seconds == 0
 
 
 def test_pgadmin_http_models_round_trip_and_redact_secrets() -> None:

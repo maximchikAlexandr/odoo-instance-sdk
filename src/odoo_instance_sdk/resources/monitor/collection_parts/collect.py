@@ -84,6 +84,7 @@ class _CollectMixin:
             *,
             probe_results: dict[str, ProcessResult] | None = None,
             sections: frozenset[SnapshotSection] | None = None,
+            generated_at: datetime | None = None,
         ) -> tuple[
             tuple[ProjectSummary, ...],
             tuple[EnvironmentSnapshot, ...],
@@ -907,7 +908,11 @@ class _CollectMixin:
             else ({}, set())
         )
         projects, environments, section_outcomes = self._collect_snapshot_rows(
-            plan.projects, resources, probe_results=probe_results, sections=plan.sections
+            plan.projects,
+            resources,
+            probe_results=probe_results,
+            sections=plan.sections,
+            generated_at=generated_at,
         )
         self._prune_caches(
             set(plan.environment_ids),
