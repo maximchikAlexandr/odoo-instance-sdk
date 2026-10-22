@@ -146,8 +146,8 @@ def test_public_project_forget_reinit_and_purge(
     ]
     registered_projects = catalog.list_projects()
     retained_environments = catalog._conn.execute(
-        "SELECT state FROM environments WHERE id = ? AND project_id = ?",
-        (environment_id, project_id),
+        "SELECT state FROM environments WHERE id = ?",
+        (environment_id,),
     ).fetchall()
     assert len(forgotten_projects) == 1
     assert str(forgotten_projects[0]["registration_state"]) == "forgotten"
