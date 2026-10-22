@@ -234,8 +234,9 @@ def test_public_project_forget_reinit_and_purge(
         confirmation=token,
     )
     shutil.rmtree(drift_target)
-    with pytest.raises(ProjectRemovalError, match="stale"):
+    with pytest.raises(ProjectRemovalError) as drift_error:
         drift_command.run()
+    assert "stale" in str(drift_error.value), drift_error.value.details
     assert project.exists()
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
