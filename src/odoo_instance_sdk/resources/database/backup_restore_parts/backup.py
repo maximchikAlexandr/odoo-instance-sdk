@@ -298,13 +298,28 @@ class _BackupMixin:
     ) -> RestoreResult:
         from odoo_instance_sdk.internal.proc import active_context
 
-        if active_context() is not None:
+        context = active_context()
+        if context is not None:
+            before_step_id = (
+                "database.restore.exists-before"
+                if context.planned("database.restore.exists-before")
+                and not context.consumed("database.restore.exists-before")
+                else None
+            )
+            after_step_id = (
+                "database.restore.exists-after"
+                if context.planned("database.restore.exists-after")
+                and not context.consumed("database.restore.exists-after")
+                else None
+            )
             return self._restore_impl(
                 backup,
                 target_database_name,
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
+                before_step_id=before_step_id,
+                after_step_id=after_step_id,
             )
         return self.restore_command(
             backup,
@@ -400,12 +415,29 @@ class _BackupMixin:
         if not isinstance(payload, SelectedBackupRestorePayload):
             raise InstanceConfigurationError("local restore evidence is unavailable")
         _assert_verified_snapshot_unchanged(payload)
+        context = active_context()
+        before_step_id = (
+            "database.restore.exists-before"
+            if context is not None
+            and context.planned("database.restore.exists-before")
+            and not context.consumed("database.restore.exists-before")
+            else None
+        )
+        after_step_id = (
+            "database.restore.exists-after"
+            if context is not None
+            and context.planned("database.restore.exists-after")
+            and not context.consumed("database.restore.exists-after")
+            else None
+        )
         self._restore_impl_locked(
             payload,
             target_database_name,
             copy=copy,
             neutralize_database=neutralize_database,
             timeout=timeout,
+            before_step_id=before_step_id,
+            after_step_id=after_step_id,
         )
 
     def _restore_impl(
@@ -601,6 +633,14 @@ class _BackupMixin:
                         "Database identity observation was invalid after restore"
                     )
                 database_oid = int(raw_oid.strip())
+
+        if (
+            record_provenance
+            and postgres_cluster is not None
+            and getattr(postgres_cluster, "owned", False)
+            and database_oid is None
+        ):
+            raise RestoreFailedError("Database identity observation was unavailable after restore")
 
         ck = self._cluster
         if ck is not None and record_provenance:

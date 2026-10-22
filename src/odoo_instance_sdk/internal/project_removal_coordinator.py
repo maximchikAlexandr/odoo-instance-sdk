@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
@@ -674,10 +675,22 @@ def capture_project_removal_command(  # noqa: C901
             ),
         )
     else:
+        projected_decisions = projection.decisions
+        if not projection.complete:
+            projected_decisions = tuple(
+                replace(
+                    decision,
+                    action="retain",
+                    reason="observation_incomplete",
+                )
+                if decision.action != "retain"
+                else decision
+                for decision in projected_decisions
+            )
         decisions = (
             *tuple(
                 decision.public()
-                for decision in projection.decisions
+                for decision in projected_decisions
                 if not (
                     decision.action == "delete"
                     and decision.resource_type in {"worktree", "python_environment"}
@@ -687,12 +700,18 @@ def capture_project_removal_command(  # noqa: C901
                     )
                 )
             ),
-            ProjectResourceDecision(
-                identity=f"project-forget:{registration.project_id}",
-                resource_type="project",
-                action="forget",
-                reason="terminal_registration_transition",
-                target="<catalogue>",
+            *(
+                (
+                    ProjectResourceDecision(
+                        identity=f"project-forget:{registration.project_id}",
+                        resource_type="project",
+                        action="forget",
+                        reason="terminal_registration_transition",
+                        target="<catalogue>",
+                    ),
+                )
+                if projection.complete
+                else ()
             ),
         )
     adapter_set = adapters or _NoPurgeAdapters()

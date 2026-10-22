@@ -1240,6 +1240,53 @@ def test_public_purge_refuses_same_name_replaced_restored_database(
     catalog.close()
 
 
+def test_public_purge_refuses_missing_source_restore_without_oid_before_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+
+    def seed_restore_without_oid(
+        catalog: BackupCatalog, _project_id: str, claim: object, data_directory: Path
+    ) -> None:
+        backup_id = str(uuid.uuid4())
+        backup_path = data_directory.parent / "owned.zip"
+        backup_path.write_bytes(b"owned")
+        catalog.start_download(
+            backup_id,
+            "http://127.0.0.1:8069",
+            "owned_db",
+            "zip",
+            True,
+            backup_path,
+            project_id=f"project_{legacy_project_id}",
+        )
+        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
+        catalog.record_restore(
+            "127.0.0.1",
+            15432,
+            "owned_db",
+            backup_id,
+            cluster_id=getattr(claim, "cluster_id"),
+            data_directory=data_directory,
+        )
+
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        legacy_project_id,
+        ("owned_db",),
+        seed_restore_without_oid,
+        observed_oids={"owned_db": 19557},
+    )
+    assert all(step.action == "retain" for step in command.plan.steps if hasattr(step, "action"))
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
 def test_public_purge_recovers_missing_source_with_legacy_init_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
