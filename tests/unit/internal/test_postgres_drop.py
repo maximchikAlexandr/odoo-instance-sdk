@@ -27,6 +27,7 @@ from odoo_instance_sdk.internal.pg.drop import (
     _cleanup_proven_filestore,
     build_database_drop_command,
 )
+from odoo_instance_sdk.internal.pg.drop_inspection import inspection_sql
 from odoo_instance_sdk.internal.pg.drop_types import AdoptedCopyDatabaseClaim
 from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
 from odoo_instance_sdk.internal.proc import PreparedAction, ProcessResult, RecordingExecutor
@@ -37,6 +38,36 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.fixtures.transport import OPEN_ODOO_HTTP_CLIENT
 from tests.unit.monitor_support import make_env
+
+
+@pytest.mark.unit
+def test_drop_inspection_requests_numeric_postgres_oid() -> None:
+    sql = inspection_sql("feature_db")
+
+    assert "'database_oid', (SELECT oid::bigint FROM pg_database" in sql
+
+
+@pytest.mark.unit
+def test_drop_inspection_rejects_string_database_oid() -> None:
+    result = ProcessResult(
+        argv=("psql",),
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "exists": True,
+                "is_template": False,
+                "sessions": [],
+                "database_oid": "19557",
+            }
+        ),
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+
+    with pytest.raises(ConfigError, match="invalid database identity"):
+        _decode_inspection(result, "feature_db")
 
 
 def _instance(project: Path, *, database: str = "feature_db") -> OdooInstance:
