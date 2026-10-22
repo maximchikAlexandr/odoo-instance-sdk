@@ -21,7 +21,6 @@ from odoo_instance_sdk.exceptions import ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.dbprep import bootstrap
-from odoo_instance_sdk.internal.pg.drop_inspection import inspection_sql
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -1342,10 +1341,6 @@ def test_public_restore_publishes_oid_for_source_less_purge(
         real_children=True,
         observed_oids={"owned_db": 19557},
         recovery_password="test-recovery-password",
-    )
-    assert (
-        "'database_oid', (SELECT oid::bigint FROM pg_database"
-        in inspection_sql("owned_db")
     )
     claim = catalog._get_postgres_cluster(legacy_project_id)
     assert claim is not None

@@ -27,7 +27,6 @@ from odoo_instance_sdk.internal.pg.drop import (
     _cleanup_proven_filestore,
     build_database_drop_command,
 )
-from odoo_instance_sdk.internal.pg.drop_inspection import inspection_sql
 from odoo_instance_sdk.internal.pg.drop_types import AdoptedCopyDatabaseClaim
 from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
 from odoo_instance_sdk.internal.proc import PreparedAction, ProcessResult, RecordingExecutor
@@ -38,13 +37,6 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.fixtures.transport import OPEN_ODOO_HTTP_CLIENT
 from tests.unit.monitor_support import make_env
-
-
-@pytest.mark.unit
-def test_drop_inspection_requests_numeric_postgres_oid() -> None:
-    sql = inspection_sql("feature_db")
-
-    assert "'database_oid', (SELECT oid::bigint FROM pg_database" in sql
 
 
 @pytest.mark.unit
@@ -363,13 +355,13 @@ def test_drop_rich_dry_run_uses_real_builder_process_displays(
 
 
 @pytest.mark.unit
-def test_drop_records_catalogue_only_after_verified_absence(
+def test_drop_decodes_numeric_oid_and_records_after_verified_absence(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
 ) -> None:
     monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
     instance = _instance(project_manifest)
     catalog = cast("Any", instance._client.get_catalog())
-    executor = _executor()
+    executor = _executor(database_oid=19557)
     result = build_database_drop_command(
         instance, project_manifest, "feature_db", executor=executor
     ).run()
