@@ -142,6 +142,21 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "Admin" }).getAttribute("href")).toBe("/admin");
   });
 
+  it("renders a future download timestamp with a clamped zero age", async () => {
+    const downloadedAt = "2026-08-25T00:00:00Z";
+    const future: Snapshot = {
+      ...snapshot,
+      projects: snapshot.projects.map((project) => project.id === "project_c"
+        ? { ...project, backup_freshness: { downloaded_at: downloadedAt, age_seconds: 0 } }
+        : project),
+    };
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(future) as never);
+    render(<MantineProvider><App /></MantineProvider>);
+
+    expect(await screen.findByText(downloadedAt)).toBeTruthy();
+    expect(screen.getByText("(0 seconds old)")).toBeTruthy();
+  });
+
   it("uses the same compact cards for projects and worktrees and preserves publication navigation", async () => {
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
     const open = vi.spyOn(window, "open").mockImplementation(() => null);

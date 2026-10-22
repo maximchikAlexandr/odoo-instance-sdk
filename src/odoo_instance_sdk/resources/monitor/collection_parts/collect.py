@@ -85,6 +85,7 @@ class _CollectMixin:
             probe_results: dict[str, ProcessResult] | None = None,
             sections: frozenset[SnapshotSection] | None = None,
             generated_at: datetime | None = None,
+            section_outcomes: dict[SnapshotSection, str] | None = None,
         ) -> tuple[
             tuple[ProjectSummary, ...],
             tuple[EnvironmentSnapshot, ...],
@@ -907,12 +908,18 @@ class _CollectMixin:
             if "docker" in plan.sections
             else ({}, set())
         )
+        section_outcomes: dict[SnapshotSection, str] = (
+            {"postgresql": "backup freshness lookup unavailable"}
+            if plan.freshness_lookup_failed
+            else {}
+        )
         projects, environments, section_outcomes = self._collect_snapshot_rows(
             plan.projects,
             resources,
             probe_results=probe_results,
             sections=plan.sections,
             generated_at=generated_at,
+            section_outcomes=section_outcomes,
         )
         self._prune_caches(
             set(plan.environment_ids),

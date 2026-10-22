@@ -166,6 +166,7 @@ class _SnapshotPlan:
     statuses: frozenset[str]
     cpu_points: frozenset[tuple[int, float]]
     sections: frozenset[SnapshotSection]
+    freshness_lookup_failed: bool = False
 
 
 def _orphan_git(default_branch: str = "main") -> GitActivity:

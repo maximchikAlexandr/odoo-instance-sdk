@@ -102,6 +102,7 @@ class _SnapshotMixin:
         probe_results: dict[str, ProcessResult] | None = None,
         sections: frozenset[SnapshotSection] | None = None,
         generated_at: datetime | None = None,
+        section_outcomes: dict[SnapshotSection, str] | None = None,
     ) -> tuple[
         tuple[ProjectSummary, ...],
         tuple[EnvironmentSnapshot, ...],
@@ -118,7 +119,7 @@ class _SnapshotMixin:
             # route file must not hide the canonical runtime snapshot.
             publication_routes = ()
             publication_error = "publication_state_unavailable"
-        section_outcomes: dict[SnapshotSection, str] = {}
+        section_outcomes = dict(section_outcomes or {})
         for plan in plans:
             project_runtime = None
             if "runtime" in selected and plan.project_runtime is not None:
