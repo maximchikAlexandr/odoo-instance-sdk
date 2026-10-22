@@ -251,8 +251,10 @@ def test_python_resolution_audit_rejects_unknown_scanner_finding() -> None:
         is False
     )
     assert diagnostics == [
-        "scanner_advisory_mismatch:unexpected_count=1;"
-        f"unexpected_sample={[finding]};missing_count=0;missing_sample=[]"
+        (
+            "scanner_advisory_mismatch:unexpected_count=1;"
+            f"unexpected_sample={[finding]};missing_count=0;missing_sample=[]"
+        )
     ]
 
 
