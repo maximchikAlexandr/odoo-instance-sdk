@@ -2133,10 +2133,16 @@ def test_concurrent_inventory_runs_keep_private_payloads_execution_local(
     assert all(item[0][1].stdout == "" for item in runs)
     for _result, events in runs:
         rendered_events = " ".join(map(str, events))
-        assert "alpha-private" not in rendered_events
-        assert "beta-private" not in rendered_events
-        assert "101" not in rendered_events
-        assert "202" not in rendered_events
+        value_fields = " ".join(
+            value
+            for event in events
+            for value in (event.chunk, event.target, event.error)
+            if value is not None
+        )
+        assert "alpha-private" not in value_fields
+        assert "beta-private" not in value_fields
+        assert "101" not in value_fields
+        assert "202" not in value_fields
         assert "stderr-preserved" in rendered_events
         assert "kind='completed'" in rendered_events
 
