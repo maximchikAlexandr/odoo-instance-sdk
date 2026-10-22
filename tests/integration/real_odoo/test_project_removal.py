@@ -46,9 +46,7 @@ def _document(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return document
 
 
-@pytest.mark.parametrize(
-    "retain_source", [False, True], ids=["removed-source", "retained-source"]
-)
+@pytest.mark.parametrize("retain_source", [False, True], ids=["removed-source", "retained-source"])
 def test_public_project_forget_reinit_and_purge(
     tmp_path: Path,
     target_runtime: E2ERuntime,
@@ -62,10 +60,7 @@ def test_public_project_forget_reinit_and_purge(
     project = _project(
         target_runtime,
         target_runtime.root
-        / (
-            f"project-removal-{target_runtime.run_id}-"
-            f"{'retained' if retain_source else 'removed'}"
-        ),
+        / (f"project-removal-{target_runtime.run_id}-{'retained' if retain_source else 'removed'}"),
         source=source_backup_plan,
     )
     catalog_path = _catalog_for_project(target_runtime, project)
@@ -251,9 +246,12 @@ def test_public_project_forget_reinit_and_purge(
     assert catalog._project_purge_completed(project_id)
     assert catalog._get_postgres_cluster(claim.project_id) is None
     assert catalog._get_postgres_cluster_by_id(claim.cluster_id) is None
-    assert catalog._conn.execute(
-        "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1", (project_id,)
-    ).fetchone() is None
+    assert (
+        catalog._conn.execute(
+            "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1", (project_id,)
+        ).fetchone()
+        is None
+    )
     catalog.close()
     for docker_args, label in (
         (("docker", "inspect", claim.compose_project + "-postgres-1"), "container"),
