@@ -16,6 +16,9 @@ from odcli_multica.models import (
     VerifiedTaskContext,
 )
 
+from odoo_instance_sdk import Command
+from odoo_instance_sdk.execution import ExecutionPlan
+
 
 class _Issues:
     def __init__(self, issues: tuple[Issue, ...]) -> None:
@@ -40,7 +43,7 @@ class _Projects:
         return self._projects[project_id]
 
 
-def _context(issue_id: str = "child") -> VerifiedTaskContext:
+def _context(issue_id: str = "child", *, root_creator_id: str | None = None) -> VerifiedTaskContext:
     return VerifiedTaskContext(
         checkout_path="/task/checkout",
         task_root="/task",
@@ -52,6 +55,8 @@ def _context(issue_id: str = "child") -> VerifiedTaskContext:
         runtime_id="runtime",
         daemon_id="daemon",
         observed_at=datetime.now(UTC),
+        root_issue_id="root" if root_creator_id is not None else None,
+        root_creator_id=root_creator_id,
     )
 
 
@@ -102,6 +107,79 @@ def test_root_creator_accepts_parent_in_another_project_of_same_workspace() -> N
 
     assert result.root_issue_id == "root"
     assert result.root_creator_id == "human-root"
+
+
+def _project_commit_case() -> tuple[
+    MulticaOdooClient, Command[str], list[str], list[dict[str, str | None]]
+]:
+    root = Issue(
+        "root",
+        "Root",
+        "in_progress",
+        project_id="project",
+        creator_id="human-root",
+        creator_type="member",
+    )
+    child = Issue("child", "Child", "in_progress", project_id="project", parent_id="root")
+    executions: list[str] = []
+    captured: list[dict[str, str | None]] = []
+    frozen_commit = Command.create(
+        ExecutionPlan(), lambda _context: executions.append("commit") or "committed"
+    )
+
+    def commit_command(**kwargs: str | None) -> Command[str]:
+        captured.append(kwargs)
+        return frozen_commit
+
+    git = SimpleNamespace(commit_command=commit_command)
+    client = _client(child, root)
+
+    command = client.project_commit_command(
+        _context(root_creator_id="human-root"),
+        git_resource=git,
+        description="change",
+        ticket="PROJ-1",
+        tag="DOC",
+    )
+    assert captured == [
+        {
+            "description": "change",
+            "ticket": "PROJ-1",
+            "tag": "DOC",
+            "member_id": "human-root",
+        }
+    ]
+    return client, command, executions, captured
+
+
+def test_project_commit_uses_only_verified_root_human_identity() -> None:
+    _client_instance, command, executions, captured = _project_commit_case()
+
+    result = command.run()
+
+    assert result == "committed"
+    assert executions == ["commit"]
+    assert captured[0]["member_id"] == "human-root"
+    assert captured[0]["description"] == "change"
+    assert captured[0]["ticket"] == "PROJ-1"
+    assert captured[0]["tag"] == "DOC"
+
+
+def test_project_commit_fails_closed_on_execution_time_root_creator_drift() -> None:
+    client, command, executions, _captured = _project_commit_case()
+    client.multica.issues._issues["root"] = Issue(
+        "root",
+        "Root",
+        "in_progress",
+        project_id="project",
+        creator_id="different-human",
+        creator_type="member",
+    )
+
+    with pytest.raises(ContextVerificationError, match="root identity changed"):
+        command.run()
+
+    assert executions == []
 
 
 def test_git_askpass_helper_is_a_runnable_executable() -> None:

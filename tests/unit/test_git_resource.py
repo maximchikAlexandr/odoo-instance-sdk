@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -249,6 +250,30 @@ def test_commit_plan_captures_context_and_rejects_hook_failure(tmp_path: Path) -
     assert _git(tmp_path, "rev-parse", "HEAD").strip() == head
 
 
+def test_public_git_plan_and_output_redact_opaque_git_config_value(
+    tmp_path: Path,
+) -> None:
+    _repo(tmp_path)
+    canary = "opaque-config-value-canary"
+    command = GitResource(_instance(tmp_path)).passthrough_command(
+        ("canary",),
+        environment={
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "alias.canary",
+            "GIT_CONFIG_VALUE_0": f"!printf {canary}; printf {canary} >&2",
+        },
+        secret_values=("unrelated-credential",),
+    )
+
+    assert canary not in repr(command.plan)
+    result = command.run()
+
+    assert result.returncode == 0
+    assert canary not in result.stdout
+    assert canary not in result.stderr
+    assert canary not in repr(result)
+
+
 def test_commit_plan_previews_complete_configured_message(tmp_path: Path) -> None:
     _repo(tmp_path)
     _ticket_project(tmp_path)
@@ -262,7 +287,7 @@ def test_commit_plan_previews_complete_configured_message(tmp_path: Path) -> Non
     commit_step = next(step for step in command.plan.process_steps if step.step_id == "git.commit")
     assert commit_step.argv[-2:] == (
         "-m",
-        f"[IMP] {tmp_path.name}: PROJ-123 change\\x0a\\x0a<https://tracker.test/PROJ-123>",
+        f"[IMP] {tmp_path.name}: PROJ-123 change\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a",
     )
 
 
@@ -287,10 +312,31 @@ def test_commit_preserves_ticket_link_with_trailer_hook(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     message = _git(tmp_path, "log", "-1", "--format=%B")
-    assert "<https://tracker.test/PROJ-123>" in message
+    assert "\n\nhttps://tracker.test/PROJ-123\n\nCo-authored-by:" in message
     assert "https: //" not in message
     assert "Co-authored-by: Test Agent <agent@example.test>" in message
     assert GitResource(_instance(tmp_path)).check(base="main").valid is True
+
+
+def test_check_keeps_legacy_angle_ticket_links_valid(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    _ticket_project(tmp_path)
+    _git(tmp_path, "add", ".odcli/project.toml")
+    _git(tmp_path, "commit", "-qm", "project config")
+    _git(tmp_path, "checkout", "-qb", "feature")
+    module = tmp_path / "addons" / "sale"
+    module.mkdir(parents=True)
+    (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+    (module / "models.py").write_text("value = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "addons/sale")
+    _git(
+        tmp_path,
+        "commit",
+        "-qm",
+        "[IMP] sale: PROJ-123 change\n\n<https://tracker.test/PROJ-123>",
+    )
+
+    assert GitResource(_instance(tmp_path)).check().valid is True
 
 
 def test_commit_in_worktree_without_manifest_uses_project_ticket_settings(
@@ -315,7 +361,7 @@ def test_commit_in_worktree_without_manifest_uses_project_ticket_settings(
     commit_step = next(step for step in command.plan.process_steps if step.step_id == "git.commit")
     assert commit_step.argv[-2:] == (
         "-m",
-        "[IMP] worktree: PROJ-123 change\\x0a\\x0a<https://tracker.test/PROJ-123>",
+        "[IMP] worktree: PROJ-123 change\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a",
     )
 
 
@@ -339,24 +385,43 @@ def test_commit_in_worktree_without_manifest_and_no_project_manifest_disables_li
     assert context.message == "[IMP] worktree: PROJ-123 change"
 
 
-@pytest.mark.parametrize("owner_kind", ["environment", "project"])
-@pytest.mark.parametrize("base_url", ["https://tracker.test", "https://tracker.test/issues/"])
+def _project_bound_worktree(project_root: Path, _tmp_path: Path) -> tuple[Path, str]:
+    return project_root, "project"
+
+
+def _environment_bound_worktree(_project_root: Path, tmp_path: Path) -> tuple[Path, str]:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _git(worktree, "init", "-q", "-b", "feature")
+    _git(worktree, "config", "user.email", "tests@example.test")
+    _git(worktree, "config", "user.name", "tests")
+    return worktree, "environment"
+
+
+@pytest.mark.parametrize(
+    ("worktree_factory", "base_url"),
+    [
+        pytest.param(_project_bound_worktree, "https://tracker.test", id="project-root"),
+        pytest.param(
+            _project_bound_worktree, "https://tracker.test/issues/", id="project-root-path"
+        ),
+        pytest.param(
+            _environment_bound_worktree, "https://tracker.test", id="environment-worktree"
+        ),
+        pytest.param(
+            _environment_bound_worktree, "https://tracker.test/issues/", id="environment-path"
+        ),
+    ],
+)
 def test_commit_ticket_settings_come_from_binding_repository_root(
-    tmp_path: Path, owner_kind: str, base_url: str
+    tmp_path: Path, worktree_factory: Callable[[Path, Path], tuple[Path, str]], base_url: str
 ) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     _repo(project_root)
     _ticket_project(project_root, base_url)
 
-    if owner_kind == "project":
-        worktree = project_root
-    else:
-        worktree = tmp_path / "worktree"
-        worktree.mkdir()
-        _git(worktree, "init", "-q", "-b", "feature")
-        _git(worktree, "config", "user.email", "tests@example.test")
-        _git(worktree, "config", "user.name", "tests")
+    worktree, owner_kind = worktree_factory(project_root, tmp_path)
     (worktree / "change.txt").write_text("change\n", encoding="utf-8")
     _git(worktree, "add", "change.txt")
 
@@ -365,7 +430,7 @@ def test_commit_ticket_settings_come_from_binding_repository_root(
     ).commit_context("change", ticket="PROJ-123", tag="IMP")
     expected_url = f"{base_url.rstrip('/')}/PROJ-123"
     assert context.ticket_link == expected_url
-    assert context.message == (f"[IMP] {worktree.name}: PROJ-123 change\n\n<{expected_url}>")
+    assert context.message == (f"[IMP] {worktree.name}: PROJ-123 change\n\n{expected_url}\n\n")
 
 
 def test_commit_omitted_tag_freezes_add_inference_in_plan_and_execution(tmp_path: Path) -> None:

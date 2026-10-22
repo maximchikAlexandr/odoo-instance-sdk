@@ -1,4 +1,4 @@
-"""Private, typed lifecycle for credentialed Git child commands."""
+"""Typed Git command adapters and lifecycle for credentialed child commands."""
 
 from __future__ import annotations
 
@@ -8,10 +8,19 @@ import os
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
-from odcli_multica.models import GitLabCredentialContext
+import msgspec
+
+from odcli_multica.models import (
+    ContextVerificationError,
+    GitLabCredentialContext,
+    RootCreatorContext,
+    VerifiedTaskContext,
+)
 from odoo_instance_sdk import Command
+from odoo_instance_sdk.commands.output import action_command
+from odoo_instance_sdk.internal.proc import PreparedAction, RunContext, prepared_command
 from odoo_instance_sdk.models import CommandResult, GitSyncResult
 
 T_co = TypeVar("T_co", covariant=True)
@@ -48,6 +57,15 @@ class GitSync(Protocol):
 class GitResourceLike(GitPassthrough, GitSync, Protocol):
     def passthrough(self, args: Sequence[str]) -> CommandResult: ...
 
+    def commit_command(
+        self,
+        *,
+        description: str,
+        ticket: str | None = None,
+        tag: str | None = None,
+        member_id: str | None = None,
+    ) -> Command[CommandResult]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class GitCredentialSnapshot:
@@ -55,6 +73,90 @@ class GitCredentialSnapshot:
 
     host: str
     credential: GitLabCredentialContext
+
+
+def root_creator_command(
+    context: VerifiedTaskContext,
+    require_contract: Callable[[], None],
+    resolve_root_creator: Callable[[VerifiedTaskContext], RootCreatorContext],
+) -> Command[RootCreatorContext]:
+    """Build the verified root-creator observation used by commit commands."""
+    require_contract()
+    return cast(
+        "Command[RootCreatorContext]",
+        action_command(
+            "multica.root-creator",
+            lambda: resolve_root_creator(context),
+            description="Resolve the human creator of the verified task root issue",
+        ),
+    )
+
+
+def project_commit_command(
+    context: VerifiedTaskContext,
+    *,
+    git_resource: GitResourceLike,
+    description: str,
+    ticket: str | None,
+    tag: str | None,
+    root_creator: Callable[[VerifiedTaskContext], RootCreatorContext],
+    revalidate_root_creator: Callable[[VerifiedTaskContext], RootCreatorContext],
+) -> Command[CommandResult]:
+    """Capture a project commit and revalidate its verified human before execution."""
+    root = root_creator(context)
+    if (
+        root.workspace_id != context.workspace_id
+        or (context.root_issue_id is not None and root.root_issue_id != context.root_issue_id)
+        or (context.root_creator_id is not None and root.root_creator_id != context.root_creator_id)
+    ):
+        raise ContextVerificationError("verified task root identity changed")
+    commit_command = git_resource.commit_command(
+        description=description,
+        ticket=ticket,
+        tag=tag,
+        member_id=root.root_creator_id,
+    )
+    revalidate = PreparedAction(
+        step_id="multica.commit.revalidate-root-creator",
+        action="multica.commit.revalidate-root-creator",
+        description="Revalidate the verified task root before committing",
+        read_only=True,
+        details={
+            "workspace_id": context.workspace_id,
+            "root_issue_id": context.root_issue_id,
+            "root_creator_id": context.root_creator_id,
+        },
+    )
+    prepared = commit_command._prepared()
+    steps = (revalidate, *prepared.steps)
+
+    def run_commit(run_context: RunContext[CommandResult]) -> CommandResult:
+        run_context.action(revalidate.step_id)
+        current = revalidate_root_creator(context)
+        if (
+            current.workspace_id != context.workspace_id
+            or current.root_issue_id != context.root_issue_id
+            or current.root_creator_id != context.root_creator_id
+            or current.root_issue_id != root.root_issue_id
+            or current.root_creator_id != root.root_creator_id
+        ):
+            raise ContextVerificationError("verified task root identity changed")
+        run_context.complete_action(revalidate.step_id)
+        return prepared.callback(run_context)
+
+    return Command.from_prepared(
+        msgspec.structs.replace(
+            commit_command.plan,
+            steps=tuple(step.public_projection() for step in steps),
+            fingerprint="",
+        ).with_fingerprint(),
+        prepared_command(
+            run_commit,
+            steps,
+            executor=prepared.executor,
+            private_projection=prepared.private_projection,
+        ),
+    )
 
 
 def write_askpass_channel(credential: GitLabCredentialContext) -> str:

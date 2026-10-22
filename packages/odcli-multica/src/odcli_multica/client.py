@@ -38,6 +38,8 @@ from odcli_multica.git_execution import (
     GitSync as _GitSync,
     Runnable as _Runnable,
     execute_child,
+    project_commit_command as _project_commit_command,
+    root_creator_command as _root_creator_command,
 )
 from odcli_multica.models import (
     MULTICA_PY_REVISION,
@@ -62,6 +64,7 @@ from odoo_instance_sdk import (
 )
 from odoo_instance_sdk.commands.output import action_command
 from odoo_instance_sdk.execution import ExecutionPlan
+from odoo_instance_sdk.internal.proc import RunContext
 from odoo_instance_sdk.models import CommandResult, GitSyncResult
 
 if TYPE_CHECKING:
@@ -156,19 +159,31 @@ class MulticaOdooClient:
 
     def root_creator_command(self, context: VerifiedTaskContext) -> Command[RootCreatorContext]:
         """Capture the verified issue's finite root-creator traversal."""
-        self._require_contract()
-        return cast(
-            "Command[RootCreatorContext]",
-            action_command(
-                "multica.root-creator",
-                lambda: self._resolve_root_creator(context),
-                description="Resolve the human creator of the verified task root issue",
-            ),
-        )
+        return _root_creator_command(context, self._require_contract, self._resolve_root_creator)
 
     def root_creator(self, context: VerifiedTaskContext) -> RootCreatorContext:
         """Resolve one human root creator from an already verified context."""
         return self.root_creator_command(context).run()
+
+    def project_commit_command(
+        self,
+        context: VerifiedTaskContext,
+        *,
+        git_resource: GitResourceLike,
+        description: str,
+        ticket: str | None = None,
+        tag: str | None = None,
+    ) -> Command[CommandResult]:
+        """Build a project commit under the verified root human's identity."""
+        return _project_commit_command(
+            context,
+            git_resource=git_resource,
+            description=description,
+            ticket=ticket,
+            tag=tag,
+            root_creator=self.root_creator,
+            revalidate_root_creator=self._resolve_root_creator,
+        )
 
     def credential_context_command(
         self,
@@ -445,7 +460,7 @@ class MulticaOdooClient:
             repository_project_path,
         )
         from odoo_instance_sdk.execution import ExecutionPlan
-        from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+        from odoo_instance_sdk.internal.proc import PreparedAction
 
         host, inferred_project = repository_project_path(context.repository_url)
         selected_project = _validated_project_path(project_path, inferred_project)
@@ -651,11 +666,7 @@ class MulticaOdooClient:
         )
 
     def _resolve_root_creator(self, context: VerifiedTaskContext) -> RootCreatorContext:
-        return _resolve_root_creator(
-            context,
-            self.multica.issues,
-            self.multica.projects,
-        )
+        return _resolve_root_creator(context, self.multica.issues, self.multica.projects)
 
     def _resolve_credentials(
         self,
