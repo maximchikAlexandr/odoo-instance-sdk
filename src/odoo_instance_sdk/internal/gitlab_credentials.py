@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import cast
 from urllib.parse import urlsplit
 
-from odoo_instance_sdk.exceptions import GitLabCredentialError
+from odoo_instance_sdk.exceptions import GitLabCredentialError, SecretStoreError
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.paths import get_user_root
 from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, SubprocessExecutor
@@ -301,6 +301,24 @@ def resolve_gitlab_credential(
     """Resolve one exact member/host pair without consulting Git credentials."""
     selected_member = normalize_member_id(member_id)
     normalized_host = normalize_gitlab_host(host)
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    try:
+        encrypted = SecretStore(user_root=user_root).lookup_gitlab_member(
+            selected_member, normalized_host
+        )
+    except SecretStoreError as exc:
+        raise GitLabCredentialError("encrypted credential lookup failed") from exc
+    if encrypted is not None:
+        return GitLabCredentialContext(
+            identity=GitLabCredentialIdentity(
+                user_id=encrypted.member_id,
+                host=encrypted.host,
+                login=encrypted.login,
+                token_key=encrypted.token_key,
+            ),
+            _token=encrypted.token,
+        )
     mappings = read_gitlab_credential_mappings(mapping_path, user_root=user_root)
     matches = tuple(
         item

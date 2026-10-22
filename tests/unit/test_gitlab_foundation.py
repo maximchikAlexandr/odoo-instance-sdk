@@ -37,6 +37,7 @@ from odoo_instance_sdk.internal.proc import (
     prepared_step,
 )
 from odoo_instance_sdk.internal.proc.redaction import project_process_step
+from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.internal.transport.gitlab import GitLabHttpClient
 from odoo_instance_sdk.models import GitLabCredentialContext, GitMergeRequestResult
 from odoo_instance_sdk.resources.git import _command_result
@@ -132,6 +133,49 @@ def test_global_credential_resolution_is_owner_only_and_process_precedence(
     assert credential.child_environment()["GITLAB_TOKEN"] == "process-token"
     assert "process-token" not in repr(credential)
     assert "process-token" not in repr(credential.identity)
+
+
+def test_encrypted_gitlab_credential_precedes_legacy_mapping(tmp_path: Path) -> None:
+    store = SecretStore(user_root=tmp_path)
+    created = store.create_gitlab_member(
+        MEMBER_A, "https://GitLab.Example/", "encrypted", "secret-token"
+    )
+
+    credential = resolve_gitlab_credential(MEMBER_A, "gitlab.example", user_root=tmp_path)
+
+    assert credential.login == "encrypted"
+    assert credential.child_environment()["GITLAB_TOKEN"] == "secret-token"
+    assert (
+        credential.identity.token_key
+        == store.lookup_gitlab_member(MEMBER_A, "gitlab.example").token_key
+    )  # type: ignore[union-attr]
+    assert created.login == "encrypted"
+    assert "secret-token" not in repr(credential)
+
+
+def test_broken_encrypted_gitlab_store_never_falls_back(tmp_path: Path) -> None:
+    store = SecretStore(user_root=tmp_path)
+    store.create_gitlab_member(MEMBER_A, "gitlab.example", "encrypted", "secret-token")
+    store.key_path.unlink()
+    _credentials(tmp_path)
+
+    with pytest.raises(GitLabCredentialError, match="encrypted credential lookup failed"):
+        resolve_gitlab_credential(MEMBER_A, "gitlab.example", user_root=tmp_path)
+
+
+def test_invalid_encrypted_gitlab_record_never_falls_back(tmp_path: Path) -> None:
+    store = SecretStore(user_root=tmp_path)
+    store.create_gitlab_member(MEMBER_A, "gitlab.example", "encrypted", "secret-token")
+    driver = __import__("sqlcipher3.dbapi2", fromlist=["connect"])
+    connection = driver.connect(str(store.store_path))
+    connection.execute(f"PRAGMA key = \"x'{store.key_path.read_bytes().hex()}'\"")
+    connection.execute("UPDATE gitlab_member_secret SET token = ''")
+    connection.commit()
+    connection.close()
+    _credentials(tmp_path)
+
+    with pytest.raises(GitLabCredentialError, match="encrypted credential lookup failed"):
+        resolve_gitlab_credential(MEMBER_A, "gitlab.example", user_root=tmp_path)
 
 
 def test_credential_mapping_rejects_duplicate_and_unprotected_files(tmp_path: Path) -> None:

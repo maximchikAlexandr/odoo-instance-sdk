@@ -7,9 +7,9 @@
 
 ## 2. Credential resolver integration
 
-- [ ] 2.1 Add one normalized-URL encrypted lookup before the existing remote Odoo named/legacy environment chain, preserving MYL-515 nullable-database discovery and all current fallback order.
-- [ ] 2.2 Add one member-ID/normalized-host encrypted lookup before the existing GitLab mapping/environment chain while preserving the generated token-key contract and transport redaction.
-- [ ] 2.3 Add public-boundary hit/absent/broken-store/invalid-record matrices for remote refresh/COPY and GitLab operations, proving that only absence falls back and no password/token/database leaks through plans, output, errors, logs, or repr.
+- [x] 2.1 Add one normalized-URL encrypted lookup before the existing remote Odoo named/legacy environment chain, preserving MYL-515 nullable-database discovery and all current fallback order.
+- [x] 2.2 Add one member-ID/normalized-host encrypted lookup before the existing GitLab mapping/environment chain while preserving the generated token-key contract and transport redaction.
+- [x] 2.3 Add public-boundary hit/absent/broken-store/invalid-record matrices for remote refresh/COPY and GitLab operations, proving that only absence falls back and no password/token/database leaks through plans, output, errors, logs, or repr.
 
 ## 3. Read-only catalogue Admin
 

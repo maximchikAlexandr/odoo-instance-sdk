@@ -501,12 +501,13 @@ def prepare_restore(  # noqa: C901
         elif restore_inputs[0] != target_database:
             raise ConfigError("target database was captured with a different value")
     remote_password = (
-        _remote_password(
+        None
+        if not isinstance(selected_source, _RemoteRestoreSource)
+        else _remote_password(
             effective_project_environment(project_environment),
             remote_name=options.remote_name,
+            base_url=resolve_test_source(_initial, options).config.base_url,
         )
-        if isinstance(selected_source, _RemoteRestoreSource)
-        else None
     )
     try:
         preflight_target = restore_inputs[0] if restore_inputs is not None else None
@@ -840,6 +841,7 @@ def prepare_download(
     password = _remote_password(
         effective_project_environment(load_project_environment(root)),
         remote_name=source.source_name,
+        base_url=source.config.base_url,
     )
     repo_root, git_common, project_key = canonical_project_identity(root)
     lock_path = database_preparation_lock_path(project_key)

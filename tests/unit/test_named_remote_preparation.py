@@ -14,16 +14,20 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentConflictError,
     MasterPasswordRequiredError,
     RemoteDatabaseResolutionError,
+    SecretStoreCorruptError,
+    SecretStoreRecordError,
 )
-from odoo_instance_sdk.internal.dbprep import materialize as preparation
+from odoo_instance_sdk.internal.dbprep import materialize as preparation, source as source_module
 from odoo_instance_sdk.internal.dbprep.source import (
     _remote_password,
+    acquire_copy_backup,
     remote_password_key,
     resolve_test_source,
 )
 from odoo_instance_sdk.internal.doctor import DoctorReport, manifest as doctor_manifest
 from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.project_env import effective_project_environment
+from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.models import (
     Backup,
     BackupBranchOrigin,
@@ -113,6 +117,59 @@ def test_named_password_uses_process_precedence_and_rejects_empty_override() -> 
         _remote_password(empty, remote_name="staging")
 
 
+def test_encrypted_remote_password_precedes_legacy_environment(tmp_path: Path) -> None:
+    store = SecretStore(user_root=tmp_path)
+    store.create_remote_odoo("https://Staging.Example/", "encrypted-secret")
+
+    assert (
+        _remote_password(
+            {"ODCLI_REMOTE_STAGING_MASTER_PASSWORD": "legacy-secret"},
+            remote_name="staging",
+            base_url="https://staging.example",
+            user_root=tmp_path,
+        )
+        == "encrypted-secret"
+    )
+
+
+def test_absent_encrypted_remote_password_preserves_legacy_fallback(tmp_path: Path) -> None:
+    assert (
+        _remote_password(
+            {"ODCLI_TEST_MASTER_PASSWORD": "legacy-secret"},
+            base_url="https://staging.example",
+            user_root=tmp_path,
+        )
+        == "legacy-secret"
+    )
+
+
+def test_broken_or_invalid_encrypted_remote_password_never_falls_back(tmp_path: Path) -> None:
+    store = SecretStore(user_root=tmp_path)
+    store.create_remote_odoo("https://staging.example", "encrypted-secret")
+    store.key_path.unlink()
+    with pytest.raises(SecretStoreCorruptError):
+        _remote_password(
+            {"ODCLI_TEST_MASTER_PASSWORD": "legacy-secret"},
+            base_url="https://staging.example",
+            user_root=tmp_path,
+        )
+
+    store = SecretStore(user_root=tmp_path / "invalid")
+    store.create_remote_odoo("https://staging.example", "encrypted-secret")
+    driver = __import__("sqlcipher3.dbapi2", fromlist=["connect"])
+    connection = driver.connect(str(store.store_path))
+    connection.execute(f"PRAGMA key = \"x'{store.key_path.read_bytes().hex()}'\"")
+    connection.execute("UPDATE remote_odoo_secret SET master_password = ''")
+    connection.commit()
+    connection.close()
+    with pytest.raises(SecretStoreRecordError):
+        _remote_password(
+            {"ODCLI_TEST_MASTER_PASSWORD": "legacy-secret"},
+            base_url="https://staging.example",
+            user_root=tmp_path / "invalid",
+        )
+
+
 def test_child_environment_removes_all_named_remote_passwords() -> None:
     environment = {
         "ODCLI_REMOTE_LAB_MASTER_PASSWORD": "lab-secret",
@@ -179,6 +236,66 @@ def test_named_download_uses_secret_and_preserves_source_provenance(
     assert result.backup == backup
     assert result.source_git_branch == "staging"
     assert result.branch_origin is BackupBranchOrigin.CONFIGURED
+
+
+def test_named_download_uses_encrypted_secret_before_legacy_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, backup, client = _named_download_case(
+        tmp_path, monkeypatch, database="staging_db", listed=RuntimeError("listing disabled")
+    )
+    store_root = tmp_path / "odcli"
+    store = SecretStore(user_root=store_root)
+    store.create_remote_odoo("https://staging.example", "encrypted-secret")
+    monkeypatch.setattr(source_module, "SecretStore", lambda user_root=None: store)
+
+    result = preparation.prepare_download(
+        client, project, options=DatabaseRefreshOptions(remote_name="STAGING")
+    )
+
+    assert result.backup == backup
+    client.instance.assert_called_once_with(
+        "https://staging.example", master_password="encrypted-secret"
+    )
+
+
+def test_copy_acquisition_uses_encrypted_secret_before_legacy_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = RemoteSourceConfig(
+        name="staging",
+        base_url="https://staging.example",
+        database="staging_db",
+        git_branch="staging",
+    )
+    project = _project(source, root=tmp_path)
+    backup = _backup(tmp_path, source_name="staging", branch="staging")
+    client = MagicMock()
+    client.instance.return_value.databases.backup.return_value = backup
+    context = MagicMock()
+    store_root = tmp_path / "odcli"
+    store = SecretStore(user_root=store_root)
+    store.create_remote_odoo("https://staging.example", "encrypted-secret")
+    monkeypatch.setattr(source_module, "SecretStore", lambda user_root=None: store)
+    monkeypatch.setenv("ODCLI_REMOTE_STAGING_MASTER_PASSWORD", "legacy-secret")
+    monkeypatch.setattr(source_module, "git_common_dir", lambda _root: tmp_path)
+    monkeypatch.setattr(source_module, "repo_key", lambda _root, _common: "repo")
+
+    acquired = acquire_copy_backup(
+        client,
+        project,
+        local_instance=MagicMock(),
+        source_db="staging_db",
+        repo_root=tmp_path,
+        remote_name="staging",
+        selected_backup=None,
+        context=context,
+    )
+
+    assert acquired.backup == backup
+    client.instance.assert_called_once_with(
+        "https://staging.example", master_password="encrypted-secret"
+    )
 
 
 def test_named_download_uses_secret_and_preserves_source_provenance_singleton(
