@@ -14,7 +14,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
@@ -95,6 +95,35 @@ class ObservedDatabase:
 
     name: str
     database_oid: int
+
+
+@dataclass(slots=True)
+class _InventoryProbeCapture:
+    """Keep the typed inventory payload private until the parser consumes it."""
+
+    value: str | bytes | None = None
+    captured: bool = False
+
+    def capture(self, value: str | bytes | None) -> None:
+        self.value = value
+        self.captured = True
+
+    def take(self, result: ProcessResultLike) -> str | bytes | None:
+        value = (
+            self.value
+            if self.captured
+            else result.stdout
+            if isinstance(result, ProcessResult)
+            else None
+        )
+        self.value = None
+        self.captured = False
+        return value
+
+
+def _inventory_capture(step: PreparedStep) -> _InventoryProbeCapture | None:
+    owner = getattr(step.private_stdout_consumer, "__self__", None)
+    return owner if isinstance(owner, _InventoryProbeCapture) else None
 
 
 class BootstrapOutcome(StrEnum):
@@ -235,15 +264,19 @@ def bootstrap_tmp_plan(
         db_password=db_password,
         step_id=_BOOTSTRAP_READY_STEP_ID,
     )
+    inventory_capture = _InventoryProbeCapture()
     inventory_step = (
-        _bootstrap_sql_step(
-            db_host=db_host,
-            db_port=db_port,
-            db_user=db_user,
-            db_password=db_password,
-            step_id=_BOOTSTRAP_INVENTORY_STEP_ID,
-            database="postgres",
-            stdin=_BOOTSTRAP_INVENTORY_SQL,
+        replace(
+            _bootstrap_sql_step(
+                db_host=db_host,
+                db_port=db_port,
+                db_user=db_user,
+                db_password=db_password,
+                step_id=_BOOTSTRAP_INVENTORY_STEP_ID,
+                database="postgres",
+                stdin=_BOOTSTRAP_INVENTORY_SQL,
+            ),
+            private_stdout_consumer=inventory_capture.capture,
         )
         if capture_inventory
         else None
@@ -455,7 +488,11 @@ def execute_bootstrap_tmp(
         context.complete_action(plan.verify_action.step_id)
         observed: tuple[ObservedDatabase, ...] = ()
         if plan.inventory_step is not None:
-            observed = _read_database_inventory(context.process_prepared(plan.inventory_step))
+            result = context.process_prepared(plan.inventory_step)
+            capture = _inventory_capture(plan.inventory_step)
+            if capture is not None and isinstance(result, ProcessResult):
+                result = replace(result, stdout=capture.take(result))
+            observed = _read_database_inventory(result)
             if on_observed is not None:
                 on_observed(observed)
         if plan.record_action is not None:
