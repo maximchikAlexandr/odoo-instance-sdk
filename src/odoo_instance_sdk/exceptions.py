@@ -354,6 +354,42 @@ class DatabaseError(OdooInstanceSdkError):
         super().__init__(message)
 
 
+class SecretStoreError(OdooInstanceSdkError):
+    """Base class for bounded encrypted secret-store failures."""
+
+    code = "secret_store_error"
+
+
+class SecretStoreUnavailableError(SecretStoreError):
+    """The optional SQLCipher support or a required store file is unavailable."""
+
+    code = "secret_store_unavailable"
+
+
+class SecretStoreCorruptError(SecretStoreError):
+    """The encrypted store cannot be safely opened or has an invalid schema."""
+
+    code = "secret_store_corrupt"
+
+
+class SecretStoreRecordError(SecretStoreError):
+    """A present encrypted record is malformed and cannot be used."""
+
+    code = "secret_store_record_invalid"
+
+
+class SecretStoreConflictError(SecretStoreError):
+    """A compare-and-swap mutation used a stale record revision."""
+
+    code = "secret_store_conflict"
+
+
+class SecretStoreBusyError(SecretStoreError):
+    """The bounded SQLCipher busy window expired."""
+
+    code = "secret_store_busy"
+
+
 class BackupCatalogError(OdooInstanceSdkError):
     """Backup catalog operation failed."""
 
