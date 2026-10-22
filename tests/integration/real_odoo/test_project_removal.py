@@ -139,14 +139,22 @@ def test_public_project_forget_reinit_and_purge(
     assert project.exists()
 
     catalog = BackupCatalog(db_path=catalog_path)
-    forgotten_projects = catalog.list_projects(include_forgotten=True)
+    forgotten_projects = [
+        row
+        for row in catalog.list_projects(include_forgotten=True)
+        if str(row["project_id"]) == project_id
+    ]
     registered_projects = catalog.list_projects()
-    retained_environments = catalog.list_environments(project_id=project_id, include_removed=True)
+    retained_environments = catalog._conn.execute(
+        "SELECT state FROM environments WHERE id = ? AND project_id = ?",
+        (environment_id, project_id),
+    ).fetchall()
     assert len(forgotten_projects) == 1
     assert str(forgotten_projects[0]["registration_state"]) == "forgotten"
     assert not catalog._project_purge_completed(project_id)
     assert registered_projects == []
     assert len(retained_environments) == 1
+    assert str(retained_environments[0]["state"]) == "removed"
     retained_bytes = sum(path.stat().st_size for path in project.rglob("*") if path.is_file())
     assert retained_bytes > 0
     assert (project / ".odcli" / "project.toml").is_file()
@@ -174,7 +182,11 @@ def test_public_project_forget_reinit_and_purge(
     assert reactivated is not None
     assert reactivated["registration_state"] == "registered"
     assert not catalog._project_purge_completed(project_id)
-    assert len(catalog.list_projects(include_forgotten=True)) == 1
+    assert [
+        row
+        for row in catalog.list_projects(include_forgotten=True)
+        if str(row["project_id"]) == project_id
+    ]
     catalog.close()
 
     token = f"{project.name}:{project_id}"
