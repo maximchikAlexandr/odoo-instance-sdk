@@ -41,7 +41,7 @@ PYTHON_RESOLUTION_AUDIT: Final[Path] = (
     ROOT / "tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.audit.json"
 )
 AUDITED_EXCEPTION_PACKAGES: Final[frozenset[str]] = frozenset(
-    {"cryptography", "pypdf2", "requests", "urllib3"}
+    {"cryptography", "pypdf2", "requests"}
 )
 PINNED_AUDIT_SCANNER: Final[str] = E2E_PINS.pip_audit
 PACKAGE_NAME = re.compile(r"\A[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*\Z")

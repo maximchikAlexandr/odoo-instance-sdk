@@ -16,7 +16,7 @@ def test_cache_keys_include_all_immutable_inputs() -> None:
     source = bootstrap.source_cache_key("Linux", "amd64")
     uv = bootstrap.uv_cache_key("Linux", "amd64", b"odoo requirements", b"uv lock")
     assert source == "odoo19-Linux-amd64-cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
-    assert uv.startswith("uv-Linux-amd64-3.12.13-0.10.8-")
+    assert uv.startswith("uv-Linux-amd64-3.12.13-0.13.4-")
     assert len(uv.rsplit("-", 1)[1]) == 64
 
 
