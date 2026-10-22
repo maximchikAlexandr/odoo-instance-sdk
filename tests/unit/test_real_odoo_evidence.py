@@ -251,7 +251,7 @@ def test_evidence_records_runtime_and_audit_properties(tmp_path: Path) -> None:
     assert resource["evidence"]["platform"] == "linux/amd64"
     assert resource["evidence"]["architecture"] == "X64"
     assert resource["evidence"]["cache"]["source_hit"] is False
-    assert resource["evidence"]["pins"]["uv"] == "0.10.8"
+    assert resource["evidence"]["pins"]["uv"] == "0.13.4"
     assert resource["evidence"]["timing"]["cleanup_seconds"] == 0.1
     assert resource["evidence"]["artifact_bytes"] == result["artifact_bytes"]
     assert resource["evidence"]["audit_state"] == "clean"

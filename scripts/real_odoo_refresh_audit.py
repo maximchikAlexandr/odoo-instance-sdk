@@ -28,6 +28,30 @@ class AuditRefreshError(ValueError):
     """Raised when the real scanner result cannot be accepted without a waiver."""
 
 
+def _exception_fields(entry: object) -> tuple[str, str, list[object]]:
+    if not isinstance(entry, Mapping):
+        raise AuditRefreshError("existing exception entry is malformed")
+    package = _canonical_package(entry.get("package"))
+    version = entry.get("version")
+    advisories = entry.get("advisories")
+    if package is None or not isinstance(version, str) or not isinstance(advisories, list):
+        raise AuditRefreshError("existing exception identity is malformed")
+    return package, version, advisories
+
+
+def _check_retired_urllib_exception(entries: list[Mapping[str, object]]) -> None:
+    if len(entries) != 1:
+        raise AuditRefreshError("expected exactly one existing urllib3 exception entry")
+    urllib = entries[0]
+    package, version, advisories = _exception_fields(urllib)
+    if (
+        package != "urllib3"
+        or version != "2.6.3"
+        or set(advisories) != {"PYSEC-2026-141", "PYSEC-2026-142"}
+    ):
+        raise AuditRefreshError("urllib3 exception differs from the two explicitly retired findings")
+
+
 def _expected_findings(entries: object) -> tuple[set[tuple[str, str, str]], list[object]]:
     if not isinstance(entries, list):
         raise AuditRefreshError("existing exceptions are malformed")
@@ -35,13 +59,7 @@ def _expected_findings(entries: object) -> tuple[set[tuple[str, str, str]], list
     retained: list[object] = []
     urllib_entries: list[Mapping[str, object]] = []
     for entry in entries:
-        if not isinstance(entry, Mapping):
-            raise AuditRefreshError("existing exception entry is malformed")
-        package = _canonical_package(entry.get("package"))
-        version = entry.get("version")
-        advisories = entry.get("advisories")
-        if package is None or not isinstance(version, str) or not isinstance(advisories, list):
-            raise AuditRefreshError("existing exception identity is malformed")
+        package, version, advisories = _exception_fields(entry)
         if package == "urllib3":
             urllib_entries.append(entry)
             continue
@@ -50,15 +68,7 @@ def _expected_findings(entries: object) -> tuple[set[tuple[str, str, str]], list
             if not isinstance(advisory, str):
                 raise AuditRefreshError("existing exception advisory is malformed")
             expected.add((package, version, advisory))
-
-    if len(urllib_entries) != 1:
-        raise AuditRefreshError("expected exactly one existing urllib3 exception entry")
-    urllib = urllib_entries[0]
-    if (
-        urllib.get("version") != "2.6.3"
-        or set(urllib.get("advisories", [])) != {"PYSEC-2026-141", "PYSEC-2026-142"}
-    ):
-        raise AuditRefreshError("urllib3 exception differs from the two explicitly retired findings")
+    _check_retired_urllib_exception(urllib_entries)
     return expected, retained
 
 

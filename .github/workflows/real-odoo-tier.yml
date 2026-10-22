@@ -28,7 +28,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           python-version: "3.12.13"
-          version: "0.10.8"
+          version: "0.13.4"
           enable-cache: false
       - name: Pin workflow uv cache path
         run: echo "UV_CACHE_DIR=${{ github.workspace }}/.cache/uv" >> "$GITHUB_ENV"

@@ -24,7 +24,7 @@ def _evidence_contract(
                     "source_key": "odoo19-Linux-X64-pin",
                     "uv_key": "uv-Linux-X64-python-uv-digest",
                 },
-                "pins": {"uv": "0.10.8"},
+                "pins": {"uv": "0.13.4"},
             }
         )
         + "\n"

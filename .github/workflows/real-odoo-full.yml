@@ -65,8 +65,11 @@ jobs:
           mkdir -p .artifacts/real-odoo-dependency-refresh
           git init --bare "$source_cache"
           git -C "$source_cache" fetch --depth=1 https://github.com/odoo/odoo.git cd992ceebbaf343c03e1941d39cfe423d35ba6c6
-          test "$(git -C "$source_cache" rev-parse 'FETCH_HEAD^{commit}')" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+          resolved_commit=$(git -C "$source_cache" rev-parse --verify 'FETCH_HEAD^{commit}')
+          echo "fetched_source_commit=$resolved_commit"
+          test "$resolved_commit" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6
           git -C "$source_cache" show cd992ceebbaf343c03e1941d39cfe423d35ba6c6:requirements.txt > /tmp/odoo19-requirements.txt
+          echo "requirements_sha256=$(shasum -a 256 /tmp/odoo19-requirements.txt | cut -d' ' -f1)"
           cat > /tmp/odoo19-overrides.txt <<'OVERRIDES'
           cbor2==5.9.0
           certifi==2026.10.19
@@ -84,12 +87,12 @@ jobs:
           zeep==4.3.3
           OVERRIDES
           chmod 600 /tmp/odoo19-requirements.txt /tmp/odoo19-overrides.txt
-          test "$(uv --version)" = "uv 0.13.4"
-          python -c 'import platform,sys; assert sys.version_info[:3] == (3,12,13); assert platform.machine() == "x86_64"'
-          git -C "$source_cache" show cd992ceebbaf343c03e1941d39cfe423d35ba6c6:requirements.txt | shasum -a 256
+          uv_version=$(uv --version | awk '{print $2}')
+          echo "uv_version=$uv_version"
+          test "$uv_version" = 0.13.4
+          uv run --no-project --python 3.12.13 python -c 'import platform,sys; assert sys.version_info[:3] == (3,12,13); assert platform.machine() == "x86_64"'
           echo "odoo_source_commit=cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
-          echo "uv_version=$(uv --version)"
-          echo "python_version=$(python --version)"
+          echo "python_version=$(uv run --no-project --python 3.12.13 python --version)"
       - name: Regenerate pinned locks and run the real pinned audit scanner
         run: |
           set -euo pipefail
@@ -117,11 +120,11 @@ jobs:
           audit_exit=$?
           set -e
           printf '%s\n' "$audit_exit" > "$output/pip-audit-exit-code.txt"
-          python scripts/real_odoo_refresh_audit.py \
+          uv run --no-project --python 3.12.13 python scripts/real_odoo_refresh_audit.py \
             --lock "$output/odoo19-linux-amd64-py3.12.lock" \
             --scanner-report "$output/pip-audit.json" \
             --output "$output/odoo19-linux-amd64-py3.12.audit.json"
-          python - <<'PY'
+          uv run --no-project --python 3.12.13 python - <<'PY'
           import re
           import tomllib
           from pathlib import Path

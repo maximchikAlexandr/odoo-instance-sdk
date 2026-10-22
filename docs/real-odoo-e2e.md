@@ -3,7 +3,7 @@
 The harness is opt-in and starts with a fail-closed prerequisite check. The
 bootstrap writes a redacted machine-readable manifest and exits non-zero when
 Docker, Compose, the pinned images, the required platform, Python 3.12.13,
-uv 0.10.8, or (for full E2E) the pinned Odoo source revision is unavailable.
+uv 0.13.4, or (for full E2E) the pinned Odoo source revision is unavailable.
 Missing prerequisites are failures, not pytest skips.
 
 Install the frozen development environment, then run the tier you need:
