@@ -196,6 +196,12 @@ def create_app(  # noqa: C901
                 else None,
             )
         )
+        from odoo_instance_sdk.http.admin import mount_admin
+
+        # Non-headless composition always validates and mounts Admin.  A
+        # missing or unsafe administrator configuration must fail closed at
+        # startup; headless composition remains dependency-free.
+        app.state.admin = mount_admin(app, secure_cookie=external_proxy is not None)
         if static_assets:
             if not _WEB_DIST.is_dir():
                 raise RuntimeError(

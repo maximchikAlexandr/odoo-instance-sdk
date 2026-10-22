@@ -443,6 +443,31 @@ class SecretStore:
         finally:
             connection.close()
 
+    def list_remote_odoo(self) -> tuple[RemoteOdooSecret, ...]:
+        """Return safe remote Odoo projections without decrypting fields."""
+        connection = self._ready(write=False)
+        if connection is None:
+            return ()
+        try:
+            rows = connection.execute(
+                "SELECT base_url, revision, created_at, updated_at, master_password "
+                "FROM remote_odoo_secret ORDER BY base_url ASC"
+            ).fetchall()
+            result: list[RemoteOdooSecret] = []
+            for row in rows:
+                _validate_remote_row(row)
+                result.append(
+                    RemoteOdooSecret(
+                        base_url=_text(row[0], label="remote URL"),
+                        revision=_revision(row[1]),
+                        created_at=_text(row[2], label="created timestamp"),
+                        updated_at=_text(row[3], label="updated timestamp"),
+                    )
+                )
+            return tuple(result)
+        finally:
+            connection.close()
+
     def lookup_remote_odoo(self, base_url: str) -> RemoteOdooCredential | None:
         normalized = normalize_base_url(base_url)
         connection = self._ready(write=False)
@@ -571,6 +596,24 @@ class SecretStore:
             row = rows[0]
             _validate_gitlab_row(row)
             return _gitlab_projection(row)
+        finally:
+            connection.close()
+
+    def list_gitlab_members(self) -> tuple[GitLabMemberSecret, ...]:
+        """Return safe GitLab projections without token or token-key fields."""
+        connection = self._ready(write=False)
+        if connection is None:
+            return ()
+        try:
+            rows = connection.execute(
+                "SELECT member_id, host, login, token_key, revision, created_at, "
+                "updated_at, token FROM gitlab_member_secret ORDER BY host ASC, member_id ASC"
+            ).fetchall()
+            result: list[GitLabMemberSecret] = []
+            for row in rows:
+                _validate_gitlab_row(row)
+                result.append(_gitlab_projection(row))
+            return tuple(result)
         finally:
             connection.close()
 
