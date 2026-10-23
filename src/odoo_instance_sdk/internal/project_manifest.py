@@ -19,6 +19,7 @@ def default_project_ignore_contents() -> bytes:
     """Return the exact SDK-managed ignore file contents when no caller rules exist."""
     return "".join(f"{entry}\n" for entry in _PROJECT_LOCAL_IGNORES).encode("utf-8")
 
+
 _SECRET_KEYS = frozenset(
     {
         "admin_passwd",
