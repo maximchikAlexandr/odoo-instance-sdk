@@ -25,7 +25,7 @@ from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from scripts.real_odoo_pins import E2E_PINS
-from tests.integration.real_odoo.archive import SourceBackupPlan
+from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence, audit_no_leaks
 from tests.integration.real_odoo.conftest import E2ERuntime, odoo_runtime_python
 from tests.integration.real_odoo.focused_support import (
@@ -59,6 +59,7 @@ def _document(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 def test_public_project_forget_reinit_and_purge(
     tmp_path: Path,
     target_runtime: E2ERuntime,
+    source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
     record_property: object,
@@ -123,7 +124,7 @@ def test_public_project_forget_reinit_and_purge(
     project_postgres_port = project_cluster.endpoint_port
     backup_id = str(uuid.uuid4())
     backup_path = target_runtime.root / f"project-removal-{target_runtime.run_id}.zip"
-    shutil.copy2(source_backup_plan.destination, backup_path)
+    shutil.copy2(source_backup.path, backup_path)
     seed_backup(
         catalog_path,
         backup_path,
@@ -269,17 +270,15 @@ def test_public_project_forget_reinit_and_purge(
     ]
     catalog.close()
     resumed_cluster_result = invoke("--project", str(project), "postgres", "up")
-    assert resumed_cluster_result.returncode == 0, (
-        resumed_cluster_result.stdout + resumed_cluster_result.stderr
-    )
+    resumed_cluster_output = resumed_cluster_result.stdout + resumed_cluster_result.stderr
+    assert resumed_cluster_result.returncode == 0, resumed_cluster_output
     database_probe = _project_database_probe(
         project,
         project_database,
         home=target_runtime.environment["HOME"],
     )
-    assert database_probe.returncode == 0, (
-        database_probe.stdout + database_probe.stderr
-    )
+    database_probe_output = database_probe.stdout + database_probe.stderr
+    assert database_probe.returncode == 0, database_probe_output
     assert database_probe.stdout.strip() == project_database
     project_instance = OdooClient(config=OdooClientConfig(executable="odoo")).instance.from_project(
         ProjectConfig.load(project)
