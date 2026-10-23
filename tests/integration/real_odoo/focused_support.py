@@ -391,7 +391,6 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         "--project",
         str(root),
         "--yes",
-        "--allow-partial",
         "--odoo-bin",
         str(bootstrap_odoo_bin),
         "--python",
@@ -410,6 +409,8 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
                 E2E_PINS.odoo_source_commit,
             )
         )
+    else:
+        init_args.append("--allow-partial")
     init_args.extend(
         (
             "--database",
