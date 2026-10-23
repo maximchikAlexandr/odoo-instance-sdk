@@ -16,6 +16,7 @@ from odoo_instance_sdk.internal.proc import (
     RunContext,
     SubprocessExecutor,
 )
+from odoo_instance_sdk.internal.project_manifest import default_project_ignore_contents
 from odoo_instance_sdk.internal.project_removal import canonical_containment
 from odoo_instance_sdk.internal.project_removal_coordinator import ProjectRemovalAdapter
 from odoo_instance_sdk.internal.repo_key import parse_git_common_dir
@@ -31,6 +32,7 @@ class FilesystemPurgeTarget:
     path: Path
     allowed_root: Path
     git_common_dir: Path | None = None
+    expected_content: bytes | None = None
 
 
 def project_owned_paths(
@@ -47,6 +49,13 @@ def project_owned_paths(
         ("log", odcli / "odoo.log"),
         ("python_environment", root / ".venv"),
     ]
+    project_ignore = odcli / ".gitignore"
+    if (
+        not project_ignore.is_symlink()
+        and project_ignore.is_file()
+        and project_ignore.read_bytes() == default_project_ignore_contents()
+    ):
+        candidates.append(("config", project_ignore))
     if managed_filestore is not None:
         candidates.append(("filestore", managed_filestore))
     return tuple(
@@ -117,6 +126,10 @@ class FilesystemPurgeAdapter:
                 raise ConfigError("project filesystem target is a symlink")
             if not canonical_containment(path, target.allowed_root):
                 raise ConfigError("project filesystem target escaped its allowed root")
+            if target.expected_content is not None and (
+                not path.is_file() or path.read_bytes() != target.expected_content
+            ):
+                raise ConfigError("project filesystem target content changed after ownership proof")
             if decision.resource_type == "source" and (
                 target.git_common_dir is None or parse_git_common_dir(path) != target.git_common_dir
             ):
