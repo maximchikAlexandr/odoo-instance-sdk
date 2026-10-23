@@ -49,7 +49,7 @@ from odoo_instance_sdk.internal.project_removal import (
     resolve_project_selector,
 )
 from odoo_instance_sdk.internal.project_removal_terminal import (
-    _completed_purge_is_inert,
+    _forgotten_project_is_inert,
     _environment_owner_clause,
     _environment_sources,
     _project_runtime,
@@ -225,12 +225,6 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
         registration.project_id,
         registration.repository_root,
         registration.git_common_dir,
-    )
-    config_evidence_complete |= catalog._project_purge_proves_missing_config(
-        registration.project_id,
-        registration.registration_state,
-        manifest_present,
-        claim is not None,
     )
     active_claim = claim if claim is not None and claim.state == "active" else None
     active_cluster_id = str(active_claim.cluster_id) if active_claim is not None else None
@@ -569,7 +563,7 @@ def capture_project_removal_command(  # noqa: C901
         git_status_step_id=git_status_step_id,
         git_status_hardened=True,
     )
-    terminal_purge = purge and _completed_purge_is_inert(catalog, registration)
+    terminal_purge = purge and _forgotten_project_is_inert(catalog, registration)
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     decisions: tuple[ProjectResourceDecision, ...]
     if not purge:
@@ -764,7 +758,7 @@ def capture_project_removal_command(  # noqa: C901
             if terminal_purge:
                 if source_status_step is not None:
                     context.process(source_status_step.step_id)
-                if not _completed_purge_is_inert(catalog, current):
+                if not _forgotten_project_is_inert(catalog, current):
                     raise _error(
                         "completed project purge state changed before retry",
                         projection,
@@ -891,16 +885,6 @@ def capture_project_removal_command(  # noqa: C901
                     completed=tuple(completed),
                     retained=tuple(retained),
                     remaining=tuple(remaining),
-                )
-            if not catalog._mark_project_purge_completed(registration.project_id):
-                raise _error(
-                    "project registration changed before purge completion was recorded",
-                    current_projection,
-                    mode=mode,
-                    failed_step="project-removal:finalize",
-                    decisions=decisions,
-                    completed=tuple(completed),
-                    retained=tuple(retained),
                 )
             return ProjectRemovalResult(
                 project_id=registration.project_id,

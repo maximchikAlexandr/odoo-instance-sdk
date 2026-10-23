@@ -97,6 +97,53 @@ def _catalog(tmp_path: Path) -> tuple[BackupCatalog, str, Path]:
     return catalog, project_id, root
 
 
+def _record_race_worker_outcome(
+    outcome: dict[str, object],
+    action: Callable[[], object],
+    *,
+    result_key: str,
+    error_key: str,
+    traceback_key: str,
+    details_key: str | None = None,
+    completion_event: threading.Event | None = None,
+) -> None:
+    try:
+        outcome[result_key] = action()
+    except BaseException as exc:  # preserve worker failure for the asserting thread
+        outcome[error_key] = exc
+        outcome[traceback_key] = traceback.format_exc()
+        if details_key is not None:
+            outcome[details_key] = getattr(exc, "details", None)
+    finally:
+        if completion_event is not None:
+            completion_event.set()
+
+
+def _run_fresh_public_project_purge(
+    catalog_path: Path,
+    project_id: str,
+    project_name: str,
+    outcome: dict[str, object],
+) -> ProjectRemovalResult:
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        client = SimpleNamespace(get_catalog=lambda: catalog)
+        command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+            ProjectSelector.from_project_id(project_id),
+            purge=True,
+            confirmation=f"{project_name}:{project_id}",
+        )
+        outcome["plan"] = command.plan
+        return command.run()
+    finally:
+        catalog.close()
+
+
+def _assert_no_purge_completion_marker(catalog: BackupCatalog) -> None:
+    columns = {str(row[1]) for row in catalog._conn.execute("PRAGMA table_info(projects)")}
+    assert "purge_completed_at" not in columns
+
+
 def _legacy_environment(catalog: BackupCatalog, environment_id: str, root: Path) -> None:
     catalog.create_environment(
         {
@@ -299,6 +346,77 @@ def test_public_forget_refuses_nonblocking_resource_decision_drift(tmp_path: Pat
 
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert catalog.get_environment("removed-after-capture") is not None
+    catalog.close()
+
+
+def test_public_forget_refuses_post_capture_compose_and_database_activation(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    legacy_id = repo_key(root, root / ".git")
+    compose_project = f"odcli_pg_{legacy_id}"
+    volume_name = f"pgdata_{legacy_id}"
+    pending = catalog._ensure_postgres_cluster_pending(
+        legacy_id, compose_project, volume_name
+    )
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id)
+    )
+
+    active = catalog._activate_postgres_cluster(
+        pending.cluster_id, legacy_id, compose_project, volume_name
+    )
+    catalog._record_project_database_binding(
+        project_id, active.cluster_id, "127.0.0.1", 5432, "owned_db", 19576
+    )
+
+    with pytest.raises(ProjectRemovalError, match="plan is stale"):
+        command.run()
+
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert catalog._get_postgres_cluster_by_id(active.cluster_id).state == "active"  # type: ignore[union-attr]
+    assert catalog._project_bound_database_records(
+        project_id, active.cluster_id, "127.0.0.1", 5432
+    ) == (("owned_db", 19576),)
+    catalog.close()
+
+
+def test_public_purge_does_not_treat_reappeared_owned_manifest_as_inert(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    assert catalog.forget_project(project_id)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
+    database_inventory = DatabaseInventoryResult(
+        cluster="127.0.0.1:5432", databases=(), tracked=True
+    )
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(
+            list_inventory=lambda *_args, **_kwargs: database_inventory
+        ),
+        _postgres_cluster=None,
+    )
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        instance=SimpleNamespace(from_project=lambda _project: instance),
+    )
+
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    assert any(step.mutating for step in command.plan.steps)
+
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert any(item.action == "delete" for item in result.completed)
+    assert not manifest.exists()
+    _assert_no_purge_completion_marker(catalog)
     catalog.close()
 
 
@@ -526,7 +644,7 @@ def _assert_partial_purge_failure_details(
     assert details["completed"][0]["identity"] == completed_identity  # type: ignore[index]
     assert details["remaining"][0]["identity"] == failed_identity  # type: ignore[index]
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
-    assert not catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     return details
 
 
@@ -613,7 +731,7 @@ def test_partial_purge_failure_captured_process_is_publicly_truthful_and_retryab
     )
     assert result.completed[-1].action == "forget"
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
-    assert catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     catalog.close()
 
 
@@ -690,7 +808,7 @@ def test_partial_purge_failure_in_process_action_is_publicly_truthful_and_retrya
     assert result.completed[-1].action == "forget"
     assert not failed_resource.exists()
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
-    assert catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     catalog.close()
 
 
