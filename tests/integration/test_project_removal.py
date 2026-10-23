@@ -8,12 +8,12 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import Callable, ContextManager, Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ContextManager, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -920,9 +920,7 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
         local_endpoint="http://127.0.0.1:8069",
     )
     client = SimpleNamespace(get_catalog=lambda: catalog, publication=publication)
-    publication.publish_command(
-        target, settings=settings, executor=RecordingExecutor()
-    ).run()
+    publication.publish_command(target, settings=settings, executor=RecordingExecutor()).run()
     assert catalog.forget_project(project_id)
     shutil.rmtree(root)
     command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
