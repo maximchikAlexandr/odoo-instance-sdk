@@ -61,6 +61,7 @@ from odoo_instance_sdk.internal.project_removal_terminal import (
     _project_runtime,
 )
 from odoo_instance_sdk.internal.publication_routes import (
+    PublicationRoute,
     read_owned_routes,
     routes_owned_by_project,
 )
@@ -177,11 +178,12 @@ def _row_registration(row: sqlite3.Row) -> ProjectRegistration:
     )
 
 
-def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...]:
+def _publication_sources_from_routes(
+    project_id: str,
+    routes: tuple[PublicationRoute, ...],
+) -> tuple[RemovalPublicationSource, ...]:
     sources: list[RemovalPublicationSource] = []
-    with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
-        routes = routes_owned_by_project(read_owned_routes(), project_id)
-    for route in routes:
+    for route in routes_owned_by_project(routes, project_id):
         sources.append(
             RemovalPublicationSource(
                 project_id=project_id,
@@ -192,6 +194,15 @@ def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...
             )
         )
     return tuple(sources)
+
+
+def _publication_sources(
+    project_id: str, *, publication_lock_held: bool = False
+) -> tuple[RemovalPublicationSource, ...]:
+    if publication_lock_held:
+        return _publication_sources_from_routes(project_id, read_owned_routes())
+    with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+        return _publication_sources_from_routes(project_id, read_owned_routes())
 
 
 def _projection(  # noqa: C901 -- source-less claim recovery shares the existing projection boundary
@@ -402,7 +413,12 @@ def _planned_projection(
     )
 
 
-def _forget_blockers(catalog: BackupCatalog, registration: ProjectRegistration) -> tuple[str, ...]:
+def _forget_blockers(
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+    *,
+    publication_lock_held: bool = False,
+) -> tuple[str, ...]:
     project_id = registration.project_id
     blockers: set[str] = set()
     if catalog.get_runtime("project", project_id) is not None:
@@ -420,7 +436,12 @@ def _forget_blockers(catalog: BackupCatalog, registration: ProjectRegistration) 
     ):
         if str(row["state"]) != "removed":
             blockers.add(f"environment:{row['id']}")
-    blockers.update(source.identity for source in _publication_sources(project_id))
+    blockers.update(
+        source.identity
+        for source in _publication_sources(
+            project_id, publication_lock_held=publication_lock_held
+        )
+    )
     return tuple(sorted(blockers))
 
 
@@ -518,11 +539,14 @@ def _catalogue_forget_command(
 
     def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
         context.action(action.step_id)
-        row = catalog.get_project_for_lifecycle(project_id)
-        if row is None:
-            raise ProjectRemovalError("project registration disappeared")
-        if str(row["registration_state"]) == "registered":
-            catalog.forget_project(project_id, _lock_held=True)
+        with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+            if routes_owned_by_project(read_owned_routes(), project_id):
+                raise ProjectRemovalError("owned publication appeared before terminal forget")
+            row = catalog.get_project_for_lifecycle(project_id)
+            if row is None:
+                raise ProjectRemovalError("project registration disappeared")
+            if str(row["registration_state"]) == "registered":
+                catalog.forget_project(project_id, _lock_held=True)
         context.complete_action(action.step_id)
         return decision
 
@@ -765,19 +789,22 @@ def capture_project_removal_command(  # noqa: C901
                         mode=mode,
                         failed_step="project-removal:revalidate",
                     )
-                blockers = _forget_blockers(catalog, current)
-                if blockers and current.registration_state == "registered":
-                    raise _error(
-                        "project removal blockers changed: " + ", ".join(blockers),
-                        projection,
-                        mode=mode,
-                        failed_step="project-removal:preflight",
+                with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+                    blockers = _forget_blockers(
+                        catalog, current, publication_lock_held=True
                     )
-                step = next(step for step in steps if isinstance(step, PreparedAction))
-                context.action(step.step_id)
-                if current.registration_state == "registered":
-                    catalog.forget_project(registration.project_id, _lock_held=True)
-                context.complete_action(step.step_id)
+                    if blockers and current.registration_state == "registered":
+                        raise _error(
+                            "project removal blockers changed: " + ", ".join(blockers),
+                            projection,
+                            mode=mode,
+                            failed_step="project-removal:preflight",
+                        )
+                    step = next(step for step in steps if isinstance(step, PreparedAction))
+                    context.action(step.step_id)
+                    if current.registration_state == "registered":
+                        catalog.forget_project(registration.project_id, _lock_held=True)
+                    context.complete_action(step.step_id)
                 forget_retained = projection.public_decisions
                 return ProjectRemovalResult(
                     project_id=registration.project_id,
