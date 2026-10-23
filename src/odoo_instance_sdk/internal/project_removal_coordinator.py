@@ -242,9 +242,7 @@ def _project_runtime(
     return tuple(sources)
 
 
-def _completed_purge_is_inert(
-    catalog: BackupCatalog, registration: ProjectRegistration
-) -> bool:
+def _completed_purge_is_inert(catalog: BackupCatalog, registration: ProjectRegistration) -> bool:
     """Recognize a terminal purge only while owned paths and runtimes stay absent."""
     if registration.registration_state != "forgotten":
         return False
