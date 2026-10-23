@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from pathlib import Path
-from urllib.parse import quote
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog

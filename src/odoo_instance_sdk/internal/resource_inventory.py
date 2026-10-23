@@ -9,7 +9,6 @@ small source dataclasses make the expensive probes injectable while
 from __future__ import annotations
 
 import os
-import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
