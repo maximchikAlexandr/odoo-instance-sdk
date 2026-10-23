@@ -187,6 +187,7 @@ def test_public_project_forget_reinit_and_purge(
         source_backup_plan.database,
         "--test-branch",
         E2E_PINS.odoo_source_commit,
+        "--local-config",
         "--database",
         target_runtime.topology.target_sentinel_database,
         "--postgres",
