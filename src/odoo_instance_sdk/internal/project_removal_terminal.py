@@ -136,8 +136,8 @@ def _forgotten_project_is_inert(catalog: BackupCatalog, registration: ProjectReg
 
 
 __all__ = [
-    "_forgotten_project_is_inert",
     "_environment_owner_clause",
     "_environment_sources",
+    "_forgotten_project_is_inert",
     "_project_runtime",
 ]

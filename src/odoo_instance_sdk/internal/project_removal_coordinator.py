@@ -49,9 +49,9 @@ from odoo_instance_sdk.internal.project_removal import (
     resolve_project_selector,
 )
 from odoo_instance_sdk.internal.project_removal_terminal import (
-    _forgotten_project_is_inert,
     _environment_owner_clause,
     _environment_sources,
+    _forgotten_project_is_inert,
     _project_runtime,
 )
 from odoo_instance_sdk.internal.publication_routes import read_owned_routes
