@@ -762,6 +762,8 @@ def capture_project_removal_command(  # noqa: C901
                     retained=forget_retained,
                 )
             if terminal_purge:
+                if source_status_step is not None:
+                    context.process(source_status_step.step_id)
                 if not _completed_purge_is_inert(catalog, current):
                     raise _error(
                         "completed project purge state changed before retry",
