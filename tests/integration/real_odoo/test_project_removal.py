@@ -320,7 +320,18 @@ def test_public_project_forget_reinit_and_purge(
         compose_project=claim.compose_project,
         volume_name=claim.volume_name,
     )
-    snapshot = resumed_postgres_cluster.resource_snapshot()
+    with monkeypatch.context() as project_environment:
+        for key in (
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "ODCLI_E2E_CATALOG",
+        ):
+            project_environment.setenv(key, target_runtime.environment[key])
+        assert resumed_postgres_cluster.compose_file.is_file()
+        snapshot = resumed_postgres_cluster.resource_snapshot()
     assert container_id is not None
     assert snapshot is not None and snapshot.container is not None
     assert container_id_matches_snapshot(container_id, snapshot.container.id)
