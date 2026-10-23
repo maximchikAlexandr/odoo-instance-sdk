@@ -343,7 +343,11 @@ class ProjectResource:
 
         class _Adapters:
             def __init__(self) -> None:
-                self._runtime = RuntimeEnvironmentPurgeAdapters(client)
+                self._runtime = RuntimeEnvironmentPurgeAdapters(
+                    client,
+                    repository_root=registration.repository_root,
+                    git_common_dir=registration.git_common_dir,
+                )
                 self._filesystem = FilesystemPurgeAdapter(
                     (
                         *(

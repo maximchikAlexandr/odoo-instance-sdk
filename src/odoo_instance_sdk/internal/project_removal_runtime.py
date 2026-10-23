@@ -204,6 +204,8 @@ class EnvironmentPurgeAdapter:
 
     client: OdooClient
     force_connections: bool = False
+    repository_root: Path | None = None
+    git_common_dir: Path | None = None
 
     def capture(
         self,
@@ -216,7 +218,16 @@ class EnvironmentPurgeAdapter:
             raise ValueError(f"invalid environment identity: {decision.identity}")
         catalog = self.client.get_catalog()
         row = catalog.get_environment(environment_id)
-        if row is None or str(row["project_id"]) != project_id:
+        project_owned = row is not None and str(row["project_id"]) == project_id
+        legacy_owned = (
+            row is not None
+            and row["project_id"] is None
+            and self.repository_root is not None
+            and self.git_common_dir is not None
+            and str(row["repository_root"]) == str(self.repository_root)
+            and str(row["git_common_dir"]) == str(self.git_common_dir)
+        )
+        if not (project_owned or legacy_owned):
             raise ValueError("environment is outside the selected project")
         environment = _row_to_env(row)
         command = self.client.environments.remove_command(
@@ -234,6 +245,8 @@ class RuntimeEnvironmentPurgeAdapters:
     client: OdooClient
     runtime_timeout: float = 10.0
     force_environment_connections: bool = False
+    repository_root: Path | None = None
+    git_common_dir: Path | None = None
     _runtime: RuntimePurgeAdapter = field(init=False, repr=False)
     _publication: PublicationPurgeAdapter = field(init=False, repr=False)
     _environment: EnvironmentPurgeAdapter = field(init=False, repr=False)
@@ -244,6 +257,8 @@ class RuntimeEnvironmentPurgeAdapters:
         self._environment = EnvironmentPurgeAdapter(
             self.client,
             force_connections=self.force_environment_connections,
+            repository_root=self.repository_root,
+            git_common_dir=self.git_common_dir,
         )
 
     def for_decision(self, decision: ProjectResourceDecision) -> ProjectRemovalAdapter | None:
