@@ -358,7 +358,14 @@ def test_public_project_forget_reinit_and_purge(
     shutil.rmtree(drift_target)
     with pytest.raises(ProjectRemovalError) as drift_error:
         drift_command.run()
-    assert "project removal plan is stale" in str(drift_error.value)
+    # A changed project tree can invalidate the captured plan either at the
+    # required-observation boundary or during the later fingerprint check.
+    # Both are fail-closed outcomes; retain the structured step and durable
+    # no-write assertions below so this does not accept an arbitrary refusal.
+    assert drift_error.value.details["failed_step"] in {
+        "project-removal:observations",
+        "project-removal:revalidate",
+    }
     assert project.exists()
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
