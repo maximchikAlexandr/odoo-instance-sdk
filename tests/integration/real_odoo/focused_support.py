@@ -385,20 +385,33 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         pytest.fail("odcli executable is required for focused public leaves")
     process_environment = {**os.environ, **environment}
     project_postgres_port = project_postgres.port
-    init = subprocess.run(
-        [
-            command,
-            "init",
-            "--project",
-            str(root),
-            "--yes",
-            "--allow-partial",
-            "--odoo-bin",
-            str(bootstrap_odoo_bin),
-            "--python",
-            str(odoo_python),
-            "--config",
-            str(bootstrap_config),
+    init_args = [
+        command,
+        "init",
+        "--project",
+        str(root),
+        "--yes",
+        "--allow-partial",
+        "--odoo-bin",
+        str(bootstrap_odoo_bin),
+        "--python",
+        str(odoo_python),
+        "--config",
+        str(bootstrap_config),
+    ]
+    if source is not None:
+        init_args.extend(
+            (
+                "--test-url",
+                source.endpoint,
+                "--test-database",
+                source.database,
+                "--test-branch",
+                E2E_PINS.odoo_source_commit,
+            )
+        )
+    init_args.extend(
+        (
             "--database",
             runtime.topology.target_sentinel_database,
             "--postgres",
@@ -413,7 +426,10 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             str(public_http_port),
             "--format",
             "json",
-        ],
+        )
+    )
+    init = subprocess.run(
+        init_args,
         cwd=root,
         env=process_environment,
         capture_output=True,
