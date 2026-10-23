@@ -331,6 +331,9 @@ def test_update_workflow_retains_exact_revision_and_dashboard_probe(
     assert "--updater-sha" in script
     assert "--candidate-sha" in script
     assert "odoo-instance-sdk[dashboard]" in script
+    assert "starlette_admin" in script
+    assert "sqlcipher3" in script
+    assert "admin_imports" in script
     assert "historical_baseline_sha" in script
     assert "updater_source_sha" in script
     assert "expected_dependency_loss" in script
@@ -559,3 +562,23 @@ def test_readme_states_generic_git_boundaries_and_credential_schema() -> None:
         "`odcli git mr create`",
     ):
         assert required in readme
+
+
+@pytest.mark.unit
+def test_readme_documents_admin_secret_and_backup_freshness_contract() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for required in (
+        "Optional administrator and catalogue",
+        "~/.odcli/config/admin.toml",
+        "~/.odcli/config/secrets.key",
+        "~/.odcli/secrets.sqlite3",
+        "ODCLI_SECRET_KEY_FILE",
+        "write-only",
+        "record revisions",
+        "Backup download date unknown",
+        "completed catalogue restore",
+        "no second catalogue request",
+    ):
+        assert required in readme
+    assert "master_password =" not in readme
+    assert "private-token =" not in readme
