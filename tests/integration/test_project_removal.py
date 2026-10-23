@@ -794,6 +794,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
     assert catalog.forget_project(project_id)
+    shutil.rmtree(root)
     settings, routes_path = _isolated_publication_settings(
         tmp_path / "isolated-user-root", monkeypatch
     )
@@ -819,7 +820,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     terminal_done = threading.Event()
     outcome: dict[str, object] = {}
     original_atomic_write = publication_routes._atomic_write
-    original_inert_check = project_removal_coordinator._forgotten_project_is_inert
+    original_route_reader = publication_routes.read_owned_routes
 
     def pause_before_route_write(path: Path, content: bytes) -> None:
         if path == routes_path.with_name(f".{routes_path.name}.candidate"):
@@ -828,21 +829,13 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
                 raise TimeoutError("publication writer was not released")
         original_atomic_write(path, content)
 
-    def observe_terminal_absence(
-        selected_catalog: BackupCatalog,
-        registration: ProjectRegistration,
-        *,
-        check_publications: bool = True,
-    ) -> bool:
+    def observe_terminal_route_read() -> tuple[publication_routes.PublicationRoute, ...]:
+        routes = original_route_reader()
         terminal_observed_absence.set()
-        return original_inert_check(
-            selected_catalog, registration, check_publications=check_publications
-        )
+        return routes
 
     monkeypatch.setattr(publication_routes, "_atomic_write", pause_before_route_write)
-    monkeypatch.setattr(
-        project_removal_coordinator, "_forgotten_project_is_inert", observe_terminal_absence
-    )
+    monkeypatch.setattr(publication_routes, "read_owned_routes", observe_terminal_route_read)
     publication_command = publication.publish_command(
         target, settings=settings, executor=RecordingExecutor()
     )
@@ -899,6 +892,9 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
     settings, routes_path = _isolated_publication_settings(
         tmp_path / "isolated-user-root", monkeypatch
     )
