@@ -9,6 +9,7 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.project_filesystem_purge import (
     FilesystemPurgeAdapter,
     FilesystemPurgeTarget,
+    project_owned_paths,
 )
 from odoo_instance_sdk.models.project_removal import ProjectResourceDecision
 
@@ -55,6 +56,23 @@ def test_filesystem_adapter_deletes_only_contained_target(tmp_path: Path) -> Non
     command = FilesystemPurgeAdapter(
         (FilesystemPurgeTarget(identity, "project-1", target, tmp_path),)
     ).capture(_decision(identity), project_id="project-1")
+
+    assert command is not None
+    command.run()
+    assert not target.exists()
+
+
+def test_project_owned_paths_includes_generated_odoo_log(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    target = root / ".odcli" / "odoo.log"
+    target.parent.mkdir(parents=True)
+    target.write_text("generated log\n", encoding="utf-8")
+
+    assert ("log", target) in project_owned_paths(root)
+    identity = "log:project-odoo-log"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", target, root),)
+    ).capture(_decision(identity, "log"), project_id="project-1")
 
     assert command is not None
     command.run()
