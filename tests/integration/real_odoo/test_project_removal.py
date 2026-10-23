@@ -358,7 +358,7 @@ def test_public_project_forget_reinit_and_purge(
     shutil.rmtree(drift_target)
     with pytest.raises(ProjectRemovalError) as drift_error:
         drift_command.run()
-    assert "observation is unavailable or unproven" in str(drift_error.value)
+    assert "project removal plan is stale" in str(drift_error.value)
     assert project.exists()
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
