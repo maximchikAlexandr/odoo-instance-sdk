@@ -242,6 +242,43 @@ def _project_runtime(
     return tuple(sources)
 
 
+def _completed_purge_is_inert(
+    catalog: BackupCatalog, registration: ProjectRegistration
+) -> bool:
+    """Recognize a terminal purge only while owned paths and runtimes stay absent."""
+    if registration.registration_state != "forgotten":
+        return False
+    root = registration.repository_root
+    manifest = root / ".odcli" / "project.toml"
+    claim = catalog._get_postgres_cluster_for_project(
+        registration.project_id,
+        str(root),
+        str(registration.git_common_dir),
+    )
+    if not catalog._project_purge_proves_missing_config(
+        registration.project_id,
+        registration.registration_state,
+        manifest.exists() or manifest.is_symlink(),
+        claim is not None,
+    ):
+        return False
+    from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
+
+    if project_owned_paths(root) or _project_runtime(catalog, registration):
+        return False
+    for environment in _environment_sources(catalog, registration):
+        if environment.state != "removed":
+            return False
+        if environment.worktree_path.exists() or environment.worktree_path.is_symlink():
+            return False
+        if environment.python_environment_owned and (
+            environment.python_environment_path.exists()
+            or environment.python_environment_path.is_symlink()
+        ):
+            return False
+    return True
+
+
 def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...]:
     sources: list[RemovalPublicationSource] = []
     for route in read_owned_routes():
@@ -643,6 +680,7 @@ def capture_project_removal_command(  # noqa: C901
         git_status_step_id=git_status_step_id,
         git_status_hardened=True,
     )
+    terminal_purge = purge and _completed_purge_is_inert(catalog, registration)
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     decisions: tuple[ProjectResourceDecision, ...]
     if not purge:
@@ -664,6 +702,8 @@ def capture_project_removal_command(  # noqa: C901
                 target="<catalogue>",
             ),
         )
+    elif terminal_purge:
+        decisions = ()
     else:
         projected_decisions = projection.decisions
         if not projection.complete:
@@ -862,6 +902,25 @@ def capture_project_removal_command(  # noqa: C901
                     projection,
                     mode=mode,
                     failed_step="project-removal:revalidate",
+                )
+            if terminal_purge:
+                if not _completed_purge_is_inert(catalog, current):
+                    raise _error(
+                        "completed project purge state changed before retry",
+                        current_projection,
+                        mode=mode,
+                        failed_step="project-removal:revalidate",
+                        decisions=(),
+                    )
+                return ProjectRemovalResult(
+                    project_id=registration.project_id,
+                    mode="purge",
+                    registration_state="forgotten",
+                    retained=tuple(
+                        decision.public()
+                        for decision in current_projection.decisions
+                        if decision.action == "retain"
+                    ),
                 )
             completed: list[ProjectResourceDecision] = []
             retained: list[ProjectResourceDecision] = []
