@@ -30,7 +30,7 @@ from scripts.real_odoo_pins import E2E_PINS
 from .archive import SourceBackupPlan
 from .cleanup import FailureEvidence, compose_down, replace_http_port
 from .compose import ComposeLifecycle, reserve_ports
-from .conftest import E2ERuntime
+from .conftest import E2ERuntime, odoo_runtime_python
 from .failures import assert_secret_free, write_failure_evidence
 from .test_critical_path import _remove_owned_fixture_tree
 
@@ -376,25 +376,43 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     bootstrap_config = root / "focused-odoo.conf"
     shutil.copy2(runtime.config_file, bootstrap_config)
     replace_http_port(bootstrap_config, public_http_port)
+    with bootstrap_config.open("a", encoding="utf-8") as stream:
+        stream.write(f"logfile = {root / 'odoo.log'}\n")
+    bootstrap_config.chmod(0o600)
+    odoo_python = odoo_runtime_python(runtime, root, bootstrap_odoo_bin)
     command = shutil.which("odcli")
     if command is None:
         pytest.fail("odcli executable is required for focused public leaves")
     process_environment = {**os.environ, **environment}
     project_postgres_port = project_postgres.port
-    init = subprocess.run(
-        [
-            command,
-            "init",
-            "--project",
-            str(root),
-            "--no-input",
-            "--allow-partial",
-            "--odoo-bin",
-            str(bootstrap_odoo_bin),
-            "--python",
-            E2E_PINS.cpython,
-            "--config",
-            str(bootstrap_config),
+    init_args = [
+        command,
+        "init",
+        "--project",
+        str(root),
+        "--yes",
+        "--odoo-bin",
+        str(bootstrap_odoo_bin),
+        "--python",
+        str(odoo_python),
+        "--config",
+        str(bootstrap_config),
+    ]
+    if source is not None:
+        init_args.extend(
+            (
+                "--test-url",
+                source.endpoint,
+                "--test-database",
+                source.database,
+                "--test-branch",
+                E2E_PINS.odoo_source_commit,
+            )
+        )
+    else:
+        init_args.append("--allow-partial")
+    init_args.extend(
+        (
             "--database",
             runtime.topology.target_sentinel_database,
             "--postgres",
@@ -409,7 +427,10 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             str(public_http_port),
             "--format",
             "json",
-        ],
+        )
+    )
+    init = subprocess.run(
+        init_args,
         cwd=root,
         env=process_environment,
         capture_output=True,
@@ -435,7 +456,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     config_lines = [
         line
         for line in local_config.read_text(encoding="utf-8").splitlines()
-        if not line.lstrip().startswith("addons_path")
+        if not line.lstrip().startswith(("addons_path", "logfile"))
     ]
     config_lines.append(f"addons_path = {root / 'addons'}")
     local_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")

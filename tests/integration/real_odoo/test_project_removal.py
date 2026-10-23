@@ -7,7 +7,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
-import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,17 +15,26 @@ import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.exceptions import ProjectRemovalError
+from odoo_instance_sdk.internal.postgres_compose import (
+    container_id_matches_snapshot,
+    inspect_container_identity,
+    inspect_volume_identity,
+)
 from odoo_instance_sdk.models.project_removal import ProjectSelector
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from tests.integration.real_odoo.archive import SourceBackupPlan
+from scripts.real_odoo_pins import E2E_PINS
+from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence, audit_no_leaks
-from tests.integration.real_odoo.conftest import E2ERuntime
+from tests.integration.real_odoo.conftest import E2ERuntime, odoo_runtime_python
 from tests.integration.real_odoo.focused_support import (
     _catalog_for_project,
     _project,
+    _project_database_probe,
     record,
     registered_worktree,
+    seed_backup,
 )
 from tests.integration.real_odoo.test_critical_path import _remove_owned_fixture_tree
 
@@ -50,6 +59,7 @@ def _document(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
 def test_public_project_forget_reinit_and_purge(
     tmp_path: Path,
     target_runtime: E2ERuntime,
+    source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
     record_property: object,
@@ -112,6 +122,52 @@ def test_public_project_forget_reinit_and_purge(
     catalog.close()
     project_cluster = PostgresCluster.from_project(project)
     project_postgres_port = project_cluster.endpoint_port
+    backup_id = str(uuid.uuid4())
+    backup_path = target_runtime.root / f"project-removal-{target_runtime.run_id}.zip"
+    shutil.copy2(source_backup.path, backup_path)
+    seed_backup(
+        catalog_path,
+        backup_path,
+        backup_id=backup_id,
+        database=source_backup_plan.database,
+        source_base_url=source_backup_plan.endpoint,
+    )
+    project_database = f"odcli_e2e_owned_{target_runtime.run_id.replace('-', '')[:20]}"
+    restored = invoke("db", "restore", backup_id, "--target", project_database, "--yes")
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+    assert _document(restored)["result"]["restored_database"] == project_database
+    configured = invoke(
+        "init",
+        "--project",
+        str(project),
+        "--no-input",
+        "--yes",
+        "--odoo-bin",
+        str(project / "odoo-bin"),
+        "--python",
+        str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        "--config",
+        str(target_runtime.config_file),
+        "--test-url",
+        source_backup_plan.endpoint,
+        "--test-database",
+        source_backup_plan.database,
+        "--test-branch",
+        E2E_PINS.odoo_source_commit,
+        "--local-config",
+        "--database",
+        project_database,
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        E2E_PINS.postgres_image,
+        "--postgres-port",
+        str(project_postgres_port),
+        "--postgres-user",
+        "odoo",
+    )
+    assert configured.returncode == 0, configured.stdout + configured.stderr
+    assert ProjectConfig.load(project).default_source_database == project_database
     environment_id = (project / ".odcli" / "e2e-environment-id").read_text(encoding="ascii").strip()
     worktree = registered_worktree(catalog_path, project)
     fixture_addon = worktree / "addons" / "odcli_e2e_probe"
@@ -139,14 +195,24 @@ def test_public_project_forget_reinit_and_purge(
     assert project.exists()
 
     catalog = BackupCatalog(db_path=catalog_path)
-    forgotten_projects = catalog.list_projects(include_forgotten=True)
-    registered_projects = catalog.list_projects()
-    retained_environments = catalog.list_environments(project_id=project_id, include_removed=True)
+    forgotten_projects = [
+        row
+        for row in catalog.list_projects(include_forgotten=True)
+        if str(row["project_id"]) == project_id
+    ]
+    registered_projects = [
+        row for row in catalog.list_projects() if str(row["project_id"]) == project_id
+    ]
+    retained_environments = catalog._conn.execute(
+        "SELECT state FROM environments WHERE id = ?",
+        (environment_id,),
+    ).fetchall()
     assert len(forgotten_projects) == 1
     assert str(forgotten_projects[0]["registration_state"]) == "forgotten"
     assert not catalog._project_purge_completed(project_id)
     assert registered_projects == []
     assert len(retained_environments) == 1
+    assert str(retained_environments[0]["state"]) == "removed"
     retained_bytes = sum(path.stat().st_size for path in project.rglob("*") if path.is_file())
     assert retained_bytes > 0
     assert (project / ".odcli" / "project.toml").is_file()
@@ -157,25 +223,107 @@ def test_public_project_forget_reinit_and_purge(
     monitor_document = _document(monitor)
     assert project_id not in json.dumps(monitor_document, sort_keys=True)
 
-    reinit = invoke(
+    reinit_config = ProjectConfig.load(project)
+    reinit_args = [
         "init",
         "--project",
         str(project),
         "--no-input",
-        "--allow-partial",
+        "--yes",
         "--odoo-bin",
         str(project / "odoo-bin"),
         "--python",
-        sys.executable,
-    )
+        str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        "--config",
+        str(target_runtime.config_file),
+        "--test-url",
+        source_backup_plan.endpoint,
+        "--test-database",
+        source_backup_plan.database,
+        "--test-branch",
+        E2E_PINS.odoo_source_commit,
+        "--local-config",
+        "--database",
+        project_database,
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        E2E_PINS.postgres_image,
+        "--postgres-port",
+        str(project_postgres_port),
+        "--postgres-user",
+        "odoo",
+    ]
+    if reinit_config.preferred_http_port is not None:
+        reinit_args.extend(("--http-port", str(reinit_config.preferred_http_port)))
+    reinit = invoke(*reinit_args)
     assert reinit.returncode == 0, reinit.stdout + reinit.stderr
     catalog = BackupCatalog(db_path=catalog_path)
     reactivated = catalog.get_project_for_lifecycle(project_id)
     assert reactivated is not None
     assert reactivated["registration_state"] == "registered"
     assert not catalog._project_purge_completed(project_id)
-    assert len(catalog.list_projects(include_forgotten=True)) == 1
+    assert [
+        row
+        for row in catalog.list_projects(include_forgotten=True)
+        if str(row["project_id"]) == project_id
+    ]
     catalog.close()
+    resumed_cluster_result = invoke("--project", str(project), "postgres", "up")
+    resumed_cluster_output = resumed_cluster_result.stdout + resumed_cluster_result.stderr
+    assert resumed_cluster_result.returncode == 0, resumed_cluster_output
+    database_probe = _project_database_probe(
+        project,
+        project_database,
+        home=target_runtime.environment["HOME"],
+    )
+    database_probe_output = database_probe.stdout + database_probe.stderr
+    assert database_probe.returncode == 0, database_probe_output
+    assert database_probe.stdout.strip() == project_database
+    project_instance = OdooClient(config=OdooClientConfig(executable="odoo")).instance.from_project(
+        ProjectConfig.load(project)
+    )
+    database_inventory = project_instance.databases.list_inventory(project, tracked=False)
+    owned_database = next(
+        item
+        for item in database_inventory.databases
+        if item.name == project_database
+    )
+    assert type(owned_database.database_oid) is int and owned_database.database_oid > 0
+    resumed_claim = BackupCatalog(db_path=catalog_path)
+    current_claim = resumed_claim._get_postgres_cluster_for_project(
+        project_id,
+        str(project),
+        str(registration["git_common_dir"]),
+    )
+    resumed_postgres_cluster = PostgresCluster.from_project(project)
+    bound_records = resumed_claim._project_bound_database_records(
+        claim.project_id,
+        claim.cluster_id,
+        resumed_postgres_cluster.endpoint_host,
+        resumed_postgres_cluster.endpoint_port,
+    )
+    resumed_claim.close()
+    assert current_claim is not None and current_claim.cluster_id == claim.cluster_id
+    assert (owned_database.name, owned_database.database_oid) in bound_records
+    assert inspect_volume_identity(
+        resumed_postgres_cluster.compose_runner,
+        claim.volume_name,
+        str(claim.cluster_id),
+        project_id=claim.project_id,
+    )
+    container_id = inspect_container_identity(
+        resumed_postgres_cluster.compose_runner,
+        f"{claim.compose_project}-postgres-1",
+        str(claim.cluster_id),
+        project_id=claim.project_id,
+        compose_project=claim.compose_project,
+        volume_name=claim.volume_name,
+    )
+    snapshot = resumed_postgres_cluster.resource_snapshot()
+    assert container_id is not None
+    assert snapshot is not None and snapshot.container is not None
+    assert container_id_matches_snapshot(container_id, snapshot.container.id)
 
     token = f"{project.name}:{project_id}"
     drift_target = project / ".odcli" / "logs"
@@ -197,11 +345,14 @@ def test_public_project_forget_reinit_and_purge(
         confirmation=token,
     )
     shutil.rmtree(drift_target)
-    with pytest.raises(ProjectRemovalError, match="stale"):
+    with pytest.raises(ProjectRemovalError) as drift_error:
         drift_command.run()
+    assert "observation is unavailable or unproven" in str(drift_error.value)
     assert project.exists()
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
+    retained_claim = catalog._get_postgres_cluster(claim.project_id)
+    assert retained_claim is not None and retained_claim.state == "active"
     catalog.close()
 
     wrong_confirmation = invoke(
@@ -213,7 +364,9 @@ def test_public_project_forget_reinit_and_purge(
         "wrong-token",
     )
     assert wrong_confirmation.returncode == 1, wrong_confirmation.stdout + wrong_confirmation.stderr
-    assert _document(wrong_confirmation)["error"]["code"] == "confirmation_required"
+    assert _document(wrong_confirmation)["error"]["code"] == "confirmation_required", (
+        wrong_confirmation.stdout + wrong_confirmation.stderr
+    )
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
     catalog.close()
@@ -318,7 +471,7 @@ def test_public_project_forget_reinit_and_purge(
             },
             "monitor_hidden_after_forget": project_id
             not in json.dumps(monitor_document, sort_keys=True),
-            "drift_refusal": "stale",
+            "unavailable_observation_refusal": "project claim retained",
             "unrelated_project_preserved": True,
             "shared_resource_preserved": True,
             "purge": purge_document["result"]["registration_state"],
