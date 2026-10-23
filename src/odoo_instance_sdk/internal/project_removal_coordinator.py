@@ -563,9 +563,12 @@ def capture_project_removal_command(  # noqa: C901
         git_status_step_id=git_status_step_id,
         git_status_hardened=True,
     )
-    terminal_purge = purge and _forgotten_project_is_inert(catalog, registration) and not any(
-        decision.resource_type not in {"project", "source"}
-        for decision in projection.decisions
+    terminal_purge = (
+        purge
+        and _forgotten_project_is_inert(catalog, registration)
+        and not any(
+            decision.resource_type not in {"project", "source"} for decision in projection.decisions
+        )
     )
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     if (

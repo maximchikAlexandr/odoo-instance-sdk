@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 
 import odoo_instance_sdk.storage.catalog_migrate as catalog_migrate
 from odoo_instance_sdk.exceptions import BackupCatalogError
@@ -249,7 +250,7 @@ def test_backup_catalog_rejects_unknown_future_revision(tmp_path: Path) -> None:
         conn.execute("UPDATE alembic_version SET version_num = '9999'")
         conn.commit()
 
-    with pytest.raises(BackupCatalogError):
+    with pytest.raises(CommandError):
         BackupCatalog(db_path=db)
 
     with sqlite3.connect(str(db)) as conn:
@@ -268,7 +269,7 @@ def test_backup_catalog_rejects_stamped_0013_with_unconfirmed_schema_drift(
         conn.execute("ALTER TABLE projects DROP COLUMN purge_completed_at")
         conn.commit()
 
-    with pytest.raises(BackupCatalogError):
+    with pytest.raises(RuntimeError, match="missing its legacy projects column"):
         BackupCatalog(db_path=db)
 
     with sqlite3.connect(str(db)) as conn:

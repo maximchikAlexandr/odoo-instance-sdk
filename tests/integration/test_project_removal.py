@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import odoo_instance_sdk.resources.publication as publication_resource
+
 from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal import publication_routes
@@ -393,9 +395,7 @@ def test_public_purge_does_not_treat_reappeared_owned_manifest_as_inert(
     catalog.close()
 
 
-def _prepare_registered_empty(
-    _catalog: BackupCatalog, _project_id: str, _root: Path
-) -> None:
+def _prepare_registered_empty(_catalog: BackupCatalog, _project_id: str, _root: Path) -> None:
     return
 
 
@@ -411,9 +411,7 @@ def _prepare_current_environment_active(
     catalog._conn.commit()
 
 
-def _prepare_legacy_environment_active(
-    catalog: BackupCatalog, project_id: str, root: Path
-) -> None:
+def _prepare_legacy_environment_active(catalog: BackupCatalog, project_id: str, root: Path) -> None:
     assert catalog.forget_project(project_id)
     _legacy_environment(catalog, "environment-after-purge", root)
     catalog._conn.execute(
@@ -442,8 +440,7 @@ def _prepare_legacy_python_symlink_reappeared(
     assert catalog.forget_project(project_id)
     _legacy_environment(catalog, "environment-after-purge", root)
     catalog._conn.execute(
-        "UPDATE environments SET state = 'removed', python_environment_owned = 1 "
-        "WHERE id = ?",
+        "UPDATE environments SET state = 'removed', python_environment_owned = 1 WHERE id = ?",
         ("environment-after-purge",),
     )
     catalog._conn.commit()
@@ -462,9 +459,7 @@ def _assert_current_environment_active(
     _assert_forgotten_environment_state(catalog, project_id, "ready")
 
 
-def _assert_legacy_environment_active(
-    catalog: BackupCatalog, project_id: str, _root: Path
-) -> None:
+def _assert_legacy_environment_active(catalog: BackupCatalog, project_id: str, _root: Path) -> None:
     _assert_forgotten_environment_state(catalog, project_id, "ready")
 
 
@@ -597,10 +592,13 @@ def test_public_purge_does_not_treat_surviving_database_binding_as_inert(
 
 
 def _assert_database_binding_preserved(catalog: BackupCatalog, project_id: str) -> None:
-    assert catalog._conn.execute(
-        "SELECT database_name FROM project_database_bindings WHERE project_id = ?",
-        (project_id,),
-    ).fetchone()[0] == "owned-db"
+    assert (
+        catalog._conn.execute(
+            "SELECT database_name FROM project_database_bindings WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()[0]
+        == "owned-db"
+    )
 
 
 def _prepare_removed_owned_python_environment(
@@ -662,21 +660,34 @@ def test_public_purge_does_not_treat_owned_python_symlink_as_inert(
     catalog.close()
 
 
-def _isolated_publication_settings(root: Path) -> tuple[PublicationSettings, Path]:
+def _isolated_publication_settings(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[PublicationSettings, Path]:
     config_root = root / "config"
     config_root.mkdir(mode=0o700, parents=True)
     routes_path = config_root / "routes.caddy"
+    settings_path = config_root / "publication.toml"
+    monkeypatch.setattr(
+        publication_resource, "get_config_root", lambda **_kwargs: config_root
+    )
+    monkeypatch.setattr(
+        publication_resource,
+        "get_publication_config_path",
+        lambda **_kwargs: settings_path,
+    )
+    monkeypatch.setattr(
+        publication_routes,
+        "get_publication_config_path",
+        lambda **_kwargs: settings_path,
+    )
     settings = PublicationSettings(
         domain_suffix="example.test",
         caddy_executable="caddy",
         caddy_control_endpoint="http://127.0.0.1:2019",
         owned_route_file=routes_path,
         basic_auth_username="odoo",
-        basic_auth_password_hash=(
-            "$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        ),
+        basic_auth_password_hash=("$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
     )
-    settings_path = config_root / "publication.toml"
     settings_path.write_text(
         "[publication]\n"
         'domain_suffix = "example.test"\n'
@@ -717,10 +728,11 @@ def _write_owned_routes(
 def test_public_purge_refuses_owned_route_present_before_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ODCLI_USER_ROOT", str(tmp_path / "isolated-user-root"))
     catalog, project_id, root = _catalog(tmp_path)
     assert catalog.forget_project(project_id)
-    settings, routes_path = _isolated_publication_settings(tmp_path / "isolated-user-root")
+    settings, routes_path = _isolated_publication_settings(
+        tmp_path / "isolated-user-root", monkeypatch
+    )
     route = _project_route(project_id)
     _write_owned_routes(settings, routes_path, (route,))
     previous_routes = routes_path.read_bytes()
@@ -743,10 +755,11 @@ def test_public_purge_refuses_owned_route_present_before_capture(
 def test_public_purge_refuses_owned_route_reappearing_after_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ODCLI_USER_ROOT", str(tmp_path / "isolated-user-root"))
     catalog, project_id, root = _catalog(tmp_path)
     assert catalog.forget_project(project_id)
-    settings, routes_path = _isolated_publication_settings(tmp_path / "isolated-user-root")
+    settings, routes_path = _isolated_publication_settings(
+        tmp_path / "isolated-user-root", monkeypatch
+    )
     _write_owned_routes(settings, routes_path, ())
     client = SimpleNamespace(get_catalog=lambda: catalog)
     command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
