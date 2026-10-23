@@ -28,7 +28,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           python-version: "3.12.13"
-          version: "0.10.8"
+          version: "0.13.4"
           enable-cache: false
       - name: Pin workflow uv cache path
         run: echo "UV_CACHE_DIR=${{ github.workspace }}/.cache/uv" >> "$GITHUB_ENV"
@@ -40,6 +40,21 @@ jobs:
           umask 077
           python -c 'import secrets; print(secrets.token_urlsafe(24))' > .artifacts/real-odoo-e2e-secret-canary
           printf '%s\n' '<testsuite tests="0" failures="1"/>' > .artifacts/real-odoo-e2e/junit.xml
+      - name: Initialize owner-only secret registry
+        run: |
+          test ! -L "$ODCLI_E2E_SECRET_REGISTRY"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from scripts.real_odoo_secrets import read_secret_registry, write_secret_registry
+
+          path = Path(os.environ["ODCLI_E2E_SECRET_REGISTRY"])
+          write_secret_registry(path, ())
+          if path.stat().st_mode & 0o077 or read_secret_registry(path):
+              raise SystemExit("secret registry initialization failed owner-only check")
+          print("secret_registry_initialized=owner-only")
+          PY
       - name: Compute immutable source cache key
         id: source-key
         run: >-
@@ -78,6 +93,10 @@ jobs:
             echo "verified_source_cache_hit=false" >> "$GITHUB_OUTPUT"
           fi
           git -C "$cache" cat-file -e cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}
+          resolved_commit=$(git -C "$cache" rev-parse 'cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}')
+          test "$resolved_commit" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+          echo "verified_source_commit=$resolved_commit"
+          echo "verified_source_commit=$resolved_commit" >> "$GITHUB_OUTPUT"
           git -C "$cache" show cd992ceebbaf343c03e1941d39cfe423d35ba6c6:requirements.txt > .cache/odoo-requirements.txt
           chmod 600 .cache/odoo-requirements.txt
       - name: Compute immutable uv cache key

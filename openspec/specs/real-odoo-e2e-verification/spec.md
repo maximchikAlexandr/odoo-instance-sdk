@@ -5,7 +5,7 @@ TBD - created by archiving change add-reproducible-odoo19-e2e-harness. Update Pu
 ## Requirements
 ### Requirement: Pinned hybrid full-E2E topology
 
-The full real-Odoo tier SHALL run on Linux amd64 with Odoo Community 19 source commit `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, CPython `3.12.13`, `uv` `0.10.8`, and PostgreSQL image `docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685`. Docker Compose SHALL provision the disposable PostgreSQL and reference source-server dependencies. OdCLI SHALL own target project initialization, source checkout, explicit `--create-venv` environment creation, generated configuration, target Odoo process lifecycle, database operations, and environment removal. The full tier MUST NOT substitute an Odoo container for the target checkout, Python environment, or target process.
+The full real-Odoo tier SHALL run on Linux amd64 with Odoo Community 19 source commit `cd992ceebbaf343c03e1941d39cfe423d35ba6c6`, CPython `3.12.13`, `uv` `0.13.4`, and PostgreSQL image `docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685`. Docker Compose SHALL provision the disposable PostgreSQL and reference source-server dependencies. OdCLI SHALL own target project initialization, source checkout, explicit `--create-venv` environment creation, generated configuration, target Odoo process lifecycle, database operations, and environment removal. The full tier MUST NOT substitute an Odoo container for the target checkout, Python environment, or target process.
 
 #### Scenario: Full tier exercises product-owned target runtime
 - **WHEN** the scheduled or manual full-E2E job runs

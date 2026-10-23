@@ -53,7 +53,9 @@ def test_smoke_bootstrap_and_evidence_emit_cache_class_and_budget(
     """Exercise the smoke cache matrix through bootstrap and packaging."""
     monkeypatch.setattr(bootstrap, "ROOT", tmp_path)
     monkeypatch.setattr(bootstrap, "_cache_os_arch", lambda: ("Linux", "X64"))
-    monkeypatch.setattr(bootstrap, "prerequisite_checks", lambda _tier, _platform: {})
+    monkeypatch.setattr(
+        bootstrap, "prerequisite_checks", lambda _tier, _platform, _diagnostics=None: {}
+    )
     (tmp_path / "uv.lock").write_bytes(b"repository lock")
     requirements = tmp_path / ".cache" / "odoo-requirements.txt"
     requirements.parent.mkdir()
@@ -89,7 +91,9 @@ def test_smoke_bootstrap_and_evidence_emit_cache_class_and_budget(
 def test_smoke_bootstrap_ignores_label_only_cache_class(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(bootstrap, "prerequisite_checks", lambda _tier, _platform: {})
+    monkeypatch.setattr(
+        bootstrap, "prerequisite_checks", lambda _tier, _platform, _diagnostics=None: {}
+    )
     monkeypatch.setenv("ODCLI_E2E_CACHE_CLASS", "warm")
     monkeypatch.setenv("ODCLI_E2E_SOURCE_CACHE_HIT", "false")
     monkeypatch.setenv("ODCLI_E2E_UV_CACHE_HIT", "false")
