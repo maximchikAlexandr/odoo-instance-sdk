@@ -32,7 +32,6 @@ from odoo_instance_sdk.internal.dbprep import bootstrap
 from odoo_instance_sdk.internal.locks import (
     exclusive_lock,
     postgres_cluster_lock_path,
-    publication_lock_path,
 )
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
@@ -884,6 +883,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     terminal_thread = threading.Thread(target=run_terminal_purge)
     terminal_reached_absence = False
     writer_published_during_terminal_gap = False
+    terminal_remained_paused_after_publication = False
     publication_started = False
     try:
         terminal_thread.start()
@@ -896,6 +896,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
             writer_published_during_terminal_gap = (
                 writer_reached_route_write and publication_done.wait(timeout=10)
             )
+            terminal_remained_paused_after_publication = not terminal_done.is_set()
             allow_terminal_to_continue.set()
     finally:
         allow_terminal_to_continue.set()
@@ -916,6 +917,10 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
         "publication writer did not finish while terminal was paused after its unlocked "
         f"absence result; outcome={outcome!r}; plan={command.plan!r}; "
         f"inert_checks={inert_checks!r}; route_exists={routes_path.exists()}"
+    )
+    assert terminal_remained_paused_after_publication, (
+        "baseline terminal completed before the test released the post-observation pause; "
+        f"outcome={outcome!r}; inert_checks={inert_checks!r}"
     )
     assert "publication_error" not in outcome
     assert "value" in published_route_bytes
