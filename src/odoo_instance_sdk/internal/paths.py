@@ -10,6 +10,7 @@ from odoo_instance_sdk.internal.repo_key import repo_key
 
 _USER_ROOT_NAME = ".odcli"
 USER_ROOT_ENV = "ODCLI_USER_ROOT"
+SECRET_KEY_FILE_ENV = "ODCLI_SECRET_KEY_FILE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +98,34 @@ def get_publication_config_path(*, ensure_exists: bool = False) -> Path:
     fail closed when an operator has not configured the proxy.
     """
     return get_config_root(ensure_exists=ensure_exists) / "publication.toml"
+
+
+def get_admin_config_path(*, ensure_exists: bool = False) -> Path:
+    """Return the owner-only administrator configuration path.
+
+    The accessor deliberately does not create a credential.  Admin startup
+    must fail closed until an operator has written this file explicitly.
+    """
+    return get_config_root(ensure_exists=ensure_exists) / "admin.toml"
+
+
+def get_secret_key_path(*, ensure_exists: bool = False) -> Path:
+    """Return the SQLCipher key path without accepting key material in env."""
+    selected = os.environ.get(SECRET_KEY_FILE_ENV)
+    if selected:
+        path = Path(selected).expanduser()
+        if not path.is_absolute():
+            raise ValueError(f"{SECRET_KEY_FILE_ENV} must be an absolute path")
+        if ensure_exists:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(path.parent, 0o700)
+        return path
+    return get_config_root(ensure_exists=ensure_exists) / "secrets.key"
+
+
+def get_secret_store_path(*, ensure_exists: bool = True) -> Path:
+    """Return the encrypted secret store path below the SDK-owned data root."""
+    return get_data_root(ensure_exists=ensure_exists) / "secrets.sqlite3"
 
 
 def get_cache_root(*, ensure_exists: bool = True) -> Path:
