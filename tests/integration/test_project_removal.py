@@ -20,10 +20,15 @@ import pytest
 import odoo_instance_sdk.resources.publication as publication_resource
 from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
-from odoo_instance_sdk.internal import publication_routes
+from odoo_instance_sdk.internal import paths as internal_paths
+from odoo_instance_sdk.internal import publication_routes, project_removal_coordinator
 from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.dbprep import bootstrap
-from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
+from odoo_instance_sdk.internal.locks import (
+    exclusive_lock,
+    postgres_cluster_lock_path,
+    publication_lock_path,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -78,7 +83,11 @@ from odoo_instance_sdk.project_init import (
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.resources.project import ProjectResource
-from odoo_instance_sdk.resources.publication import PublicationSettings
+from odoo_instance_sdk.resources.publication import (
+    PublicationResource,
+    PublicationSettings,
+    PublicationTarget,
+)
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
@@ -777,6 +786,161 @@ def test_public_purge_refuses_owned_route_reappearing_after_capture(
     assert catalog._conn.total_changes == catalogue_changes_before_run
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     assert routes_path.read_bytes() == previous_routes
+    catalog.close()
+
+
+def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    assert catalog.forget_project(project_id)
+    settings, routes_path = _isolated_publication_settings(
+        tmp_path / "isolated-user-root", monkeypatch
+    )
+    monkeypatch.setattr(internal_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
+    monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
+    publication = PublicationResource(_client=cast("OdooClient", SimpleNamespace()))
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id=project_id,
+        project_id=project_id,
+        local_endpoint="http://127.0.0.1:8069",
+    )
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    writer_holds_lock = threading.Event()
+    release_writer = threading.Event()
+    terminal_observed_absence = threading.Event()
+    terminal_done = threading.Event()
+    outcome: dict[str, object] = {}
+    original_atomic_write = publication_routes._atomic_write
+    original_inert_check = project_removal_coordinator._forgotten_project_is_inert
+
+    def pause_before_route_write(path: Path, content: bytes) -> None:
+        if path == routes_path.with_name(f".{routes_path.name}.candidate"):
+            writer_holds_lock.set()
+            if not release_writer.wait(timeout=10):
+                raise TimeoutError("publication writer was not released")
+        original_atomic_write(path, content)
+
+    def observe_terminal_absence(
+        selected_catalog: BackupCatalog,
+        registration: ProjectRegistration,
+        *,
+        check_publications: bool = True,
+    ) -> bool:
+        terminal_observed_absence.set()
+        return original_inert_check(
+            selected_catalog, registration, check_publications=check_publications
+        )
+
+    monkeypatch.setattr(publication_routes, "_atomic_write", pause_before_route_write)
+    monkeypatch.setattr(
+        project_removal_coordinator, "_forgotten_project_is_inert", observe_terminal_absence
+    )
+    publication_command = publication.publish_command(
+        target, settings=settings, executor=RecordingExecutor()
+    )
+
+    def run_publication() -> None:
+        try:
+            outcome["publication"] = publication_command.run()
+        except BaseException as exc:
+            outcome["publication_error"] = exc
+
+    def run_terminal_purge() -> None:
+        try:
+            outcome["terminal"] = command.run()
+        except BaseException as exc:
+            outcome["terminal_error"] = exc
+        finally:
+            terminal_done.set()
+
+    publication_thread = threading.Thread(target=run_publication)
+    terminal_thread = threading.Thread(target=run_terminal_purge)
+    try:
+        publication_thread.start()
+        assert writer_holds_lock.wait(timeout=10), (
+            "publisher never entered the locked route write"
+        )
+        assert publication_lock_path() == tmp_path / "locks" / "publication.lock"
+        terminal_thread.start()
+        assert terminal_observed_absence.wait(timeout=10), (
+            "terminal purge did not reach its route-absence observation while publication held "
+            "the real publication lock"
+        )
+        assert terminal_done.wait(timeout=10), (
+            "terminal purge did not complete at the race boundary"
+        )
+        assert routes_path.exists() is False
+        assert "terminal" in outcome
+        assert isinstance(outcome.get("terminal_error"), ProjectRemovalError), (
+            "terminal purge returned success while an owned publication writer held the lock "
+            "before making its route visible"
+        )
+    finally:
+        release_writer.set()
+        publication_thread.join(timeout=10)
+        terminal_thread.join(timeout=10)
+        catalog.close()
+
+    assert not publication_thread.is_alive()
+    assert not terminal_thread.is_alive()
+    assert "publication_error" not in outcome
+    assert routes_path.exists()
+
+
+def test_public_purge_preserves_same_owner_route_replaced_after_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    settings, routes_path = _isolated_publication_settings(
+        tmp_path / "isolated-user-root", monkeypatch
+    )
+    monkeypatch.setattr(internal_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
+    monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
+    publication = PublicationResource(_client=cast("OdooClient", SimpleNamespace()))
+    original_target = PublicationTarget(
+        owner_kind="project",
+        owner_id=project_id,
+        project_id=project_id,
+        local_endpoint="http://127.0.0.1:8069",
+    )
+    replacement_target = PublicationTarget(
+        owner_kind="project",
+        owner_id=project_id,
+        project_id=project_id,
+        local_endpoint="http://127.0.0.1:8070",
+    )
+    client = SimpleNamespace(get_catalog=lambda: catalog, publication=publication)
+    publication.publish_command(
+        original_target, settings=settings, executor=RecordingExecutor()
+    ).run()
+    original_bytes = routes_path.read_bytes()
+
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    publication.publish_command(
+        replacement_target, settings=settings, executor=RecordingExecutor()
+    ).run()
+    replacement_bytes = routes_path.read_bytes()
+    assert replacement_bytes != original_bytes
+    catalogue_changes_before_run = catalog._conn.total_changes
+
+    with pytest.raises(ProjectRemovalError, match="publication route identity changed"):
+        command.run()
+
+    assert routes_path.read_bytes() == replacement_bytes
+    assert catalog._conn.total_changes == catalogue_changes_before_run
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     catalog.close()
 
 
