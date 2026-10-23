@@ -450,10 +450,10 @@ __all__ = [
     "decode_routes",
     "panel_route",
     "read_owned_routes",
-    "routes_owned_by_project",
     "reconcile_route_file",
     "render_panel_route",
     "root_imports_owned_route",
     "route_identity",
+    "routes_owned_by_project",
     "validate_route",
 ]

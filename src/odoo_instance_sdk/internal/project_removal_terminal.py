@@ -109,6 +109,23 @@ def _has_owned_publication(project_id: str) -> bool:
         return bool(routes_owned_by_project(read_owned_routes(), project_id))
 
 
+def _environment_artifacts_are_absent(
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+) -> bool:
+    for environment in _environment_sources(catalog, registration):
+        if environment.state != "removed":
+            return False
+        if environment.worktree_path.exists() or environment.worktree_path.is_symlink():
+            return False
+        if environment.python_environment_owned and (
+            environment.python_environment_path.exists()
+            or environment.python_environment_path.is_symlink()
+        ):
+            return False
+    return True
+
+
 def _forgotten_project_is_inert(
     catalog: BackupCatalog,
     registration: ProjectRegistration,
@@ -140,16 +157,8 @@ def _forgotten_project_is_inert(
 
     if project_owned_paths(root) or _project_runtime(catalog, registration):
         return False
-    for environment in _environment_sources(catalog, registration):
-        if environment.state != "removed":
-            return False
-        if environment.worktree_path.exists() or environment.worktree_path.is_symlink():
-            return False
-        if environment.python_environment_owned and (
-            environment.python_environment_path.exists()
-            or environment.python_environment_path.is_symlink()
-        ):
-            return False
+    if not _environment_artifacts_are_absent(catalog, registration):
+        return False
     if not check_publications:
         return True
     if publication_lock_held:

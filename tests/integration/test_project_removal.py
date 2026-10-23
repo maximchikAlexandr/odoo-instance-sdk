@@ -9,11 +9,12 @@ import sys
 import threading
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ContextManager, cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -843,6 +844,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
     assert catalog.forget_project(project_id)
+    shutil.rmtree(root)
     settings, routes_path = _isolated_publication_settings(
         tmp_path / "isolated-user-root", monkeypatch
     )
@@ -855,51 +857,89 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
         project_id=project_id,
         local_endpoint="http://127.0.0.1:8069",
     )
-    client = SimpleNamespace(get_catalog=lambda: catalog)
-    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
-        ProjectSelector.from_project_id(project_id),
-        purge=True,
-        confirmation=f"{root.name}:{project_id}",
-    )
+    writer_holds_lock = threading.Event()
+    release_writer = threading.Event()
     waiting_for_publication = threading.Event()
-    release_terminal = threading.Event()
+    terminal_done = threading.Event()
+    published_route_bytes: dict[str, bytes] = {}
     original_lock_until = exclusive_lock_until
+    original_atomic_write = publication_routes._atomic_write
 
-    def gate_terminal_lock(path: Path, deadline: float) -> ContextManager[int]:
+    def pause_before_route_write(path: Path, content: bytes) -> None:
+        if path == routes_path.with_name(f".{routes_path.name}.candidate"):
+            writer_holds_lock.set()
+            if not release_writer.wait(timeout=10):
+                raise TimeoutError("publication writer was not released")
+        original_atomic_write(path, content)
+        if path == routes_path:
+            published_route_bytes["value"] = content
+
+    def observe_terminal_lock(path: Path, deadline: float) -> AbstractContextManager[int]:
         if path == lock_paths.publication_lock_path():
             waiting_for_publication.set()
-            if not release_terminal.wait(timeout=10):
-                raise TimeoutError("terminal command was not released to acquire publication lock")
         return original_lock_until(path, deadline)
 
+    monkeypatch.setattr(publication_routes, "_atomic_write", pause_before_route_write)
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.project_removal_coordinator.exclusive_lock_until",
-        gate_terminal_lock,
+        observe_terminal_lock,
     )
     outcome: dict[str, object] = {}
+
+    publication_command = publication.publish_command(
+        target, settings=settings, executor=RecordingExecutor()
+    )
+
+    def run_publication() -> None:
+        try:
+            outcome["publication"] = publication_command.run()
+        except BaseException as exc:  # preserve the command failure for the asserting thread
+            outcome["publication_error"] = exc
 
     def run_terminal_repeat() -> None:
         try:
             outcome["result"] = command.run()
         except BaseException as exc:  # preserve the command failure for the asserting thread
             outcome["error"] = exc
+        finally:
+            terminal_done.set()
 
+    publication_thread = threading.Thread(target=run_publication)
     repeat_thread = threading.Thread(target=run_terminal_repeat)
-    repeat_thread.start()
-    assert waiting_for_publication.wait(timeout=10)
-    publication.publish_command(target, settings=settings, executor=RecordingExecutor()).run()
-    published_bytes = routes_path.read_bytes()
-    catalogue_changes = catalog._conn.total_changes
-    release_terminal.set()
-    repeat_thread.join(timeout=10)
+    try:
+        publication_thread.start()
+        assert writer_holds_lock.wait(timeout=10), (
+            "publisher never entered the locked route write"
+        )
+        assert lock_paths.publication_lock_path() == tmp_path / "locks" / "publication.lock"
+        catalogue_changes_before_repeat = catalog._conn.total_changes
+        catalogue_version_before_repeat = int(
+            catalog._conn.execute("PRAGMA data_version").fetchone()[0]
+        )
+        repeat_thread.start()
+        assert waiting_for_publication.wait(timeout=10), (
+            "terminal repeat did not reach the publication lock boundary"
+        )
+        assert not terminal_done.is_set(), "terminal repeat bypassed the held publication lock"
+    finally:
+        release_writer.set()
+        publication_thread.join(timeout=10)
+        repeat_thread.join(timeout=10)
 
+    assert not publication_thread.is_alive()
     assert not repeat_thread.is_alive()
+    assert "publication_error" not in outcome
+    assert "value" in published_route_bytes
+    assert routes_path.read_bytes() == published_route_bytes["value"]
     error = outcome.get("error")
     assert isinstance(error, ProjectRemovalError)
-    assert "state changed before retry" in str(error)
-    assert catalog._conn.total_changes == catalogue_changes
+    assert "owned publication reappeared after project purge" in str(error)
+    assert catalog._conn.total_changes == catalogue_changes_before_repeat
+    assert int(catalog._conn.execute("PRAGMA data_version").fetchone()[0]) == (
+        catalogue_version_before_repeat
+    )
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
-    assert routes_path.read_bytes() == published_bytes
+    assert routes_path.read_bytes() == published_route_bytes["value"]
     catalog.close()
 
 
@@ -913,16 +953,26 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     monkeypatch.setattr(internal_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
     monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
     publication = PublicationResource(_client=cast("OdooClient", SimpleNamespace()))
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(
+            list_inventory=lambda *_args, **_kwargs: DatabaseInventoryResult(
+                cluster="127.0.0.1:5432", databases=(), tracked=True
+            )
+        ),
+        _postgres_cluster=None,
+    )
     target = PublicationTarget(
         owner_kind="project",
         owner_id=project_id,
         project_id=project_id,
         local_endpoint="http://127.0.0.1:8069",
     )
-    client = SimpleNamespace(get_catalog=lambda: catalog, publication=publication)
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        publication=publication,
+        instance=SimpleNamespace(from_project=lambda _project: instance),
+    )
     publication.publish_command(target, settings=settings, executor=RecordingExecutor()).run()
-    assert catalog.forget_project(project_id)
-    shutil.rmtree(root)
     command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
         ProjectSelector.from_project_id(project_id),
         purge=True,
@@ -945,7 +995,7 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
         command.run()
 
     assert catalog._conn.total_changes == catalogue_changes
-    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert routes_path.read_bytes() == replacement_bytes
     catalog.close()
 
