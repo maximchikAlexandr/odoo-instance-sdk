@@ -406,12 +406,19 @@ def test_public_project_forget_reinit_and_purge(
     # helpers can locate the environment. The SDK does not own this file.
     (project / ".odcli" / "e2e-environment-id").unlink(missing_ok=True)
     if retain_source:
-        # Simulate a checkout whose Git provenance no longer matches the
-        # registration after purge removes its manifest and generated config.
-        (project / ".odcli-e2e-retained-source.txt").write_text(
-            "caller-owned source\n", encoding="utf-8"
+        # A caller change makes the registered checkout fail the clean-source
+        # provenance guard, while retaining its Git metadata for observation.
+        retained_marker = project / "caller-retained-source.bin"
+        retained_marker.write_bytes(b"caller-owned source\n")
+        source_status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            check=False,
         )
-        shutil.rmtree(project / ".git")
+        assert source_status.returncode == 0, source_status.stderr
+        assert "caller-retained-source.bin" in source_status.stdout
     purge = invoke(
         "remove",
         "--project-id",
@@ -438,9 +445,7 @@ def test_public_project_forget_reinit_and_purge(
     assert project.exists() is retain_source
     assert not (project / ".odcli" / "project.toml").exists()
     if retain_source:
-        assert (project / ".odcli-e2e-retained-source.txt").read_text(encoding="utf-8") == (
-            "caller-owned source\n"
-        )
+        assert (project / "caller-retained-source.bin").read_bytes() == b"caller-owned source\n"
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
     assert shared_resource.read_bytes() == b"shared resource\n"
 
@@ -518,6 +523,5 @@ def test_public_project_forget_reinit_and_purge(
             "shared_resource_preserved": True,
             "purge": purge_document["result"]["registration_state"],
             "repeat": "idempotent",
-            "cleanup_audit": cleanup_audit.leaks,
         },
     )
