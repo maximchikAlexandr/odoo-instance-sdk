@@ -1,9 +1,6 @@
 from __future__ import annotations  # noqa: I001 -- keep backup catalog helper aliases grouped; remove when Ruff supports grouped aliases.
 
-import base64
-import binascii
 import hashlib
-import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -27,8 +24,12 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.storage.catalog.helpers import (
     _READ_ONLY_PROJECT_SCOPE as _READ_ONLY_PROJECT_SCOPE,
     BackupEnvironmentLink as BackupEnvironmentLink,
+    BackupEventPage as BackupEventPage,
+    BackupEventSummary as BackupEventSummary,
     BackupProjection as BackupProjection,
     BackupProjectionPage as BackupProjectionPage,
+    BackupSummary as BackupSummary,
+    BackupSummaryPage as BackupSummaryPage,
     BackupRetentionRecord as BackupRetentionRecord,
     BackupRetentionSnapshot as BackupRetentionSnapshot,
     BackupRestoreLink as BackupRestoreLink,
@@ -40,6 +41,8 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     _row_to_cluster_claim as _row_to_cluster_claim,
     _row_to_event as _row_to_event,
     _translate_sqlite_error as _translate_sqlite_error,
+    decode_catalog_cursor as decode_catalog_cursor,
+    encode_catalog_cursor as encode_catalog_cursor,
     normalize_db_host as normalize_db_host,
 )
 from odoo_instance_sdk.storage.catalog_migrate import ensure_catalog_migrated
@@ -60,6 +63,12 @@ class _BackupMixin:
             exit_code: int | None = None,
             message: str | None = None,
         ) -> None: ...
+
+        @classmethod
+        def _decode_backup_cursor(cls, cursor: str) -> tuple[str, str]: ...
+
+        @staticmethod
+        def _encode_backup_cursor(catalogue_time: str, backup_id: str) -> str: ...
 
     def __post_init__(self) -> None:
         try:
@@ -397,36 +406,6 @@ class _BackupMixin:
         if str(parsed) != backup_id.lower():
             raise BackupNotFoundError("Backup identifier must be a complete UUID")
         return str(parsed)
-
-    @staticmethod
-    def _encode_backup_cursor(catalogue_time: str, backup_id: str) -> str:
-        payload = json.dumps(
-            {"catalogue_time": catalogue_time, "id": backup_id},
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-
-    @classmethod
-    def _decode_backup_cursor(cls, cursor: str) -> tuple[str, str]:
-        if not isinstance(cursor, str) or not cursor:
-            raise BackupCatalogError("Backup cursor is invalid")
-        try:
-            payload = json.loads(
-                base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("utf-8")
-            )
-        except (ValueError, TypeError, binascii.Error) as exc:
-            raise BackupCatalogError("Backup cursor is invalid") from exc
-        if not isinstance(payload, dict) or set(payload) != {"catalogue_time", "id"}:
-            raise BackupCatalogError("Backup cursor is invalid")
-        catalogue_time = payload["catalogue_time"]
-        if not isinstance(catalogue_time, str) or not catalogue_time:
-            raise BackupCatalogError("Backup cursor is invalid")
-        try:
-            backup_id = cls._canonical_backup_id(payload["id"])
-        except BackupNotFoundError as exc:
-            raise BackupCatalogError("Backup cursor is invalid") from exc
-        return catalogue_time, backup_id
 
     @staticmethod
     def _projection_file_data(path_value: str | None) -> tuple[bool, int | None]:
