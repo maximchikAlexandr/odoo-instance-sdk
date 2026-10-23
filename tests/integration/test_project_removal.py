@@ -1009,6 +1009,8 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     manifest = root / ".odcli" / "project.toml"
     manifest.parent.mkdir()
     manifest.write_text("[project]\n", encoding="utf-8")
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True, text=True)
+    (root / "caller-owned.txt").write_text("preserve this checkout\n", encoding="utf-8")
     settings, routes_path = _isolated_publication_settings(
         tmp_path / "isolated-user-root", monkeypatch
     )
@@ -1220,7 +1222,16 @@ def test_public_purge_refuses_same_owner_route_replaced_between_projection_and_c
         f"worker_traceback={outcome.get('traceback')!r}"
     )
     details = cast("dict[str, object]", removal_error.details["removal"])
-    assert details["failed_step"] == "project-removal:revalidate"
+    assert details["failed_step"] == "project-removal:revalidate", (
+        "baseline did not refuse route replacement during capture revalidation; "
+        f"failed_step={details['failed_step']!r}; "
+        f"completed_total={details.get('completed_total')!r}; "
+        f"completed={details.get('completed')!r}; "
+        f"replacement_route_sha256={replacement_digest}; "
+        f"route_after_sha256={hashlib.sha256(routes_path.read_bytes()).hexdigest()}; "
+        f"route_preserved={routes_path.read_bytes() == replacement_route_bytes}; "
+        f"registration={catalog.get_project(project_id)['registration_state']!r}"
+    )
     assert details["completed_total"] == 0
     assert catalog._conn.total_changes == catalogue_changes_before
     assert int(catalog._conn.execute("PRAGMA data_version").fetchone()[0]) == (
