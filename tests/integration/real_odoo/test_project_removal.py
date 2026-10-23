@@ -284,11 +284,7 @@ def test_public_project_forget_reinit_and_purge(
         ProjectConfig.load(project)
     )
     database_inventory = project_instance.databases.list_inventory(project, tracked=False)
-    owned_database = next(
-        item
-        for item in database_inventory.databases
-        if item.name == project_database
-    )
+    owned_database = next(item for item in database_inventory.databases if item.name == project_database)
     assert type(owned_database.database_oid) is int and owned_database.database_oid > 0
     resumed_claim = BackupCatalog(db_path=catalog_path)
     current_claim = resumed_claim._get_postgres_cluster_for_project(
@@ -388,6 +384,18 @@ def test_public_project_forget_reinit_and_purge(
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
     catalog.close()
+    source_status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert source_status.returncode == 0, source_status.stderr
+    assert not source_status.stdout.strip(), (
+        "project fixture should be source-clean before caller-owned retention: "
+        + source_status.stdout
+    )
     if retain_source:
         # Match a caller-owned checkout whose remaining source fails the
         # registered Git provenance check after purge removes its manifest.
