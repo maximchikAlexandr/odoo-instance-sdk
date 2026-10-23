@@ -362,7 +362,7 @@ def test_public_project_forget_reinit_and_purge(
     # required-observation boundary or during the later fingerprint check.
     # Both are fail-closed outcomes; retain the structured step and durable
     # no-write assertions below so this does not accept an arbitrary refusal.
-    assert drift_error.value.details["failed_step"] in {
+    assert drift_error.value.details["removal"]["failed_step"] in {
         "project-removal:observations",
         "project-removal:revalidate",
     }
