@@ -49,7 +49,6 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.environment.checkout_artifacts import (
-    _capture_checkout_stage,
     _pgadmin_command_steps,
     _planning_result,
     _restore_audit_backup,
@@ -63,6 +62,9 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _PlanningOutcome,
     _process_stderr,
     _rebase_requirement_paths,
+)
+from odoo_instance_sdk.resources.environment.checkout_stages import (
+    capture_checkout_stage as _capture_checkout_stage,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 

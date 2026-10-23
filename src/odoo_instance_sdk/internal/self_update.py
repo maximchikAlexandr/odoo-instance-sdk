@@ -37,14 +37,19 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResult,
 )
 from odoo_instance_sdk.internal.self_update_composition import (
+    InstalledCompanion,
     install_argv as _install_argv,
-    install_requirement as _install_requirement,
+    read_uv_tool_companion,
     read_uv_tool_composition,
+    uv_tool_environment_path as _uv_tool_env_path,
     verify_dashboard_installation,
 )
 from odoo_instance_sdk.internal.self_update_recovery import (
     UpdateRecoveryState,
     inspect_update_recovery_state as _inspect_update_recovery_state,
+)
+from odoo_instance_sdk.internal.self_update_snapshot import (
+    snapshot_metadata as _serialize_snapshot_metadata,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdatePhaseDuration, UpdateResult
 
@@ -85,11 +90,16 @@ class InstalledProvenance:
     manual_argv: tuple[str, ...] | None
     direct_requirement: str | None = None
     requested_extras: tuple[str, ...] = ()
+    companion: InstalledCompanion | None = None
 
     @property
     def extras(self) -> tuple[str, ...]:
         """Compatibility name for the normalized uv optional-extra set."""
         return self.requested_extras
+
+
+def _snapshot_metadata(provenance: InstalledProvenance, ref: str) -> dict[str, JsonValue]:
+    return _serialize_snapshot_metadata(provenance, ref, _JOURNAL_VERSION)
 
 
 def _is_exact_supported_https_repo(source_repo: str) -> bool:
@@ -317,22 +327,6 @@ def _uv_tool_executable_path() -> Path | None:
     return None
 
 
-def _uv_tool_env_path(dist: Distribution) -> Path | None:
-    """Return the uv tool environment path from the distribution file tree."""
-    files = dist.files
-    if files is None:
-        return None
-    for file_path in files:
-        resolved = Path(str(file_path))
-        if resolved.name == "odcli" and "tools" in resolved.parts:
-            try:
-                tools_index = resolved.parts.index("tools")
-                return Path(*resolved.parts[: tools_index + 2])
-            except ValueError:
-                continue
-    return None
-
-
 def _parse_vcs_direct_url(
     payload: dict[str, JsonValue] | None,
 ) -> tuple[str | None, str | None, str | None, bool]:
@@ -410,6 +404,11 @@ def read_uv_tool_direct_url(
         manual_argv=None,
         direct_requirement=direct_requirement,
         requested_extras=requested_extras,
+        companion=(
+            read_uv_tool_companion(source_repo=canonical_source_repo)
+            if canonical_source_repo is not None
+            else None
+        ),
     )
     _assert_runtime_environment(provenance)
     return provenance
@@ -496,25 +495,6 @@ def _write_journal(path: Path, payload: Mapping[str, JsonValue]) -> None:
 def _clear_journal(path: Path) -> None:
     with _suppress_file_not_found():
         path.unlink()
-
-
-def _snapshot_metadata(provenance: InstalledProvenance, ref: str) -> dict[str, JsonValue]:
-    return {
-        "version": _JOURNAL_VERSION,
-        "previous_version": provenance.version,
-        "package_revision": provenance.version,
-        "previous_sha": provenance.commit_id,
-        "direct_requirement": provenance.direct_requirement,
-        "requested_extras": list(provenance.requested_extras),
-        "install_requirement": _install_requirement(
-            ref,
-            source_repo=provenance.source_repo,
-            extras=provenance.requested_extras,
-        ),
-        "source_repo": provenance.source_repo,
-        "target_ref": ref,
-        "snapshot_sha": provenance.commit_id,
-    }
 
 
 def _write_snapshot(snapshot_dir: Path, metadata: Mapping[str, JsonValue]) -> None:
@@ -987,11 +967,13 @@ __all__ = [
     "InstalledProvenance",
     "UpdateRecoveryState",
     "_install_argv",
+    "_snapshot_metadata",
     "assert_update_not_blocking",
     "inspect_update_recovery_state",
     "is_maintenance_mode",
     "preflight_update_command",
     "prepare_maintenance_environment",
+    "read_uv_tool_companion",
     "read_uv_tool_direct_url",
     "run_maintenance",
     "unfinished_update_journal",

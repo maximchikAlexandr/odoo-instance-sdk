@@ -272,7 +272,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:515` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/internal/self_update.py:842-844` — maintenance child
+- `src/odoo_instance_sdk/internal/self_update.py:822-824` — maintenance child
   JSON stdout transport.
 - `src/odoo_instance_sdk/internal/git_credential_helper.py:31-32` — Git
   credential protocol child transport.
@@ -299,14 +299,12 @@ documented by `OUTPUT_WRITE_REASONS`:
 
 ### Production type annotations
 
-`EXPLICIT_IMPRECISE_ANNOTATIONS` records deliberate third-party adapter seams
-in `bug_report.py`, `internal/bug_report.py`, `internal/dbprep/bootstrap.py`,
-`internal/transport/*`, and `project_init.py`. The AST gate rejects direct,
-qualified, and quoted `Any`/bare `object`, empty marker Protocols,
-opaque-named aliases, and broad `Callable[..., ...]`; every finding includes
-`file:line`. The removal condition for a future finding is to narrow it at the
-external adapter boundary to `JsonValue`, a validated model, or a concrete
-protocol—not to add an exception.
+The production AST gate currently finds no imprecise annotations. It rejects
+direct, qualified, and quoted `Any`/bare `object`, empty marker Protocols,
+opaque-named aliases, and broad `Callable[..., ...]`; every future finding
+includes `file:line`. Narrow third-party values once at their adapter boundary
+to `JsonValue`, a validated model, or a concrete protocol rather than adding
+an exception.
 
 ### HTTP transport and XML-RPC boundary
 

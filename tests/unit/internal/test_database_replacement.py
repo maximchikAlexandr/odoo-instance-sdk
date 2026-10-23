@@ -358,6 +358,7 @@ def test_replacement_legacy_adoption_runs_after_revalidation_and_under_lock(
             'copy replacement cleanup_failed; retained={"password=secret": true}; legacy cleanup',
         ),
     ],
+    ids=("stale", "contradictory", "malformed", "secret-bearing"),
 )
 def test_replacement_invalid_legacy_evidence_never_mutates(
     tmp_path: Path,

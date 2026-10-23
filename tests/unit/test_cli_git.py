@@ -176,6 +176,56 @@ def test_git_commit_explicit_initialized_repo_uses_odoo_policy(tmp_path: Path) -
     assert _git(tmp_path, "log", "-1", "--format=%s").strip() == "[ADD] sale: PROJ-12 add model"
 
 
+def test_git_commit_project_member_does_not_require_repo(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    _git(tmp_path, "remote", "add", "origin", "https://gitlab.example/team/repo")
+    (tmp_path / ".odcli").mkdir()
+    (tmp_path / ".odcli" / "project.toml").write_text("[project]\n", encoding="utf-8")
+    _git(tmp_path, "add", ".odcli/project.toml")
+    _git(tmp_path, "commit", "-qm", "project config")
+    (tmp_path / "change.txt").write_text("change\n", encoding="utf-8")
+    _git(tmp_path, "add", "change.txt")
+    identity = {
+        "GIT_AUTHOR_NAME": "Selected Member",
+        "GIT_AUTHOR_EMAIL": "selected@example.test",
+        "GIT_COMMITTER_NAME": "Selected Member",
+        "GIT_COMMITTER_EMAIL": "selected@example.test",
+    }
+
+    with (
+        patch(
+            "odoo_instance_sdk.commands.git.cli_context.ready_instance",
+            return_value=_context(tmp_path),
+        ),
+        patch(
+            "odoo_instance_sdk.internal.git_explicit.explicit_commit_environment",
+            return_value=identity,
+        ) as capture,
+    ):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "git",
+                "commit",
+                "change",
+                "--member-id",
+                "11111111-1111-4111-8111-111111111111",
+                "--tag",
+                "DOC",
+                "--dry-run",
+                "--format",
+                "json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    commit = next(step for step in payload["result"]["steps"] if step["step_id"] == "git.commit")
+    assert dict(commit["environment_overrides"]) == identity
+    assert commit["argv"][-2:] == ["-m", f"[DOC] {tmp_path.name}: change"]
+    capture.assert_called_once_with("11111111-1111-4111-8111-111111111111", "gitlab.example")
+
+
 def test_git_sync_explicit_repo_passes_selected_member_to_dispatcher(tmp_path: Path) -> None:
     _repo(tmp_path)
     fake_resource = Mock()

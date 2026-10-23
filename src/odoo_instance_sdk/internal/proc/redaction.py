@@ -99,7 +99,33 @@ _BEARER_VALUE = re.compile(r"\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNOR
 _JWT_VALUE = re.compile(
     r"(?:^|\s)eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:$|\s)",
 )
-_SAFE_ENV_KEY = re.compile(r"^(?:LANG|LC_[A-Z0-9_]+|TERM|TZ|PYTHONUNBUFFERED)$")
+_SAFE_ENV_KEY = re.compile(
+    r"^(?:LANG|LC_[A-Z0-9_]+|TERM|TZ|PYTHONUNBUFFERED|GIT_CONFIG_COUNT|"
+    r"GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL))$"
+)
+_GIT_CONFIG_INDEX = re.compile(r"^GIT_CONFIG_(KEY|VALUE)_(\d+)$")
+
+
+def _safe_git_config_indices(environment: Sequence[tuple[str, str]]) -> frozenset[int]:
+    pairs: dict[str, dict[str, tuple[int, str]]] = {}
+    for index, (key, value) in enumerate(environment):
+        match = _GIT_CONFIG_INDEX.fullmatch(str(key))
+        if match is not None:
+            pairs.setdefault(match.group(2), {})[match.group(1)] = (index, str(value))
+    safe: set[int] = set()
+    for pair in pairs.values():
+        config_key = pair.get("KEY")
+        config_value = pair.get("VALUE")
+        if (
+            config_key is not None
+            and config_value is not None
+            and config_key[1] == "trailer.separators"
+            and config_value[1] == " "
+        ):
+            safe.update((config_key[0], config_value[0]))
+    return frozenset(safe)
+
+
 _ASSIGNMENT_TOKENS = tuple(
     dict.fromkeys(
         prefilter_token
@@ -200,14 +226,18 @@ def redacted_environment(
 ) -> tuple[tuple[str, str], ...]:
     """Return explicit environment metadata without inherited values."""
     known_secrets = tuple(secrets)
+    safe_git_config = _safe_git_config_indices(environment)
     return tuple(
         (
             str(key),
             str(redacted_projection(value, secrets=known_secrets, field=str(key)))
-            if _SAFE_ENV_KEY.fullmatch(str(key)) and not _SECRET_KEY.search(str(key))
+            if (
+                (_SAFE_ENV_KEY.fullmatch(str(key)) or index in safe_git_config)
+                and not _SECRET_KEY.search(str(key))
+            )
             else REDACTION_MARKER,
         )
-        for key, value in environment
+        for index, (key, value) in enumerate(environment)
     )
 
 
@@ -218,7 +248,12 @@ def captured_secret_values(step: PreparedStep) -> tuple[str, ...]:
     # copied into diagnostics: doing so would both widen the secret surface
     # and make harmless output depend on ambient process state.  Explicit
     # overrides are captured below and are always treated as private values.
-    values.extend(value for _key, value in step.environment_overrides if value)
+    safe_git_config = _safe_git_config_indices(step.environment_overrides)
+    values.extend(
+        value
+        for index, (key, value) in enumerate(step.environment_overrides)
+        if value and not _SAFE_ENV_KEY.fullmatch(str(key)) and index not in safe_git_config
+    )
     return _argv_secret_values(step.argv, step.sensitive_argv_indices, initial=values)
 
 

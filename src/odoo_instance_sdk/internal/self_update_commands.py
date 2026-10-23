@@ -59,6 +59,19 @@ from odoo_instance_sdk.internal.self_update_ancestry import (
     revision_probe_steps as _revision_probe_steps,
     run_revision_probe as _run_revision_probe,
 )
+from odoo_instance_sdk.internal.self_update_composition import (
+    companion_install_argv,
+    companion_rollback_verified,
+    journal_composition_fields,
+    read_uv_tool_companion_in_environment,
+    resume_update_argv,
+    skip_companion_verification,
+    verify_companion_revision,
+)
+from odoo_instance_sdk.internal.self_update_planning import (
+    _build_preflight_command,
+    _build_staged_command,
+)
 from odoo_instance_sdk.internal.self_update_policy import (
     preflight_error as _policy_preflight_error,
     probe_source_repo as _probe_source_repo,
@@ -74,7 +87,7 @@ from odoo_instance_sdk.internal.self_update_recovery import (
 )
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdateResult
 
-_ANCESTRY_CLEANUP_STEP_ID = "update.inspect.ancestry-cleanup"
+__all__ = ["_build_preflight_command", "_build_staged_command"]
 
 
 def _build_failure_command(result: UpdateResult) -> Command[UpdateResult]:
@@ -264,10 +277,6 @@ def _skip_planned_steps(context: RunContext[UpdateResult], *step_ids: str) -> No
             context.skip(step_id)
 
 
-def _skip_verification_steps(context: RunContext[UpdateResult]) -> None:
-    _skip_planned_steps(context, "update.verify", "update.verify.version", "update.commit")
-
-
 def _preflight_error(
     *,
     ref: str,
@@ -313,6 +322,10 @@ class _UpdateSession:
     install_step: PreparedStep
     maintenance_step: PreparedStep
     verify_step: PreparedStep
+    companion_install_step: PreparedStep | None
+    companion_version_step: PreparedStep | None
+    companion_metadata_step: PreparedStep | None
+    companion_rollback_step: PreparedStep | None
     ancestry_steps: tuple[PreparedStep, ...]
     source_origin_step: PreparedStep | None
     cleanup_step_id: str | None
@@ -329,15 +342,10 @@ class _UpdateSession:
     source_origin_verified: bool = False
 
     def _composition_fields(self) -> dict[str, JsonValue]:
-        return {
-            "direct_requirement": self.provenance.direct_requirement,
-            "requested_extras": list(self.provenance.requested_extras),
-            "install_requirement": _install_argv(
-                self.ref,
-                source_repo=self.provenance.source_repo,
-                extras=self.provenance.requested_extras,
-            )[-1],
-        }
+        return journal_composition_fields(self.provenance, self.ref)
+
+    def _resume_command(self) -> tuple[str, ...] | None:
+        return resume_update_argv(self.provenance.uv_tool_bin_path, self.ref)
 
     def __post_init__(self) -> None:
         self.journal_path = _update_journal_path()
@@ -361,6 +369,9 @@ class _UpdateSession:
         started = self._start("inspect")
         self.context.action("update.inspect")
         self.context.complete_action("update.inspect")
+        if self.provenance.companion is not None:
+            self.context.action("update.warn.companion")
+            self.context.complete_action("update.warn.companion")
         self._finish("inspect", started)
         self.ref = self.ref.lower()
 
@@ -418,12 +429,12 @@ class _UpdateSession:
         self.context.complete_action("update.snapshot")
         self._finish("snapshot", started)
 
-    def _write_install_journal(self) -> None:
+    def _write_install_journal(self, *, phase: str = "install") -> None:
         _write_journal(
             self.journal_path,
             {
                 "version": _JOURNAL_VERSION,
-                "phase": "install",
+                "phase": phase,
                 "target_ref": self.ref,
                 "snapshot_sha": self.snapshot_sha,
                 "maintenance_pid": None,
@@ -431,7 +442,7 @@ class _UpdateSession:
             },
         )
 
-    def resume_snapshot(self) -> None:
+    def resume_snapshot(self) -> str | None:
         self.context.skip("update.snapshot")
         snapshot_sha = self.snapshot_sha
         target_ref = self.journal_target_ref
@@ -440,27 +451,36 @@ class _UpdateSession:
             raise UpdateError("snapshot resume has incomplete immutable provenance")
         installed_sha = installed_sha.lower()
         if installed_sha == snapshot_sha:
-            self.install()
-            return
+            return self.install()
         if installed_sha == target_ref:
             self.context.skip("update.install")
             self._write_install_journal()
-            return
+            return self.install(core=False)
         raise UpdateError("snapshot resume found an unexpected installed revision")
 
-    def install(self) -> None:
+    def install(self, *, core: bool = True) -> str | None:
         started = self._start("install")
-        result = cast("ProcessResult", self.context.process_prepared(self.install_step))
-        self._finish("install", started)
-        if result.returncode != 0 and not _install_reached_target(
-            ref=self.ref,
-            output=_process_output_text(result),
-            previous_sha=self.provenance.commit_id,
-        ):
-            _clear_journal(self.journal_path)
-            _clear_snapshot(self.snapshot_dir)
-            raise UpdateError(f"uv tool install failed with exit {result.returncode}")
+        if core:
+            result = cast("ProcessResult", self.context.process_prepared(self.install_step))
+            if result.returncode != 0 and not _install_reached_target(
+                ref=self.ref,
+                output=_process_output_text(result),
+                previous_sha=self.provenance.commit_id,
+            ):
+                _clear_journal(self.journal_path)
+                _clear_snapshot(self.snapshot_dir)
+                raise UpdateError(f"uv tool install failed with exit {result.returncode}")
+        if self.companion_install_step is not None:
+            self._write_install_journal()
+            companion_result = cast(
+                "ProcessResult", self.context.process_prepared(self.companion_install_step)
+            )
+            if companion_result.returncode != 0:
+                self._finish("install", started)
+                return "odcli-multica coordinated install failed; recovery evidence was retained"
         self._write_install_journal()
+        self._finish("install", started)
+        return None
 
     def migrate(self) -> UpdateResult | None:
         started = self._start("migrate")
@@ -485,12 +505,33 @@ class _UpdateSession:
         self.maintenance_result = result
         self._finish("migrate", started)
         if result.returncode == 0:
+            _skip_planned_steps(self.context, "update.recovery.companion")
             return None
         rollback = _attempt_rollback(
             self.executor,
             snapshot_sha=self.snapshot_sha,
             recovery_step=recovery_step,
         )
+        companion = self.provenance.companion
+        if (
+            rollback == "restored"
+            and companion is not None
+            and self.companion_rollback_step is not None
+        ):
+            result = cast(
+                "ProcessResult",
+                self.context.process_prepared(self.companion_rollback_step),
+            )
+            try:
+                restored = read_uv_tool_companion_in_environment(
+                    companion.source_repo, companion.environment
+                )
+            except (UpdateError, UnsupportedInstallError):
+                restored = None
+            if not companion_rollback_verified(result, restored, companion):
+                rollback = "failed"
+        else:
+            _skip_planned_steps(self.context, "update.recovery.companion")
         _write_journal(
             self.journal_path,
             {
@@ -506,7 +547,7 @@ class _UpdateSession:
         if rollback == "restored":
             _clear_journal(self.journal_path)
             _clear_snapshot(self.snapshot_dir)
-            _skip_verification_steps(self.context)
+            skip_companion_verification(self.context)
             return _failure_result(
                 "rolled_back",
                 provenance=self.provenance,
@@ -514,11 +555,12 @@ class _UpdateSession:
                 next_step="maintenance failed; the previous revision was restored",
                 phase_durations=_phase_durations(self.durations),
             )
-        _skip_verification_steps(self.context)
+        self._write_install_journal(phase="snapshot")
+        skip_companion_verification(self.context)
         return _failure_result(
             "update_incomplete",
             provenance=self.provenance,
-            recovery_argv=recovery_step.argv,
+            recovery_argv=self._resume_command() or recovery_step.argv,
             rollback_outcome=rollback,
             snapshot_state="present",
             journal_state="present",
@@ -554,32 +596,44 @@ class _UpdateSession:
                 target_ref=self.ref,
                 version_result=version_result,
             )
-        except UpdateError as exc:
+            if self.companion_version_step is not None and self.companion_metadata_step is not None:
+                companion_version = cast(
+                    "ProcessResult", self.context.process_prepared(self.companion_version_step)
+                )
+                companion_metadata = cast(
+                    "ProcessResult", self.context.process_prepared(self.companion_metadata_step)
+                )
+                verify_companion_revision(companion_version, companion_metadata, self.ref)
+        except (UpdateError, json.JSONDecodeError, msgspec.ValidationError) as exc:
             self.context.fail_action("update.verify", exc)
-            _skip_planned_steps(self.context, "update.commit")
-            self._finish("verify", started)
-            return _failure_result(
-                "update_incomplete",
-                provenance=self.provenance,
-                recovery_argv=self.recovery_step.argv if self.recovery_step else None,
-                rollback_outcome="not_attempted",
-                snapshot_state="present",
-                journal_state="present",
-                next_step=str(exc),
-                phase_durations=_phase_durations(self.durations),
+            _skip_planned_steps(
+                self.context,
+                "update.verify.version",
+                "update.verify.companion.version",
+                "update.verify.companion.revisions",
+                "update.recovery.companion",
+                "update.commit",
             )
-        except (json.JSONDecodeError, msgspec.ValidationError) as exc:
-            self.context.fail_action("update.verify", exc)
-            _skip_planned_steps(self.context, "update.verify.version", "update.commit")
+            self._write_install_journal(phase="snapshot")
             self._finish("verify", started)
             return _failure_result(
                 "update_incomplete",
                 provenance=self.provenance,
-                recovery_argv=self.recovery_step.argv if self.recovery_step else None,
+                recovery_argv=(
+                    self._resume_command()
+                    if self.provenance.companion is not None
+                    else self.recovery_step.argv
+                    if self.recovery_step
+                    else None
+                ),
                 rollback_outcome="not_attempted",
                 snapshot_state="present",
                 journal_state="present",
-                next_step=f"maintenance produced invalid JSON: {exc}",
+                next_step=(
+                    f"maintenance produced invalid JSON: {exc}"
+                    if isinstance(exc, (json.JSONDecodeError, msgspec.ValidationError))
+                    else str(exc)
+                ),
                 phase_durations=_phase_durations(self.durations),
             )
         self.context.complete_action("update.verify")
@@ -594,14 +648,23 @@ class _UpdateSession:
         self.context.complete_action("update.commit")
         self._finish("commit", started)
 
-    def resume_or_install(self) -> None:
+    def resume_or_install(self) -> str | None:
         if self.resume_phase == "snapshot":
-            self.resume_snapshot()
-        elif self.resume_phase in {"migrate", "install"}:
+            return self.resume_snapshot()
+        if self.resume_phase in {"migrate", "install"}:
             _skip_planned_steps(self.context, "update.snapshot", "update.install")
-        else:
-            self.snapshot()
-            self.install()
+            if self.resume_phase == "install" and self.companion_install_step is not None:
+                self._write_install_journal()
+                result = cast(
+                    "ProcessResult", self.context.process_prepared(self.companion_install_step)
+                )
+                if result.returncode != 0:
+                    return "odcli-multica coordinated install could not be resumed"
+            elif self.resume_phase == "migrate":
+                _skip_planned_steps(self.context, "update.install.companion")
+            return None
+        self.snapshot()
+        return self.install()
 
     def result(self) -> UpdateResult:
         if self.maintenance_result_model is None:
@@ -650,9 +713,13 @@ class _UpdateSession:
                 "update.quiesce",
                 "update.snapshot",
                 "update.install",
+                "update.install.companion",
                 "update.migrate",
                 "update.verify",
                 "update.verify.version",
+                "update.verify.companion.version",
+                "update.verify.companion.revisions",
+                "update.recovery.companion",
                 "update.commit",
             )
             return _failure_result(
@@ -667,13 +734,44 @@ class _UpdateSession:
             with exclusive_lock(_update_lock_path()):
                 self.context.complete_action("update.quiesce")
                 self._finish("quiesce", started)
-                self.resume_or_install()
+                install_failure = self.resume_or_install()
+                if install_failure is not None:
+                    _skip_planned_steps(
+                        self.context,
+                        "update.migrate",
+                        "update.verify",
+                        "update.verify.version",
+                        "update.verify.companion.version",
+                        "update.verify.companion.revisions",
+                        "update.recovery.companion",
+                        "update.commit",
+                    )
+                    companion = self.provenance.companion
+                    recovery = (
+                        self._resume_command()
+                        or companion_install_argv(
+                            companion.package_sha,
+                            sdk_ref=companion.sdk_sha,
+                            source_repo=self.provenance.source_repo,
+                        )
+                        if companion is not None
+                        else None
+                    )
+                    return _failure_result(
+                        "update_incomplete",
+                        provenance=self.provenance,
+                        recovery_argv=recovery,
+                        snapshot_state="present",
+                        journal_state="present",
+                        next_step=install_failure,
+                        phase_durations=_phase_durations(self.durations),
+                    )
                 migration_failure = self.migrate()
                 if migration_failure is not None:
                     return migration_failure
                 maintenance_result = self.maintenance_result
                 if maintenance_result is None:
-                    _skip_verification_steps(self.context)
+                    skip_companion_verification(self.context)
                     return _failure_result(
                         "update_incomplete",
                         provenance=self.provenance,
@@ -696,185 +794,6 @@ class _UpdateSession:
         return self.result()
 
 
-def _build_staged_command(
-    *,
-    ref: str,
-    provenance: InstalledProvenance,
-    executor: ProcessExecutor | None,
-) -> Command[UpdateResult]:
-    resolve_step = PreparedStep(
-        step_id="update.resolve",
-        argv=_resolve_argv(ref),
-        read_only=True,
-    )
-    active_executor = executor or SubprocessExecutor()
-
-    def target_sha_from_result(result: ProcessResult) -> str:
-        if result.returncode != 0:
-            stderr = result.stderr if isinstance(result.stderr, str) else ""
-            raise UnsupportedInstallError(
-                stderr.strip() or "uv could not resolve the requested revision",
-                manual_argv=_MANUAL_INSTALL_ARGV,
-            )
-        target_sha = _extract_target_sha(ref, _process_output_text(result))
-        if target_sha is None:
-            raise UnsupportedInstallError(
-                "could not parse target SHA from uv output (sha_unparsed)",
-                manual_argv=_MANUAL_INSTALL_ARGV,
-            )
-        return target_sha
-
-    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
-        context.action("update.inspect")
-        context.complete_action("update.inspect")
-        result = cast("ProcessResult", context.process_prepared(resolve_step))
-        target_sha = target_sha_from_result(result)
-        outcome: UpdateOutcome = (
-            "already_current"
-            if provenance.commit_id is not None and target_sha == provenance.commit_id
-            else "updated"
-        )
-        return UpdateResult(
-            outcome=outcome,
-            source_repo=provenance.source_repo,
-            previous_version=provenance.version,
-            target_version=provenance.version if outcome == "already_current" else None,
-            final_version=provenance.version if outcome == "already_current" else None,
-            previous_sha=provenance.commit_id,
-            target_sha=target_sha,
-            final_sha=provenance.commit_id if outcome == "already_current" else None,
-            executable_path=(
-                str(provenance.uv_tool_bin_path) if provenance.uv_tool_bin_path else None
-            ),
-            tool_env_path=(
-                str(provenance.uv_tool_env_path) if provenance.uv_tool_env_path else None
-            ),
-            snapshot_state="absent",
-            journal_state="absent",
-            next_step=(
-                None
-                if outcome == "already_current"
-                else "run `odcli update` to apply the resolved revision"
-            ),
-        )
-
-    inspect_step = PreparedAction(
-        step_id="update.inspect",
-        action="inspect",
-        description="Inspect installed OdCLI provenance",
-        read_only=True,
-    )
-    steps: tuple[PreparedAction | PreparedStep, ...] = (inspect_step, resolve_step)
-    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-    prepared = prepared_command(callback, steps, executor=active_executor)
-    return Command.from_prepared(plan, prepared)
-
-
-def _build_preflight_command(
-    *,
-    ref: str,
-    provenance: InstalledProvenance,
-    allow_downgrade: bool,
-    executor: ProcessExecutor | None,
-) -> Command[UpdateResult]:
-    inspect_step = PreparedAction(
-        step_id="update.inspect",
-        action="inspect",
-        description="Inspect installed OdCLI provenance",
-        read_only=True,
-    )
-    preflight_step = PreparedAction(
-        step_id="update.preflight",
-        action="preflight",
-        description="Verify free space, schema, and migration path",
-        read_only=True,
-    )
-    origin_step = _source_origin_step(provenance)
-    canonical_source_repo = _probe_source_repo(provenance)
-    ancestry_steps = (
-        _revision_probe_steps(
-            source_repo=canonical_source_repo,
-            installed_sha=provenance.commit_id or "",
-            target_sha=ref,
-        )
-        if canonical_source_repo
-        and _is_full_sha(ref)
-        and provenance.commit_id
-        and _is_full_sha(provenance.commit_id)
-        else ()
-    )
-    cleanup_action = (
-        PreparedAction(
-            step_id=_ANCESTRY_CLEANUP_STEP_ID,
-            action="cleanup",
-            description="Remove the temporary ancestry object store",
-            mutating=True,
-        )
-        if ancestry_steps
-        else None
-    )
-    steps: tuple[PreparedAction | PreparedStep, ...] = (
-        inspect_step,
-        preflight_step,
-        *((origin_step,) if origin_step is not None else ()),
-        *ancestry_steps,
-        *((cleanup_action,) if cleanup_action is not None else ()),
-    )
-
-    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
-        context.action(inspect_step.step_id)
-        context.complete_action(inspect_step.step_id)
-        context.action(preflight_step.step_id)
-        source_origin_verified = origin_step is None
-        if origin_step is not None:
-            origin_result = cast("ProcessResult", context.process_prepared(origin_step))
-            origin_output = origin_result.stdout if isinstance(origin_result.stdout, str) else ""
-            source_origin_verified = origin_result.returncode == 0 and _is_supported_source_origin(
-                origin_output
-            )
-        relation = "unknown"
-        if source_origin_verified and provenance.commit_id is not None and _is_full_sha(ref):
-            relation = _run_revision_probe(
-                context,
-                ancestry_steps,
-                installed_sha=provenance.commit_id.lower(),
-                target_sha=ref.lower(),
-                cleanup_step_id=cleanup_action.step_id if cleanup_action else None,
-            )
-        elif ancestry_steps:
-            _skip_revision_probe(
-                context,
-                ancestry_steps,
-                cleanup_action.step_id if cleanup_action else None,
-            )
-        error = _preflight_error(
-            ref=ref,
-            provenance=provenance,
-            allow_downgrade=allow_downgrade,
-            relation=cast("RevisionRelation", relation),
-            source_origin_verified=source_origin_verified,
-        )
-        context.complete_action(preflight_step.step_id)
-        if error is not None:
-            return _failure_result(
-                "preflight_failed",
-                provenance=provenance,
-                next_step=error,
-            )
-        return UpdateResult(
-            outcome="updated",
-            source_repo=provenance.source_repo,
-            previous_version=provenance.version,
-            previous_sha=provenance.commit_id,
-            target_sha=ref,
-            snapshot_state="absent",
-            journal_state="absent",
-        )
-
-    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-    return Command.create(plan, callback, steps, executor=executor or SubprocessExecutor())
-
-
 def _build_mutating_command(
     *,
     ref: str,
@@ -895,6 +814,55 @@ def _build_mutating_command(
             extras=provenance.requested_extras,
         ),
         mutating=True,
+    )
+    companion = provenance.companion
+    companion_install_step = (
+        PreparedStep(
+            step_id="update.install.companion",
+            argv=companion_install_argv(ref, source_repo=provenance.source_repo),
+            mutating=True,
+        )
+        if companion is not None
+        else None
+    )
+    companion_version_step = (
+        PreparedStep(
+            step_id="update.verify.companion.version",
+            argv=(str(companion.launcher), "--version"),
+            read_only=True,
+        )
+        if companion is not None
+        else None
+    )
+    companion_metadata_step = (
+        PreparedStep(
+            step_id="update.verify.companion.revisions",
+            argv=(
+                str(companion.environment / "bin" / "python"),
+                "-c",
+                (
+                    "import importlib.metadata as m, json; "
+                    "print(json.dumps({n: json.loads(m.distribution(n).read_text('direct_url.json'))"
+                    "['vcs_info']['commit_id'] for n in ('odcli-multica', 'odoo-instance-sdk')}))"
+                ),
+            ),
+            read_only=True,
+        )
+        if companion is not None
+        else None
+    )
+    companion_rollback_step = (
+        PreparedStep(
+            step_id="update.recovery.companion",
+            argv=companion_install_argv(
+                companion.package_sha,
+                sdk_ref=companion.sdk_sha,
+                source_repo=companion.source_repo,
+            ),
+            mutating=True,
+        )
+        if companion is not None
+        else None
     )
     executable = provenance.uv_tool_bin_path
     if executable is None:
@@ -926,7 +894,7 @@ def _build_mutating_command(
     )
     cleanup_action = (
         PreparedAction(
-            step_id=_ANCESTRY_CLEANUP_STEP_ID,
+            step_id="update.inspect.ancestry-cleanup",
             action="cleanup",
             description="Remove the temporary ancestry object store",
             mutating=True,
@@ -938,8 +906,24 @@ def _build_mutating_command(
         PreparedAction(
             step_id="update.inspect",
             action="inspect",
-            description="Inspect installed OdCLI provenance",
+            description=(
+                "Inspect installed OdCLI and odcli-multica provenance"
+                if companion is not None
+                else "Inspect installed OdCLI provenance"
+            ),
             read_only=True,
+        ),
+        *(
+            (
+                PreparedAction(
+                    step_id="update.warn.companion",
+                    action="warn",
+                    description="Warning: this update replaces both odcli and odcli-multica",
+                    read_only=True,
+                ),
+            )
+            if companion is not None
+            else ()
         ),
         PreparedAction(
             step_id="update.preflight",
@@ -963,6 +947,8 @@ def _build_mutating_command(
             mutating=True,
         ),
         install_step,
+        *((companion_install_step,) if companion_install_step is not None else ()),
+        *((companion_rollback_step,) if companion_rollback_step is not None else ()),
         maintenance_step,
         PreparedAction(
             step_id="update.verify",
@@ -971,6 +957,8 @@ def _build_mutating_command(
             read_only=True,
         ),
         verify_step,
+        *((companion_version_step,) if companion_version_step is not None else ()),
+        *((companion_metadata_step,) if companion_metadata_step is not None else ()),
         PreparedAction(
             step_id="update.commit",
             action="commit",
@@ -989,6 +977,10 @@ def _build_mutating_command(
             install_step=install_step,
             maintenance_step=maintenance_step,
             verify_step=verify_step,
+            companion_install_step=companion_install_step,
+            companion_version_step=companion_version_step,
+            companion_metadata_step=companion_metadata_step,
+            companion_rollback_step=companion_rollback_step,
             ancestry_steps=ancestry_steps,
             source_origin_step=origin_step,
             cleanup_step_id=cleanup_action.step_id if cleanup_action else None,

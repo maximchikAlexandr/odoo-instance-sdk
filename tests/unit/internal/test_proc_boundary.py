@@ -44,11 +44,38 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.proc.redaction import (
     IncrementalStreamRedactor,
+    captured_secret_values,
+    redacted_environment,
     redacted_projection,
 )
 from odoo_instance_sdk.models import GitLabCredentialContext, GitLabCredentialIdentity
 
 pytestmark = pytest.mark.serial
+
+
+def test_git_config_environment_redacts_values_except_exact_trailer_separator_pair() -> None:
+    opaque = "opaque-config-value-7d92"
+    environment = (
+        ("GIT_CONFIG_COUNT", "2"),
+        ("GIT_CONFIG_KEY_0", "trailer.separators"),
+        ("GIT_CONFIG_VALUE_0", " "),
+        ("GIT_CONFIG_KEY_1", "credential.helper"),
+        ("GIT_CONFIG_VALUE_1", opaque),
+    )
+    step = PreparedStep(step_id="git.commit", argv=("git", "commit"), environment=environment)
+
+    public = redacted_environment(environment)
+    secrets = captured_secret_values(step)
+
+    assert public[1:3] == environment[1:3]
+    assert public[3:] == (
+        ("GIT_CONFIG_KEY_1", "<redacted>"),
+        ("GIT_CONFIG_VALUE_1", "<redacted>"),
+    )
+    assert opaque in secrets
+    assert redacted_projection(f"child echoed {opaque}", secrets=secrets) == (
+        "child echoed <redacted>"
+    )
 
 
 def test_explicit_runtime_environment_reaches_real_git_and_cleans_askpass(

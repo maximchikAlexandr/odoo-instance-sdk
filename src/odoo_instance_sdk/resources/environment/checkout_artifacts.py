@@ -63,9 +63,9 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _PlanningOutcome as _PlanningOutcome,
 )
 from odoo_instance_sdk.resources.environment import checkout_stages as _checkout_stages
+from odoo_instance_sdk.resources.environment.checkout_filestore import copy_attachment_probe
 from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
 
-_capture_checkout_stage = _checkout_stages.capture_checkout_stage
 _normalize_checkout_stage = _checkout_stages.normalize_checkout_stage
 _planning_error_outcome = _checkout_stages.planning_error_outcome
 _planning_result = _checkout_stages.planning_result
@@ -679,6 +679,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
                 "database.restore.exists-after",
             )
         )
+        steps.append(copy_attachment_probe(plan))
     steps.extend(
         (
             PreparedAction(

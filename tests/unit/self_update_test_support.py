@@ -116,7 +116,10 @@ def _patch_provenance(
         "odoo_instance_sdk.internal.self_update_commands._verify_installed_revision",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.which",
+        lambda name: "uv" if name == "uv" else None,
+    )
 
 
 def _write_recovery_evidence(
@@ -178,6 +181,52 @@ def _process_result(
     )
 
 
+def _companion_result(step: PreparedStep, effects: dict[str, object]) -> ProcessResult | None:
+    if step.step_id == "update.verify.version":
+        return _process_result(step, returncode=cast("int", effects.get("verify_rc", 0)))
+    if step.step_id == "update.install.companion":
+        return _process_result(step, returncode=cast("int", effects.get("companion_install_rc", 0)))
+    if step.step_id == "update.verify.companion.version":
+        return _process_result(step, returncode=cast("int", effects.get("companion_verify_rc", 0)))
+    if step.step_id == "update.verify.companion.revisions":
+        return _process_result(
+            step,
+            stdout=str(
+                effects.get(
+                    "companion_revision_json",
+                    json.dumps({"odcli-multica": _SHA_B, "odoo-instance-sdk": _SHA_B}),
+                )
+            ),
+        )
+    if step.step_id == "update.recovery.companion":
+        return _process_result(
+            step, returncode=cast("int", effects.get("companion_rollback_rc", 0))
+        )
+    return None
+
+
+def _maintenance_result(step: PreparedStep, effects: dict[str, object]) -> ProcessResult:
+    returncode = cast("int", effects.get("maintenance_rc", 0))
+    return _process_result(
+        step,
+        returncode=returncode,
+        stdout=(
+            cast("str", effects.get("maintenance_stdout", _MAINTENANCE_JSON))
+            if returncode == 0
+            else ""
+        ),
+    )
+
+
+def _ancestry_result(step: PreparedStep, effects: dict[str, object]) -> ProcessResult | None:
+    relation = effects.get("ancestry_relation", "descendant")
+    if step.step_id == "update.inspect.ancestry-installed":
+        return _process_result(step, returncode=0 if relation in {"descendant", "same"} else 1)
+    if step.step_id == "update.inspect.ancestry-target":
+        return _process_result(step, returncode=0 if relation == "ancestor" else 1)
+    return None
+
+
 def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
     def factory(step):
         if step.step_id == "update.resolve":
@@ -194,30 +243,18 @@ def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
                 stdout=str(effects.get("resolve_stdout", f"{_SHA_B}\trefs/heads/main")),
                 stderr=str(effects.get("resolve_stderr", "")),
             )
-        if step.step_id == "update.inspect.ancestry-installed":
-            relation = effects.get("ancestry_relation", "descendant")
-            return _process_result(
-                step,
-                returncode=0 if relation in {"descendant", "same"} else 1,
-            )
-        if step.step_id == "update.inspect.ancestry-target":
-            relation = effects.get("ancestry_relation", "descendant")
-            return _process_result(step, returncode=0 if relation == "ancestor" else 1)
+        ancestry_result = _ancestry_result(step, effects)
+        if ancestry_result is not None:
+            return ancestry_result
         if step.step_id == "update.install":
             return _process_result(step, returncode=cast("int", effects.get("install_rc", 0)))
         if step.step_id == "update.migrate":
-            return _process_result(
-                step,
-                returncode=cast("int", effects.get("maintenance_rc", 0)),
-                stdout=_MAINTENANCE_JSON
-                if cast("int", effects.get("maintenance_rc", 0)) == 0
-                else "",
-            )
+            return _maintenance_result(step, effects)
         if step.step_id == "update.verify.version":
-            return _process_result(
-                step,
-                returncode=cast("int", effects.get("verify_rc", 0)),
-            )
+            return _process_result(step, returncode=cast("int", effects.get("verify_rc", 0)))
+        companion_result = _companion_result(step, effects)
+        if companion_result is not None:
+            return companion_result
         if step.step_id == "update.recovery":
             return _process_result(step, returncode=cast("int", effects.get("rollback_rc", 0)))
         return _process_result(step)

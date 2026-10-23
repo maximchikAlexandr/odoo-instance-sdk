@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import textwrap
 import uuid
 import zipfile
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,11 +61,142 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentDatabaseMode,
     EnvironmentState,
 )
+from odoo_instance_sdk.resources.environment.checkout_filestore import verify_copy_filestore
 from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
 from odoo_instance_sdk.resources.environment.checkout_source_runtime import _source_auxiliary_python
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 
 FIXED_NOW = datetime(2026, 9, 26, 21, 30, tzinfo=UTC)
+
+
+def test_copy_filestore_verifier_keeps_contained_regular_file_intact(tmp_path: Path) -> None:
+    from_result = ProcessResult((), 0, "6173736574", "", 0.0, None, ())
+    target = tmp_path / "data" / "filestore" / "target"
+    target.mkdir(parents=True)
+    (target / "asset").write_bytes(b"restored")
+
+    verify_copy_filestore(from_result, tmp_path / "data", "target")
+    assert (target / "asset").read_bytes() == b"restored"
+
+
+@pytest.mark.parametrize(
+    "rows", ("6d697373696e67", "2e2e2f657363617065"), ids=("missing", "traversal")
+)
+def test_copy_filestore_verification_rejects_missing_and_traversal(
+    tmp_path: Path, rows: str
+) -> None:
+    from odoo_instance_sdk.exceptions import InstanceConfigurationError
+
+    target = tmp_path / "data" / "filestore" / "target"
+    target.mkdir(parents=True)
+    result = ProcessResult((), 0, rows, "", 0.0, None, ())
+
+    with pytest.raises(InstanceConfigurationError):
+        verify_copy_filestore(result, tmp_path / "data", "target")
+
+
+def _make_symlink_entry(target: Path, entry: Path) -> str:
+    (target / "regular-asset").write_bytes(b"restored")
+    entry.symlink_to(target / "regular-asset")
+    return "asset"
+
+
+def _make_intermediate_symlink_entry(target: Path, _entry: Path) -> str:
+    outside = target / "outside"
+    outside.mkdir()
+    (outside / "asset").write_bytes(b"restored")
+    (target / "sub").symlink_to(outside, target_is_directory=True)
+    return "sub/asset"
+
+
+def _make_fifo_entry(_target: Path, entry: Path) -> str:
+    os.mkfifo(entry)
+    return "asset"
+
+
+@pytest.mark.parametrize(
+    "make_entry",
+    (_make_symlink_entry, _make_intermediate_symlink_entry, _make_fifo_entry),
+    ids=("file-symlink", "intermediate-symlink", "fifo"),
+)
+def test_copy_filestore_verification_rejects_symlinked_and_non_regular_targets(
+    tmp_path: Path, make_entry: Callable[[Path, Path], str]
+) -> None:
+    target = tmp_path / "data" / "filestore" / "target"
+    target.mkdir(parents=True)
+    entry = target / "asset"
+    store_fname = make_entry(target, entry)
+    result = ProcessResult(
+        argv=(),
+        returncode=0,
+        stdout=store_fname.encode().hex(),
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    with pytest.raises(InstanceConfigurationError):
+        verify_copy_filestore(result, tmp_path / "data", "target")
+
+
+def _symlink_filestore_root(data: Path, external: Path) -> None:
+    filestore = data / "filestore"
+    filestore.mkdir(parents=True)
+    filestore.rmdir()
+    filestore.symlink_to(external, target_is_directory=True)
+
+
+def _symlink_database_root(data: Path, external: Path) -> None:
+    filestore = data / "filestore"
+    filestore.mkdir(parents=True)
+    (filestore / "target").symlink_to(external / "target", target_is_directory=True)
+
+
+def _make_public_filestore_root_symlink(data: Path, target_db: str) -> None:
+    alternate = data / "filestore-alternate"
+    target = alternate / target_db
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "asset").write_bytes(b"restored")
+    filestore = data / "filestore"
+    if filestore.is_symlink():
+        filestore.unlink()
+    elif filestore.exists():
+        shutil.rmtree(filestore)
+    filestore.symlink_to(alternate, target_is_directory=True)
+
+
+def _make_public_database_root_symlink(data: Path, target_db: str) -> None:
+    alternate = data / "filestore-alternate"
+    target = alternate / target_db
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "asset").write_bytes(b"restored")
+    filestore = data / "filestore"
+    filestore.mkdir(parents=True, exist_ok=True)
+    target_link = filestore / target_db
+    if target_link.is_symlink() or target_link.is_file():
+        target_link.unlink()
+    elif target_link.exists():
+        shutil.rmtree(target_link)
+    target_link.symlink_to(target, target_is_directory=True)
+
+
+@pytest.mark.parametrize(
+    "make_root",
+    (_symlink_filestore_root, _symlink_database_root),
+    ids=("filestore-root", "database-root"),
+)
+def test_copy_filestore_verification_rejects_symlinked_roots(
+    tmp_path: Path, make_root: Callable[[Path, Path], None]
+) -> None:
+    data = tmp_path / "data"
+    external = tmp_path / "external"
+    target = external / "target"
+    target.mkdir(parents=True)
+    (target / "asset").write_bytes(b"restored")
+    make_root(data, external)
+    result = ProcessResult((), 0, "6173736574", "", 0.0, None, ())
+    with pytest.raises(InstanceConfigurationError):
+        verify_copy_filestore(result, data, "target")
 
 
 def test_copy_source_manager_uses_existing_project_python_before_owned_venv(
@@ -670,7 +803,11 @@ class TestCheckoutPreflight:
         psql = tmp_path / "psql"
         marker = tmp_path / "psql-called"
         psql.write_text(
-            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
+            "#!/bin/sh\n"
+            'case "$*" in *convert_to*store_fname*) '
+            'if [ -n "${ODCLI_TEST_PSQL_ATTACHMENT_ROW:-}" ]; then '
+            'printf "%s\\n" "$ODCLI_TEST_PSQL_ATTACHMENT_ROW"; fi; exit 0 ;; esac\n'
+            f'if [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
         )
         psql.chmod(0o755)
         monkeypatch.setattr(
@@ -832,7 +969,11 @@ class TestCheckoutPreflight:
         psql = tmp_path / "psql"
         marker = tmp_path / "psql-called"
         psql.write_text(
-            f'#!/bin/sh\nif [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
+            "#!/bin/sh\n"
+            'case "$*" in *convert_to*store_fname*) '
+            'if [ -n "${ODCLI_TEST_PSQL_ATTACHMENT_ROW:-}" ]; then '
+            'printf "%s\\n" "$ODCLI_TEST_PSQL_ATTACHMENT_ROW"; fi; exit 0 ;; esac\n'
+            f'if [ -f "{marker}" ]; then printf "1\\n"; else : > "{marker}"; fi\n'
         )
         psql.chmod(0o755)
         monkeypatch.setattr(
@@ -1730,6 +1871,9 @@ class TestCheckoutCopy:
             "  printf 'probe failed\\n' >&2\n"
             "  exit 1\n"
             "fi\n"
+            'case "$*" in *convert_to*store_fname*) '
+            'if [ -n "${ODCLI_TEST_PSQL_ATTACHMENT_ROW:-}" ]; then '
+            'printf "%s\\n" "$ODCLI_TEST_PSQL_ATTACHMENT_ROW"; fi; exit 0 ;; esac\n'
             'if [ "${ODCLI_TEST_PSQL_EXISTS_BEFORE:-}" = "1" ]; then\n'
             "  printf '1\\n'\n"
             "  exit 0\n"
@@ -2350,7 +2494,7 @@ class TestCheckoutCopy:
         )
         instance.databases.exists.assert_not_called()
 
-    def test_copy_consumes_exact_restore_probes_around_restore(
+    def test_copy_verifies_target_attachment_files_after_restore(
         self,
         env_client: OdooClient,
         project_manifest: Path,
@@ -2362,14 +2506,18 @@ class TestCheckoutCopy:
         instance = _copy_instance(env_client)
         _record_backup(env_client, instance.databases.backup.return_value)
         consumed: list[str] = []
-        original_process = RunContext.process
+        original_process = RunContext.process_prepared
 
-        def process(context: RunContext[object], step_id: str) -> object:
-            if step_id.startswith("database.restore.exists-"):
+        def process(context: RunContext[object], requested: PreparedStep) -> object:
+            step_id = requested.step_id
+            if (
+                step_id.startswith("database.restore.exists-")
+                or step_id == "database.restore.attachments"
+            ):
                 consumed.append(step_id)
-            return original_process(context, step_id)
+            return original_process(context, requested)
 
-        monkeypatch.setattr(RunContext, "process", process)
+        monkeypatch.setattr(RunContext, "process_prepared", process)
         self._checkout_copy(
             env_client, project_manifest, fake_python, "feat/copy-probes-run", instance
         )
@@ -2377,6 +2525,7 @@ class TestCheckoutCopy:
         assert consumed == [
             "database.restore.exists-before",
             "database.restore.exists-after",
+            "database.restore.attachments",
         ]
         instance.databases._restore_after_verified_absence.assert_called_once_with(
             instance.databases.backup.return_value,
@@ -2384,6 +2533,189 @@ class TestCheckoutCopy:
             copy=True,
             neutralize_database=True,
         )
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is EnvironmentState.READY
+
+    def test_copy_public_checkout_accepts_empty_attachment_query(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        instance = _copy_instance(env_client)
+        _record_backup(env_client, instance.databases.backup.return_value)
+        monkeypatch.setenv("ODCLI_TEST_PSQL_ATTACHMENT_ROW", "")
+
+        self._checkout_copy(
+            env_client,
+            project_manifest,
+            fake_python,
+            "feat/copy-verified-attachments",
+            instance,
+        )
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is EnvironmentState.READY
+        instance.databases._restore_after_verified_absence.assert_called_once_with(
+            instance.databases.backup.return_value,
+            "copy_target",
+            copy=True,
+            neutralize_database=True,
+        )
+
+    def test_copy_public_checkout_accepts_contained_regular_attachment_file(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        instance = _copy_instance(env_client)
+        _record_backup(env_client, instance.databases.backup.return_value)
+        monkeypatch.setenv("ODCLI_TEST_PSQL_ATTACHMENT_ROW", "6173736574")
+        data_dir = project_manifest / ".odcli" / "filestore"
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.environment.checkout._resolve_checkout_data_dir",
+            lambda *_args: data_dir,
+        )
+        target_file = data_dir / "filestore" / "copy_target" / "asset"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_bytes(b"restored")
+
+        self._checkout_copy(
+            env_client,
+            project_manifest,
+            fake_python,
+            "feat/copy-verified-attachments",
+            instance,
+        )
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is EnvironmentState.READY
+        assert target_file.read_bytes() == b"restored"
+        instance.databases._restore_after_verified_absence.assert_called_once_with(
+            instance.databases.backup.return_value,
+            "copy_target",
+            copy=True,
+            neutralize_database=True,
+        )
+
+    def test_copy_public_checkout_rejects_data_dir_symlink_swapped_after_planning(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from odoo_instance_sdk.resources.environment.checkout_filestore import (
+            verify_copy_filestore as verify,
+        )
+
+        instance = _copy_instance(env_client)
+        _record_backup(env_client, instance.databases.backup.return_value)
+        monkeypatch.setenv("ODCLI_TEST_PSQL_ATTACHMENT_ROW", "6173736574")
+        data_dir = project_manifest / ".odcli" / "copy-data-dir-swap"
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.environment.checkout._resolve_checkout_data_dir",
+            lambda *_args: data_dir,
+        )
+        outside = tmp_path / "outside-data-dir"
+        target = outside / "filestore" / "copy_target"
+        target.mkdir(parents=True)
+        sentinel = target / "asset"
+        sentinel.write_bytes(b"external")
+
+        def swap_data_dir_and_verify(result: Any, captured: Path | None, target_db: str) -> None:
+            assert captured == data_dir
+            data_dir.parent.mkdir(parents=True, exist_ok=True)
+            data_dir.symlink_to(outside, target_is_directory=True)
+            return verify(result, captured, target_db)
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.environment.settings.verify_copy_filestore",
+            swap_data_dir_and_verify,
+        )
+
+        refusal: InstanceConfigurationError | None = None
+        try:
+            self._checkout_copy(
+                env_client,
+                project_manifest,
+                fake_python,
+                "feat/copy-data-dir-symlink-swap",
+                instance,
+            )
+        except InstanceConfigurationError as exc:
+            refusal = exc
+
+        environments = env_client.environments.list(project=project_manifest)
+        assert refusal is not None, (
+            "public COPY accepted the external data_dir symlink after planning; "
+            f"resulting states={[env.state.value for env in environments]}"
+        )
+        assert "filestore root" in str(refusal) and "unsafe" in str(refusal)
+        assert environments and all(env.state is not EnvironmentState.READY for env in environments)
+        assert sentinel.read_bytes() == b"external"
+        instance.databases._restore_after_verified_absence.assert_called_once_with(
+            instance.databases.backup.return_value,
+            "copy_target",
+            copy=True,
+            neutralize_database=True,
+        )
+        instance.databases.drop.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "make_root_symlink",
+        (_make_public_filestore_root_symlink, _make_public_database_root_symlink),
+        ids=("filestore-root", "target-database-root"),
+    )
+    def test_copy_public_checkout_rejects_symlinked_filestore_root_before_ready(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_root_symlink: Callable[[Path, str], None],
+    ) -> None:
+        from odoo_instance_sdk.resources.environment.checkout_filestore import (
+            verify_copy_filestore as verify,
+        )
+
+        instance = _copy_instance(env_client)
+        _record_backup(env_client, instance.databases.backup.return_value)
+        monkeypatch.setenv("ODCLI_TEST_PSQL_ATTACHMENT_ROW", "6173736574")
+        sandbox_data_dir = project_manifest / ".odcli" / "copy-symlink-data"
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.environment.checkout._resolve_checkout_data_dir",
+            lambda *_args: sandbox_data_dir,
+        )
+        original_verify = verify
+
+        def create_internal_symlink_and_verify(
+            context: Any, data_dir: Path | None, target_db: str
+        ) -> None:
+            assert data_dir is not None
+            make_root_symlink(data_dir, target_db)
+            original_verify(context, data_dir, target_db)
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.environment.settings.verify_copy_filestore",
+            create_internal_symlink_and_verify,
+        )
+
+        with pytest.raises(InstanceConfigurationError, match=r"filestore root.*unsafe"):
+            self._checkout_copy(
+                env_client,
+                project_manifest,
+                fake_python,
+                "feat/copy-symlink-root-refused",
+                instance,
+            )
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is not EnvironmentState.READY
 
     def test_copy_rejects_failed_restore_probe_before_restore(
         self,

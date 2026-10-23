@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.proc import PreparedStep, is_process_alive
@@ -61,6 +61,24 @@ def _read_json_object(path: Path) -> dict[str, JsonValue] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _companion_metadata_shape_error(value: JsonValue) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return "update recovery snapshot has malformed companion provenance"
+    previous_sha = value.get("previous_sha")
+    previous_sdk_sha = value.get("previous_sdk_sha")
+    if not isinstance(previous_sha, str) or not isinstance(previous_sdk_sha, str):
+        return "update recovery snapshot has malformed companion provenance"
+    if not _full_sha(previous_sha) or not _full_sha(previous_sdk_sha):
+        return "update recovery snapshot has malformed companion provenance"
+    if not isinstance(value.get("environment"), str) or not isinstance(
+        value.get("source_repo"), str
+    ):
+        return "update recovery snapshot has malformed companion provenance"
+    return None
+
+
 def _snapshot_metadata_shape_error(
     metadata: dict[str, JsonValue], journal_version: int
 ) -> str | None:
@@ -89,6 +107,13 @@ def _snapshot_metadata_shape_error(
     direct_requirement = metadata.get("direct_requirement")
     if direct_requirement is not None and not isinstance(direct_requirement, str):
         return "update recovery snapshot metadata has malformed direct_requirement"
+    return _snapshot_metadata_optional_shape_error(metadata)
+
+
+def _snapshot_metadata_optional_shape_error(metadata: dict[str, JsonValue]) -> str | None:
+    companion_error = _companion_metadata_shape_error(metadata.get("companion"))
+    if companion_error is not None:
+        return companion_error
     if metadata["source_repo"] is not None and not isinstance(metadata["source_repo"], str):
         return "update recovery snapshot metadata has malformed source_repo"
     previous_sha = metadata["previous_sha"]
@@ -96,6 +121,55 @@ def _snapshot_metadata_shape_error(
         not isinstance(previous_sha, str) or not _full_sha(previous_sha)
     ):
         return "update recovery snapshot metadata has malformed previous_sha"
+    return None
+
+
+def _journal_state_error(
+    *,
+    version: JsonValue,
+    pid: JsonValue,
+    phase: JsonValue,
+    target_ref: str | None,
+    snapshot_sha: str | None,
+    snapshot_present: bool,
+) -> str | None:
+    from odoo_instance_sdk.internal.self_update import _JOURNAL_PHASES, _JOURNAL_VERSION
+
+    if not isinstance(version, int) or isinstance(version, bool):
+        return "update recovery journal has missing or malformed version"
+    if version != _JOURNAL_VERSION:
+        return "update recovery journal has an unsupported version"
+    if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
+        return "update recovery journal has malformed maintenance_pid"
+    if phase not in _JOURNAL_PHASES:
+        return "update recovery journal has an invalid phase"
+    if target_ref is None:
+        return "update recovery journal has no immutable target_ref"
+    if snapshot_sha is None:
+        return "update recovery journal has no immutable snapshot_sha"
+    if not snapshot_present:
+        return "update recovery snapshot directory is missing"
+    return None
+
+
+def _journal_companion_error(
+    journal: dict[str, JsonValue], metadata: dict[str, JsonValue] | None
+) -> str | None:
+    journal_companion = journal.get("companion")
+    snapshot_companion = metadata.get("companion") if metadata is not None else None
+    if journal_companion is None and snapshot_companion is None:
+        return None
+    if journal_companion is None:
+        return "update recovery journal is missing companion provenance"
+    if (
+        not isinstance(journal_companion, dict)
+        or not isinstance(snapshot_companion, dict)
+        or any(
+            journal_companion.get(field) != snapshot_companion.get(field)
+            for field in ("previous_sha", "previous_sdk_sha", "environment")
+        )
+    ):
+        return "update recovery journal and snapshot companion provenance disagree"
     return None
 
 
@@ -147,11 +221,7 @@ def _snapshot_metadata_error(
 
 def inspect_update_recovery_state(user_root: Path) -> UpdateRecoveryState:
     """Inspect recovery paths without creating, locking, or mutating them."""
-    from odoo_instance_sdk.internal.self_update import (
-        _JOURNAL_PHASES,
-        _JOURNAL_VERSION,
-        _is_full_sha,
-    )
+    from odoo_instance_sdk.internal.self_update import _is_full_sha
 
     root = user_root / "update"
     journal_path = root / "journal.json"
@@ -200,28 +270,24 @@ def inspect_update_recovery_state(user_root: Path) -> UpdateRecoveryState:
         if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) and raw_pid > 0
         else None
     )
-    diagnostic: str | None
-    if not isinstance(raw_version, int) or isinstance(raw_version, bool):
-        diagnostic = "update recovery journal has missing or malformed version"
-    elif raw_version != _JOURNAL_VERSION:
-        diagnostic = "update recovery journal has an unsupported version"
-    elif raw_pid is not None and maintenance_pid is None:
-        diagnostic = "update recovery journal has malformed maintenance_pid"
-    elif phase not in _JOURNAL_PHASES:
-        diagnostic = "update recovery journal has an invalid phase"
-    elif target_ref is None:
-        diagnostic = "update recovery journal has no immutable target_ref"
-    elif snapshot_sha is None:
-        diagnostic = "update recovery journal has no immutable snapshot_sha"
-    elif not snapshot_present:
-        diagnostic = "update recovery snapshot directory is missing"
-    else:
+    diagnostic = _journal_state_error(
+        version=raw_version,
+        pid=raw_pid,
+        phase=phase,
+        target_ref=target_ref,
+        snapshot_sha=snapshot_sha,
+        snapshot_present=snapshot_present,
+    )
+    if diagnostic is None:
+        metadata = _read_json_object(snapshot_dir / "metadata.json")
         diagnostic = _snapshot_metadata_error(
-            _read_json_object(snapshot_dir / "metadata.json"),
-            journal_version=raw_version,
+            metadata,
+            journal_version=cast("int", raw_version),
             target_ref=target_ref,
             snapshot_sha=snapshot_sha,
         )
+        if diagnostic is None:
+            diagnostic = _journal_companion_error(journal, metadata)
     return UpdateRecoveryState(
         journal_state="present" if journal_present else "absent",
         snapshot_state="present" if snapshot_present else "absent",

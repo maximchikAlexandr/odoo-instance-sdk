@@ -489,9 +489,12 @@ odcli env checkout PROJ-123 --db-mode copy --backup 01234567-89ab-cdef-0123-4567
 
 The resulting database and filestore remain local and independently writable;
 the source name, origin, database, declared branch, resolved local commit, and
-backup UUID are retained as provenance. A declared branch is metadata, not
-proof of the code deployed on the remote. Existing `stop`, `env rm`, and
-recovery commands remain the composition surface for lifecycle cleanup.
+backup UUID are retained as provenance. Before marking COPY ready, the SDK
+checks that each bounded file-backed attachment query resolves to a regular
+file inside the target database filestore; databases without file-backed
+attachments are valid. A declared branch is metadata, not proof of the code
+deployed on the remote. Existing `stop`, `env rm`, and recovery commands remain
+the composition surface for lifecycle cleanup.
 
 Environment-bound detached launches may wait for the exact owned runtime and
 listener to become ready. Readiness is opt-in, bounded, and fails closed when
@@ -609,14 +612,16 @@ odcli translations export --module sale --language en_US --dry-run --format json
 ```
 
 Git operations are staged-only where applicable and use the shared immutable
-plan boundary. Project-aware `git commit` retains its Odoo policy; explicit
-`--repo`/`--member-id` selects the generic GitLab workflow without `odcli init`.
+plan boundary. Project-aware `git commit` retains its Odoo policy and accepts a
+verified member identity without `--repo`; explicit `--repo`/`--member-id`
+selects the generic GitLab workflow without `odcli init`.
 Generic commit subjects are repository-neutral, while `git sync` fetches and
 rebases before an optional same-name HTTPS publication. Use `--dry-run` before
 mutation; a stale remote lease or conflict fails without an automatic retry:
 
 ```bash
 odcli git commit "describe the staged change" --ticket PROJ-123 --dry-run
+odcli git commit "describe the staged change" --member-id 11111111-1111-4111-8111-111111111111 --dry-run
 odcli git check --base main --format json
 odcli git absorb --dry-run
 odcli git sync --base main --push --dry-run
@@ -738,7 +743,10 @@ Mutating execution uses an exclusive lock on
 `~/.odcli/locks/odcli-update.lock`, snapshots affected metadata, installs
 through `uv tool install --force`, and runs maintenance migrations in a child
 `odcli update --format json` with `ODCLI_MAINTENANCE=1`. Pip, pipx, system, and
-editable installs are refused.
+editable installs are refused. When a supported `odcli-multica` uv tool is
+installed, update pins its package and embedded SDK to the same revision,
+verifies both tool environments, and retains recovery evidence if either
+replacement fails. Core-only installations remain core-only.
 
 ```bash
 odcli bug-report init --title "stop does not stop foreground run" --kind bug --dry-run
