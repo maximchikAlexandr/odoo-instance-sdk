@@ -46,7 +46,7 @@ from odoo_instance_sdk.internal.project_removal import (
     RemovalPublicationSource,
     RemovalRuntimeSource,
     build_project_removal_projection,
-    removal_fingerprint,
+    forget_resource_fingerprint,
     resolve_project_selector,
 )
 from odoo_instance_sdk.internal.publication_routes import read_owned_routes
@@ -312,6 +312,12 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
         registration.repository_root,
         registration.git_common_dir,
     )
+    config_evidence_complete |= catalog._project_purge_proves_missing_config(
+        registration.project_id,
+        registration.registration_state,
+        manifest_present,
+        claim is not None,
+    )
     active_claim = claim if claim is not None and claim.state == "active" else None
     active_cluster_id = str(active_claim.cluster_id) if active_claim is not None else None
     database_required = database_name is not None or active_claim is not None
@@ -478,22 +484,6 @@ def _planned_projection(
         volume_observation=volume_observation,
         git_status_step_id=git_status_step_id,
         git_status_hardened=git_status_hardened,
-    )
-
-
-def _forget_resource_fingerprint(projection: ProjectRemovalProjection) -> str:
-    """Fingerprint stable forget decisions, excluding mutable DB/volume evidence."""
-    stable_decisions = tuple(
-        decision
-        for decision in projection.decisions
-        if decision.resource_type not in {"database", "volume"}
-    )
-    return removal_fingerprint(
-        projection.project_id,
-        projection.registration_state,
-        projection.repository_root,
-        stable_decisions,
-        complete=True,
     )
 
 
@@ -791,10 +781,10 @@ def capture_project_removal_command(  # noqa: C901
         ),
         warnings=(),
         fingerprint=(
-            _forget_resource_fingerprint(projection) if not purge else projection.fingerprint
+            forget_resource_fingerprint(projection) if not purge else projection.fingerprint
         ),
     )
-    captured_forget_fingerprint = _forget_resource_fingerprint(projection) if not purge else None
+    captured_forget_fingerprint = forget_resource_fingerprint(projection) if not purge else None
     confirmation_value = [confirmation]
 
     def run(context: RunContext[ProjectRemovalResult]) -> ProjectRemovalResult:  # noqa: C901
@@ -846,7 +836,7 @@ def capture_project_removal_command(  # noqa: C901
                     git_status_hardened=git_status_step_id is not None,
                 )
                 assert captured_forget_fingerprint is not None
-                if _forget_resource_fingerprint(current_projection) != captured_forget_fingerprint:
+                if forget_resource_fingerprint(current_projection) != captured_forget_fingerprint:
                     raise _error(
                         "project removal plan is stale",
                         projection,
@@ -983,6 +973,16 @@ def capture_project_removal_command(  # noqa: C901
                     completed=tuple(completed),
                     retained=tuple(retained),
                     remaining=tuple(remaining),
+                )
+            if not catalog._mark_project_purge_completed(registration.project_id):
+                raise _error(
+                    "project registration changed before purge completion was recorded",
+                    current_projection,
+                    mode=mode,
+                    failed_step="project-removal:finalize",
+                    decisions=decisions,
+                    completed=tuple(completed),
+                    retained=tuple(retained),
                 )
             return ProjectRemovalResult(
                 project_id=registration.project_id,

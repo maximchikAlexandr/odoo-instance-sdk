@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,7 @@ def _document(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return document
 
 
+@pytest.mark.parametrize("retain_source", [False, True], ids=["removed-source", "retained-source"])
 def test_public_project_forget_reinit_and_purge(
     tmp_path: Path,
     target_runtime: E2ERuntime,
@@ -52,11 +54,13 @@ def test_public_project_forget_reinit_and_purge(
     failure_evidence: FailureEvidence,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
+    retain_source: bool,
 ) -> None:
     """Exercise one disposable project through the public CLI boundary."""
     project = _project(
         target_runtime,
-        target_runtime.root / f"project-removal-{target_runtime.run_id}",
+        target_runtime.root
+        / (f"project-removal-{target_runtime.run_id}-{'retained' if retain_source else 'removed'}"),
         source=source_backup_plan,
     )
     catalog_path = _catalog_for_project(target_runtime, project)
@@ -70,10 +74,15 @@ def test_public_project_forget_reinit_and_purge(
     if command is None:
         pytest.fail("odcli executable is required for public project removal")
 
-    unrelated_project = target_runtime.root / f"unrelated-project-{target_runtime.run_id}"
+    source_variant = "retained" if retain_source else "removed"
+    unrelated_project = (
+        target_runtime.root / f"unrelated-project-{target_runtime.run_id}-{source_variant}"
+    )
     unrelated_project.mkdir()
     (unrelated_project / "sentinel.txt").write_text("unrelated\n", encoding="utf-8")
-    shared_resource = target_runtime.root / f"shared-resource-{target_runtime.run_id}.dat"
+    shared_resource = (
+        target_runtime.root / f"shared-resource-{target_runtime.run_id}-{source_variant}.dat"
+    )
     shared_resource.write_bytes(b"shared resource\n")
 
     def invoke(*args: str, cwd: Path = project) -> subprocess.CompletedProcess[str]:
@@ -92,6 +101,14 @@ def test_public_project_forget_reinit_and_purge(
         for row in catalog.list_projects(include_forgotten=True)
         if Path(str(row["repository_root"])).resolve() == project.resolve()
     )
+    registration = catalog.get_project_for_lifecycle(project_id)
+    assert registration is not None
+    claim = catalog._get_postgres_cluster_for_project(
+        project_id,
+        str(registration["repository_root"]),
+        str(registration["git_common_dir"]),
+    )
+    assert claim is not None and claim.state == "active"
     catalog.close()
     project_cluster = PostgresCluster.from_project(project)
     project_postgres_port = project_cluster.endpoint_port
@@ -127,6 +144,7 @@ def test_public_project_forget_reinit_and_purge(
     retained_environments = catalog.list_environments(project_id=project_id, include_removed=True)
     assert len(forgotten_projects) == 1
     assert str(forgotten_projects[0]["registration_state"]) == "forgotten"
+    assert not catalog._project_purge_completed(project_id)
     assert registered_projects == []
     assert len(retained_environments) == 1
     retained_bytes = sum(path.stat().st_size for path in project.rglob("*") if path.is_file())
@@ -192,6 +210,12 @@ def test_public_project_forget_reinit_and_purge(
     )
     assert wrong_confirmation.returncode == 1, wrong_confirmation.stdout + wrong_confirmation.stderr
     assert _document(wrong_confirmation)["error"]["code"] == "confirmation_required"
+    if retain_source:
+        # Match a caller-owned checkout whose remaining source fails the
+        # registered Git provenance check after purge removes its manifest.
+        (project / ".odcli-e2e-retained-source.txt").write_text(
+            "caller-owned source\n", encoding="utf-8"
+        )
     purge = invoke(
         "remove",
         "--project-id",
@@ -203,9 +227,41 @@ def test_public_project_forget_reinit_and_purge(
     assert purge.returncode == 0, purge.stdout + purge.stderr
     purge_document = _document(purge)
     assert purge_document["result"]["registration_state"] == "forgotten"
-    assert not project.exists()
+    assert project.exists() is retain_source
+    assert not (project / ".odcli" / "project.toml").exists()
+    if retain_source:
+        assert (project / ".odcli-e2e-retained-source.txt").read_text(encoding="utf-8") == (
+            "caller-owned source\n"
+        )
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
     assert shared_resource.read_bytes() == b"shared resource\n"
+
+    # Read the durable catalogue and Docker independently before issuing a
+    # fresh full-id command. The purge must retire the exact legacy-aware
+    # claim only after both owned Compose resources have been verified absent.
+    catalog = BackupCatalog(db_path=catalog_path)
+    persisted = catalog.get_project_for_lifecycle(project_id)
+    assert persisted is not None
+    assert persisted["registration_state"] == "forgotten"
+    assert catalog._project_purge_completed(project_id)
+    assert catalog._get_postgres_cluster(claim.project_id) is None
+    assert catalog._get_postgres_cluster_by_id(claim.cluster_id) is None
+    assert (
+        catalog._conn.execute(
+            "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1", (project_id,)
+        ).fetchone()
+        is None
+    )
+    catalog.close()
+    for docker_args, label in (
+        (("docker", "inspect", claim.compose_project + "-postgres-1"), "container"),
+        (("docker", "volume", "inspect", claim.volume_name), "volume"),
+    ):
+        absent = subprocess.run(docker_args, capture_output=True, text=True, check=False)
+        assert absent.returncode != 0
+        assert "no such" in (absent.stdout + absent.stderr).lower(), (
+            f"{label} absence was not proven: {absent.stdout}{absent.stderr}"
+        )
 
     cleanup_audit = audit_no_leaks(
         target_runtime.run_id,
@@ -213,6 +269,9 @@ def test_public_project_forget_reinit_and_purge(
     )
     assert cleanup_audit.clean, cleanup_audit.leaks
 
+    observer = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+    observer.execute("PRAGMA query_only=ON")
+    changes_before_repeat = int(observer.execute("PRAGMA data_version").fetchone()[0])
     repeated = invoke(
         "remove",
         "--project-id",
@@ -223,7 +282,19 @@ def test_public_project_forget_reinit_and_purge(
         cwd=tmp_path,
     )
     assert repeated.returncode == 0, repeated.stdout + repeated.stderr
-    assert _document(repeated)["result"]["registration_state"] == "forgotten"
+    repeated_result = _document(repeated)["result"]
+    assert repeated_result["registration_state"] == "forgotten"
+    assert repeated_result["completed"] == []
+    assert repeated_result["remaining"] == []
+    assert int(observer.execute("PRAGMA data_version").fetchone()[0]) == changes_before_repeat
+    observer.close()
+    catalog = BackupCatalog(db_path=catalog_path)
+    persisted_after_repeat = catalog.get_project_for_lifecycle(project_id)
+    assert persisted_after_repeat is not None
+    assert persisted_after_repeat["registration_state"] == "forgotten"
+    assert catalog._project_purge_completed(project_id)
+    assert catalog._get_postgres_cluster(claim.project_id) is None
+    catalog.close()
     record(
         record_property,
         "E2E-CP-16",

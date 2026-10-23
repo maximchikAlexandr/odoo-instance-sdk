@@ -29,7 +29,9 @@ class _RestoreMixin:
 
         def _cluster_uuid(self, value: uuid.UUID | str) -> str: ...
 
-        def _get_postgres_cluster_by_id(self, cluster_id: str) -> PostgresClusterClaim | None: ...
+        def _get_postgres_cluster_by_id(
+            self, cluster_id: uuid.UUID | str
+        ) -> PostgresClusterClaim | None: ...
 
     @_translate_sqlite_error
     def record_restore(

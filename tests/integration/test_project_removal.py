@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -18,10 +19,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from odoo_instance_sdk.exceptions import ProjectRemovalError
+from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.dbprep import bootstrap
+from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -741,7 +743,7 @@ def test_projection_fails_closed_for_unobserved_database_and_compose_volume(
     claim = catalog._ensure_postgres_cluster_pending(
         legacy_project_id, compose_project, volume_name
     )
-    catalog._activate_postgres_cluster(
+    claim = catalog._activate_postgres_cluster(
         claim.cluster_id, legacy_project_id, compose_project, volume_name
     )
     foreign_root = tmp_path / "foreign"
@@ -1768,9 +1770,27 @@ def test_projection_retains_dirty_primary_source_at_capture(tmp_path: Path) -> N
     catalog.close()
 
 
-def test_public_remove_command_executes_observed_database_and_compose_before_forget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _observed_database_and_compose_removal_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verification_error: str | None,
+    *,
+    absence_observed: threading.Event | None = None,
+    continue_after_absence: threading.Event | None = None,
+    container_absent: bool = False,
+) -> tuple[
+    BackupCatalog,
+    str,
+    Path,
+    Command[ProjectRemovalResult],
+    str,
+    tuple[str, ...],
+    RecordingExecutor,
+    RecordingExecutor,
+    str,
+    dict[str, BackupCatalog],
+    OdooClient,
+]:
     catalog, project_id, root = _catalog(tmp_path)
     subprocess.run(("git", "init", str(root)), check=True, capture_output=True)
     manifest_dir = root / ".odcli"
@@ -1801,7 +1821,7 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     claim = catalog._ensure_postgres_cluster_pending(
         legacy_project_id, compose_project, volume_name
     )
-    catalog._activate_postgres_cluster(
+    claim = catalog._activate_postgres_cluster(
         claim.cluster_id, legacy_project_id, compose_project, volume_name
     )
     full_container_id = "a" * 64
@@ -1854,10 +1874,11 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
         databases=SimpleNamespace(list_inventory=lambda *_args, **_kwargs: database_inventory),
         _postgres_cluster=cluster,
     )
+    catalog_holder = {"catalog": catalog}
     client = cast(
         "OdooClient",
         SimpleNamespace(
-            get_catalog=lambda: catalog,
+            get_catalog=lambda: catalog_holder["catalog"],
             instance=SimpleNamespace(from_project=lambda _project: instance),
         ),
     )
@@ -1891,6 +1912,16 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
                 }
             )
         elif step.step_id.endswith("inspect-container"):
+            if container_absent:
+                return ProcessResult(
+                    argv=step.argv,
+                    returncode=1,
+                    stdout="",
+                    stderr="No such container",
+                    duration=0.0,
+                    cwd=step.cwd,
+                    environment=step.environment,
+                )
             stdout = json.dumps(
                 {
                     "Name": f"/{compose_project}-postgres-1",
@@ -1907,11 +1938,21 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
             )
         elif step.step_id.endswith("verify-volume") or step.step_id.endswith("verify-container"):
             stdout = ""
+            if (
+                step.step_id.endswith("verify-container")
+                and verification_error is None
+                and absence_observed is not None
+            ):
+                absence_observed.set()
+                if continue_after_absence is not None and not continue_after_absence.wait(
+                    timeout=10
+                ):
+                    raise TimeoutError("purge test was not released after absence proof")
             return ProcessResult(
                 argv=step.argv,
                 returncode=1,
                 stdout=stdout,
-                stderr="No such object",
+                stderr=verification_error or "No such object",
                 duration=0.0,
                 cwd=step.cwd,
                 environment=step.environment,
@@ -1956,6 +1997,40 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     plan_step_ids = tuple(step.step_id for step in command.plan.steps)
     assert any("database" in step_id and "guarded-drop" in step_id for step_id in plan_step_ids)
     assert any(step_id.endswith(":destroy") for step_id in plan_step_ids)
+    return (
+        catalog,
+        project_id,
+        root,
+        command,
+        captured_fingerprint,
+        plan_step_ids,
+        database_executor,
+        compose_executor,
+        legacy_project_id,
+        catalog_holder,
+        client,
+    )
+
+
+def test_public_remove_command_executes_observed_database_and_compose_before_forget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        catalog,
+        project_id,
+        root,
+        command,
+        captured_fingerprint,
+        plan_step_ids,
+        database_executor,
+        compose_executor,
+        legacy_project_id,
+        catalog_holder,
+        client,
+    ) = _observed_database_and_compose_removal_case(tmp_path, monkeypatch, verification_error=None)
+    assert captured_fingerprint
+    assert any("database" in step_id and "guarded-drop" in step_id for step_id in plan_step_ids)
+    assert any(step_id.endswith(":destroy") for step_id in plan_step_ids)
     result = command.run()
 
     assert command.plan.fingerprint == captured_fingerprint
@@ -1979,6 +2054,187 @@ def test_public_remove_command_executes_observed_database_and_compose_before_for
     assert result.completed[-1].action == "forget"
     assert not root.exists()
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert catalog._get_postgres_cluster(legacy_project_id) is None
+    catalog_path = catalog.db_path
+    catalog.close()
+
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog_holder["catalog"] = catalog
+    persisted = catalog.get_project_for_lifecycle(project_id)
+    assert persisted is not None
+    assert persisted["registration_state"] == "forgotten"
+    assert catalog._get_postgres_cluster(legacy_project_id) is None
+    repeat_command = ProjectResource(_client=client).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    assert all("volume:" not in step.step_id for step in repeat_command.plan.steps)
+    assert all("compose:" not in step.step_id for step in repeat_command.plan.steps)
+    changes_before_repeat = catalog._conn.total_changes
+    repeated = repeat_command.run()
+    assert repeated.registration_state == "forgotten"
+    assert catalog._conn.total_changes == changes_before_repeat
+    persisted_after_repeat = catalog.get_project_for_lifecycle(project_id)
+    assert persisted_after_repeat is not None
+    assert persisted_after_repeat["registration_state"] == "forgotten"
+    catalog.close()
+
+
+def test_public_remove_command_refuses_unavailable_compose_postcondition_before_forget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        catalog,
+        project_id,
+        root,
+        command,
+        _captured_fingerprint,
+        _plan_step_ids,
+        database_executor,
+        _compose_executor,
+        legacy_project_id,
+        _catalog_holder,
+        _client,
+    ) = _observed_database_and_compose_removal_case(
+        tmp_path, monkeypatch, verification_error="Cannot connect to the Docker daemon"
+    )
+    changes_before_failure = catalog._conn.total_changes
+    with pytest.raises(ProjectRemovalError, match="project removal step failed"):
+        command.run()
+    active_claim = catalog._get_postgres_cluster(legacy_project_id)
+    assert active_claim is not None
+    assert active_claim.state == "active"
+    assert active_claim.compose_project == f"odcli_pg_{legacy_project_id}"
+    assert active_claim.volume_name == f"pgdata_{legacy_project_id}"
+    assert catalog._conn.total_changes == changes_before_failure
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert [step.step_id for step in database_executor.executed] == [
+        "project-removal.database.guarded-drop:database:owned_db"
+    ]
+    assert root.exists()
+    catalog.close()
+
+
+def test_compose_purge_retains_claim_when_cluster_lock_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        catalog,
+        project_id,
+        root,
+        command,
+        _fingerprint,
+        _step_ids,
+        _database_executor,
+        compose_executor,
+        cluster_project_id,
+        _catalog_holder,
+        _client,
+    ) = _observed_database_and_compose_removal_case(tmp_path, monkeypatch, verification_error=None)
+    with (
+        exclusive_lock(postgres_cluster_lock_path(cluster_project_id)),
+        pytest.raises(ProjectRemovalError, match="project removal step failed"),
+    ):
+        command.run()
+
+    retained_claim = catalog._get_postgres_cluster(cluster_project_id)
+    assert retained_claim is not None
+    assert retained_claim.state == "active"
+    assert compose_executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert root.exists()
+    catalog.close()
+
+
+def test_public_remove_command_retires_claim_when_owned_container_is_already_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        catalog,
+        project_id,
+        root,
+        command,
+        _fingerprint,
+        _step_ids,
+        database_executor,
+        compose_executor,
+        cluster_project_id,
+        _catalog_holder,
+        _client,
+    ) = _observed_database_and_compose_removal_case(
+        tmp_path, monkeypatch, verification_error=None, container_absent=True
+    )
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert [step.step_id.rsplit(":", 1)[-1] for step in compose_executor.executed] == [
+        "inspect-volume",
+        "inspect-container",
+        "remove-volume",
+        "verify-volume",
+        "verify-container",
+    ]
+    assert [step.step_id for step in database_executor.executed] == [
+        "project-removal.database.guarded-drop:database:owned_db"
+    ]
+    assert catalog._get_postgres_cluster(cluster_project_id) is None
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert not root.exists()
+    catalog.close()
+
+
+def test_compose_purge_holds_cluster_lock_from_absence_proof_through_claim_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    absence_observed = threading.Event()
+    continue_after_absence = threading.Event()
+    (
+        catalog,
+        project_id,
+        root,
+        command,
+        _fingerprint,
+        _step_ids,
+        _database_executor,
+        _compose_executor,
+        cluster_project_id,
+        _catalog_holder,
+        _client,
+    ) = _observed_database_and_compose_removal_case(
+        tmp_path,
+        monkeypatch,
+        verification_error=None,
+        absence_observed=absence_observed,
+        continue_after_absence=continue_after_absence,
+    )
+    reconcile_attempted = threading.Event()
+    reconcile_acquired = threading.Event()
+    reconcile_denied = threading.Event()
+
+    def reconcile_cluster() -> None:
+        assert absence_observed.wait(timeout=10)
+        reconcile_attempted.set()
+        try:
+            with exclusive_lock(postgres_cluster_lock_path(cluster_project_id)):
+                reconcile_acquired.set()
+        except LockConflictError:
+            reconcile_denied.set()
+        finally:
+            continue_after_absence.set()
+
+    reconcile_thread = threading.Thread(target=reconcile_cluster)
+    reconcile_thread.start()
+    result = command.run()
+    reconcile_thread.join(timeout=5)
+    assert not reconcile_thread.is_alive()
+    assert result.registration_state == "forgotten"
+    assert reconcile_attempted.is_set()
+    assert reconcile_denied.is_set()
+    assert not reconcile_acquired.is_set()
+    assert catalog._get_postgres_cluster(cluster_project_id) is None
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert not root.exists()
     catalog.close()
 
 
@@ -2108,7 +2364,7 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
     claim = catalog._ensure_postgres_cluster_pending(
         legacy_project_id, compose_project, volume_name
     )
-    catalog._activate_postgres_cluster(
+    claim = catalog._activate_postgres_cluster(
         claim.cluster_id, legacy_project_id, compose_project, volume_name
     )
 
@@ -2147,6 +2403,11 @@ def test_public_remove_command_blocks_forget_when_required_observation_is_unavai
     details = cast("dict[str, object]", error.value.details["removal"])
     assert details["failed_step"] == "project-removal:observations"
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    retained_claim = catalog._get_postgres_cluster(legacy_project_id)
+    assert retained_claim == claim
+    assert retained_claim is not None
+    assert retained_claim.state == "active"
+    assert retained_claim.activated_at is not None
     assert manifest.exists()
     assert root.exists()
     catalog.close()
