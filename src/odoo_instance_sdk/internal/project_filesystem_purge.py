@@ -44,6 +44,7 @@ def project_owned_paths(
         ("secret", odcli / ".env"),
         ("temporary", odcli / "tmp"),
         ("log", odcli / "logs"),
+        ("log", odcli / "odoo.log"),
         ("python_environment", root / ".venv"),
     ]
     if managed_filestore is not None:
@@ -55,7 +56,15 @@ def project_owned_paths(
 
 def _assert_safe_directory(path: Path, *, source: bool) -> None:
     """Refuse a recursive delete when ownership or link traversal is ambiguous."""
-    unknown_odcli = {"project.toml", "odoo.conf", ".env", "tmp", "logs", "filestore"}
+    unknown_odcli = {
+        "project.toml",
+        "odoo.conf",
+        ".env",
+        "tmp",
+        "logs",
+        "odoo.log",
+        "filestore",
+    }
     try:
         for directory, directories, files in os.walk(path, followlinks=False):
             directory_path = Path(directory)
