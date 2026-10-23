@@ -566,8 +566,13 @@ def capture_project_removal_command(  # noqa: C901
     terminal_purge = (
         purge
         and _forgotten_project_is_inert(catalog, registration)
-        and not any(
-            decision.resource_type not in {"project", "source"} for decision in projection.decisions
+        # The inert check revalidates each durable removed environment row
+        # and proves its owned worktree/Python paths are absent. Those rows
+        # can still appear as projection decisions; they are not live work.
+        and all(
+            decision.resource_type
+            in {"project", "source", "environment", "worktree", "python_environment"}
+            for decision in projection.decisions
         )
     )
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
@@ -789,11 +794,6 @@ def capture_project_removal_command(  # noqa: C901
                     project_id=registration.project_id,
                     mode="purge",
                     registration_state="forgotten",
-                    retained=tuple(
-                        decision.public()
-                        for decision in projection.decisions
-                        if decision.action == "retain"
-                    ),
                 )
             current_projection = _planned_projection(
                 catalog,
