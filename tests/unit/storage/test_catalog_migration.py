@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 
 import odoo_instance_sdk.storage.catalog_migrate as catalog_migrate
 from odoo_instance_sdk.exceptions import BackupCatalogError
@@ -16,6 +17,7 @@ from odoo_instance_sdk.internal.applied_settings import (
     LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     encode_applied_settings,
 )
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from odoo_instance_sdk.storage.catalog_migrate import (
     CATALOG_REVISION,
@@ -173,6 +175,144 @@ def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
     indexes = {row[1] for row in catalog._conn.execute("PRAGMA index_list(backups)")}
     assert "backups_point_order_idx" in indexes
     catalog.close()
+
+
+def _downgrade_to_stamped_0012(db: Path) -> None:
+    command.downgrade(_alembic_config(db), "0012")
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("ALTER TABLE projects DROP COLUMN purge_completed_at")
+        conn.commit()
+
+
+def _downgrade_to_stamped_0013(db: Path) -> None:
+    command.downgrade(_alembic_config(db), "0013")
+
+
+def _assert_0012_predecessor_schema(conn: sqlite3.Connection) -> None:
+    assert "purge_completed_at" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(projects)")
+    }
+
+
+def _assert_0013_predecessor_schema(conn: sqlite3.Connection) -> None:
+    assert "purge_completed_at" in {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+
+
+def _assert_backup_catalog_opens_stamped_purge_predecessor_without_losing_rows(
+    tmp_path: Path,
+    *,
+    predecessor: str,
+    prepare_predecessor: Callable[[Path], None],
+    assert_predecessor_schema: Callable[[sqlite3.Connection], None],
+) -> None:
+    db = tmp_path / f"catalog-{predecessor}.sqlite3"
+    root = tmp_path / "registered-project"
+    root.mkdir()
+    common = root / ".git"
+    project_id = f"project_{repo_key(root, common)}"
+    catalog = BackupCatalog(db_path=db)
+    catalog._register_project(project_id, root, common)
+    catalog.create_environment(
+        {
+            "id": "preserved-environment",
+            "name": "preserved-environment",
+            "repository_root": str(root),
+            "git_common_dir": str(common),
+            "branch": "main",
+            "base_ref": "HEAD",
+            "worktree_path": str(root / "worktree"),
+            "generated_config_path": str(root / "odoo.conf"),
+            "python_environment_path": str(root / ".venv"),
+            "python_environment_owned": False,
+            "dependency_lock_path": str(root / "requirements.lock"),
+            "db_mode": "shared",
+            "runtime_json": "{}",
+            "state": "ready",
+            "created_at": "2026-01-01T00:00:00Z",
+            "project_id": project_id,
+        }
+    )
+    assert catalog.forget_project(project_id)
+    catalog.close()
+
+    prepare_predecessor(db)
+    with sqlite3.connect(str(db)) as conn:
+        assert catalog_revision(conn) == predecessor
+        assert_predecessor_schema(conn)
+
+    reopened = BackupCatalog(db_path=db)
+    assert catalog_revision(reopened._conn) == CATALOG_REVISION
+    project = reopened.get_project(project_id)
+    assert project is not None
+    assert Path(str(project["repository_root"])) == root.resolve()
+    assert Path(str(project["git_common_dir"])) == common.resolve()
+    assert project["registration_state"] == "forgotten"
+    environment = reopened.get_environment("preserved-environment")
+    assert environment is not None
+    assert environment["project_id"] == project_id
+    assert environment["state"] == "ready"
+    assert "purge_completed_at" not in {
+        row[1] for row in reopened._conn.execute("PRAGMA table_info(projects)")
+    }
+    assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    verify_schema_equivalence(reopened._conn)
+    reopened.close()
+
+
+def test_backup_catalog_opens_stamped_0012_purge_predecessor_without_losing_rows(
+    tmp_path: Path,
+) -> None:
+    _assert_backup_catalog_opens_stamped_purge_predecessor_without_losing_rows(
+        tmp_path,
+        predecessor="0012",
+        prepare_predecessor=_downgrade_to_stamped_0012,
+        assert_predecessor_schema=_assert_0012_predecessor_schema,
+    )
+
+
+def test_backup_catalog_opens_stamped_0013_purge_predecessor_without_losing_rows(
+    tmp_path: Path,
+) -> None:
+    _assert_backup_catalog_opens_stamped_purge_predecessor_without_losing_rows(
+        tmp_path,
+        predecessor="0013",
+        prepare_predecessor=_downgrade_to_stamped_0013,
+        assert_predecessor_schema=_assert_0013_predecessor_schema,
+    )
+
+
+def test_backup_catalog_rejects_unknown_future_revision(tmp_path: Path) -> None:
+    db = tmp_path / "future-catalog.sqlite3"
+    catalog = BackupCatalog(db_path=db)
+    catalog.close()
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = '9999'")
+        conn.commit()
+
+    with pytest.raises(CommandError):
+        BackupCatalog(db_path=db)
+
+    with sqlite3.connect(str(db)) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "9999"
+
+
+def test_backup_catalog_rejects_stamped_0013_with_unconfirmed_schema_drift(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "drifted-0013-catalog.sqlite3"
+    catalog = BackupCatalog(db_path=db)
+    catalog.close()
+    config = _alembic_config(db)
+    command.downgrade(config, "0013")
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("ALTER TABLE projects DROP COLUMN purge_completed_at")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="missing its legacy projects column"):
+        BackupCatalog(db_path=db)
+
+    with sqlite3.connect(str(db)) as conn:
+        assert catalog_revision(conn) == "0013"
 
 
 @pytest.mark.parametrize("prior_revision", ["0001", "0002"])

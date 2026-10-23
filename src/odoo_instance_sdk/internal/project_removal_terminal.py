@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 
+from odoo_instance_sdk.internal.locks import exclusive_lock_until, publication_lock_path
 from odoo_instance_sdk.internal.project_removal import (
     ProjectRegistration,
     RemovalRuntimeSource,
@@ -97,28 +99,20 @@ def _project_runtime(
     return tuple(sources)
 
 
-def _completed_purge_is_inert(catalog: BackupCatalog, registration: ProjectRegistration) -> bool:
-    """Recognize a terminal purge only while owned paths and runtimes stay absent."""
-    if registration.registration_state != "forgotten":
-        return False
-    root = registration.repository_root
-    manifest = root / ".odcli" / "project.toml"
-    claim = catalog._get_postgres_cluster_for_project(
-        registration.project_id,
-        str(root),
-        str(registration.git_common_dir),
+def _has_owned_publication(project_id: str) -> bool:
+    from odoo_instance_sdk.internal.publication_routes import (
+        read_owned_routes,
+        routes_owned_by_project,
     )
-    if not catalog._project_purge_proves_missing_config(
-        registration.project_id,
-        registration.registration_state,
-        manifest.exists() or manifest.is_symlink(),
-        claim is not None,
-    ):
-        return False
-    from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
 
-    if project_owned_paths(root) or _project_runtime(catalog, registration):
-        return False
+    with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+        return bool(routes_owned_by_project(read_owned_routes(), project_id))
+
+
+def _environment_artifacts_are_absent(
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+) -> bool:
     for environment in _environment_sources(catalog, registration):
         if environment.state != "removed":
             return False
@@ -132,9 +126,54 @@ def _completed_purge_is_inert(catalog: BackupCatalog, registration: ProjectRegis
     return True
 
 
+def _forgotten_project_is_inert(
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+    *,
+    check_publications: bool = True,
+    publication_lock_held: bool = False,
+) -> bool:
+    """Treat a forgotten project as inert only while every owned resource stays absent."""
+    if registration.registration_state != "forgotten":
+        return False
+    root = registration.repository_root
+    manifest = root / ".odcli" / "project.toml"
+    claim = catalog._get_postgres_cluster_for_project(
+        registration.project_id,
+        str(root),
+        str(registration.git_common_dir),
+    )
+    if manifest.exists() or manifest.is_symlink() or claim is not None:
+        return False
+    if (
+        catalog._conn.execute(
+            "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1",
+            (registration.project_id,),
+        ).fetchone()
+        is not None
+    ):
+        return False
+    from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
+
+    if project_owned_paths(root) or _project_runtime(catalog, registration):
+        return False
+    if not _environment_artifacts_are_absent(catalog, registration):
+        return False
+    if not check_publications:
+        return True
+    if publication_lock_held:
+        from odoo_instance_sdk.internal.publication_routes import (
+            read_owned_routes,
+            routes_owned_by_project,
+        )
+
+        return not routes_owned_by_project(read_owned_routes(), registration.project_id)
+    return not _has_owned_publication(registration.project_id)
+
+
 __all__ = [
-    "_completed_purge_is_inert",
     "_environment_owner_clause",
     "_environment_sources",
+    "_forgotten_project_is_inert",
     "_project_runtime",
 ]

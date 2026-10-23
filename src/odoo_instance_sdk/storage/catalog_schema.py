@@ -28,7 +28,6 @@ projects = Table(
     Column("git_common_dir", Text, nullable=False),
     Column("registered_at", Text, nullable=False),
     Column("updated_at", Text, nullable=False),
-    Column("purge_completed_at", Text, nullable=True),
     Column(
         "registration_state",
         Text,

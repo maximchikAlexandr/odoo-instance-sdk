@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from odoo_instance_sdk.exceptions import PublicationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
 from odoo_instance_sdk.internal.project_removal import (
@@ -192,7 +191,7 @@ def test_runtime_adapter_rejects_unrelated_runtime_ownership(
         RuntimePurgeAdapter(client).capture(decision, project_id="project-a")
 
 
-def test_publication_adapter_rejects_route_identity_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publication_adapter_passes_route_snapshot_for_locked_identity_check() -> None:
     original = PublicationRoute(
         owner_kind="project",
         owner_id="project-a",
@@ -201,20 +200,6 @@ def test_publication_adapter_rejects_route_identity_drift(monkeypatch: pytest.Mo
         local_endpoint="http://127.0.0.1:8069",
         external_url="https://project-a.example.test",
         route_identity="original",
-    )
-    changed = PublicationRoute(
-        owner_kind="project",
-        owner_id="project-a",
-        project_id="project-a",
-        environment_id=None,
-        local_endpoint="http://127.0.0.1:8070",
-        external_url="https://project-a.example.test",
-        route_identity="changed",
-    )
-    routes = iter(((original,), (changed,)))
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.project_removal_runtime.read_owned_routes",
-        lambda: next(routes),
     )
     client = MagicMock()
     client.publication.unpublish_command.return_value = _child("publication.remove")
@@ -226,8 +211,13 @@ def test_publication_adapter_rejects_route_identity_drift(monkeypatch: pytest.Mo
         route_snapshot=original,
     )
 
-    with pytest.raises(PublicationError, match="identity changed"):
-        captured.run()
+    assert captured.run() == decision
+    client.publication.unpublish_command.assert_called_once_with(
+        ("project", "project-a"),
+        step_prefix="project-removal.publication.publication_project_project-a.",
+        expected_route_identity="original",
+        expected_current_route=original,
+    )
 
 
 @pytest.mark.parametrize(
@@ -268,14 +258,12 @@ def test_publication_adapter_uses_the_captured_route_snapshot(
     )
 
     assert captured.run() == decision
-    if route_present:
-        client.publication.unpublish_command.assert_called_once_with(
-            (owner_kind, owner_id),
-            step_prefix=f"project-removal.publication.publication_{owner_kind}_{owner_id}.",
-        )
-    else:
-        client.publication.unpublish_command.assert_not_called()
-        assert captured.plan.steps[0].step_id.endswith("absent")
+    client.publication.unpublish_command.assert_called_once_with(
+        (owner_kind, owner_id),
+        step_prefix=f"project-removal.publication.publication_{owner_kind}_{owner_id}.",
+        expected_route_identity=route.route_identity,
+        expected_current_route=route,
+    )
 
 
 @pytest.mark.parametrize(
@@ -548,9 +536,20 @@ def test_runtime_adapter_integration_preserves_order_identity_and_isolation(
         lambda *, timeout, step_prefix: _child(f"{step_prefix}stop")
     )
     client.instance.from_environment.return_value = client.instance.from_project.return_value
-    client.publication.unpublish_command.side_effect = lambda target, *, step_prefix: _child(
-        f"{step_prefix}unpublish"
-    )
+    unpublish_snapshots: list[tuple[str | None, PublicationRoute | None]] = []
+
+    def unpublish_command(
+        target: tuple[str, str],
+        *,
+        step_prefix: str,
+        expected_route_identity: str | None,
+        expected_current_route: PublicationRoute | None,
+    ) -> Command[None]:
+        del target
+        unpublish_snapshots.append((expected_route_identity, expected_current_route))
+        return _child(f"{step_prefix}unpublish")
+
+    client.publication.unpublish_command.side_effect = unpublish_command
     client.environments.remove_command.side_effect = (
         lambda selected, *, force_connections, step_prefix: _child(f"{step_prefix}remove")
     )
@@ -578,7 +577,7 @@ def test_runtime_adapter_integration_preserves_order_identity_and_isolation(
     )
     assert result.registration_state == "forgotten"
     client.publication.unpublish_command.assert_called_once()
-    assert unrelated_route.owner_id not in " ".join(step_ids)
+    assert unpublish_snapshots == [(route.route_identity, route)]
     catalog.close()
 
 

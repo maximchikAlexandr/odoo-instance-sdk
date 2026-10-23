@@ -1,4 +1,4 @@
-"""Record fully completed project purges for inert full-id retries."""
+"""Keep the published 0013 catalogue revision resolvable."""
 
 from __future__ import annotations
 
@@ -14,15 +14,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Mark only purges whose captured actions all completed."""
+    """Reconcile the legacy column before the next revision removes it."""
     bind = op.get_bind()
     assert isinstance(bind, Connection)
-    if not any(
+    has_column = any(
         row[1] == "purge_completed_at"
         for row in bind.exec_driver_sql("PRAGMA table_info(projects)")
-    ):
+    )
+    if not has_column:
         bind.exec_driver_sql("ALTER TABLE projects ADD COLUMN purge_completed_at TEXT")
 
 
 def downgrade() -> None:
-    """Retain the nullable completion marker on downgrade."""
+    """Retain the nullable legacy column when downgrading to revision 0012."""

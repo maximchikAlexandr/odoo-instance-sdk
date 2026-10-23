@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
 
-from odoo_instance_sdk.exceptions import PublicationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
@@ -170,20 +169,12 @@ class PublicationPurgeAdapter:
         command = self.client.publication.unpublish_command(
             (owner_kind, owner_id),
             step_prefix=_prefix("publication", decision.identity),
+            expected_route_identity=route_snapshot.route_identity,
+            expected_current_route=route_snapshot,
         )
         prepared = command._prepared()
 
         def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
-            current = next(
-                (
-                    item
-                    for item in read_owned_routes()
-                    if item.owner_kind == owner_kind and item.owner_id == owner_id
-                ),
-                None,
-            )
-            if current is not None and current.route_identity != expected_route_identity:
-                raise PublicationError("publication route identity changed after planning")
             prepared.callback(cast("RunContext[PublicationResult]", context))
             return decision
 

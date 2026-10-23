@@ -592,6 +592,8 @@ class PublicationResource:
         settings: PublicationSettings | None = None,
         executor: ProcessExecutor | None = None,
         step_prefix: str = "",
+        expected_route_identity: str | None = None,
+        expected_current_route: PublicationRoute | None = None,
     ) -> Command[PublicationResult]:
         if isinstance(target, tuple):
             kind, owner_id = target
@@ -612,6 +614,8 @@ class PublicationResource:
             remove=True,
             executor=executor,
             step_prefix=step_prefix,
+            expected_route_identity=expected_route_identity,
+            expected_current_route=expected_current_route,
         )
 
     def unpublish(
@@ -692,6 +696,8 @@ class PublicationResource:
         remove: bool,
         executor: ProcessExecutor | None,
         step_prefix: str = "",
+        expected_route_identity: str | None = None,
+        expected_current_route: PublicationRoute | None = None,
     ) -> Command[PublicationResult]:
         action_id = (
             f"{step_prefix}{'publication.unpublish' if remove else 'publication.publish'}"
@@ -716,6 +722,8 @@ class PublicationResource:
                 owner_id=target.owner_id,
                 route=route,
                 remove=remove,
+                expected_route_identity=expected_route_identity,
+                expected_current_route=expected_current_route,
             )
             if remove:
                 return _result(

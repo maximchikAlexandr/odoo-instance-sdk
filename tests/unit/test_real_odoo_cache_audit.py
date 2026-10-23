@@ -121,29 +121,11 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
     assert calls[0][calls[0].index("--aliases") + 1] == "off"
 
 
-@pytest.mark.parametrize(
-    ("probe", "expected_diagnostic"),
-    [
-        (subprocess.TimeoutExpired("uvx", 120), "scanner_timeout"),
-        (subprocess.CompletedProcess(["uvx"], 2, "", ""), "scanner_exit_code:2"),
-        (
-            subprocess.CompletedProcess(["uvx"], 2, "", "connection refused"),
-            "scanner_transport_failure",
-        ),
-        (
-            subprocess.CompletedProcess(["uvx"], 0, "not-json token=secretvalue", ""),
-            "scanner_invalid_json:",
-        ),
-        (subprocess.CompletedProcess(["uvx"], 0, "[]", ""), "scanner_invalid_payload"),
-    ],
-    ids=("timeout", "exit", "transport", "json", "payload"),
-)
-def test_pinned_scanner_reports_bounded_sanitized_failure_reason(
+def _run_pinned_audit_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: subprocess.CompletedProcess[str] | subprocess.SubprocessError,
-    expected_diagnostic: str,
-) -> None:
+) -> list[str]:
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if isinstance(probe, subprocess.SubprocessError):
             raise probe
@@ -151,16 +133,57 @@ def test_pinned_scanner_reports_bounded_sanitized_failure_reason(
 
     monkeypatch.setattr(bootstrap, "_run", fake_run)
     diagnostics: list[str] = []
-
     assert bootstrap._run_pinned_python_audit(tmp_path / "odoo.lock", diagnostics) is None
-    if expected_diagnostic == "scanner_invalid_json:":
-        assert diagnostics[0].startswith(expected_diagnostic)
-        assert "returncode=0" in diagnostics[0]
-        assert "stdout_chars=26" in diagnostics[0]
-        assert "not-json token=<redacted>" in diagnostics[0]
-        assert "secretvalue" not in diagnostics[0]
-    else:
-        assert diagnostics == [expected_diagnostic]
+    return diagnostics
+
+
+def test_pinned_scanner_reports_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path, monkeypatch, subprocess.TimeoutExpired("uvx", 120)
+    )
+    assert diagnostics == ["scanner_timeout"]
+
+
+def test_pinned_scanner_reports_exit_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path, monkeypatch, subprocess.CompletedProcess(["uvx"], 2, "", "")
+    )
+    assert diagnostics == ["scanner_exit_code:2"]
+
+
+def test_pinned_scanner_reports_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path,
+        monkeypatch,
+        subprocess.CompletedProcess(["uvx"], 2, "", "connection refused"),
+    )
+    assert diagnostics == ["scanner_transport_failure"]
+
+
+def test_pinned_scanner_reports_sanitized_invalid_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path,
+        monkeypatch,
+        subprocess.CompletedProcess(["uvx"], 0, "not-json token=secretvalue", ""),
+    )
+    assert diagnostics[0].startswith("scanner_invalid_json:")
+    assert "returncode=0" in diagnostics[0]
+    assert "stdout_chars=26" in diagnostics[0]
+    assert "not-json token=<redacted>" in diagnostics[0]
+    assert "secretvalue" not in diagnostics[0]
+
+
+def test_pinned_scanner_reports_invalid_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path, monkeypatch, subprocess.CompletedProcess(["uvx"], 0, "[]", "")
+    )
+    assert diagnostics == ["scanner_invalid_payload"]
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import msgspec
@@ -28,7 +29,12 @@ from odoo_instance_sdk.execution import (
     SemanticPlanObservation,
 )
 from odoo_instance_sdk.internal.git_worktree import project_git_status_argv
-from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
+from odoo_instance_sdk.internal.locks import (
+    exclusive_lock,
+    exclusive_lock_until,
+    project_manifest_lock_path,
+    publication_lock_path,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedCommand,
@@ -50,12 +56,16 @@ from odoo_instance_sdk.internal.project_removal import (
     resolve_project_selector,
 )
 from odoo_instance_sdk.internal.project_removal_terminal import (
-    _completed_purge_is_inert,
     _environment_owner_clause,
     _environment_sources,
+    _forgotten_project_is_inert,
     _project_runtime,
 )
-from odoo_instance_sdk.internal.publication_routes import read_owned_routes
+from odoo_instance_sdk.internal.publication_routes import (
+    PublicationRoute,
+    read_owned_routes,
+    routes_owned_by_project,
+)
 from odoo_instance_sdk.internal.resource_inventory import (
     ProjectResourceSource,
     VolumeResourceSource,
@@ -179,23 +189,13 @@ def _row_registration(row: sqlite3.Row) -> ProjectRegistration:
     )
 
 
-def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...]:
-    sources: list[RemovalPublicationSource] = []
-    for route in read_owned_routes():
-        belongs = route.project_id == project_id or (
-            route.owner_kind == "project" and route.owner_id == project_id
-        )
-        if belongs:
-            sources.append(
-                RemovalPublicationSource(
-                    project_id=project_id,
-                    identity=f"publication:{route.owner_kind}:{route.owner_id}",
-                    target="publication route",
-                    active_use=ActiveUse.ACTIVE,
-                    ownership=OwnershipConfidence.PROVEN,
-                )
-            )
-    return tuple(sources)
+def _publication_sources(
+    project_id: str, *, publication_lock_held: bool = False
+) -> tuple[RemovalPublicationSource, ...]:
+    if publication_lock_held:
+        return _publication_sources_from_routes(project_id, read_owned_routes())
+    with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+        return _publication_sources_from_routes(project_id, read_owned_routes())
 
 
 def _projection(  # noqa: C901 -- source-less claim recovery shares the existing projection boundary
@@ -236,12 +236,6 @@ def _projection(  # noqa: C901 -- source-less claim recovery shares the existing
         registration.project_id,
         registration.repository_root,
         registration.git_common_dir,
-    )
-    config_evidence_complete |= catalog._project_purge_proves_missing_config(
-        registration.project_id,
-        registration.registration_state,
-        manifest_present,
-        claim is not None,
     )
     active_claim = claim if claim is not None and claim.state == "active" else None
     active_cluster_id = str(active_claim.cluster_id) if active_claim is not None else None
@@ -412,7 +406,12 @@ def _planned_projection(
     )
 
 
-def _forget_blockers(catalog: BackupCatalog, registration: ProjectRegistration) -> tuple[str, ...]:
+def _forget_blockers(
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+    *,
+    publication_lock_held: bool = False,
+) -> tuple[str, ...]:
     project_id = registration.project_id
     blockers: set[str] = set()
     if catalog.get_runtime("project", project_id) is not None:
@@ -430,7 +429,10 @@ def _forget_blockers(catalog: BackupCatalog, registration: ProjectRegistration) 
     ):
         if str(row["state"]) != "removed":
             blockers.add(f"environment:{row['id']}")
-    blockers.update(source.identity for source in _publication_sources(project_id))
+    blockers.update(
+        source.identity
+        for source in _publication_sources(project_id, publication_lock_held=publication_lock_held)
+    )
     return tuple(sorted(blockers))
 
 
@@ -528,11 +530,14 @@ def _catalogue_forget_command(
 
     def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
         context.action(action.step_id)
-        row = catalog.get_project_for_lifecycle(project_id)
-        if row is None:
-            raise ProjectRemovalError("project registration disappeared")
-        if str(row["registration_state"]) == "registered":
-            catalog.forget_project(project_id, _lock_held=True)
+        with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+            if routes_owned_by_project(read_owned_routes(), project_id):
+                raise ProjectRemovalError("owned publication appeared before terminal forget")
+            row = catalog.get_project_for_lifecycle(project_id)
+            if row is None:
+                raise ProjectRemovalError("project registration disappeared")
+            if str(row["registration_state"]) == "registered":
+                catalog.forget_project(project_id, _lock_held=True)
         context.complete_action(action.step_id)
         return decision
 
@@ -580,8 +585,32 @@ def capture_project_removal_command(  # noqa: C901
         git_status_step_id=git_status_step_id,
         git_status_hardened=True,
     )
-    terminal_purge = purge and _completed_purge_is_inert(catalog, registration)
+    terminal_purge = (
+        purge
+        and _forgotten_project_is_inert(catalog, registration)
+        # The inert check revalidates each durable removed environment row
+        # and proves its owned worktree/Python paths are absent. Those rows
+        # can still appear as projection decisions; they are not live work.
+        and all(
+            decision.resource_type
+            in {"project", "source", "environment", "worktree", "python_environment"}
+            for decision in projection.decisions
+        )
+    )
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
+    if (
+        purge
+        and registration.registration_state == "forgotten"
+        and _forgotten_project_is_inert(catalog, registration, check_publications=False)
+        and _publication_sources(registration.project_id)
+    ):
+        raise _error(
+            "owned publication reappeared after project purge",
+            projection,
+            mode=mode,
+            failed_step="project-removal:revalidate",
+            decisions=(),
+        )
     decisions: tuple[ProjectResourceDecision, ...]
     if not purge:
         blockers = _forget_blockers(catalog, registration)
@@ -771,19 +800,20 @@ def capture_project_removal_command(  # noqa: C901
                         mode=mode,
                         failed_step="project-removal:revalidate",
                     )
-                blockers = _forget_blockers(catalog, current)
-                if blockers and current.registration_state == "registered":
-                    raise _error(
-                        "project removal blockers changed: " + ", ".join(blockers),
-                        projection,
-                        mode=mode,
-                        failed_step="project-removal:preflight",
-                    )
-                step = next(step for step in steps if isinstance(step, PreparedAction))
-                context.action(step.step_id)
-                if current.registration_state == "registered":
-                    catalog.forget_project(registration.project_id, _lock_held=True)
-                context.complete_action(step.step_id)
+                with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+                    blockers = _forget_blockers(catalog, current, publication_lock_held=True)
+                    if blockers and current.registration_state == "registered":
+                        raise _error(
+                            "project removal blockers changed: " + ", ".join(blockers),
+                            projection,
+                            mode=mode,
+                            failed_step="project-removal:preflight",
+                        )
+                    step = next(step for step in steps if isinstance(step, PreparedAction))
+                    context.action(step.step_id)
+                    if current.registration_state == "registered":
+                        catalog.forget_project(registration.project_id, _lock_held=True)
+                    context.complete_action(step.step_id)
                 forget_retained = projection.public_decisions
                 return ProjectRemovalResult(
                     project_id=registration.project_id,
@@ -795,24 +825,25 @@ def capture_project_removal_command(  # noqa: C901
             if terminal_purge:
                 if source_status_step is not None:
                     context.process(source_status_step.step_id)
-                if not _completed_purge_is_inert(catalog, current):
-                    raise _error(
-                        "completed project purge state changed before retry",
-                        projection,
-                        mode=mode,
-                        failed_step="project-removal:revalidate",
-                        decisions=(),
+                # Lock order is project manifest then the existing global
+                # publication transaction lock, matching project purge's
+                # captured unpublish child. Hold it through the terminal return.
+                with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+                    if not _forgotten_project_is_inert(
+                        catalog, current, publication_lock_held=True
+                    ):
+                        raise _error(
+                            "completed project purge state changed before retry",
+                            projection,
+                            mode=mode,
+                            failed_step="project-removal:revalidate",
+                            decisions=(),
+                        )
+                    return ProjectRemovalResult(
+                        project_id=registration.project_id,
+                        mode="purge",
+                        registration_state="forgotten",
                     )
-                return ProjectRemovalResult(
-                    project_id=registration.project_id,
-                    mode="purge",
-                    registration_state="forgotten",
-                    retained=tuple(
-                        decision.public()
-                        for decision in projection.decisions
-                        if decision.action == "retain"
-                    ),
-                )
             current_projection = _planned_projection(
                 catalog,
                 current,
@@ -922,16 +953,6 @@ def capture_project_removal_command(  # noqa: C901
                     completed=tuple(completed),
                     retained=tuple(retained),
                     remaining=tuple(remaining),
-                )
-            if not catalog._mark_project_purge_completed(registration.project_id):
-                raise _error(
-                    "project registration changed before purge completion was recorded",
-                    current_projection,
-                    mode=mode,
-                    failed_step="project-removal:finalize",
-                    decisions=decisions,
-                    completed=tuple(completed),
-                    retained=tuple(retained),
                 )
             return ProjectRemovalResult(
                 project_id=registration.project_id,
