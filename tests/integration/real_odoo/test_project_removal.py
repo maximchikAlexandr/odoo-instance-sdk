@@ -76,8 +76,7 @@ def _exercise_public_project_forget_reinit_and_purge(
     """Exercise one disposable project through the public CLI boundary."""
     project = _project(
         target_runtime,
-        target_runtime.root
-        / f"project-removal-{target_runtime.run_id}-{source_variant}",
+        target_runtime.root / f"project-removal-{target_runtime.run_id}-{source_variant}",
         source=source_backup_plan,
     )
     catalog_path = _catalog_for_project(target_runtime, project)
@@ -516,7 +515,9 @@ def _prepare_removed_source(_project: Path) -> None:
     return None
 
 
-def _assert_removed_source_result(project: Path, _project_id: str, _document: dict[str, Any]) -> None:
+def _assert_removed_source_result(
+    project: Path, _project_id: str, _document: dict[str, Any]
+) -> None:
     assert not project.exists()
 
 

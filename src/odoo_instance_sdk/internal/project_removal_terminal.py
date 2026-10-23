@@ -110,10 +110,13 @@ def _forgotten_project_is_inert(catalog: BackupCatalog, registration: ProjectReg
     )
     if manifest.exists() or manifest.is_symlink() or claim is not None:
         return False
-    if catalog._conn.execute(
-        "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1",
-        (registration.project_id,),
-    ).fetchone() is not None:
+    if (
+        catalog._conn.execute(
+            "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1",
+            (registration.project_id,),
+        ).fetchone()
+        is not None
+    ):
         return False
     from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
 

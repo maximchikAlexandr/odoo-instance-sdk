@@ -356,16 +356,14 @@ def test_public_forget_refuses_post_capture_compose_and_database_activation(
     legacy_id = repo_key(root, root / ".git")
     compose_project = f"odcli_pg_{legacy_id}"
     volume_name = f"pgdata_{legacy_id}"
-    pending = catalog._ensure_postgres_cluster_pending(
-        legacy_id, compose_project, volume_name
-    )
+    pending = catalog._ensure_postgres_cluster_pending(project_id, compose_project, volume_name)
     client = SimpleNamespace(get_catalog=lambda: catalog)
     command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
         ProjectSelector.from_project_id(project_id)
     )
 
     active = catalog._activate_postgres_cluster(
-        pending.cluster_id, legacy_id, compose_project, volume_name
+        pending.cluster_id, project_id, compose_project, volume_name
     )
     catalog._record_project_database_binding(
         project_id, active.cluster_id, "127.0.0.1", 5432, "owned_db", 19576
@@ -387,6 +385,27 @@ def test_public_purge_does_not_treat_reappeared_owned_manifest_as_inert(
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
     assert catalog.forget_project(project_id)
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True, text=True)
+    (root / ".gitignore").write_text(".odcli/\n", encoding="utf-8")
+    (root / "tracked.txt").write_text("registered source\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(root), "add", ".gitignore", "tracked.txt"), check=True)
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "baseline",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     manifest = root / ".odcli" / "project.toml"
     manifest.parent.mkdir()
     manifest.write_text("[project]\n", encoding="utf-8")
@@ -394,9 +413,7 @@ def test_public_purge_does_not_treat_reappeared_owned_manifest_as_inert(
         cluster="127.0.0.1:5432", databases=(), tracked=True
     )
     instance = SimpleNamespace(
-        databases=SimpleNamespace(
-            list_inventory=lambda *_args, **_kwargs: database_inventory
-        ),
+        databases=SimpleNamespace(list_inventory=lambda *_args, **_kwargs: database_inventory),
         _postgres_cluster=None,
     )
     client = SimpleNamespace(

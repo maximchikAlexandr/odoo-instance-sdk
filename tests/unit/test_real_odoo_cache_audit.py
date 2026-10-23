@@ -137,18 +137,14 @@ def _run_pinned_audit_probe(
     return diagnostics
 
 
-def test_pinned_scanner_reports_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pinned_scanner_reports_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     diagnostics = _run_pinned_audit_probe(
         tmp_path, monkeypatch, subprocess.TimeoutExpired("uvx", 120)
     )
     assert diagnostics == ["scanner_timeout"]
 
 
-def test_pinned_scanner_reports_exit_code(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pinned_scanner_reports_exit_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     diagnostics = _run_pinned_audit_probe(
         tmp_path, monkeypatch, subprocess.CompletedProcess(["uvx"], 2, "", "")
     )
