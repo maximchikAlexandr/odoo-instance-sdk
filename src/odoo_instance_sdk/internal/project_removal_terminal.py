@@ -97,6 +97,16 @@ def _project_runtime(
     return tuple(sources)
 
 
+def _has_owned_publication(project_id: str) -> bool:
+    from odoo_instance_sdk.internal.publication_routes import read_owned_routes
+
+    return any(
+        route.project_id == project_id
+        or (route.owner_kind == "project" and route.owner_id == project_id)
+        for route in read_owned_routes()
+    )
+
+
 def _forgotten_project_is_inert(
     catalog: BackupCatalog,
     registration: ProjectRegistration,
@@ -137,15 +147,8 @@ def _forgotten_project_is_inert(
             or environment.python_environment_path.is_symlink()
         ):
             return False
-    if check_publications:
-        from odoo_instance_sdk.internal.publication_routes import read_owned_routes
-
-        if any(
-            route.project_id == registration.project_id
-            or (route.owner_kind == "project" and route.owner_id == registration.project_id)
-            for route in read_owned_routes()
-        ):
-            return False
+    if check_publications and _has_owned_publication(registration.project_id):
+        return False
     return True
 
 

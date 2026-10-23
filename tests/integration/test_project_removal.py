@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 import pytest
 
 import odoo_instance_sdk.resources.publication as publication_resource
-
 from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal import publication_routes
