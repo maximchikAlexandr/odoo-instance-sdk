@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 
 def failed_copy_absence_probe_steps(
-    cleanup: _CleanupMixin, env: DevelopmentEnvironment
+    cleanup: _CleanupMixin, env: DevelopmentEnvironment, *, step_prefix: str = ""
 ) -> tuple[PreparedStep, ...]:
     """Plan exact PostgreSQL probes used by failed-adoption recovery."""
     from odoo_instance_sdk.internal.proc import PreparedStep
@@ -86,10 +86,10 @@ def failed_copy_absence_probe_steps(
     ):
         return ()
     source_probe = instance.databases._psql_probe_for(
-        env.source_db_name, "environment.remove.database.exists-before"
+        env.source_db_name, f"{step_prefix}environment.remove.database.exists-before"
     )
     target_probe = instance.databases._psql_probe_for(
-        env.target_db_name, "environment.remove.database.exists-after"
+        env.target_db_name, f"{step_prefix}environment.remove.database.exists-after"
     )
     if not isinstance(source_probe, PreparedStep) or not isinstance(target_probe, PreparedStep):
         return ()

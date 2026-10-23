@@ -44,7 +44,23 @@ def _rich_remove(document: OutputDocument) -> str:
 def _removal_result(value: ProjectRemovalResult | None) -> JsonObject:
     if value is None:
         return {}
-    return model_to_dict(value)
+    payload = model_to_dict(value)
+    totals: dict[str, int] = {}
+    for field in ("completed", "retained", "remaining"):
+        decisions = payload[field]
+        if isinstance(decisions, list):
+            totals[field] = len(decisions)
+    for field in ("completed", "retained", "remaining"):
+        decisions = payload[field]
+        if isinstance(decisions, list) and len(decisions) > 100:
+            payload[field] = decisions[:100]
+    payload["completed_total"] = value.completed_total
+    payload["retained_total"] = value.retained_total
+    payload["remaining_total"] = value.remaining_total
+    payload["truncated"] = any(
+        totals.get(field, 0) > 100 for field in ("completed", "retained", "remaining")
+    )
+    return payload
 
 
 def _selector(project_path: str | None, project_id: str | None) -> ProjectSelector:

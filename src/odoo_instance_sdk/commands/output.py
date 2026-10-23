@@ -931,10 +931,16 @@ def fail(
 ) -> Never:
     mode = output_mode
     context = _failure_context(message if isinstance(message, BaseException) else None)
+    from odoo_instance_sdk.exceptions import PlanError
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropSafetyError
 
     if isinstance(message, DatabaseDropSafetyError) and details is None:
         details = context
+    if isinstance(message, PlanError):
+        if error_code is None:
+            error_code = message.code
+        if details is None and message.details:
+            details = message.details
     rendered_message = _failure_message(message, context)
     if mode is not OutputMode.RICH:
         emit(
