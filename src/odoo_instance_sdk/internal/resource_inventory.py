@@ -772,7 +772,13 @@ def build_resource_inventory(  # noqa: C901
         for path in project.log_paths:
             add(
                 _file_item(
-                    FileResourceSource(path=path, kind="log", owner_identity=identity), roots
+                    FileResourceSource(
+                        path=path,
+                        kind="log",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
                 )
             )
         for path in project.temp_paths:

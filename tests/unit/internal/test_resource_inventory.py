@@ -420,6 +420,8 @@ def test_project_inventory_includes_secret_config_primary_venv_logs_and_temp(
         ResourceType.LOG,
         ResourceType.TEMPORARY,
     } <= types
+    project_log = next(item for item in result.resources if item.type is ResourceType.LOG)
+    assert project_log.ownership_confidence is OwnershipConfidence.PROVEN
     serialized = " ".join(item.sanitized_path or "" for item in result.resources)
     assert "password=not returned" not in serialized
 
