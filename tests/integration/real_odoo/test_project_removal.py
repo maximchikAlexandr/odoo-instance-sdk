@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -55,8 +56,12 @@ def _document(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return document
 
 
-@pytest.mark.parametrize("retain_source", [False, True], ids=["removed-source", "retained-source"])
-def test_public_project_forget_reinit_and_purge(
+def _assert_no_purge_completion_marker(catalog: BackupCatalog) -> None:
+    columns = {str(row[1]) for row in catalog._conn.execute("PRAGMA table_info(projects)")}
+    assert "purge_completed_at" not in columns
+
+
+def _exercise_public_project_forget_reinit_and_purge(
     tmp_path: Path,
     target_runtime: E2ERuntime,
     source_backup: ArchiveIdentity,
@@ -64,13 +69,15 @@ def test_public_project_forget_reinit_and_purge(
     failure_evidence: FailureEvidence,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
-    retain_source: bool,
+    source_variant: str,
+    prepare_source: Callable[[Path], None],
+    assert_source_result: Callable[[Path, str, dict[str, Any]], None],
 ) -> None:
     """Exercise one disposable project through the public CLI boundary."""
     project = _project(
         target_runtime,
         target_runtime.root
-        / (f"project-removal-{target_runtime.run_id}-{'retained' if retain_source else 'removed'}"),
+        / f"project-removal-{target_runtime.run_id}-{source_variant}",
         source=source_backup_plan,
     )
     catalog_path = _catalog_for_project(target_runtime, project)
@@ -84,7 +91,6 @@ def test_public_project_forget_reinit_and_purge(
     if command is None:
         pytest.fail("odcli executable is required for public project removal")
 
-    source_variant = "retained" if retain_source else "removed"
     unrelated_project = (
         target_runtime.root / f"unrelated-project-{target_runtime.run_id}-{source_variant}"
     )
@@ -209,7 +215,7 @@ def test_public_project_forget_reinit_and_purge(
     ).fetchall()
     assert len(forgotten_projects) == 1
     assert str(forgotten_projects[0]["registration_state"]) == "forgotten"
-    assert not catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     assert registered_projects == []
     assert len(retained_environments) == 1
     assert str(retained_environments[0]["state"]) == "removed"
@@ -262,7 +268,7 @@ def test_public_project_forget_reinit_and_purge(
     reactivated = catalog.get_project_for_lifecycle(project_id)
     assert reactivated is not None
     assert reactivated["registration_state"] == "registered"
-    assert not catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     assert [
         row
         for row in catalog.list_projects(include_forgotten=True)
@@ -370,7 +376,7 @@ def test_public_project_forget_reinit_and_purge(
     }
     assert project.exists()
     catalog = BackupCatalog(db_path=catalog_path)
-    assert not catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     retained_claim = catalog._get_postgres_cluster(claim.project_id)
     assert retained_claim is not None and retained_claim.state == "active"
     catalog.close()
@@ -388,7 +394,7 @@ def test_public_project_forget_reinit_and_purge(
         wrong_confirmation.stdout + wrong_confirmation.stderr
     )
     catalog = BackupCatalog(db_path=catalog_path)
-    assert not catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     catalog.close()
     source_status = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
@@ -405,20 +411,7 @@ def test_public_project_forget_reinit_and_purge(
     # This selector is created only by the real-Odoo harness so its cleanup
     # helpers can locate the environment. The SDK does not own this file.
     (project / ".odcli" / "e2e-environment-id").unlink(missing_ok=True)
-    if retain_source:
-        # A caller change makes the registered checkout fail the clean-source
-        # provenance guard, while retaining its Git metadata for observation.
-        retained_marker = project / "caller-retained-source.bin"
-        retained_marker.write_bytes(b"caller-owned source\n")
-        source_status = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=project,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert source_status.returncode == 0, source_status.stderr
-        assert "caller-retained-source.bin" in source_status.stdout
+    prepare_source(project)
     purge = invoke(
         "remove",
         "--project-id",
@@ -436,16 +429,8 @@ def test_public_project_forget_reinit_and_purge(
     )
     purge_document = _document(purge)
     assert purge_document["result"]["registration_state"] == "forgotten"
-    if retain_source:
-        assert any(
-            item["identity"] == f"project:{project_id}"
-            and item["reason"] == "source_git_provenance_unmatched"
-            for item in purge_document["result"]["retained"]
-        )
-    assert project.exists() is retain_source
+    assert_source_result(project, project_id, purge_document)
     assert not (project / ".odcli" / "project.toml").exists()
-    if retain_source:
-        assert (project / "caller-retained-source.bin").read_bytes() == b"caller-owned source\n"
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
     assert shared_resource.read_bytes() == b"shared resource\n"
 
@@ -456,7 +441,7 @@ def test_public_project_forget_reinit_and_purge(
     persisted = catalog.get_project_for_lifecycle(project_id)
     assert persisted is not None
     assert persisted["registration_state"] == "forgotten"
-    assert catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     assert catalog._get_postgres_cluster(claim.project_id) is None
     assert catalog._get_postgres_cluster_by_id(claim.cluster_id) is None
     assert (
@@ -499,7 +484,7 @@ def test_public_project_forget_reinit_and_purge(
     persisted_after_repeat = catalog.get_project_for_lifecycle(project_id)
     assert persisted_after_repeat is not None
     assert persisted_after_repeat["registration_state"] == "forgotten"
-    assert catalog._project_purge_completed(project_id)
+    _assert_no_purge_completion_marker(catalog)
     assert catalog._get_postgres_cluster(claim.project_id) is None
     catalog.close()
     record(
@@ -524,4 +509,84 @@ def test_public_project_forget_reinit_and_purge(
             "purge": purge_document["result"]["registration_state"],
             "repeat": "idempotent",
         },
+    )
+
+
+def _prepare_removed_source(_project: Path) -> None:
+    return None
+
+
+def _assert_removed_source_result(project: Path, _project_id: str, _document: dict[str, Any]) -> None:
+    assert not project.exists()
+
+
+def _prepare_retained_source(project: Path) -> None:
+    # Caller content makes the registered checkout fail the clean-source guard.
+    (project / "caller-retained-source.bin").write_bytes(b"caller-owned source\n")
+    source_status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert source_status.returncode == 0, source_status.stderr
+    assert "caller-retained-source.bin" in source_status.stdout
+
+
+def _assert_retained_source_result(
+    project: Path, project_id: str, document: dict[str, Any]
+) -> None:
+    assert project.exists()
+    assert (project / "caller-retained-source.bin").read_bytes() == b"caller-owned source\n"
+    assert any(
+        item["identity"] == f"project:{project_id}"
+        and item["reason"] == "source_git_provenance_unmatched"
+        for item in document["result"]["retained"]
+    )
+
+
+def test_public_project_forget_reinit_and_purge_removes_owned_source(
+    tmp_path: Path,
+    target_runtime: E2ERuntime,
+    source_backup: ArchiveIdentity,
+    source_backup_plan: SourceBackupPlan,
+    failure_evidence: FailureEvidence,
+    record_property: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exercise_public_project_forget_reinit_and_purge(
+        tmp_path,
+        target_runtime,
+        source_backup,
+        source_backup_plan,
+        failure_evidence,
+        record_property,
+        monkeypatch,
+        "removed-source",
+        _prepare_removed_source,
+        _assert_removed_source_result,
+    )
+
+
+def test_public_project_forget_reinit_and_purge_retains_caller_source(
+    tmp_path: Path,
+    target_runtime: E2ERuntime,
+    source_backup: ArchiveIdentity,
+    source_backup_plan: SourceBackupPlan,
+    failure_evidence: FailureEvidence,
+    record_property: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _exercise_public_project_forget_reinit_and_purge(
+        tmp_path,
+        target_runtime,
+        source_backup,
+        source_backup_plan,
+        failure_evidence,
+        record_property,
+        monkeypatch,
+        "retained-source",
+        _prepare_retained_source,
+        _assert_retained_source_result,
     )

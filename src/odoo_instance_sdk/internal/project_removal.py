@@ -654,19 +654,8 @@ def removal_fingerprint(
 
 
 def forget_resource_fingerprint(projection: ProjectRemovalProjection) -> str:
-    """Keep database and Compose evidence out of a forget-only comparison."""
-    stable_decisions = tuple(
-        decision
-        for decision in projection.decisions
-        if decision.resource_type not in {"database", "volume"}
-    )
-    return removal_fingerprint(
-        projection.project_id,
-        projection.registration_state,
-        projection.repository_root,
-        stable_decisions,
-        complete=True,
-    )
+    """Revalidate every captured resource decision before hiding registration."""
+    return projection.fingerprint
 
 
 def build_project_removal_projection(  # noqa: C901

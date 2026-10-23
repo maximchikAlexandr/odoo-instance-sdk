@@ -97,8 +97,8 @@ def _project_runtime(
     return tuple(sources)
 
 
-def _completed_purge_is_inert(catalog: BackupCatalog, registration: ProjectRegistration) -> bool:
-    """Recognize a terminal purge only while owned paths and runtimes stay absent."""
+def _forgotten_project_is_inert(catalog: BackupCatalog, registration: ProjectRegistration) -> bool:
+    """Treat a forgotten project as inert only while every owned resource stays absent."""
     if registration.registration_state != "forgotten":
         return False
     root = registration.repository_root
@@ -108,12 +108,12 @@ def _completed_purge_is_inert(catalog: BackupCatalog, registration: ProjectRegis
         str(root),
         str(registration.git_common_dir),
     )
-    if not catalog._project_purge_proves_missing_config(
-        registration.project_id,
-        registration.registration_state,
-        manifest.exists() or manifest.is_symlink(),
-        claim is not None,
-    ):
+    if manifest.exists() or manifest.is_symlink() or claim is not None:
+        return False
+    if catalog._conn.execute(
+        "SELECT 1 FROM project_database_bindings WHERE project_id = ? LIMIT 1",
+        (registration.project_id,),
+    ).fetchone() is not None:
         return False
     from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
 
@@ -133,7 +133,7 @@ def _completed_purge_is_inert(catalog: BackupCatalog, registration: ProjectRegis
 
 
 __all__ = [
-    "_completed_purge_is_inert",
+    "_forgotten_project_is_inert",
     "_environment_owner_clause",
     "_environment_sources",
     "_project_runtime",
