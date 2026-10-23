@@ -25,6 +25,7 @@ from odoo_instance_sdk.models import (
     StorageFootprint,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from odoo_instance_sdk.storage.catalog.helpers import CurrentBackupProvenance
 
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
@@ -76,6 +77,7 @@ class _ProjectPlan:
     state: PostgresClusterState | None
     environments: tuple[_EnvironmentPlan, ...]
     project_runtime: sqlite3.Row | None = None
+    backup_provenance: CurrentBackupProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +86,7 @@ class _EnvironmentPlan:
 
     row: sqlite3.Row
     runtime: sqlite3.Row | None
+    backup_provenance: CurrentBackupProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +166,7 @@ class _SnapshotPlan:
     statuses: frozenset[str]
     cpu_points: frozenset[tuple[int, float]]
     sections: frozenset[SnapshotSection]
+    freshness_lookup_failed: bool = False
 
 
 def _orphan_git(default_branch: str = "main") -> GitActivity:

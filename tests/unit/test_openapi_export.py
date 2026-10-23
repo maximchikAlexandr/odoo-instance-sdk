@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import json
+from importlib import import_module
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -12,12 +12,7 @@ pytestmark = pytest.mark.dashboard
 
 
 def _exporter() -> ModuleType:
-    script = Path(__file__).parents[2] / "scripts" / "export_openapi.py"
-    spec = importlib.util.spec_from_file_location("export_openapi", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return import_module("scripts.export_openapi")
 
 
 def test_export_is_byte_identical_and_does_not_need_web_dist(

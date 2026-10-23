@@ -13,8 +13,9 @@ from odoo_instance_sdk.internal.process_metrics import (
     ProcessTreeResult,
     collect_process_tree,
 )
-from odoo_instance_sdk.models import Snapshot, SnapshotRequest
+from odoo_instance_sdk.models import RuntimeState, Snapshot, SnapshotRequest
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.monitor_support import (
     FakeDockerProvider,
     FakeGitProvider,
@@ -101,6 +102,52 @@ def test_snapshot_observation_marks_unavailable_runtime(
     )
     assert runtime_observation.complete is False
     assert runtime_observation.reason == "runtime observation unavailable"
+
+
+def test_snapshot_freshness_lookup_failure_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = make_catalog(tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    env_id = str(uuid.uuid4())
+    seed_env(catalog, make_env(env_id, worktree_path=str(worktree)))
+    seed_runtime(catalog, env_id)
+    claim = catalog._ensure_postgres_cluster_pending("fake_key", "compose", "volume-fake_key")
+    catalog._activate_postgres_cluster(claim.cluster_id, "fake_key", "compose", "volume-fake_key")
+    catalog.close()
+
+    patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
+    monkeypatch.setattr(
+        EnvironmentMonitor,
+        "_probe_readiness",
+        lambda _self, _http_url: RuntimeState.READY,
+    )
+
+    def fail_lookup(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("catalogue lookup failed")
+
+    monkeypatch.setattr(BackupCatalog, "current_database_backup_provenance", fail_lookup)
+    snapshot = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        process_provider=FakeProcessProvider(
+            result=ProcessTreeResult(
+                child_pids=(), process_count=1, cpu_percent=None, memory_bytes=1
+            )
+        ),
+    ).snapshot(request=SnapshotRequest(sections=("catalogue", "runtime", "postgresql")))
+
+    environment = snapshot.environments[0]
+    assert environment.backup_freshness.downloaded_at is None
+    assert environment.backup_freshness.age_seconds is None
+    assert environment.runtime.state is RuntimeState.READY
+    assert snapshot.unknown_sections == ("postgresql",)
+    assert snapshot.observation is not None
+    postgresql_observation = next(
+        item for item in snapshot.observation.sections if item.section == "postgresql"
+    )
+    assert postgresql_observation.complete is False
+    assert postgresql_observation.reason == "backup freshness lookup unavailable"
 
 
 def test_snapshot_batch_sections_share_one_observation_boundary(
