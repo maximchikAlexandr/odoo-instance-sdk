@@ -440,8 +440,33 @@ def test_public_purge_keeps_unproven_or_reappeared_environment_state_non_inert(
         confirmation=f"{root.name}:{project_id}",
     )
 
+    catalogue_changes_before_run = catalog._conn.total_changes
     assert command.plan.steps
-    assert any(step.mutating for step in command.plan.steps)
+    with pytest.raises(ProjectRemovalError, match="observation") as error:
+        command.run()
+
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["failed_step"] == "project-removal:observations"
+    expected_registration_state = (
+        "registered" if state == "registered-empty" else "forgotten"
+    )
+    registration = catalog.get_project(project_id)
+    assert registration is not None
+    assert registration["registration_state"] == expected_registration_state
+    environment = catalog._conn.execute(
+        "SELECT state FROM environments WHERE id = ?", ("environment-after-purge",)
+    ).fetchone()
+    if state == "registered-empty":
+        assert environment is None
+    else:
+        assert environment is not None
+        assert str(environment["state"]) == (
+            "removed"
+            if state in {"current-worktree-reappeared", "legacy-python-symlink-reappeared"}
+            else "ready"
+        )
+    assert catalog._conn.total_changes == catalogue_changes_before_run
+    _assert_no_purge_completion_marker(catalog)
     catalog.close()
 
 
