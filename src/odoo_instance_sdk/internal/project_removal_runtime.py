@@ -229,6 +229,7 @@ class EnvironmentPurgeAdapter:
         )
         if not (project_owned or legacy_owned):
             raise ValueError("environment is outside the selected project")
+        assert row is not None
         environment = _row_to_env(row)
         command = self.client.environments.remove_command(
             environment,
