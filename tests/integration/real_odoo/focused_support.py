@@ -461,7 +461,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     config_lines.append(f"addons_path = {root / 'addons'}")
     local_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
     fixture_addon = Path(__file__).parents[2] / "fixtures" / "addons" / "odcli_e2e_probe"
-    logfile = root / f"odoo-{runtime.run_id}.log"
+    logfile = root / ".odcli" / f"odoo-{runtime.run_id}.log"
     logfile.write_text("INFO focused leaf completed; secret=redacted\n", encoding="utf-8")
     with local_config.open("a", encoding="utf-8") as stream:
         stream.write(f"logfile = {logfile}\n")
@@ -624,6 +624,13 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     def remove_environment() -> None:
         if probe_destination.exists():
             _remove_owned_fixture_tree(worktree, probe_destination)
+        cleanup_catalog = BackupCatalog(db_path=Path(process_environment["ODCLI_E2E_CATALOG"]))
+        try:
+            environment_row = cleanup_catalog.get_environment(environment_id)
+        finally:
+            cleanup_catalog.close()
+        if environment_row is None or str(environment_row["state"]) == "removed":
+            return
         removed = subprocess.run(
             [
                 command,
