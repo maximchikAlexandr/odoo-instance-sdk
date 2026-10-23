@@ -99,6 +99,7 @@ from odoo_instance_sdk.models import (
     PortObservation,
     PostgresClusterState,
     ProcessInventory,
+    ProjectRemovalResult,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -220,6 +221,17 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="primary project venv creation and refresh",
         success_path_argument=True,
         failure_args=("prepare-venv", "--python", sys.executable, "--venv", ".venv", "--dry-run"),
+    ),
+    PublicLeafCase(
+        ("remove",),
+        ("remove", "--project-id", "project-test", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="ProjectResource.remove_command",
+        aliases=(("rm",),),
+        e2e_disposition="not-applicable",
+        e2e_rationale="cross-provider purge walkthrough is owned by the later project-removal E2E package",
+        failure_args=("remove", "--project-id", "project-test", "--purge", "--dry-run"),
     ),
     PublicLeafCase(
         ("doctor",),
@@ -1452,6 +1464,24 @@ def _patch_leaf_external(  # noqa: C901
             monkeypatch.setattr(
                 "odoo_instance_sdk.commands.prepare_venv.prepare_venv_command", fail_operation
             )
+        return
+    if path == ("remove",):
+
+        def remove_command(*_args: object, **_kwargs: object) -> object:
+            if failing:
+                raise fail_operation()
+            return _matrix_command(
+                ProjectRemovalResult(
+                    project_id="project-test",
+                    mode="purge",
+                    registration_state="registered",
+                )
+            )
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.project.ProjectResource.remove_command",
+            remove_command,
+        )
         return
     if path == ("doctor",):
         project_cfg = ProjectConfig(

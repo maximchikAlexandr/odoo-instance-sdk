@@ -7,8 +7,8 @@
 ## 2. Typed Project Lifecycle and Resource Projection
 
 - [ ] 2.1 Add frozen JSON-safe selector, minimal resource-decision (stable identity/type, action, reason, sanitized target), result, and structured-error models; keep ownership/active-use/dependency/fingerprint evidence internal, and add the lazy-exported `ProjectResource` facade and `OdooClient.projects` wiring while preserving lightweight imports and the characterized public SDK boundary.
-- [ ] 2.2 Extend the existing local resource inventory with one deterministic full-project projection for runtimes/routes, environments, worktrees/venvs/config/logs, project config/secrets/primary venv/logs/temp, databases/filestores/backups, Compose container/volume, and source root; deduplicate shared identities and assign every item one fail-closed delete/retain reason.
-- [ ] 2.3 Implement exact path/full-id selection, bounded sanitized projection, expected confirmation token, and a stable resource-decision fingerprint; cover missing roots, unknown/abbreviated ids, shared resources, symlink escapes, caller/linked/other-tool-managed checkouts, unknown files, and secret redaction.
+- [x] 2.2 Extend the existing local resource inventory with one deterministic full-project projection for runtimes/routes, environments, worktrees/venvs/config/logs, project config/secrets/primary venv/logs/temp, databases/filestores/backups, Compose container/volume, and source root; deduplicate shared identities and assign every item one fail-closed delete/retain reason.
+- [x] 2.3 Implement exact path/full-id selection, bounded sanitized projection, expected confirmation token, and a stable resource-decision fingerprint; cover missing roots, unknown/abbreviated ids, shared resources, symlink escapes, caller/linked/other-tool-managed checkouts, unknown files, and secret redaction.
 - [ ] 2.4 Build one immutable project removal command by flattening captured child command steps in stable dependency order; revalidate registration and projection under the project lock and preserve each child operation's executor, action ledger, narrower locks, stale-plan checks, and postconditions.
 
 ## 3. Forget and Monitor Semantics

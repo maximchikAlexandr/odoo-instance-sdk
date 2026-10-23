@@ -272,6 +272,23 @@ def test_resource_command_is_read_only_and_discovers_owned_directory_files(
     assert (owned / "crash.zip.part").exists()
 
 
+def test_resource_inventory_reports_symlink_escape_without_following_it(tmp_path: Path) -> None:
+    owned = tmp_path / "owned"
+    outside = tmp_path / "outside"
+    owned.mkdir()
+    outside.mkdir()
+    link = owned / "escape"
+    link.symlink_to(outside, target_is_directory=True)
+
+    result = collect_resource_inventory(
+        owned_directories=(owned,),
+        roots=(tmp_path,),
+    )
+
+    assert "symlink_escape_retained" in {finding.code for finding in result.findings}
+    assert link.is_symlink()
+
+
 def test_resource_source_matrix_preserves_project_only_context_and_volume_states(
     tmp_path: Path,
 ) -> None:
@@ -320,6 +337,48 @@ def test_resource_source_matrix_preserves_project_only_context_and_volume_states
     assert sum(item.active_use is ActiveUse.UNKNOWN for item in volumes) == 2
     assert all(item.reclaimable is False for item in volumes)
     assert any(item.completeness is MeasurementCompleteness.PARTIAL for item in volumes)
+
+
+def test_project_inventory_includes_secret_config_primary_venv_logs_and_temp(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    config = root / ".odcli" / "project.toml"
+    config.parent.mkdir()
+    config.write_text("[project]\n", encoding="utf-8")
+    secret = root / ".odcli" / "secret"
+    secret.write_text("password=not returned\n", encoding="utf-8")
+    log = root / "odoo.log"
+    log.write_text("log", encoding="utf-8")
+    temporary = root / "tmp.part"
+    temporary.write_text("partial", encoding="utf-8")
+
+    result = build_resource_inventory(
+        projects=(
+            ProjectResourceSource(
+                project_id="project-one",
+                repository_root=root,
+                config_paths=(config,),
+                secret_paths=(secret,),
+                primary_python_environment_path=root / ".venv",
+                log_paths=(log,),
+                temp_paths=(temporary,),
+            ),
+        ),
+        roots=(tmp_path,),
+    )
+
+    types = {item.type for item in result.resources}
+    assert {
+        ResourceType.CONFIG,
+        ResourceType.SECRET,
+        ResourceType.PYTHON_ENVIRONMENT,
+        ResourceType.LOG,
+        ResourceType.TEMPORARY,
+    } <= types
+    serialized = " ".join(item.sanitized_path or "" for item in result.resources)
+    assert "password=not returned" not in serialized
 
 
 def test_handled_failed_download_without_partial_file_has_no_leftover_finding(

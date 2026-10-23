@@ -34,6 +34,7 @@ from odoo_instance_sdk.commands.pg import (
 )
 from odoo_instance_sdk.commands.publication import publish as _publish
 from odoo_instance_sdk.commands.publication import unpublish as _unpublish
+from odoo_instance_sdk.commands.remove import remove as _remove
 from odoo_instance_sdk.commands.resource import (
     configure_catalog_path_provider as configure_resource_catalog_path_provider,
     resource_group,
@@ -496,6 +497,22 @@ def _repair_packaged_askpass() -> None:
 class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
     """Root CLI group that blocks normal commands during unfinished updates."""
 
+    def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
+        command = cast("click.Command | None", super().get_command(ctx, name))
+        if command is not None:
+            return command
+        return cast(
+            "click.Command | None",
+            next(
+                (
+                    candidate
+                    for candidate in self.commands.values()
+                    if name in cast("list[str]", getattr(candidate, "aliases", []))
+                ),
+                None,
+            ),
+        )
+
     def invoke(self, ctx: click.Context) -> None:
         from odoo_instance_sdk.internal.self_update import (
             assert_update_not_blocking,
@@ -652,6 +669,7 @@ cli.add_command(
 cli.add_command(bug_report_group, name="bug-report")
 cli.add_command(_publish, name="publish")
 cli.add_command(_unpublish, name="unpublish")
+cli.add_command(_remove, name="remove")
 register_init_command(cli)
 register_prepare_venv_command(cli)
 
