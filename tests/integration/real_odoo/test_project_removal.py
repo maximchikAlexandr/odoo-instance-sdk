@@ -24,6 +24,7 @@ from tests.integration.real_odoo.cleanup import FailureEvidence, audit_no_leaks
 from tests.integration.real_odoo.conftest import E2ERuntime, odoo_runtime_python
 from tests.integration.real_odoo.focused_support import (
     _catalog_for_project,
+    _project_database_probe,
     _project,
     record,
     registered_worktree,
@@ -214,6 +215,15 @@ def test_public_project_forget_reinit_and_purge(
         if str(row["project_id"]) == project_id
     ]
     catalog.close()
+    resumed_cluster = invoke("--project", str(project), "postgres", "start")
+    assert resumed_cluster.returncode == 0, resumed_cluster.stdout + resumed_cluster.stderr
+    database_probe = _project_database_probe(
+        project,
+        target_runtime.topology.target_sentinel_database,
+        home=target_runtime.environment["HOME"],
+    )
+    assert database_probe.returncode == 0, database_probe.stdout + database_probe.stderr
+    assert database_probe.stdout.strip() == target_runtime.topology.target_sentinel_database
 
     token = f"{project.name}:{project_id}"
     drift_target = project / ".odcli" / "logs"
