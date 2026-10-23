@@ -14,8 +14,11 @@ from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpPlan
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.proc import (
     PreparedStep,
+    ProcessResult,
     RecordingExecutor,
     RunContext,
+    StepObserver,
+    SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
@@ -26,6 +29,34 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 @pytest.fixture(autouse=True)
 def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Compose init now chains postgres start and tmp bootstrap after scaffold."""
+
+    original_execute = SubprocessExecutor.execute
+
+    def _execute_with_database_inventory(
+        self: SubprocessExecutor,
+        step: PreparedStep,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResult:
+        if step.step_id != "init.bootstrap.databases":
+            return original_execute(
+                self,
+                step,
+                observer=observer,
+                observe_output=observe_output,
+            )
+        return ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout="tmp\t101\n",
+            stderr="",
+            duration=0.0,
+            cwd=step.cwd,
+            environment=step.environment,
+        )
+
+    monkeypatch.setattr(SubprocessExecutor, "execute", _execute_with_database_inventory)
 
     def _noop_ensure_running(
         self: PostgresCluster,

@@ -169,8 +169,9 @@ class VolumeResourceSource:
     """Result of the existing Compose volume probe.
 
     ``volume_name`` is an internal input only.  The projection exposes a
-    stable digest, never the Docker name.  Reclaimability requires an exact
-    owned Compose identity with a complete inactive observation.
+    stable digest, never the Docker name. Reclaimability requires an exact
+    owned Compose identity; a live container is reclaimable only when it is
+    the exact container scheduled by the guarded removal adapter.
     """
 
     project_id: str
@@ -180,6 +181,7 @@ class VolumeResourceSource:
     available: bool
     usage_bytes: int | None
     active: bool | None = None
+    container_identity_verified: bool = False
     reason: str | None = None
 
 
@@ -460,6 +462,13 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
     identity = stable_resource_identity("volume", value)
     ownership = OwnershipConfidence.PROVEN if source.owned else OwnershipConfidence.UNKNOWN
     complete = source.available
+    reclaimable = (
+        source.owned
+        and source.available
+        and (
+            source.active is False or (source.active is True and source.container_identity_verified)
+        )
+    )
     return ResourceInventoryItem(
         stable_identity=identity,
         type=ResourceType.VOLUME,
@@ -483,10 +492,12 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
         completeness_reason=None
         if complete
         else _safe_message(source.reason, "volume measurement unavailable"),
-        reclaimable=source.owned and source.available and source.active is False,
+        reclaimable=reclaimable,
         reclaimability_reason=(
             "exact inactive Compose identity observed"
-            if source.owned and source.available and source.active is False
+            if reclaimable and source.active is False
+            else "exact active Compose identity scheduled for guarded stop"
+            if reclaimable
             else "retained by postgres lifecycle"
             if source.owned
             else "volume ownership is not proven"

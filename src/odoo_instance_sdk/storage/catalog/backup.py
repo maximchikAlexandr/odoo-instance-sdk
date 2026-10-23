@@ -39,6 +39,7 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     CopyJournalStage as CopyJournalStage,
     MonitorCatalogSnapshot as MonitorCatalogSnapshot,
     PostgresClusterClaim as PostgresClusterClaim,
+    resolve_postgres_cluster_claim as resolve_postgres_cluster_claim,
     _row_to_backup as _row_to_backup,
     _row_to_cluster_claim as _row_to_cluster_claim,
     _row_to_event as _row_to_event,
@@ -873,26 +874,14 @@ class _BackupMixin:
         self,
         project_id: str,
         repository_root: str | Path,
-        git_common_dir: str | Path,
+        git_common_dir: str | Path | None,
     ) -> PostgresClusterClaim | None:
-        """Resolve the exact or legacy Compose claim for one registration."""
-        claim = self._get_postgres_cluster(project_id)
-        if claim is not None:
-            return claim
-        root, common = Path(repository_root).resolve(), Path(git_common_dir).resolve()
-
-        legacy_project_id = repo_key(root, common)
-        if project_id != f"project_{legacy_project_id}":
-            return None
-        legacy = self._get_postgres_cluster(legacy_project_id)
-        if legacy is None:
-            return None
-        if (
-            legacy.compose_project != f"odcli_pg_{legacy_project_id}"
-            or legacy.volume_name != f"pgdata_{legacy_project_id}"
-        ):
-            return None
-        return legacy
+        return resolve_postgres_cluster_claim(
+            self._get_postgres_cluster,
+            project_id,
+            repository_root,
+            git_common_dir,
+        )
 
     @_translate_sqlite_error
     def _get_postgres_cluster_by_id(

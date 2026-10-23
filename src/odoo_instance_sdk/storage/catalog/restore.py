@@ -43,6 +43,7 @@ class _RestoreMixin:
         source_sha256: str | None = None,
         cluster_id: uuid.UUID | str | None = None,
         data_directory: str | Path | None = None,
+        database_oid: int | None = None,
         state: RestoreState | str = RestoreState.COMPLETE,
     ) -> None:
         host = normalize_db_host(db_host)
@@ -55,6 +56,8 @@ class _RestoreMixin:
         data_dir = None if data_directory is None else str(data_directory)
         if data_dir is not None and not data_dir.strip():
             raise BackupCatalogError("data_directory must not be empty")
+        if database_oid is not None and (type(database_oid) is not int or database_oid <= 0):
+            raise BackupCatalogError("restore PostgreSQL identity is invalid")
         if identity is not None:
             claim = self._get_postgres_cluster_by_id(identity)
             if claim is None or claim.state != "active":
@@ -63,8 +66,8 @@ class _RestoreMixin:
             self._conn.execute(
                 """INSERT INTO restores
                    (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
-                    restored_at, cluster_id, data_directory, state)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)""",
+                   restored_at, cluster_id, data_directory, database_oid, state)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)""",
                 (
                     host,
                     db_port,
@@ -74,6 +77,7 @@ class _RestoreMixin:
                     digest,
                     identity,
                     data_dir,
+                    database_oid,
                     restore_state.value,
                 ),
             )
@@ -232,6 +236,11 @@ class _RestoreMixin:
                 "AND state='incomplete'",
                 (host, db_port, database_name),
             )
+            self._conn.execute(
+                "DELETE FROM project_database_bindings "
+                "WHERE db_host=? AND db_port=? AND database_name=?",
+                (host, db_port, database_name),
+            )
 
     @_translate_sqlite_error
     def record_databases_dropped(
@@ -295,6 +304,11 @@ class _RestoreMixin:
             self._conn.execute(
                 "DELETE FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
                 "AND state='incomplete'",
+                (host, db_port, database_name),
+            )
+            self._conn.execute(
+                "DELETE FROM project_database_bindings "
+                "WHERE db_host=? AND db_port=? AND database_name=?",
                 (host, db_port, database_name),
             )
         return tuple(changed)
@@ -467,7 +481,7 @@ class _RestoreMixin:
             "list[sqlite3.Row]",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, restored_at, state "
+                "data_directory, database_oid, restored_at, state "
                 "FROM restores WHERE db_host=? AND db_port=? "
                 "ORDER BY database_name ASC, restored_at DESC, sequence DESC",
                 (host, db_port),
@@ -484,7 +498,7 @@ class _RestoreMixin:
             "sqlite3.Row | None",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, restored_at, state "
+                "data_directory, database_oid, restored_at, state "
                 "FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
                 "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
                 (host, db_port, database_name),
@@ -503,6 +517,110 @@ class _RestoreMixin:
             (host, db_port),
         ).fetchall()
         return tuple(row["database_name"] for row in rows)
+
+    @_translate_sqlite_error
+    def _project_restored_database_names(
+        self,
+        project_id: str,
+        cluster_id: uuid.UUID | str,
+        db_host: str | None,
+        db_port: int,
+    ) -> tuple[str, ...]:
+        """Return restores proved for one project and exact cluster endpoint."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT DISTINCT r.database_name
+               FROM restores r JOIN backups b ON b.id = r.backup_id
+               WHERE b.project_id = ? AND b.state <> 'deleted'
+                 AND r.state = 'complete' AND r.cluster_id = ?
+                 AND r.db_host = ? AND r.db_port = ? AND r.database_oid IS NOT NULL
+               ORDER BY r.database_name""",
+            (project_id, identity, host, db_port),
+        ).fetchall()
+        return tuple(str(row["database_name"]) for row in rows)
+
+    @_translate_sqlite_error
+    def _project_bootstrapped_database_names(
+        self, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
+    ) -> tuple[str, ...]:
+        """Return databases explicitly bootstrapped on one claimed cluster."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT DISTINCT database_name FROM database_events
+               WHERE cluster_id = ? AND db_host = ? AND db_port = ?
+                 AND event_type = 'bootstrapped'
+               ORDER BY database_name""",
+            (identity, host, db_port),
+        ).fetchall()
+        return tuple(str(row["database_name"]) for row in rows)
+
+    @_translate_sqlite_error
+    def _record_project_database_binding(
+        self,
+        project_id: str,
+        cluster_id: uuid.UUID | str,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+        database_oid: int | None = None,
+    ) -> None:
+        """Record a database identity observed during successful project init."""
+        project = str(project_id).strip()
+        name = str(database_name).strip()
+        if not project or not name or name in {"postgres", "template0", "template1"}:
+            raise BackupCatalogError("project database binding identity is invalid")
+        if database_oid is not None and (type(database_oid) is not int or database_oid <= 0):
+            raise BackupCatalogError("project database binding PostgreSQL identity is invalid")
+        host = normalize_db_host(db_host)
+        identity = self._cluster_uuid(cluster_id)
+        claim = self._get_postgres_cluster_by_id(identity)
+        if claim is None or claim.state != "active" or claim.project_id != project:
+            raise BackupCatalogError("project database binding requires its active claim")
+        with self._conn:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO project_database_bindings
+                   (project_id, cluster_id, db_host, db_port, database_name, database_oid, bound_at)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+                (project, identity, host, db_port, name, database_oid),
+            )
+
+    @_translate_sqlite_error
+    def _project_bound_database_records(
+        self, project_id: str, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
+    ) -> tuple[tuple[str, int | None], ...]:
+        """Return exact project database names and their durable PostgreSQL OIDs."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT database_name, database_oid FROM project_database_bindings
+               WHERE project_id = ? AND cluster_id = ? AND db_host = ? AND db_port = ?
+               ORDER BY database_name""",
+            (str(project_id), identity, host, db_port),
+        ).fetchall()
+        return tuple(
+            (
+                str(row["database_name"]),
+                int(row["database_oid"]) if row["database_oid"] is not None else None,
+            )
+            for row in rows
+        )
+
+    @_translate_sqlite_error
+    def _project_bound_database_names(
+        self, project_id: str, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
+    ) -> tuple[str, ...]:
+        """Return only database identities captured for this exact claim endpoint."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT database_name FROM project_database_bindings
+               WHERE project_id = ? AND cluster_id = ? AND db_host = ? AND db_port = ?
+               ORDER BY database_name""",
+            (str(project_id), identity, host, db_port),
+        ).fetchall()
+        return tuple(str(row["database_name"]) for row in rows)
 
     @_translate_sqlite_error
     def has_tracked_database(

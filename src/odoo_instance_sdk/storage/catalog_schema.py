@@ -140,6 +140,7 @@ restores = Table(
         nullable=False,
         server_default="complete",
     ),
+    Column("database_oid", Integer),
     CheckConstraint(
         "(source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
         "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "
@@ -208,6 +209,27 @@ database_events = Table(
         "db_port",
         "database_name",
         text("sequence DESC"),
+    ),
+)
+
+project_database_bindings = Table(
+    "project_database_bindings",
+    metadata,
+    Column("project_id", Text, nullable=False),
+    Column("cluster_id", Text, nullable=False),
+    Column("db_host", Text, nullable=False),
+    Column("db_port", Integer, nullable=False),
+    Column("database_name", Text, nullable=False),
+    Column("database_oid", Integer, nullable=True),
+    Column("bound_at", Text, nullable=False),
+    UniqueConstraint("project_id", "cluster_id", "db_host", "db_port", "database_name"),
+    Index(
+        "project_database_bindings_identity_idx",
+        "project_id",
+        "cluster_id",
+        "db_host",
+        "db_port",
+        "database_name",
     ),
 )
 
@@ -374,6 +396,7 @@ CATALOG_TABLES = (
     "backup_events",
     "restores",
     "database_events",
+    "project_database_bindings",
     "environments",
     "environment_events",
     "environment_copy_journal",
@@ -393,6 +416,7 @@ CATALOG_INDEXES = (
     "restores_cluster_identity_idx",
     "database_events_cluster_idx",
     "database_events_cluster_identity_idx",
+    "project_database_bindings_identity_idx",
     "environments_active_idx",
     "environments_one_active_branch",
     "environments_project_checkout_idx",

@@ -78,10 +78,8 @@ class _BootstrapFollowup:
     plan: BootstrapTmpPlan
     project_root: Path
     data_directory: Path
-
-    @property
-    def steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
-        return self.plan.execution_steps
+    database_names: tuple[str | None, ...]
+    fresh_cluster: bool = False
 
 
 def _init_action_details(
@@ -277,24 +275,22 @@ def _execute_compose_init_phase(
 def _execute_bootstrap_followup_phase(
     context: RunContext[dict[str, JsonValue]], followup: _BootstrapFollowup
 ) -> None:
-    from odoo_instance_sdk.internal.dbprep.bootstrap import (
-        execute_bootstrap_tmp,
-        record_bootstrap_event,
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    bootstrap.execute_bootstrap_tmp(
+        context,
+        followup.plan,
+        on_created=lambda: bootstrap.record_bootstrap_event(
+            followup.cluster,
+            verify_project_owned_data_dir(followup.project_root, followup.data_directory),
+        ),
+        on_observed=bootstrap.observed_project_database_binding_callback(
+            followup.cluster,
+            followup.database_names,
+            fresh_cluster=followup.fresh_cluster,
+        ),
     )
-    from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
-
-    verify_project_owned_data_dir(
-        followup.project_root, followup.data_directory, require_exists=False
-    )
-
-    def record() -> None:
-        data_directory = verify_project_owned_data_dir(
-            followup.project_root, followup.data_directory
-        )
-        record_bootstrap_event(followup.cluster, data_directory)
-
-    execute_bootstrap_tmp(context, followup.plan, on_created=record)
-    for step in followup.steps:
+    for step in followup.plan.execution_steps:
         if context.planned(step.step_id) and not context.consumed(step.step_id):
             context.skip(step.step_id)
 
@@ -358,12 +354,10 @@ def init_project_command(  # noqa: C901
         raise InstanceConfigurationError(
             f"init_incomplete: missing capabilities {preliminary_missing}"
         )
-
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
         validate_generated_config_target(
             project_generated_config_path(project_path), project_root=project_path.resolve()
         )
-
     primary_preparation: _PrimaryVenvPreparation | None = None
     if venv is not None:
         if effective_config.python is None:
@@ -373,7 +367,6 @@ def init_project_command(  # noqa: C901
             python=effective_config.python,
             venv=venv,
         )
-
     compose_followup: _ComposeFollowup | None = None
     bootstrap_followup: _BootstrapFollowup | None = None
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
@@ -384,7 +377,6 @@ def init_project_command(  # noqa: C901
             python=(primary_preparation.interpreter if primary_preparation is not None else None),
             defer_actions=venv is not None or confirm_postgres_image is not None,
         )
-
     image_phase = None
     if compose_followup is not None and confirm_postgres_image is not None:
         from odoo_instance_sdk.internal.project_init_image import capture_image_consent_phase
@@ -394,7 +386,6 @@ def init_project_command(  # noqa: C901
         image_phase = capture_image_consent_phase(
             compose_followup.cluster, effective_config.postgres.image
         )
-
     init_action = PreparedAction(
         step_id="init",
         action="verify-init-manifest" if resume_existing else "init",
@@ -444,7 +435,7 @@ def init_project_command(  # noqa: C901
         *((compose_followup.init_steps[1:]) if compose_followup is not None else ()),
         *(primary_preparation.steps if primary_preparation is not None else ()),
         *(compose_followup.steps if compose_followup is not None else ()),
-        *(bootstrap_followup.steps if bootstrap_followup is not None else ()),
+        *(bootstrap_followup.plan.execution_steps if bootstrap_followup is not None else ()),
     )
 
     def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -516,6 +507,7 @@ def _compose_followup_steps(
     from odoo_instance_sdk.internal.dbprep.bootstrap import (
         bootstrap_record_action,
         bootstrap_tmp_plan,
+        candidate_database_names,
     )
     from odoo_instance_sdk.internal.generated_config import project_generated_config_path
     from odoo_instance_sdk.internal.proc import PreparedAction
@@ -592,6 +584,7 @@ def _compose_followup_steps(
         include_create=defer_actions,
         project_id=cluster._project_id,
         record_action=bootstrap_record_action(),
+        capture_inventory=True,
     )
 
     password_state: list[str | None] = [None]
@@ -620,6 +613,9 @@ def _compose_followup_steps(
             ),
             probe_step=refresh_password_environment(bootstrap_plan.probe_step),
             ready_step=refresh_password_environment(bootstrap_plan.ready_step),
+            inventory_step=refresh_password_environment(bootstrap_plan.inventory_step)
+            if bootstrap_plan.inventory_step is not None
+            else None,
         )
     return (
         _ComposeFollowup(
@@ -637,6 +633,10 @@ def _compose_followup_steps(
             plan=bootstrap_plan,
             project_root=root,
             data_directory=data_directory,
+            database_names=candidate_database_names(
+                config.default_source_database, source_start.db_name, start_config.db_user
+            ),
+            fresh_cluster=cluster._cluster_claim() is None,
         ),
     )
 

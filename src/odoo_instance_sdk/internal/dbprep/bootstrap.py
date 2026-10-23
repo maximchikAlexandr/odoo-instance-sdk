@@ -26,7 +26,13 @@ from odoo_instance_sdk.internal.locks import (
     exclusive_lock_until,
 )
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
-from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
+    PreparedStep,
+    ProcessResult,
+    ProcessResultLike,
+    SubprocessExecutor,
+)
 from odoo_instance_sdk.models import StartConfig
 
 if TYPE_CHECKING:
@@ -38,8 +44,28 @@ _ContextT = TypeVar("_ContextT")
 
 BOOTSTRAP_DATABASE = "tmp"
 _BOOTSTRAP_DATABASE = BOOTSTRAP_DATABASE
+_SYSTEM_DATABASE_NAMES = frozenset(("postgres", "template0", "template1"))
+
+
+def candidate_database_names(
+    default_source_database: str | None, source_database: str | None, db_user: str | None
+) -> tuple[str, ...]:
+    """Return ordered init candidates, including the configured PostgreSQL user database."""
+    return tuple(
+        name
+        for name in dict.fromkeys(
+            (BOOTSTRAP_DATABASE, default_source_database, source_database, db_user)
+        )
+        if name and name not in _SYSTEM_DATABASE_NAMES
+    )
+
+
 _BOOTSTRAP_INIT_MODULE = "base"
 _BOOTSTRAP_READY_SQL = b"SELECT state FROM ir_module_module WHERE name = 'base'"
+_BOOTSTRAP_INVENTORY_SQL = (
+    b"SELECT datname || E'\\t' || oid FROM pg_database "
+    b"WHERE NOT datistemplate AND datallowconn ORDER BY datname"
+)
 _BOOTSTRAP_CREATE_SQL = (
     b"SELECT 'CREATE DATABASE tmp' "
     b"WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'tmp')\\gexec"
@@ -51,6 +77,7 @@ _BOOTSTRAP_READY_STEP_ID = "init.bootstrap.tmp.ready"
 _BOOTSTRAP_VERIFY_ACTION_ID = "init.bootstrap.tmp.verify"
 _BOOTSTRAP_LOCK_ACTION_ID = "init.bootstrap.tmp.lock"
 _BOOTSTRAP_RECORD_ACTION_ID = "catalog.bootstrap.tmp.record"
+_BOOTSTRAP_INVENTORY_STEP_ID = "init.bootstrap.databases"
 
 
 class BootstrapFailedError(InstanceConfigurationError):
@@ -60,6 +87,14 @@ class BootstrapFailedError(InstanceConfigurationError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedDatabase:
+    """One database name paired with PostgreSQL's immutable catalog identity."""
+
+    name: str
+    database_oid: int
 
 
 class BootstrapOutcome(StrEnum):
@@ -80,6 +115,7 @@ class BootstrapTmpPlan:
     lock_action: PreparedAction | None = None
     create_step: PreparedStep | None = None
     record_action: PreparedAction | None = None
+    inventory_step: PreparedStep | None = None
     project_id: str | None = None
 
     @property
@@ -91,6 +127,8 @@ class BootstrapTmpPlan:
         if self.create_step is not None:
             steps.append(self.create_step)
         steps.extend((self.spawn_step, self.ready_step))
+        if self.inventory_step is not None:
+            steps.append(self.inventory_step)
         if self.record_action is not None:
             steps.append(self.record_action)
         return tuple(steps)
@@ -139,6 +177,7 @@ def bootstrap_tmp_plan(
     include_create: bool = True,
     project_id: str | None = None,
     record_action: PreparedAction | None = None,
+    capture_inventory: bool = False,
 ) -> BootstrapTmpPlan:
     """Capture bootstrap database creation, spawn, SQL probes, and verify action.
 
@@ -196,6 +235,19 @@ def bootstrap_tmp_plan(
         db_password=db_password,
         step_id=_BOOTSTRAP_READY_STEP_ID,
     )
+    inventory_step = (
+        _bootstrap_sql_step(
+            db_host=db_host,
+            db_port=db_port,
+            db_user=db_user,
+            db_password=db_password,
+            step_id=_BOOTSTRAP_INVENTORY_STEP_ID,
+            database="postgres",
+            stdin=_BOOTSTRAP_INVENTORY_SQL,
+        )
+        if capture_inventory
+        else None
+    )
     ready_action = PreparedAction(
         step_id=_BOOTSTRAP_VERIFY_ACTION_ID,
         action="verify-bootstrap-tmp-base",
@@ -221,6 +273,7 @@ def bootstrap_tmp_plan(
         lock_action=lock_action,
         create_step=create_step,
         record_action=record_action,
+        inventory_step=inventory_step,
         project_id=project_id if lock_action is not None else None,
     )
 
@@ -261,11 +314,40 @@ def run_bootstrap_tmp(
     return BootstrapOutcome.CREATED
 
 
+def _read_database_inventory(result: ProcessResultLike) -> tuple[ObservedDatabase, ...]:
+    """Decode one successful, non-empty PostgreSQL inventory observation."""
+    if not isinstance(result, ProcessResult):
+        raise BootstrapFailedError("database inventory observation returned no process result")
+    if result.returncode != 0:
+        raise BootstrapFailedError("database inventory observation failed")
+    stdout = result.stdout or ""
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise BootstrapFailedError(
+                "database inventory observation was not valid UTF-8"
+            ) from error
+    observations: list[ObservedDatabase] = []
+    for line in str(stdout).splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) != 2 or not parts[0] or not parts[1].isdigit():
+            raise BootstrapFailedError("database inventory observation was invalid")
+        oid = int(parts[1])
+        if oid <= 0 or any(ord(char) < 0x20 and char != "\t" for char in line):
+            raise BootstrapFailedError("database inventory observation was invalid")
+        observations.append(ObservedDatabase(parts[0], oid))
+    if not observations:
+        raise BootstrapFailedError("database inventory observation was invalid")
+    return tuple({item.name: item for item in observations}.values())
+
+
 def execute_bootstrap_tmp(
     context: RunContext[_ContextT],
     plan: BootstrapTmpPlan,
     *,
     on_created: Callable[[], None] | None = None,
+    on_observed: Callable[[tuple[ObservedDatabase, ...]], None] | None = None,
 ) -> BootstrapOutcome:
     """Serialize the complete bootstrap boundary, including lifecycle record."""
     lock = (
@@ -282,6 +364,11 @@ def execute_bootstrap_tmp(
         context.action(plan.verify_action.step_id)
         outcome = run_bootstrap_tmp(context, plan)
         context.complete_action(plan.verify_action.step_id)
+        observed: tuple[ObservedDatabase, ...] = ()
+        if plan.inventory_step is not None:
+            observed = _read_database_inventory(context.process_prepared(plan.inventory_step))
+            if on_observed is not None:
+                on_observed(observed)
         if plan.record_action is not None:
             if outcome is BootstrapOutcome.CREATED:
                 context.action(plan.record_action.step_id)
@@ -361,6 +448,7 @@ def project_bootstrap_tmp_plan(instance: OdooInstance) -> BootstrapTmpPlan | Non
         include_create=False,
         project_id=cluster._project_id,
         record_action=bootstrap_record_action(),
+        capture_inventory=True,
     )
 
 
@@ -374,7 +462,11 @@ def ensure_project_bootstrap_tmp(
     captured = project_bootstrap_tmp_plan(instance) if plan is None else plan
     if captured is None:
         return
-    execute_bootstrap_tmp(context, captured, on_created=lambda: _record_bootstrap_event(instance))
+    execute_bootstrap_tmp(
+        context,
+        captured,
+        on_created=lambda: _record_bootstrap_event(instance),
+    )
 
 
 def _probe_tmp_ready(context: RunContext[_ContextT], probe_step: PreparedStep) -> bool:
@@ -439,3 +531,100 @@ def record_bootstrap_event(cluster: PostgresCluster, data_directory: str | Path)
         raise BootstrapFailedError(f"bootstrap lifecycle publication failed: {error}") from error
     finally:
         catalog.close()
+
+
+def record_project_database_bindings(
+    cluster: PostgresCluster, observations: tuple[ObservedDatabase, ...]
+) -> None:
+    """Persist only identities observed on the exact active init cluster."""
+    if not observations:
+        return
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    claim = catalog._get_postgres_cluster(cluster._project_id)
+    if claim is None or claim.state != "active":
+        catalog.close()
+        raise BootstrapFailedError("database binding claim is not active")
+    try:
+        for observation in observations:
+            catalog._record_project_database_binding(
+                claim.project_id,
+                claim.cluster_id,
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+                observation.name,
+                database_oid=observation.database_oid,
+            )
+    except Exception as error:
+        if isinstance(error, BootstrapFailedError):
+            raise
+        raise BootstrapFailedError(f"database binding publication failed: {error}") from error
+    finally:
+        catalog.close()
+
+
+def record_observed_project_database_bindings(
+    cluster: PostgresCluster,
+    candidates: tuple[str | None, ...],
+    observed: tuple[ObservedDatabase, ...],
+    *,
+    fresh_cluster: bool = False,
+) -> None:
+    """Persist observed init names only with a durable ownership boundary.
+
+    A newly-created Compose claim is the only boundary that can authorize a
+    database which was merely observed (the image may create the user DB
+    before the bootstrap probe).  On retries or reused claims, only names
+    already bound by an earlier successful init are eligible; observation
+    alone must never adopt a same-name foreign database.
+    """
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        claim = catalog._get_postgres_cluster(cluster._project_id)
+        if claim is None or claim.state != "active":
+            return
+        existing = dict(
+            catalog._project_bound_database_records(
+                claim.project_id,
+                claim.cluster_id,
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+            )
+        )
+    finally:
+        catalog.close()
+    if not fresh_cluster:
+        for observation in observed:
+            if (
+                observation.name in existing
+                and existing[observation.name] != observation.database_oid
+            ):
+                raise BootstrapFailedError(
+                    "database inventory identity changed for an existing project binding"
+                )
+    allowed = frozenset(filter(None, candidates)) if fresh_cluster else frozenset(existing)
+    record_project_database_bindings(
+        cluster, tuple(item for item in observed if item.name in allowed)
+    )
+
+
+def observed_project_database_binding_callback(
+    cluster: PostgresCluster,
+    candidates: tuple[str | None, ...],
+    *,
+    fresh_cluster: bool,
+) -> Callable[[tuple[ObservedDatabase, ...]], None]:
+    """Build the captured init callback without widening the public boundary."""
+    return lambda observed: record_observed_project_database_bindings(
+        cluster, candidates, observed, fresh_cluster=fresh_cluster
+    )
+
+
+def record_project_database_binding(cluster: PostgresCluster, database_name: str) -> None:
+    """Compatibility wrapper for one already-observed database name."""
+    raise BootstrapFailedError("database binding requires observed PostgreSQL identity")

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
     from odoo_instance_sdk.models.backup import Backup
+    from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -124,7 +125,9 @@ class DatabasePurgeTarget:
     project_id: str
     project_root: Path
     database_name: str
+    database_oid: int | None = None
     instance: OdooInstance | None = None
+    project_config: ProjectConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,14 +243,20 @@ class DatabasePurgeAdapter:
         from odoo_instance_sdk.project import ProjectConfig
 
         instance = target.instance
+        project: ProjectConfig
         if instance is None:
-            instance = self._client.instance.from_project(ProjectConfig.load(target.project_root))
+            project = target.project_config or ProjectConfig.load(target.project_root)
+            instance = self._client.instance.from_project(project)
+        else:
+            project = target.project_config or ProjectConfig.load(target.project_root)
         return cast(
             "Command[JsonValue]",
             build_database_drop_command(
                 instance,
                 target.project_root,
                 target.database_name,
+                expected_database_oid=target.database_oid,
+                project=project,
                 force_default=True,
                 idempotent_absent=True,
                 defer_planning=True,

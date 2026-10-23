@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -21,6 +22,7 @@ from odoo_instance_sdk.internal.dbprep.bootstrap import (
     BootstrapFailedError,
     BootstrapOutcome,
     bootstrap_tmp_plan,
+    candidate_database_names,
     tmp_bootstrap_command,
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
@@ -29,6 +31,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessHandle,
     ProcessResult,
     RecordingExecutor,
+    RunContext,
 )
 from odoo_instance_sdk.internal.project_init import (
     _INIT_REMOTE_NAMES_ACTION_ID,
@@ -46,7 +49,13 @@ from odoo_instance_sdk.project import (
     RemoteSourceConfig,
     TestInstanceProjectConfig as RemoteTestInstanceConfig,
 )
-from odoo_instance_sdk.project_init import init_project, init_project_command
+from odoo_instance_sdk.project_init import (
+    _BootstrapFollowup,
+    _compose_followup_steps,
+    _execute_bootstrap_followup_phase,
+    init_project,
+    init_project_command,
+)
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance import (
     AuxiliaryRestoreSession,
@@ -70,7 +79,7 @@ def _cleanup_magicmock_cwd_artifacts() -> object:
 def stub_psql_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Inject a disposable native-client path for public CLI command tests."""
     psql = tmp_path / "psql"
-    psql.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    psql.write_text("#!/bin/sh\nprintf 'postgres\\t1\\n'\n", encoding="utf-8")
     psql.chmod(0o755)
     path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), path)))
@@ -102,6 +111,22 @@ def stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
         return BootstrapOutcome.ALREADY_READY
 
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", _noop_ensure_running)
+    original_process_prepared = RunContext.process_prepared
+
+    def _inventory_success(self: RunContext[object], step: PreparedStep) -> ProcessResult:
+        if step.step_id.startswith("init.bootstrap.databases"):
+            return ProcessResult(
+                argv=step.argv,
+                returncode=0,
+                stdout="postgres\t1\n",
+                stderr="",
+                duration=0.0,
+                cwd=step.cwd,
+                environment=step.environment,
+            )
+        return cast("ProcessResult", original_process_prepared(self, step))
+
+    monkeypatch.setattr(RunContext, "process_prepared", _inventory_success)
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
         _skip_bootstrap_tmp,
@@ -522,7 +547,7 @@ def test_init_after_prepare_venv_persists_real_uv_interpreter(
     assert manifest_before
 
 
-@pytest.mark.usefixtures("stub_compose_init_followup")
+@pytest.mark.usefixtures("stub_compose_init_followup", "stub_psql_resolution")
 def test_init_after_prepare_venv_preserves_primary_interpreter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1081,6 +1106,7 @@ def test_repeated_compose_resume_failure_preserves_boundary_error_and_ledger(
             "init.bootstrap.tmp.probe",
             "init.bootstrap.tmp",
             "init.bootstrap.tmp.ready",
+            "init.bootstrap.databases",
             "catalog.bootstrap.tmp.record",
         ),
         (
@@ -1088,6 +1114,7 @@ def test_repeated_compose_resume_failure_preserves_boundary_error_and_ledger(
             "init.bootstrap.tmp.probe",
             "init.bootstrap.tmp",
             "init.bootstrap.tmp.ready",
+            "init.bootstrap.databases",
             "catalog.bootstrap.tmp.record",
         ),
     ]
@@ -1783,6 +1810,240 @@ def test_init_compose_failure_keeps_forgotten_project_hidden(
     catalog.close()
 
 
+def test_init_bootstrap_publishes_observed_project_database_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    data_directory = root / ".odcli" / "filestore"
+    data_directory.mkdir(parents=True)
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    project_id = f"project_{repo_key(root, root / '.git')}"
+    catalog._register_project(project_id, root, root / ".git")
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose", "volume")
+    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose", "volume")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda: tmp_path / "catalog.sqlite3"
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.CREATED,
+    )
+    cluster = SimpleNamespace(
+        _project_id=project_id, endpoint_host="127.0.0.1", endpoint_port=15432
+    )
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        record_action=bootstrap.bootstrap_record_action(),
+        capture_inventory=True,
+    )
+    followup = _BootstrapFollowup(
+        cluster=cluster,  # type: ignore[arg-type]
+        plan=plan,
+        project_root=root,
+        data_directory=data_directory,
+        database_names=("odoo",),
+        fresh_cluster=True,
+    )
+    context = MagicMock()
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+    _execute_bootstrap_followup_phase(context, followup)
+    assert catalog._project_bound_database_names(
+        project_id, claim.cluster_id, "127.0.0.1", 15432
+    ) == ("odoo",)
+    catalog.close()
+
+
+def test_init_bootstrap_retry_publishes_observed_binding_when_tmp_is_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    data_directory = root / ".odcli" / "filestore"
+    data_directory.mkdir(parents=True)
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    project_id = f"project_{repo_key(root, root / '.git')}"
+    catalog._register_project(project_id, root, root / ".git")
+    claim = catalog._ensure_postgres_cluster_pending(project_id, "compose", "volume")
+    catalog._activate_postgres_cluster(claim.cluster_id, project_id, "compose", "volume")
+    catalog._record_database_bootstrapped(
+        "127.0.0.1", 15432, "tmp", cluster_id=claim.cluster_id, data_directory=data_directory
+    )
+    catalog._record_project_database_binding(
+        project_id, claim.cluster_id, "127.0.0.1", 15432, "odoo", database_oid=102
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda: tmp_path / "catalog.sqlite3"
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.ALREADY_READY,
+    )
+    cluster = SimpleNamespace(
+        _project_id=project_id, endpoint_host="127.0.0.1", endpoint_port=15432
+    )
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        record_action=bootstrap.bootstrap_record_action(),
+        capture_inventory=True,
+    )
+    followup = _BootstrapFollowup(
+        cluster=cluster,  # type: ignore[arg-type]
+        plan=plan,
+        project_root=root,
+        data_directory=data_directory,
+        database_names=("odoo",),
+    )
+    context = MagicMock()
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+    _execute_bootstrap_followup_phase(context, followup)
+    assert catalog._project_bound_database_names(
+        project_id, claim.cluster_id, "127.0.0.1", 15432
+    ) == ("odoo",)
+    catalog.close()
+
+
+def test_deferred_init_materializes_password_for_database_inventory_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    (root / ".odcli").mkdir(parents=True)
+    postgres_dir = tmp_path / "postgres"
+    postgres_dir.mkdir()
+    (postgres_dir / "postgres-password").write_text("captured-secret\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
+        lambda _project_id: postgres_dir,
+    )
+    source_config = root / "odoo.conf"
+    source_config.write_text("[options]\ndb_name = binta_target\n", encoding="utf-8")
+    config = ProjectConfig(
+        repository_root=root,
+        default_source_database="binta_target",
+        source_config=source_config,
+        postgres=PostgresProjectConfig(
+            mode="compose", image="postgres:16", port=15432, user="odoo"
+        ),
+    )
+    compose, followup = _compose_followup_steps(root, config, dry_run=False, defer_actions=True)
+    assert followup.database_names == ("tmp", "binta_target", "odoo")
+    inventory = followup.plan.inventory_step
+    assert inventory is not None and inventory.runtime_environment_factory is not None
+    compose.password_state[0] = "runtime-secret"
+    environment, _cleanup, secrets = inventory.runtime_environment_factory()
+    assert dict(environment)["PGPASSWORD"] == "runtime-secret"
+    assert secrets == ("runtime-secret",)
+
+
+def test_init_database_candidates_exclude_system_databases() -> None:
+    assert candidate_database_names("postgres", "template1", "odoo") == ("tmp", "odoo")
+
+
+def test_init_fails_closed_when_database_inventory_probe_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    plan = bootstrap_tmp_plan(
+        command_prefix=("python3", "odoo-bin"),
+        start_config=StartConfig(db_user="odoo"),
+        db_host="127.0.0.1",
+        db_port=15432,
+        db_user="odoo",
+        db_password="secret",
+        include_create=False,
+        capture_inventory=True,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.CREATED,
+    )
+    context = MagicMock()
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=1,
+        stdout="",
+        stderr="permission denied",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+    with pytest.raises(BootstrapFailedError, match="inventory observation failed"):
+        bootstrap.execute_bootstrap_tmp(context, plan)
+
+
+def test_deferred_init_fails_closed_when_database_inventory_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import bootstrap
+
+    root = tmp_path / "project"
+    root.mkdir()
+    config = ProjectConfig(
+        repository_root=root,
+        default_source_database="binta_target",
+        postgres=PostgresProjectConfig(
+            mode="compose", image="postgres:16", port=15432, user="odoo"
+        ),
+    )
+    _compose, followup = _compose_followup_steps(root, config, dry_run=False, defer_actions=True)
+    assert followup.plan.inventory_step is not None
+    compose_password = _compose.password_state
+    compose_password[0] = "runtime-secret"
+    monkeypatch.setattr(
+        bootstrap,
+        "run_bootstrap_tmp",
+        lambda _context, _plan: BootstrapOutcome.ALREADY_READY,
+    )
+    context = MagicMock()
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+    with pytest.raises(BootstrapFailedError, match="inventory observation was invalid"):
+        _execute_bootstrap_followup_phase(context, followup)
+
+
 def test_first_run_triggers_bootstrap_when_no_valid_tmp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1828,6 +2089,15 @@ def test_first_run_triggers_bootstrap_when_no_valid_tmp(
     context.action = MagicMock()
     context.complete_action = MagicMock()
     context.skip = MagicMock()
+    context.process_prepared.side_effect = lambda step: ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="tmp\t101\npostgres\t1\n",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
     ensure_project_bootstrap_tmp(instance, context)
     assert calls == [True]
     context.action.assert_called_once_with("init.bootstrap.tmp.verify")
@@ -1964,6 +2234,15 @@ def _prepare_self_contained_restore_setup(
         inherited_stdio=False,
     )
     executor = RecordingExecutor(handles={session.start_step.step_id: handle})
+    executor.results["init.bootstrap.databases"] = ProcessResult(
+        argv=("psql",),
+        returncode=0,
+        stdout="tmp\t101\nodoo\t102\npostgres\t1\n",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
     bootstrap_spawned: list[bool] = []
 
     def _track_bootstrap(

@@ -31,12 +31,20 @@ class ProjectResource:
         confirmation: str | None = None,
     ) -> Command[ProjectRemovalResult]:
         """Capture one immutable project removal command."""
+        import msgspec
+
+        from odoo_instance_sdk.config import InstanceConfig
         from odoo_instance_sdk.exceptions import (
             ConfigError,
             InstanceConfigurationError,
             PostgresClusterError,
         )
-        from odoo_instance_sdk.internal.postgres_compose import inspect_volume_identity
+        from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
+        from odoo_instance_sdk.internal.postgres_compose import (
+            container_id_matches_snapshot,
+            inspect_container_identity,
+            inspect_volume_identity,
+        )
         from odoo_instance_sdk.internal.project_data_purge import (
             BackupPurgeAdapter,
             ComposeClusterPurgeAdapter,
@@ -67,7 +75,14 @@ class ProjectResource:
             VolumeResourceSource,
             stable_resource_identity,
         )
-        from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
+        from odoo_instance_sdk.models import DatabaseInventoryResult, StartConfig
+        from odoo_instance_sdk.project import (
+            PostgresProjectConfig,
+            ProjectConfig,
+            managed_filestore_path,
+        )
+        from odoo_instance_sdk.resources.instance import OdooInstance
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         catalog = self._client.get_catalog()
         registrations = tuple(
@@ -97,29 +112,162 @@ class ProjectResource:
         claim = catalog._get_postgres_cluster_for_project(
             registration.project_id,
             registration.repository_root,
-            registration.git_common_dir or registration.repository_root / ".git",
+            registration.git_common_dir,
         )
+        instance = None
+        recovered_source = False
+        recovery_endpoint: tuple[str, int] | None = None
+        if (
+            purge
+            and project_config is None
+            and claim is not None
+            and claim.state == "active"
+            and not registration.repository_root.exists()
+            and not registration.repository_root.is_symlink()
+            and registration.git_common_dir is not None
+        ):
+            endpoint_row = catalog._conn.execute(
+                """SELECT db_host, db_port FROM database_events
+                   WHERE cluster_id = ? AND event_type = 'bootstrapped'
+                   ORDER BY sequence DESC LIMIT 1""",
+                (str(claim.cluster_id),),
+            ).fetchone()
+            endpoint = (
+                (str(endpoint_row["db_host"]), int(endpoint_row["db_port"]))
+                if endpoint_row is not None
+                else None
+            )
+            recovery_endpoint = endpoint
+            if endpoint is not None:
+                recovery_user = "odoo"
+                recovery_config = ProjectConfig(
+                    repository_root=registration.repository_root,
+                    postgres=PostgresProjectConfig(
+                        mode="compose",
+                        image="pgvector/pgvector:pg16",
+                        port=endpoint[1],
+                        user=recovery_user,
+                    ),
+                )
+                try:
+                    recovery_cluster = PostgresCluster._from_config(
+                        recovery_config,
+                        repository_root=registration.repository_root,
+                        compose_runner=None,
+                        project_id=claim.project_id,
+                    )
+                    instance = OdooInstance(
+                        config=InstanceConfig(
+                            base_url="http://127.0.0.1:8069",
+                            start_config=StartConfig(
+                                db_host=endpoint[0],
+                                db_port=endpoint[1],
+                                db_user=recovery_user,
+                            ),
+                            db_host=endpoint[0],
+                            db_port=endpoint[1],
+                            db_user=recovery_user,
+                        ),
+                        _client=client,
+                        _postgres_cluster=recovery_cluster,
+                    )
+                    project_config = recovery_config
+                    managed_filestore = managed_filestore_path(project_config)
+                    recovered_source = True
+                except (OSError, ValueError, PostgresClusterError):
+                    instance = None
         if purge and project_config is not None:
-            try:
-                instance = client.instance.from_project(project_config)
-            except (
-                ConfigError,
-                InstanceConfigurationError,
-                OSError,
-                ValueError,
-                PostgresClusterError,
-            ):
-                instance = None
+            if instance is None:
+                try:
+                    instance = client.instance.from_project(project_config)
+                except (
+                    ConfigError,
+                    InstanceConfigurationError,
+                    OSError,
+                    ValueError,
+                    PostgresClusterError,
+                ):
+                    instance = None
             if instance is not None:
                 try:
-                    database_inventory = instance.databases.list_inventory(
-                        registration.repository_root,
-                        tracked=True,
-                    )
+                    if recovered_source:
+                        database_inventory = build_database_inventory_command(
+                            instance,
+                            registration.repository_root,
+                            tracked=False,
+                            catalog=catalog,
+                            project=project_config,
+                        ).run()
+                        durable_records = (
+                            {
+                                (name, oid)
+                                for name, oid in catalog._project_bound_database_records(
+                                    claim.project_id,
+                                    claim.cluster_id,
+                                    *recovery_endpoint,
+                                )
+                                if isinstance(oid, int) and oid > 0
+                            }
+                            if claim is not None and recovery_endpoint is not None
+                            else set()
+                        )
+                        durable_names = {name for name, _oid in durable_records}
+                        observed_names = {
+                            item.name
+                            for item in database_inventory.databases
+                            if item.name not in {"postgres", "template0", "template1"}
+                        }
+                        authorized_items = tuple(
+                            item
+                            for item in database_inventory.databases
+                            if (item.name, item.database_oid) in durable_records
+                        )
+                        if not authorized_items or observed_names - durable_names:
+                            database_inventory = None
+                        else:
+                            database_inventory = DatabaseInventoryResult(
+                                cluster=database_inventory.cluster,
+                                databases=tuple(
+                                    item
+                                    for item in database_inventory.databases
+                                    if item in authorized_items
+                                    and item.name not in {"postgres", "template0", "template1"}
+                                ),
+                                tracked=False,
+                            )
+                        if database_inventory is not None:
+                            database_inventory = DatabaseInventoryResult(
+                                cluster=database_inventory.cluster,
+                                databases=tuple(
+                                    msgspec.structs.replace(
+                                        item,
+                                        cluster_id=(
+                                            str(claim.cluster_id)
+                                            if item.cluster_id is None and claim is not None
+                                            else item.cluster_id
+                                        ),
+                                    )
+                                    for item in database_inventory.databases
+                                ),
+                                tracked=False,
+                            )
+                        if database_inventory is not None and database_inventory.databases:
+                            project_config = ProjectConfig(
+                                repository_root=registration.repository_root,
+                                default_source_database=database_inventory.databases[0].name,
+                                postgres=project_config.postgres,
+                            )
+                    else:
+                        database_inventory = instance.databases.list_inventory(
+                            registration.repository_root,
+                            tracked=True,
+                        )
                 except (ConfigError, OSError, ValueError, PostgresClusterError):
                     database_inventory = None
                 if claim is not None and claim.state == "active":
-                    cluster = getattr(instance, "_postgres_cluster", None)
+                    cluster = cast(
+                        "PostgresCluster | None", getattr(instance, "_postgres_cluster", None)
+                    )
                     if cluster is not None and getattr(cluster, "owned", False):
                         try:
                             volume_verified = inspect_volume_identity(
@@ -128,9 +276,18 @@ class ProjectResource:
                                 str(claim.cluster_id),
                                 project_id=claim.project_id,
                             )
+                            inspected_container_id = inspect_container_identity(
+                                cluster.compose_runner,
+                                f"{claim.compose_project}-postgres-1",
+                                str(claim.cluster_id),
+                                project_id=claim.project_id,
+                                compose_project=claim.compose_project,
+                                volume_name=claim.volume_name,
+                            )
                             snapshot = cluster.resource_snapshot()
                         except (OSError, ValueError, PostgresClusterError):
                             volume_verified = False
+                            inspected_container_id = None
                             snapshot = None
                         container = getattr(snapshot, "container", None)
                         stopped = getattr(snapshot, "unavailability_reason", None) == "stopped"
@@ -152,6 +309,15 @@ class ProjectResource:
                                 else True
                                 if volume_verified and container is not None
                                 else None
+                            ),
+                            container_identity_verified=(
+                                volume_verified
+                                and inspected_container_id is not None
+                                and container is not None
+                                and container_id_matches_snapshot(
+                                    inspected_container_id,
+                                    getattr(container, "id", None),
+                                )
                             ),
                             reason=(
                                 None
@@ -193,31 +359,58 @@ class ProjectResource:
                     backup=BackupPurgeAdapter(client, catalog),
                 )
                 if project_config is not None:
-                    database = project_config.default_source_database
-                    if database:
-                        database_target = DatabasePurgeTarget(
+                    database_names = (
+                        tuple(item.name for item in database_inventory.databases)
+                        if recovered_source and database_inventory is not None
+                        else (
+                            (project_config.default_source_database,)
+                            if project_config.default_source_database
+                            else ()
+                        )
+                    )
+                    database_targets = {
+                        f"database:{database}": DatabasePurgeTarget(
                             identity=f"database:{database}",
                             project_id=registration.project_id,
                             project_root=registration.repository_root,
                             database_name=database,
+                            database_oid=next(
+                                (
+                                    item.database_oid
+                                    for item in (
+                                        database_inventory.databases
+                                        if database_inventory is not None
+                                        else ()
+                                    )
+                                    if item.name == database
+                                ),
+                                None,
+                            ),
+                            instance=instance,
+                            project_config=project_config,
                         )
+                        for database in database_names
+                    }
+                    if database_targets:
+                        database_identities = dict(database_targets)
+                        for database, database_target in (
+                            (name, target) for name, target in database_targets.items()
+                        ):
+                            database_name = database.removeprefix("database:")
+                            database_identities[
+                                stable_resource_identity(
+                                    "database", f"127.0.0.1:5432\x00{database_name}"
+                                )
+                            ] = database_target
+                            if claim is not None and claim.state == "active":
+                                database_identities[
+                                    stable_resource_identity(
+                                        "database", f"{claim.cluster_id}\x00{database_name}"
+                                    )
+                                ] = database_target
                         data.database = DatabasePurgeAdapter(
                             client,
-                            {
-                                database_target.identity: database_target,
-                                stable_resource_identity(
-                                    "database", f"127.0.0.1:5432\x00{database}"
-                                ): database_target,
-                                **(
-                                    {
-                                        stable_resource_identity(
-                                            "database", f"{claim.cluster_id}\x00{database}"
-                                        ): database_target
-                                    }
-                                    if claim is not None and claim.state == "active"
-                                    else {}
-                                ),
-                            },
+                            database_identities,
                         )
                     filestore = managed_filestore_path(project_config)
                     filestore_target = FilestorePurgeTarget(

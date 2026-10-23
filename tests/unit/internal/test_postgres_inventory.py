@@ -10,7 +10,10 @@ import pytest
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
+from odoo_instance_sdk.internal.pg.inventory import (
+    _INVENTORY_SQL,
+    build_database_inventory_command,
+)
 from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -89,6 +92,31 @@ def test_inventory_is_direct_cluster_read_and_tracks_only_provenance(
     assert tracked.databases == ()
     assert [step.step_id for step in executor.executed] == ["database.list.inventory"]
     assert catalog._conn.total_changes == before_changes
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_inventory_serializes_database_oid_as_a_json_number(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    instance = _instance(project_manifest, catalog)
+    executor = _executor(
+        [
+            {
+                "name": "feature_db",
+                "database_oid": 16384,
+                "logical_size_bytes": 10,
+                "active_sessions": 0,
+            }
+        ]
+    )
+
+    result = build_database_inventory_command(instance, project_manifest, executor=executor).run()
+
+    assert result.databases[0].database_oid == 16384
+    assert "'database_oid', d.oid::bigint" in _INVENTORY_SQL
     catalog.close()
 
 
