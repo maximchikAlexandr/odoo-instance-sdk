@@ -278,3 +278,21 @@ Baseline and candidate help captures use equivalent clean fixtures. Lifecycle be
 The Tester's final Multica comment SHALL link the product PR/commits/files and the GitLab test MR/commit/files; list tested product/test SHAs, commands and exit codes; summarize assertions and cleanup; and attach every required PNG plus any compact sanitized text/log evidence. The Tester SHALL read the posted comment back and verify links and attachment metadata before declaring verification complete.
 
 Cleanup deletes only the disposable stand (catalogue roots, target/control clones, test databases/filestores, routes, environments, Compose containers/volumes and temporary artifacts) after captured-identity checks. It SHALL preserve the evidence MR, branch, commits and linked product history. It SHALL not close/merge the MR, merge the product PR, delete branches, delete Docker images, or touch the reference checkout/persistent stand without a separate instruction.
+
+
+## Final acceptance disposition (2026-10-23)
+
+The owner cancelled the remaining mandatory managed E2E stage. The complete E01–E05 and independent walkthrough matrix exceeds the workspace ten-minute local test-run limit; splitting that matrix to bypass the limit is not permitted. No suitable existing private CI execution route was confirmed. The owner declined new runner/access provisioning and further CI-adapter preparation. The matrix above is retained as the original coverage plan, not as evidence of completed execution.
+
+Acceptance therefore uses `e2e_required=false`. This is an explicit cancellation of the managed acceptance stage, not an E2E PASS and not a change to the functional requirements. No further live attempt is required for this delivery.
+
+| Evidence | Actual disposition |
+| --- | --- |
+| Historical E01/run32 and E02/run33 | Passed on older product `3b997d82a65fac1524091cfbb66073792b164db3`; not carried to the reviewed revision. |
+| Historical E03/run34 | First purge passed; inert repeat failed. Incomplete managed case, not PASS. |
+| Fresh E01–E05 and independent walkthrough | Cancelled by owner for final acceptance; not executed on reviewed revision and not PASS. Associated new captures/images are not claimed. |
+| Reviewed product | `16f89ca8e5c995eafbda09eba4ab04b6d1063ffb`; four substantive review profiles CLEAN. |
+| Exact-head PR CI | Run `39974264104` completed successfully, including lint, types, product tests, compatibility and OSV; SARIF has zero findings. |
+| Exact-head source-backed project-removal CI | Run `39976879949`: two named source-removal/source-retention cases executed and passed, zero failures/errors/skips, durable reopen and inert full-ID repeat checked. Targeted CI evidence, not managed E2E closure. |
+
+The historical live-attempt ledger remains 34/42; attempt35 was not run. All previous evidence and fixtures remain preserved. Commit-history normalization, tree mapping and final-published-SHA CI remain release gates; merging is not part of this closeout.
