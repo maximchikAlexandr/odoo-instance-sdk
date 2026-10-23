@@ -268,9 +268,9 @@ def test_public_project_forget_reinit_and_purge(
         "wrong-token",
     )
     assert wrong_confirmation.returncode == 1, wrong_confirmation.stdout + wrong_confirmation.stderr
-    assert (
-        _document(wrong_confirmation)["error"]["code"] == "confirmation_required"
-    ), wrong_confirmation.stdout + wrong_confirmation.stderr
+    assert _document(wrong_confirmation)["error"]["code"] == "confirmation_required", (
+        wrong_confirmation.stdout + wrong_confirmation.stderr
+    )
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
     catalog.close()
