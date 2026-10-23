@@ -563,8 +563,24 @@ def capture_project_removal_command(  # noqa: C901
         git_status_step_id=git_status_step_id,
         git_status_hardened=True,
     )
-    terminal_purge = purge and _forgotten_project_is_inert(catalog, registration)
+    terminal_purge = purge and _forgotten_project_is_inert(catalog, registration) and not any(
+        decision.resource_type not in {"project", "source"}
+        for decision in projection.decisions
+    )
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
+    if (
+        purge
+        and registration.registration_state == "forgotten"
+        and _forgotten_project_is_inert(catalog, registration, check_publications=False)
+        and _publication_sources(registration.project_id)
+    ):
+        raise _error(
+            "owned publication reappeared after project purge",
+            projection,
+            mode=mode,
+            failed_step="project-removal:revalidate",
+            decisions=(),
+        )
     decisions: tuple[ProjectResourceDecision, ...]
     if not purge:
         blockers = _forget_blockers(catalog, registration)
