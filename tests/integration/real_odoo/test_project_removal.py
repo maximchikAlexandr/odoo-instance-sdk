@@ -7,6 +7,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from tests.integration.real_odoo.focused_support import (
     _project_database_probe,
     record,
     registered_worktree,
+    seed_backup,
 )
 from tests.integration.real_odoo.test_critical_path import _remove_owned_fixture_tree
 
@@ -119,6 +121,52 @@ def test_public_project_forget_reinit_and_purge(
     catalog.close()
     project_cluster = PostgresCluster.from_project(project)
     project_postgres_port = project_cluster.endpoint_port
+    backup_id = str(uuid.uuid4())
+    backup_path = target_runtime.root / f"project-removal-{target_runtime.run_id}.zip"
+    shutil.copy2(source_backup_plan.destination, backup_path)
+    seed_backup(
+        catalog_path,
+        backup_path,
+        backup_id=backup_id,
+        database=source_backup_plan.database,
+        source_base_url=source_backup_plan.endpoint,
+    )
+    project_database = f"odcli_e2e_owned_{target_runtime.run_id.replace('-', '')[:20]}"
+    restored = invoke("db", "restore", backup_id, "--target", project_database, "--yes")
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+    assert _document(restored)["result"]["restored_database"] == project_database
+    configured = invoke(
+        "init",
+        "--project",
+        str(project),
+        "--no-input",
+        "--yes",
+        "--odoo-bin",
+        str(project / "odoo-bin"),
+        "--python",
+        str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        "--config",
+        str(target_runtime.config_file),
+        "--test-url",
+        source_backup_plan.endpoint,
+        "--test-database",
+        source_backup_plan.database,
+        "--test-branch",
+        E2E_PINS.odoo_source_commit,
+        "--local-config",
+        "--database",
+        project_database,
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        E2E_PINS.postgres_image,
+        "--postgres-port",
+        str(project_postgres_port),
+        "--postgres-user",
+        "odoo",
+    )
+    assert configured.returncode == 0, configured.stdout + configured.stderr
+    assert ProjectConfig.load(project).default_source_database == project_database
     environment_id = (project / ".odcli" / "e2e-environment-id").read_text(encoding="ascii").strip()
     worktree = registered_worktree(catalog_path, project)
     fixture_addon = worktree / "addons" / "odcli_e2e_probe"
@@ -195,7 +243,7 @@ def test_public_project_forget_reinit_and_purge(
         E2E_PINS.odoo_source_commit,
         "--local-config",
         "--database",
-        target_runtime.topology.target_sentinel_database,
+        project_database,
         "--postgres",
         "compose",
         "--postgres-image",
@@ -226,13 +274,13 @@ def test_public_project_forget_reinit_and_purge(
     )
     database_probe = _project_database_probe(
         project,
-        target_runtime.topology.target_sentinel_database,
+        project_database,
         home=target_runtime.environment["HOME"],
     )
     assert database_probe.returncode == 0, (
         database_probe.stdout + database_probe.stderr
     )
-    assert database_probe.stdout.strip() == target_runtime.topology.target_sentinel_database
+    assert database_probe.stdout.strip() == project_database
     project_instance = OdooClient(config=OdooClientConfig(executable="odoo")).instance.from_project(
         ProjectConfig.load(project)
     )
@@ -240,7 +288,7 @@ def test_public_project_forget_reinit_and_purge(
     owned_database = next(
         item
         for item in database_inventory.databases
-        if item.name == target_runtime.topology.target_sentinel_database
+        if item.name == project_database
     )
     assert type(owned_database.database_oid) is int and owned_database.database_oid > 0
     resumed_claim = BackupCatalog(db_path=catalog_path)
