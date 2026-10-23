@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
 from odoo_instance_sdk.internal.project_removal import (
     ProjectRegistration,
     RemovalRuntimeSource,
@@ -116,6 +115,8 @@ def _completed_purge_is_inert(catalog: BackupCatalog, registration: ProjectRegis
         claim is not None,
     ):
         return False
+    from odoo_instance_sdk.internal.project_filesystem_purge import project_owned_paths
+
     if project_owned_paths(root) or _project_runtime(catalog, registration):
         return False
     for environment in _environment_sources(catalog, registration):
