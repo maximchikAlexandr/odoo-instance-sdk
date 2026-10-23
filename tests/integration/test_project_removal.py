@@ -25,7 +25,6 @@ from odoo_instance_sdk.internal import paths as internal_paths
 from odoo_instance_sdk.internal import (
     publication_routes,
     project_removal_coordinator,
-    project_removal_terminal,
 )
 from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.dbprep import bootstrap
@@ -811,26 +810,19 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
         project_id=project_id,
         local_endpoint="http://127.0.0.1:8069",
     )
-    client = SimpleNamespace(get_catalog=lambda: catalog)
-    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
-        ProjectSelector.from_project_id(project_id),
-        purge=True,
-        confirmation=f"{root.name}:{project_id}",
-    )
-
     writer_holds_lock = threading.Event()
     release_writer = threading.Event()
     terminal_checked_absence = threading.Event()
     allow_terminal_to_continue = threading.Event()
+    command_captured = threading.Event()
+    execute_terminal = threading.Event()
     terminal_done = threading.Event()
     publication_done = threading.Event()
     outcome: dict[str, object] = {}
     published_route_bytes: dict[str, bytes] = {}
-    inert_checks: list[bool] = []
+    route_reads: list[tuple[publication_routes.PublicationRoute, ...]] = []
     original_atomic_write = publication_routes._atomic_write
-    original_has_owned_publication = (
-        project_removal_terminal._has_owned_publication
-    )
+    original_read_owned_routes = publication_routes.read_owned_routes
 
     def pause_before_route_write(path: Path, content: bytes) -> None:
         if path == routes_path.with_name(f".{routes_path.name}.candidate"):
@@ -841,10 +833,13 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
         if path == routes_path:
             published_route_bytes["value"] = content
 
-    def observe_terminal_publication_check(project_id: str) -> bool:
-        result = original_has_owned_publication(project_id)
-        inert_checks.append(result)
-        if not result:
+    def observe_terminal_publication_check(
+    ) -> tuple[publication_routes.PublicationRoute, ...]:
+        result = original_read_owned_routes()
+        route_reads.append(result)
+        # The capture reads once. Pause the second real route read: it is the
+        # execution-time terminal check, after capture and before final return.
+        if len(route_reads) == 2 and not result:
             terminal_checked_absence.set()
             if not allow_terminal_to_continue.wait(timeout=10):
                 raise TimeoutError("terminal continuation was not released")
@@ -852,9 +847,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
 
     monkeypatch.setattr(publication_routes, "_atomic_write", pause_before_route_write)
     monkeypatch.setattr(
-        project_removal_terminal,
-        "_has_owned_publication",
-        observe_terminal_publication_check,
+        publication_routes, "read_owned_routes", observe_terminal_publication_check
     )
     publication_command = publication.publish_command(
         target, settings=settings, executor=RecordingExecutor()
@@ -870,13 +863,28 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
             publication_done.set()
 
     def run_terminal_purge() -> None:
+        worker_catalog: BackupCatalog | None = None
         try:
+            active_catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+            worker_catalog = active_catalog
+            client = SimpleNamespace(get_catalog=lambda: active_catalog)
+            command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+                ProjectSelector.from_project_id(project_id),
+                purge=True,
+                confirmation=f"{root.name}:{project_id}",
+            )
+            outcome["plan"] = command.plan
+            command_captured.set()
+            if not execute_terminal.wait(timeout=10):
+                raise TimeoutError("terminal command was not released after capture")
             outcome["terminal"] = command.run()
         except BaseException as exc:
             outcome["terminal_error"] = exc
             outcome["terminal_details"] = getattr(exc, "details", None)
             outcome["terminal_traceback"] = traceback.format_exc()
         finally:
+            if worker_catalog is not None:
+                worker_catalog.close()
             terminal_done.set()
 
     publication_thread = threading.Thread(target=run_publication)
@@ -885,58 +893,100 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     writer_published_during_terminal_gap = False
     terminal_remained_paused_after_publication = False
     publication_started = False
+    catalogue_data_version_before = int(
+        catalog._conn.execute("PRAGMA data_version").fetchone()[0]
+    )
+    catalogue_total_changes_before = catalog._conn.total_changes
     try:
         terminal_thread.start()
-        terminal_reached_absence = terminal_checked_absence.wait(timeout=10)
-        if terminal_reached_absence:
+        capture_finished = command_captured.wait(timeout=10)
+        if capture_finished:
             publication_thread.start()
             publication_started = True
             writer_reached_route_write = writer_holds_lock.wait(timeout=10)
-            release_writer.set()
-            writer_published_during_terminal_gap = (
-                writer_reached_route_write and publication_done.wait(timeout=10)
-            )
-            terminal_remained_paused_after_publication = not terminal_done.is_set()
-            allow_terminal_to_continue.set()
+            if writer_reached_route_write:
+                execute_terminal.set()
+                terminal_reached_absence = terminal_checked_absence.wait(timeout=10)
+                release_writer.set()
+                writer_published_during_terminal_gap = publication_done.wait(timeout=10)
+                terminal_remained_paused_after_publication = not terminal_done.is_set()
+                allow_terminal_to_continue.set()
     finally:
+        execute_terminal.set()
         allow_terminal_to_continue.set()
         release_writer.set()
         if publication_started:
             publication_thread.join(timeout=10)
         terminal_thread.join(timeout=10)
-        catalog.close()
 
     assert not (publication_started and publication_thread.is_alive())
     assert not terminal_thread.is_alive()
     assert terminal_reached_absence, (
-        "baseline terminal did not execute the publication absence check; "
-        f"outcome={outcome!r}; plan={command.plan!r}; inert_checks={inert_checks!r}; "
+        "baseline terminal did not execute its post-capture route-absence read; "
+        f"outcome={outcome!r}; route_reads={route_reads!r}; "
         f"route_exists={routes_path.exists()}"
     )
     assert writer_published_during_terminal_gap, (
         "publication writer did not finish while terminal was paused after its unlocked "
-        f"absence result; outcome={outcome!r}; plan={command.plan!r}; "
-        f"inert_checks={inert_checks!r}; route_exists={routes_path.exists()}"
+        f"absence result; outcome={outcome!r}; plan={outcome.get('plan')!r}; "
+        f"route_reads={route_reads!r}; route_exists={routes_path.exists()}"
     )
     assert terminal_remained_paused_after_publication, (
         "baseline terminal completed before the test released the post-observation pause; "
-        f"outcome={outcome!r}; inert_checks={inert_checks!r}"
+        f"outcome={outcome!r}; route_reads={route_reads!r}"
     )
     assert "publication_error" not in outcome
     assert "value" in published_route_bytes
     assert routes_path.read_bytes() == published_route_bytes["value"]
-    assert isinstance(outcome.get("terminal_error"), ProjectRemovalError), (
-        "terminal purge returned success after its unlocked absence check, while a public "
-        "publication command committed an owned route before terminal finalization; "
-        f"outcome={outcome!r}; plan={command.plan!r}; inert_checks={inert_checks!r}; "
+    terminal_error = outcome.get("terminal_error")
+    assert isinstance(terminal_error, ProjectRemovalError), (
+        "baseline terminal returned success after its unlocked absence read while a public "
+        "publisher committed an owned route; "
+        f"outcome={outcome!r}; route_reads={route_reads!r}; "
         f"route_bytes={routes_path.read_bytes()!r}"
     )
+    assert "owned publication reappeared" in str(terminal_error)
+    assert routes_path.read_bytes() == published_route_bytes["value"]
+    assert catalog._conn.total_changes == catalogue_total_changes_before
+    assert int(catalog._conn.execute("PRAGMA data_version").fetchone()[0]) == (
+        catalogue_data_version_before
+    )
+    terminal_project = catalog.get_project(project_id)
+    assert terminal_project is not None
+    assert terminal_project["registration_state"] == "forgotten"
+    catalog.close()
 
 
 def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
+    subprocess.run(
+        ("git", "init", "-q", str(root)),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (root / ".gitignore").write_text(".odcli/\n", encoding="utf-8")
+    (root / "tracked.txt").write_text("registered source\n", encoding="utf-8")
+    subprocess.run(("git", "-C", str(root), "add", ".gitignore", "tracked.txt"), check=True)
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "baseline",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     manifest = root / ".odcli" / "project.toml"
     manifest.parent.mkdir()
     manifest.write_text("[project]\n", encoding="utf-8")
@@ -966,11 +1016,12 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
         ),
         _postgres_cluster=None,
     )
+    unpublish_executor = RecordingExecutor()
     client = SimpleNamespace(
         get_catalog=lambda: catalog,
         publication=SimpleNamespace(
             unpublish_command=lambda *args, **kwargs: publication.unpublish_command(
-                *args, executor=RecordingExecutor(), **kwargs
+                *args, executor=unpublish_executor, **kwargs
             )
         ),
         instance=SimpleNamespace(from_project=lambda _project: instance),
@@ -990,23 +1041,38 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     ).run()
     replacement_bytes = routes_path.read_bytes()
     assert replacement_bytes != original_bytes
-    catalogue_changes_before_run = catalog._conn.total_changes
-
+    audit_catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    catalogue_version_before_run = int(
+        audit_catalog._conn.execute("PRAGMA data_version").fetchone()[0]
+    )
+    removal_result: ProjectRemovalResult | None = None
     removal_error: ProjectRemovalError | None = None
     try:
-        command.run()
+        removal_result = command.run()
     except ProjectRemovalError as exc:
         removal_error = exc
-
+    route_bytes_after_run = routes_path.read_bytes()
+    catalogue_version_after_run = int(
+        audit_catalog._conn.execute("PRAGMA data_version").fetchone()[0]
+    )
+    purged_project = audit_catalog.get_project(project_id)
     assert removal_error is not None, (
-        "baseline purge removed the same-owner replacement route instead of refusing; "
-        f"before={replacement_bytes!r}; after={routes_path.read_bytes()!r}; "
-        f"catalogue_changes={catalog._conn.total_changes - catalogue_changes_before_run}"
+        "baseline public purge completed without refusing the same-owner route captured "
+        "before replacement; "
+        f"result={removal_result!r}; route_before={replacement_bytes!r}; "
+        f"route_after={route_bytes_after_run!r}; "
+        f"data_version_before={catalogue_version_before_run}; "
+        f"data_version_after={catalogue_version_after_run}; project={purged_project!r}; "
+        f"processes={unpublish_executor.executed!r}"
     )
     assert "publication route identity changed" in str(removal_error)
-    assert routes_path.read_bytes() == replacement_bytes
-    assert catalog._conn.total_changes == catalogue_changes_before_run
-    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert any(step.argv[1:2] == ("validate",) for step in unpublish_executor.executed)
+    assert any(step.argv[1:2] == ("reload",) for step in unpublish_executor.executed)
+    assert route_bytes_after_run == replacement_bytes
+    assert catalogue_version_after_run == catalogue_version_before_run
+    assert purged_project is not None
+    assert purged_project["registration_state"] == "registered"
+    audit_catalog.close()
     catalog.close()
 
 
