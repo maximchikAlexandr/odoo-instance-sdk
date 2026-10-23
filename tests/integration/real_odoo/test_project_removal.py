@@ -406,11 +406,12 @@ def test_public_project_forget_reinit_and_purge(
     # helpers can locate the environment. The SDK does not own this file.
     (project / ".odcli" / "e2e-environment-id").unlink(missing_ok=True)
     if retain_source:
-        # Keep caller-owned metadata under the SDK directory so source purge
-        # must retain it after removing the manifest and generated config.
-        (project / ".odcli" / "caller-retained-source.txt").write_text(
+        # Simulate a checkout whose Git provenance no longer matches the
+        # registration after purge removes its manifest and generated config.
+        (project / ".odcli-e2e-retained-source.txt").write_text(
             "caller-owned source\n", encoding="utf-8"
         )
+        shutil.rmtree(project / ".git")
     purge = invoke(
         "remove",
         "--project-id",
@@ -428,12 +429,16 @@ def test_public_project_forget_reinit_and_purge(
     )
     purge_document = _document(purge)
     assert purge_document["result"]["registration_state"] == "forgotten"
+    if retain_source:
+        assert any(
+            item["identity"] == f"project:{project_id}"
+            and item["reason"] == "source_git_provenance_unmatched"
+            for item in purge_document["result"]["retained"]
+        )
     assert project.exists() is retain_source
     assert not (project / ".odcli" / "project.toml").exists()
     if retain_source:
-        assert (project / ".odcli" / "caller-retained-source.txt").read_text(
-            encoding="utf-8"
-        ) == (
+        assert (project / ".odcli-e2e-retained-source.txt").read_text(encoding="utf-8") == (
             "caller-owned source\n"
         )
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
