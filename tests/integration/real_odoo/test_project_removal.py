@@ -14,6 +14,11 @@ import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.exceptions import ProjectRemovalError
+from odoo_instance_sdk.internal.postgres_compose import (
+    container_id_matches_snapshot,
+    inspect_container_identity,
+    inspect_volume_identity,
+)
 from odoo_instance_sdk.models.project_removal import ProjectSelector
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -228,6 +233,44 @@ def test_public_project_forget_reinit_and_purge(
         database_probe.stdout + database_probe.stderr
     )
     assert database_probe.stdout.strip() == target_runtime.topology.target_sentinel_database
+    project_instance = OdooClient(config=OdooClientConfig(executable="odoo")).instance.from_project(
+        ProjectConfig.load(project)
+    )
+    database_inventory = project_instance.databases.list_inventory(project, tracked=True)
+    owned_database = next(
+        item
+        for item in database_inventory.databases
+        if item.name == target_runtime.topology.target_sentinel_database
+    )
+    assert owned_database.cluster_id == claim.cluster_id
+    assert owned_database.database_oid > 0
+    resumed_claim = BackupCatalog(db_path=catalog_path)
+    current_claim = resumed_claim._get_postgres_cluster_for_project(
+        project_id,
+        str(project),
+        str(registration["git_common_dir"]),
+    )
+    resumed_claim.close()
+    assert current_claim is not None and current_claim.cluster_id == claim.cluster_id
+    resumed_cluster = PostgresCluster.from_project(project)
+    assert inspect_volume_identity(
+        resumed_cluster.compose_runner,
+        claim.volume_name,
+        str(claim.cluster_id),
+        project_id=claim.project_id,
+    )
+    container_id = inspect_container_identity(
+        resumed_cluster.compose_runner,
+        f"{claim.compose_project}-postgres-1",
+        str(claim.cluster_id),
+        project_id=claim.project_id,
+        compose_project=claim.compose_project,
+        volume_name=claim.volume_name,
+    )
+    snapshot = resumed_cluster.resource_snapshot()
+    assert container_id is not None
+    assert snapshot is not None and snapshot.container is not None
+    assert container_id_matches_snapshot(container_id, snapshot.container.id)
 
     token = f"{project.name}:{project_id}"
     drift_target = project / ".odcli" / "logs"
