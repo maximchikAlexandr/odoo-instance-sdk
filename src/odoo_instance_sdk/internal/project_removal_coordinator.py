@@ -761,6 +761,25 @@ def capture_project_removal_command(  # noqa: C901
                     completed=(decisions[0],),
                     retained=forget_retained,
                 )
+            if terminal_purge:
+                if not _completed_purge_is_inert(catalog, current):
+                    raise _error(
+                        "completed project purge state changed before retry",
+                        projection,
+                        mode=mode,
+                        failed_step="project-removal:revalidate",
+                        decisions=(),
+                    )
+                return ProjectRemovalResult(
+                    project_id=registration.project_id,
+                    mode="purge",
+                    registration_state="forgotten",
+                    retained=tuple(
+                        decision.public()
+                        for decision in projection.decisions
+                        if decision.action == "retain"
+                    ),
+                )
             current_projection = _planned_projection(
                 catalog,
                 current,
@@ -791,25 +810,6 @@ def capture_project_removal_command(  # noqa: C901
                     projection,
                     mode=mode,
                     failed_step="project-removal:revalidate",
-                )
-            if terminal_purge:
-                if not _completed_purge_is_inert(catalog, current):
-                    raise _error(
-                        "completed project purge state changed before retry",
-                        current_projection,
-                        mode=mode,
-                        failed_step="project-removal:revalidate",
-                        decisions=(),
-                    )
-                return ProjectRemovalResult(
-                    project_id=registration.project_id,
-                    mode="purge",
-                    registration_state="forgotten",
-                    retained=tuple(
-                        decision.public()
-                        for decision in current_projection.decisions
-                        if decision.action == "retain"
-                    ),
                 )
             completed: list[ProjectResourceDecision] = []
             retained: list[ProjectResourceDecision] = []
