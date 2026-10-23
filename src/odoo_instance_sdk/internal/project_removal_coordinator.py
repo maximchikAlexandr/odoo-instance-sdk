@@ -438,9 +438,7 @@ def _forget_blockers(
             blockers.add(f"environment:{row['id']}")
     blockers.update(
         source.identity
-        for source in _publication_sources(
-            project_id, publication_lock_held=publication_lock_held
-        )
+        for source in _publication_sources(project_id, publication_lock_held=publication_lock_held)
     )
     return tuple(sorted(blockers))
 
@@ -790,9 +788,7 @@ def capture_project_removal_command(  # noqa: C901
                         failed_step="project-removal:revalidate",
                     )
                 with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
-                    blockers = _forget_blockers(
-                        catalog, current, publication_lock_held=True
-                    )
+                    blockers = _forget_blockers(catalog, current, publication_lock_held=True)
                     if blockers and current.registration_state == "registered":
                         raise _error(
                             "project removal blockers changed: " + ", ".join(blockers),

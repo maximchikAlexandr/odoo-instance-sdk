@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, ContextManager, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -21,12 +21,18 @@ import pytest
 import odoo_instance_sdk.resources.publication as publication_resource
 from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
-from odoo_instance_sdk.internal import locks as lock_paths
-from odoo_instance_sdk.internal import publication_routes
-from odoo_instance_sdk.internal import project_removal_coordinator
+from odoo_instance_sdk.internal import (
+    locks as lock_paths,
+    paths as internal_paths,
+    publication_routes,
+)
 from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.dbprep import bootstrap
-from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
+from odoo_instance_sdk.internal.locks import (
+    exclusive_lock,
+    exclusive_lock_until,
+    postgres_cluster_lock_path,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -840,7 +846,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     settings, routes_path = _isolated_publication_settings(
         tmp_path / "isolated-user-root", monkeypatch
     )
-    monkeypatch.setattr(lock_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
+    monkeypatch.setattr(internal_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
     monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
     publication = PublicationResource(_client=cast("OdooClient", SimpleNamespace()))
     target = PublicationTarget(
@@ -857,9 +863,9 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     )
     waiting_for_publication = threading.Event()
     release_terminal = threading.Event()
-    original_lock_until = project_removal_coordinator.exclusive_lock_until
+    original_lock_until = exclusive_lock_until
 
-    def gate_terminal_lock(path: Path, deadline: float):
+    def gate_terminal_lock(path: Path, deadline: float) -> ContextManager[int]:
         if path == lock_paths.publication_lock_path():
             waiting_for_publication.set()
             if not release_terminal.wait(timeout=10):
@@ -867,7 +873,8 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
         return original_lock_until(path, deadline)
 
     monkeypatch.setattr(
-        project_removal_coordinator, "exclusive_lock_until", gate_terminal_lock
+        "odoo_instance_sdk.internal.project_removal_coordinator.exclusive_lock_until",
+        gate_terminal_lock,
     )
     outcome: dict[str, object] = {}
 
@@ -880,9 +887,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     repeat_thread = threading.Thread(target=run_terminal_repeat)
     repeat_thread.start()
     assert waiting_for_publication.wait(timeout=10)
-    publication.publish_command(
-        target, settings=settings, executor=RecordingExecutor()
-    ).run()
+    publication.publish_command(target, settings=settings, executor=RecordingExecutor()).run()
     published_bytes = routes_path.read_bytes()
     catalogue_changes = catalog._conn.total_changes
     release_terminal.set()
@@ -905,7 +910,7 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     settings, routes_path = _isolated_publication_settings(
         tmp_path / "isolated-user-root", monkeypatch
     )
-    monkeypatch.setattr(lock_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
+    monkeypatch.setattr(internal_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
     monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
     publication = PublicationResource(_client=cast("OdooClient", SimpleNamespace()))
     target = PublicationTarget(

@@ -381,10 +381,7 @@ def reconcile_route_file(  # noqa: C901
             and matching is not None
             and (
                 matching.route_identity != expected_route_identity
-                or (
-                    expected_current_route is not None
-                    and matching != expected_current_route
-                )
+                or (expected_current_route is not None and matching != expected_current_route)
             )
         ):
             raise PublicationError("publication route identity changed after planning")

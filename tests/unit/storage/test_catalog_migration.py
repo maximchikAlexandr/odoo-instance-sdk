@@ -195,9 +195,7 @@ def _assert_0012_predecessor_schema(conn: sqlite3.Connection) -> None:
 
 
 def _assert_0013_predecessor_schema(conn: sqlite3.Connection) -> None:
-    assert "purge_completed_at" in {
-        row[1] for row in conn.execute("PRAGMA table_info(projects)")
-    }
+    assert "purge_completed_at" in {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
 
 
 def _assert_backup_catalog_opens_stamped_purge_predecessor_without_losing_rows(
