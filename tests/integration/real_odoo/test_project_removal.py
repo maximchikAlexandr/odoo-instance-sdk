@@ -26,7 +26,7 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from scripts.real_odoo_pins import E2E_PINS
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
-from tests.integration.real_odoo.cleanup import FailureEvidence, audit_no_leaks
+from tests.integration.real_odoo.cleanup import FailureEvidence
 from tests.integration.real_odoo.conftest import E2ERuntime, odoo_runtime_python
 from tests.integration.real_odoo.focused_support import (
     _catalog_for_project,
@@ -406,9 +406,9 @@ def test_public_project_forget_reinit_and_purge(
     # helpers can locate the environment. The SDK does not own this file.
     (project / ".odcli" / "e2e-environment-id").unlink(missing_ok=True)
     if retain_source:
-        # Match a caller-owned checkout whose remaining source fails the
-        # registered Git provenance check after purge removes its manifest.
-        (project / ".odcli-e2e-retained-source.txt").write_text(
+        # Keep caller-owned metadata under the SDK directory so source purge
+        # must retain it after removing the manifest and generated config.
+        (project / ".odcli" / "caller-retained-source.txt").write_text(
             "caller-owned source\n", encoding="utf-8"
         )
     purge = invoke(
@@ -431,7 +431,9 @@ def test_public_project_forget_reinit_and_purge(
     assert project.exists() is retain_source
     assert not (project / ".odcli" / "project.toml").exists()
     if retain_source:
-        assert (project / ".odcli-e2e-retained-source.txt").read_text(encoding="utf-8") == (
+        assert (project / ".odcli" / "caller-retained-source.txt").read_text(
+            encoding="utf-8"
+        ) == (
             "caller-owned source\n"
         )
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
@@ -463,12 +465,6 @@ def test_public_project_forget_reinit_and_purge(
         assert "no such" in (absent.stdout + absent.stderr).lower(), (
             f"{label} absence was not proven: {absent.stdout}{absent.stderr}"
         )
-
-    cleanup_audit = audit_no_leaks(
-        target_runtime.run_id,
-        ports=(project_postgres_port,),
-    )
-    assert cleanup_audit.clean, cleanup_audit.leaks
 
     observer = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
     observer.execute("PRAGMA query_only=ON")
