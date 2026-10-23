@@ -13,10 +13,10 @@ import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -32,8 +32,11 @@ from odoo_instance_sdk.models.project_removal import ProjectResourceDecision
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+    from odoo_instance_sdk.models.backup import Backup
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+_ChildResult = TypeVar("_ChildResult")
 
 
 def _result_text(result: ProcessResultLike) -> str:
@@ -68,7 +71,7 @@ def _docker_not_found(result: ProcessResult, *, label: str) -> bool:
     )
 
 
-def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, object] | None:
+def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, JsonValue] | None:
     if not isinstance(result, ProcessResult):
         raise ConfigError(f"{label} inspection returned no result")
     if result.returncode != 0:
@@ -76,14 +79,14 @@ def _json_object(result: ProcessResultLike, *, label: str) -> Mapping[str, objec
             return None
         raise ConfigError(f"{label} inspection failed; object absence is unproven")
     try:
-        value: object = json.loads(_result_text(result))
+        value: JsonValue = json.loads(_result_text(result))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ConfigError(f"{label} inspection returned invalid identity") from exc
     if isinstance(value, list):
         value = value[0] if value else None
     if not isinstance(value, Mapping):
         raise ConfigError(f"{label} inspection returned invalid identity")
-    return value
+    return cast("Mapping[str, JsonValue]", value)
 
 
 def _require_absent(result: ProcessResultLike, *, label: str) -> None:
@@ -97,14 +100,14 @@ def _require_absent(result: ProcessResultLike, *, label: str) -> None:
 
 
 def _adapt_child(
-    child: Command[object],
+    child: Command[_ChildResult],
     decision: ProjectResourceDecision,
 ) -> Command[ProjectResourceDecision]:
     """Keep a captured child plan/executor, changing only its result type."""
     prepared = child._prepared()
 
     def run(context: RunContext[ProjectResourceDecision]) -> ProjectResourceDecision:
-        prepared.callback(cast("RunContext[object]", context))
+        prepared.callback(cast("RunContext[_ChildResult]", context))
         return decision
 
     return Command.from_prepared(
@@ -146,10 +149,19 @@ class ComposeClusterPurgeTarget:
     compose_project: str
     container_name: str
     volume_name: str
+    claim_project_id: str | None = None
     dependencies: tuple[str, ...] = ()
     dependency_check: Callable[[], bool] | None = None
     compose_file: Path | None = None
     runner: ComposeRunner | None = field(default=None, repr=False, compare=False)
+
+
+class DatabaseCommandFactory(Protocol):
+    def __call__(self, target: DatabasePurgeTarget, /) -> Command[JsonValue]: ...
+
+
+class BackupCommandFactory(Protocol):
+    def __call__(self, backup: Backup, /) -> Command[JsonValue]: ...
 
 
 def _delete_contained_filestore(target: FilestorePurgeTarget) -> None:
@@ -213,7 +225,7 @@ class DatabasePurgeAdapter:
         client: OdooClient,
         targets: Mapping[str, DatabasePurgeTarget],
         *,
-        command_factory: Callable[..., Command[object]] | None = None,
+        command_factory: DatabaseCommandFactory | None = None,
         executor: ProcessExecutor | None = None,
     ) -> None:
         self._client = client
@@ -221,7 +233,7 @@ class DatabasePurgeAdapter:
         self._command_factory = command_factory
         self._executor = executor
 
-    def _capture_database(self, target: DatabasePurgeTarget) -> Command[object]:
+    def _capture_database(self, target: DatabasePurgeTarget) -> Command[JsonValue]:
         if self._command_factory is not None:
             return self._command_factory(target)
         from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
@@ -231,7 +243,7 @@ class DatabasePurgeAdapter:
         if instance is None:
             instance = self._client.instance.from_project(ProjectConfig.load(target.project_root))
         return cast(
-            "Command[object]",
+            "Command[JsonValue]",
             build_database_drop_command(
                 instance,
                 target.project_root,
@@ -262,7 +274,7 @@ class BackupPurgeAdapter:
         client: OdooClient,
         catalog: BackupCatalog,
         *,
-        command_factory: Callable[..., Command[object]] | None = None,
+        command_factory: BackupCommandFactory | None = None,
         executor: ProcessExecutor | None = None,
     ) -> None:
         self._client = client
@@ -285,12 +297,12 @@ class BackupPurgeAdapter:
         ):
             return None
         projection = self._catalog._resolve_backup_projection(backup_id)
-        child: Command[object]
+        child: Command[JsonValue]
         if self._command_factory is not None:
             child = self._command_factory(projection.backup)
         else:
             child = cast(
-                "Command[object]",
+                "Command[JsonValue]",
                 self._client.backups.delete_command(
                     projection.backup,
                     executor=self._executor,
@@ -300,8 +312,9 @@ class BackupPurgeAdapter:
 
 
 def _identity_labels(
-    value: Mapping[str, object], *, container: bool, target: ComposeClusterPurgeTarget
+    value: Mapping[str, JsonValue], *, container: bool, target: ComposeClusterPurgeTarget
 ) -> bool:
+    claim_project_id = target.claim_project_id or target.project_id
     if container:
         config = value.get("Config")
         labels = config.get("Labels") if isinstance(config, Mapping) else None
@@ -311,7 +324,7 @@ def _identity_labels(
             and isinstance(labels, Mapping)
             and labels.get("com.docker.compose.project") == target.compose_project
             and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
-            and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
+            and labels.get("io.odoo-instance-sdk.project-id") == claim_project_id
             and isinstance(mounts, list)
             and any(
                 isinstance(mount, Mapping)
@@ -326,7 +339,7 @@ def _identity_labels(
         and isinstance(labels, Mapping)
         and labels.get("com.docker.compose.project") == target.compose_project
         and labels.get("io.odoo-instance-sdk.cluster-id") == target.cluster_id
-        and labels.get("io.odoo-instance-sdk.project-id") == target.project_id
+        and labels.get("io.odoo-instance-sdk.project-id") == claim_project_id
     )
 
 
@@ -345,12 +358,13 @@ class ComposeClusterPurgeAdapter:
         self._executor = executor or SubprocessExecutor()
 
     def _claim_matches(self, target: ComposeClusterPurgeTarget) -> bool:
-        claim = self._catalog._get_postgres_cluster(target.project_id)
+        claim_project_id = target.claim_project_id or target.project_id
+        claim = self._catalog._get_postgres_cluster(claim_project_id)
         return bool(
             claim is not None
             and claim.state == "active"
             and str(claim.cluster_id) == target.cluster_id
-            and claim.project_id == target.project_id
+            and claim.project_id == claim_project_id
             and claim.compose_project == target.compose_project
             and claim.volume_name == target.volume_name
         )

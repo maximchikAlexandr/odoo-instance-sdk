@@ -11,6 +11,7 @@ from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
 from odoo_instance_sdk.internal.project_removal import (
     InternalRemovalDecision,
+    ProjectRegistration,
     ProjectRemovalProjection,
 )
 from odoo_instance_sdk.internal.project_removal_coordinator import (
@@ -479,9 +480,21 @@ def test_runtime_adapter_integration_preserves_order_identity_and_isolation(
         decisions=decisions,
         fingerprint="stable-project-removal-fingerprint",
     )
+
+    def projection_without_git_status(
+        _catalog: BackupCatalog,
+        _registration: ProjectRegistration,
+        *,
+        git_status_step_id: str | None = None,
+        git_status_hardened: bool = False,
+    ) -> ProjectRemovalProjection:
+        del git_status_step_id
+        del git_status_hardened
+        return projection
+
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.project_removal_coordinator._projection",
-        lambda _catalog, _registration: projection,
+        projection_without_git_status,
     )
     client = MagicMock()
     client.get_catalog().get_project_for_lifecycle.return_value = {

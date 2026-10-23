@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -229,8 +229,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         requires_dry_run=True,
         sdk_primitive="ProjectResource.remove_command",
         aliases=(("rm",),),
-        e2e_disposition="not-applicable",
-        e2e_rationale="cross-provider purge walkthrough is owned by the later project-removal E2E package",
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-16",),
+        e2e_rationale="public forget, re-init, exact-token purge, and full-id retry lifecycle",
         failure_args=("remove", "--project-id", "project-test", "--purge", "--dry-run"),
     ),
     PublicLeafCase(
@@ -1450,7 +1451,7 @@ def _patch_leaf_external(  # noqa: C901
 ) -> None:
     """Give one public leaf an isolated operation seam for the parity matrix."""
 
-    def fail_operation(*_args: object, **_kwargs: object) -> object:
+    def fail_operation(*_args: object, **_kwargs: object) -> NoReturn:
         raise RuntimeError("isolated external operation failed")
 
     path = case.path
@@ -1469,7 +1470,7 @@ def _patch_leaf_external(  # noqa: C901
 
         def remove_command(*_args: object, **_kwargs: object) -> object:
             if failing:
-                raise fail_operation()
+                fail_operation()
             return _matrix_command(
                 ProjectRemovalResult(
                     project_id="project-test",

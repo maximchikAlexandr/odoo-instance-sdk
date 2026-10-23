@@ -23,7 +23,7 @@ class ProjectResource:
 
     _client: OdooClient
 
-    def remove_command(
+    def remove_command(  # noqa: C901
         self,
         selector: ProjectSelector,
         *,
@@ -31,7 +31,12 @@ class ProjectResource:
         confirmation: str | None = None,
     ) -> Command[ProjectRemovalResult]:
         """Capture one immutable project removal command."""
-        from odoo_instance_sdk.exceptions import ConfigError
+        from odoo_instance_sdk.exceptions import (
+            ConfigError,
+            InstanceConfigurationError,
+            PostgresClusterError,
+        )
+        from odoo_instance_sdk.internal.postgres_compose import inspect_volume_identity
         from odoo_instance_sdk.internal.project_data_purge import (
             BackupPurgeAdapter,
             ComposeClusterPurgeAdapter,
@@ -58,7 +63,10 @@ class ProjectResource:
         from odoo_instance_sdk.internal.project_removal_runtime import (
             RuntimeEnvironmentPurgeAdapters,
         )
-        from odoo_instance_sdk.internal.resource_inventory import stable_resource_identity
+        from odoo_instance_sdk.internal.resource_inventory import (
+            VolumeResourceSource,
+            stable_resource_identity,
+        )
         from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
 
         catalog = self._client.get_catalog()
@@ -84,6 +92,73 @@ class ProjectResource:
         managed_filestore = (
             managed_filestore_path(project_config) if project_config is not None else None
         )
+        database_inventory = None
+        volume_observation: VolumeResourceSource | None = None
+        claim = catalog._get_postgres_cluster_for_project(
+            registration.project_id,
+            registration.repository_root,
+            registration.git_common_dir or registration.repository_root / ".git",
+        )
+        if purge and project_config is not None:
+            try:
+                instance = client.instance.from_project(project_config)
+            except (
+                ConfigError,
+                InstanceConfigurationError,
+                OSError,
+                ValueError,
+                PostgresClusterError,
+            ):
+                instance = None
+            if instance is not None:
+                try:
+                    database_inventory = instance.databases.list_inventory(
+                        registration.repository_root,
+                        tracked=True,
+                    )
+                except (ConfigError, OSError, ValueError, PostgresClusterError):
+                    database_inventory = None
+                if claim is not None and claim.state == "active":
+                    cluster = getattr(instance, "_postgres_cluster", None)
+                    if cluster is not None and getattr(cluster, "owned", False):
+                        try:
+                            volume_verified = inspect_volume_identity(
+                                cluster.compose_runner,
+                                claim.volume_name,
+                                str(claim.cluster_id),
+                                project_id=claim.project_id,
+                            )
+                            snapshot = cluster.resource_snapshot()
+                        except (OSError, ValueError, PostgresClusterError):
+                            volume_verified = False
+                            snapshot = None
+                        container = getattr(snapshot, "container", None)
+                        stopped = getattr(snapshot, "unavailability_reason", None) == "stopped"
+                        metrics = getattr(snapshot, "metrics", None)
+                        volume_observation = VolumeResourceSource(
+                            project_id=registration.project_id,
+                            volume_name=claim.volume_name,
+                            cluster_id=str(claim.cluster_id),
+                            owned=True,
+                            available=volume_verified and (stopped or container is not None),
+                            usage_bytes=(
+                                getattr(metrics, "volume_usage_bytes", None)
+                                if volume_verified
+                                else None
+                            ),
+                            active=(
+                                False
+                                if volume_verified and stopped
+                                else True
+                                if volume_verified and container is not None
+                                else None
+                            ),
+                            reason=(
+                                None
+                                if volume_verified and (stopped or container is not None)
+                                else "Compose volume or container observation unavailable"
+                            ),
+                        )
 
         class _Adapters:
             def __init__(self) -> None:
@@ -114,7 +189,6 @@ class ProjectResource:
                         ),
                     )
                 )
-                claim = catalog._get_postgres_cluster(registration.project_id)
                 data = ProjectDataPurgeAdapters(
                     backup=BackupPurgeAdapter(client, catalog),
                 )
@@ -194,6 +268,7 @@ class ProjectResource:
                         compose_project=claim.compose_project,
                         container_name=f"{claim.compose_project}-postgres-1",
                         volume_name=claim.volume_name,
+                        claim_project_id=claim.project_id,
                         dependencies=_compose_dependencies(),
                         dependency_check=_compose_dependency_check,
                     )
@@ -225,6 +300,8 @@ class ProjectResource:
             purge=purge,
             confirmation=confirmation,
             adapters=adapters,
+            database_inventory=database_inventory,
+            volume_observation=volume_observation,
         )
 
     def remove(

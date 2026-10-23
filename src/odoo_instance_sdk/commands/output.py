@@ -158,9 +158,7 @@ class OutputDocument(
     provenance: JsonValue
     dry_run: bool
     warnings: tuple[str, ...]
-    # Optional fields are omitted by msgspec when they do not belong to the
-    # success/failure variant.  This preserves the existing v1 envelope shape
-    # while keeping construction and transport projection typed.
+    # Optional fields are omitted for the success/failure variant.
     result: JsonValue = msgspec.field(default=None)
     data: JsonValue = msgspec.field(default=None)
     error: OutputError | None = msgspec.field(default=None)

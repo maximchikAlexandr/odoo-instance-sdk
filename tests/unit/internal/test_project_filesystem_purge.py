@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,30 @@ def _decision(identity: str, resource_type: str = "config") -> ProjectResourceDe
         action="delete",
         reason="contained_exclusive_sdk_resource",
         target="<local>/artifact",
+    )
+
+
+def _git_repo(root: Path) -> None:
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True)
+
+
+def _git_commit(root: Path, path: Path) -> None:
+    subprocess.run(("git", "-C", str(root), "add", str(path)), check=True)
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-m",
+            "baseline",
+        ),
+        check=True,
+        capture_output=True,
     )
 
 
@@ -107,3 +132,71 @@ def test_source_adapter_retains_nested_symlink_content(tmp_path: Path) -> None:
         command.run()
     assert link.is_symlink()
     assert outside.exists()
+
+
+def test_source_adapter_retains_untracked_content(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    _git_repo(root)
+    untracked = root / "notes.txt"
+    untracked.write_text("keep", encoding="utf-8")
+    identity = "project:project-1"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", root, tmp_path, root / ".git"),)
+    ).capture(_decision(identity, "source"), project_id="project-1")
+
+    assert command is not None
+    with pytest.raises(ConfigError, match="clean Git"):
+        command.run()
+    assert untracked.exists()
+    assert root.exists()
+
+
+def test_source_adapter_retains_modified_content(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    _git_repo(root)
+    tracked = root / "tracked.txt"
+    tracked.write_text("baseline", encoding="utf-8")
+    _git_commit(root, tracked)
+    tracked.write_text("modified", encoding="utf-8")
+    identity = "project:project-1"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", root, tmp_path, root / ".git"),)
+    ).capture(_decision(identity, "source"), project_id="project-1")
+
+    assert command is not None
+    with pytest.raises(ConfigError, match="clean Git"):
+        command.run()
+    assert tracked.exists()
+    assert root.exists()
+
+
+def test_source_adapter_rechecks_capture_to_run_drift(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    _git_repo(root)
+    identity = "project:project-1"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", root, tmp_path, root / ".git"),)
+    ).capture(_decision(identity, "source"), project_id="project-1")
+
+    assert command is not None
+    (root / "drift.txt").write_text("changed after capture", encoding="utf-8")
+    with pytest.raises(ConfigError, match="clean Git"):
+        command.run()
+    assert root.exists()
+
+
+def test_source_adapter_deletes_clean_checkout_recursively(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    _git_repo(root)
+    (root / ".odcli").mkdir()
+    manifest = root / ".odcli" / "project.toml"
+    manifest.write_text("[project]\n", encoding="utf-8")
+    _git_commit(root, manifest)
+    identity = "project:project-1"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", root, tmp_path, root / ".git"),)
+    ).capture(_decision(identity, "source"), project_id="project-1")
+
+    assert command is not None
+    command.run()
+    assert not root.exists()

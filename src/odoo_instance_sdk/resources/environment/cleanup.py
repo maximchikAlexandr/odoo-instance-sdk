@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from odoo_instance_sdk.exceptions import (
-    BackupNotAvailableError,
     EnvironmentConflictError,
 )
 from odoo_instance_sdk.internal import paths as _paths
@@ -186,6 +185,7 @@ class _CleanupMixin:
                 project_id = f"project_{repo_key(project_path.resolve(), common_path)}"
                 rows = catalog.list_environments(
                     git_common_dir=str(common_path),
+                    repository_root=str(Path(_text(top).strip()).resolve()),
                     project_id=project_id,
                     include_removed=include_removed,
                 )
@@ -266,8 +266,6 @@ class _CleanupMixin:
                 step_prefix=step_prefix,
             )
         else:
-            # Keep the established private hook call shape for integrations
-            # that replace the guarded COPY planner in focused tests.
             copy_drop = self._remove_copy_database_command(
                 env,
                 executor=executor,
@@ -503,10 +501,6 @@ class _CleanupMixin:
         step_prefix: str = "",
     ) -> None:
         cat = catalog
-        # A removed catalog row is the durable idempotence boundary.  Do not
-        # re-probe its released endpoint: a later process may legitimately
-        # own that port, while active environments must still pass the
-        # fail-closed port preflight below.
         if env.state is EnvironmentState.REMOVED:
             return
         copy_plan = self._preflight_remove(cat, env, context=context, step_prefix=step_prefix)
@@ -530,14 +524,12 @@ class _CleanupMixin:
             context.complete_action(publication_step)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
-
         env_root = Path(env.artifact_root or Path(env.worktree_path).parent)
         repo_root = Path(env.repository_root)
         worktree = Path(env.worktree_path)
         generated_cfg = Path(env.generated_config_path)
         lock_file = Path(env.dependency_lock_path)
         venv = Path(env.python_environment_path) if env.python_environment_owned else None
-
         if copy_plan is not None and copy_plan.stage is CopyJournalStage.RESTORE_PENDING:
             msg = "copy restore ownership is unresolved; manual reconciliation is required"
             cat.update_environment_state(
@@ -548,15 +540,12 @@ class _CleanupMixin:
 
         cleanup_failed = False
         failures: list[str] = []
-
         if copy_plan is not None and copy_plan.stage is CopyJournalStage.RESTORED:
             cleanup_failed = (
                 self._drop_copy_target(copy_plan, failures, context=context, copy_drop=copy_drop)
                 or cleanup_failed
             )
             if cleanup_failed:
-                # Keep the config and owned backup: they are the only durable
-                # evidence and capability required for a safe retry.
                 msg = "; ".join(failures)[:2000]
                 cat.update_environment_state(
                     str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
@@ -607,8 +596,6 @@ class _CleanupMixin:
         if copy_plan is not None and copy_plan.stage is not CopyJournalStage.BACKUP_DELETED:
             cleanup_failed = self._delete_copy_backup(copy_plan, failures) or cleanup_failed
             if cleanup_failed:
-                # Keep every remaining artifact for a safe retry: deleting
-                # config/worktree first would lose the cluster evidence.
                 msg = "; ".join(failures)[:2000]
                 cat.update_environment_state(
                     str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
@@ -650,9 +637,6 @@ class _CleanupMixin:
                 )
         elif copy_plan is None and env.backup_id is not None:
             cleanup_failed = self._remove_backup(cat, env, failures) or cleanup_failed
-
-        # DB and its owned backup are removed first: configuration/worktree
-        # deletion must never make the cluster identity unverifiable.
         cleanup_failed = self._remove_files(generated_cfg, lock_file, failures) or cleanup_failed
         cleanup_failed = self._remove_venv(env_root, venv, failures) or cleanup_failed
         if env.code_ownership is EnvironmentCodeOwnership.SDK_OWNED:
@@ -669,7 +653,6 @@ class _CleanupMixin:
                 )
                 or cleanup_failed
             )
-
         if cleanup_failed:
             msg = "; ".join(failures)[:2000]
             cat.update_environment_state(
@@ -755,7 +738,6 @@ class _CleanupMixin:
             raise EnvironmentConflictError(
                 "dirty_worktree", f"worktree {worktree} is dirty; refusing to remove"
             )
-
         if env.db_mode == EnvironmentDatabaseMode.COPY:
             return self._preflight_copy_remove(catalog, env)
         return None
@@ -824,10 +806,6 @@ class _CleanupMixin:
                         stage=stage,
                         backup_ownership=self._copy_backup_ownership(journal),
                     )
-                # Failed before restore: the durable stage proves no target
-                # database exists.  A prepared journal may legitimately have
-                # no backup at all; backed_up is retryable only when its backup
-                # artifact still exists.
                 if stage is CopyJournalStage.PREPARED and backup_id is None:
                     return CopyCleanupPlan(
                         target_database=str(journal["target_database"]),
@@ -1011,19 +989,11 @@ class _CleanupMixin:
 
     def _delete_copy_backup(self, plan: CopyCleanupPlan, failures: list[str]) -> bool:
         if plan.backup_ownership != "owned":
-            # Named and retained inputs belong to their source/catalog owner;
-            # removal must leave both the payload and its durable stage intact.
             return False
         if plan.backup is None:
-            # The catalog still proves ownership, but the payload has already
-            # disappeared.  Deletion is idempotent: advance the durable stage
-            # rather than blocking filesystem cleanup forever.
             return False
         try:
             self._client.backups.delete_owned(plan.backup)
-        except BackupNotAvailableError as exc:
-            failures.append(f"backup delete: {exc}")
-            return True
         except Exception as exc:
             failures.append(f"backup delete: {exc}")
             return True

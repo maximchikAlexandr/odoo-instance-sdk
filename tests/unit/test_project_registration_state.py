@@ -13,6 +13,7 @@ from alembic import command
 
 from odoo_instance_sdk.exceptions import BackupCatalogError, LockConflictError
 from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.resource_inventory import collect_resource_inventory
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.project_init import init_project, init_project_command
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -420,4 +421,78 @@ def test_legacy_global_reads_match_registered_repository_and_hide_forgotten(
         "orphan-legacy",
         "active-legacy",
     ]
+    catalog.close()
+
+
+def test_project_scoped_legacy_reads_require_matching_repository_identity(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    alpha_root = tmp_path / "alpha"
+    beta_root = tmp_path / "beta"
+    alpha_common = alpha_root / ".git"
+    beta_common = beta_root / ".git"
+    alpha_common.mkdir(parents=True)
+    beta_common.mkdir(parents=True)
+    alpha_id = f"project_{repo_key(alpha_root, alpha_common)}"
+    beta_id = f"project_{repo_key(beta_root, beta_common)}"
+
+    def add_legacy(environment_id: str, root: Path, common: Path) -> None:
+        catalog.create_environment(
+            {
+                "id": environment_id,
+                "name": environment_id,
+                "repository_root": str(root),
+                "git_common_dir": str(common),
+                "branch": "main",
+                "base_ref": "HEAD",
+                "worktree_path": str(root / "worktree"),
+                "generated_config_path": str(root / "odoo.conf"),
+                "python_environment_path": str(root / ".venv"),
+                "python_environment_owned": False,
+                "dependency_lock_path": str(root / "lock"),
+                "db_mode": "shared",
+                "runtime_json": "{}",
+                "state": "ready",
+                "created_at": "2026-01-01T00:00:00",
+            }
+        )
+
+    add_legacy("alpha-legacy", alpha_root, alpha_common)
+    add_legacy("beta-legacy", beta_root, beta_common)
+
+    alpha_snapshot = catalog._monitor_snapshot_rows(
+        project_id=alpha_id,
+        repository_root=str(alpha_root),
+        git_common_dir=str(alpha_common),
+    )
+    beta_snapshot = catalog._monitor_snapshot_rows(
+        project_id=beta_id,
+        repository_root=str(beta_root),
+        git_common_dir=str(beta_common),
+    )
+    unknown_snapshot = catalog._monitor_snapshot_rows(project_id="project_unknown")
+    assert [row["id"] for row, _runtime in alpha_snapshot.environments] == ["alpha-legacy"]
+    assert [row["id"] for row, _runtime in beta_snapshot.environments] == ["beta-legacy"]
+    assert unknown_snapshot.environments == ()
+
+    alpha_inventory = collect_resource_inventory(
+        catalog=catalog,
+        project_id=alpha_id,
+        repository_root=str(alpha_root),
+        git_common_dir=str(alpha_common),
+    )
+    unknown_inventory = collect_resource_inventory(catalog=catalog, project_id="project_unknown")
+    alpha_environment_ids = {
+        item.stable_identity
+        for item in alpha_inventory.resources
+        if item.type.value == "environment"
+    }
+    unknown_environment_ids = {
+        item.stable_identity
+        for item in unknown_inventory.resources
+        if item.type.value == "environment"
+    }
+    assert alpha_environment_ids == {"environment:alpha-legacy"}
+    assert unknown_environment_ids == set()
     catalog.close()

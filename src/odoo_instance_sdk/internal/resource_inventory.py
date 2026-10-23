@@ -169,8 +169,8 @@ class VolumeResourceSource:
     """Result of the existing Compose volume probe.
 
     ``volume_name`` is an internal input only.  The projection exposes a
-    stable digest, never the Docker name, and a retained volume is never
-    marked reclaimable (including when it is stopped).
+    stable digest, never the Docker name.  Reclaimability requires an exact
+    owned Compose identity with a complete inactive observation.
     """
 
     project_id: str
@@ -459,7 +459,7 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
     value = f"{source.project_id}\x00{source.volume_name}"
     identity = stable_resource_identity("volume", value)
     ownership = OwnershipConfidence.PROVEN if source.owned else OwnershipConfidence.UNKNOWN
-    complete = source.available and source.usage_bytes is not None
+    complete = source.available
     return ResourceInventoryItem(
         stable_identity=identity,
         type=ResourceType.VOLUME,
@@ -483,9 +483,13 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
         completeness_reason=None
         if complete
         else _safe_message(source.reason, "volume measurement unavailable"),
-        reclaimable=False,
+        reclaimable=source.owned and source.available and source.active is False,
         reclaimability_reason=(
-            "retained by postgres lifecycle" if source.owned else "volume ownership is not proven"
+            "exact inactive Compose identity observed"
+            if source.owned and source.available and source.active is False
+            else "retained by postgres lifecycle"
+            if source.owned
+            else "volume ownership is not proven"
         ),
         recommendation=None,
     )
@@ -642,7 +646,7 @@ def build_resource_inventory(  # noqa: C901
     for database in database_items:
         cluster = str(database.cluster_id or database.cluster)
         identity = _database_identity(cluster, database.name)
-        complete = database.logical_size_bytes is not None and database_measurement_complete
+        complete = database_measurement_complete
         add(
             ResourceInventoryItem(
                 stable_identity=identity,
@@ -874,7 +878,10 @@ def collect_resource_inventory(
     backup_root: Path | None = None,
     owned_directories: Sequence[Path] = (),
     database_measurement_reason: str | None = None,
+    database_measurement_complete: bool | None = None,
     project_id: str | None = None,
+    repository_root: str | None = None,
+    git_common_dir: str | None = None,
     all_projects: bool = False,
 ) -> ResourceInventory:
     """Read existing catalogue projections, then build the same pure graph.
@@ -893,7 +900,12 @@ def collect_resource_inventory(
             include_all_states=True, limit=1000, project_id=project_id
         )
         backups = page.items
-        rows = catalog._monitor_snapshot_rows(include_removed=False, project_id=project_id)
+        rows = catalog._monitor_snapshot_rows(
+            include_removed=False,
+            project_id=project_id,
+            repository_root=repository_root,
+            git_common_dir=git_common_dir,
+        )
         if not env_sources:
             env_sources = tuple(
                 EnvironmentResourceSource(
@@ -944,7 +956,11 @@ def collect_resource_inventory(
         volumes=volumes,
         files=(*supplied_files, *discovered_files),
         roots=roots,
-        database_measurement_complete=database_inventory is not None,
+        database_measurement_complete=(
+            database_inventory is not None
+            if database_measurement_complete is None
+            else database_measurement_complete
+        ),
         database_measurement_reason=(
             None
             if database_inventory is not None

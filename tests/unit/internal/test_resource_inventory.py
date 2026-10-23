@@ -78,8 +78,8 @@ def test_shared_python_and_volume_sources_are_deduplicated() -> None:
     assert set(python_items[0].relationships) == {"environment:env-a", "environment:env-b"}
     assert volume_item.name.startswith("volume:")
     assert volume_item.measured_bytes == 4096
-    assert volume_item.reclaimable is False
-    assert volume_item.reclaimability_reason == "retained by postgres lifecycle"
+    assert volume_item.reclaimable is True
+    assert volume_item.reclaimability_reason == "exact inactive Compose identity observed"
 
 
 def test_doctor_findings_are_read_only_and_cover_leftovers_and_unknown_filestore(
@@ -335,7 +335,7 @@ def test_resource_source_matrix_preserves_project_only_context_and_volume_states
     volumes = [item for item in result.resources if item.type is ResourceType.VOLUME]
     assert sum(item.active_use is ActiveUse.INACTIVE for item in volumes) == 1
     assert sum(item.active_use is ActiveUse.UNKNOWN for item in volumes) == 2
-    assert all(item.reclaimable is False for item in volumes)
+    assert sum(item.reclaimable for item in volumes) == 1
     assert any(item.completeness is MeasurementCompleteness.PARTIAL for item in volumes)
 
 

@@ -11,8 +11,13 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.execution import Command, ExecutionPlan
-from odoo_instance_sdk.internal.proc import PreparedAction, ProcessResult, RecordingExecutor
+from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
+    ProcessResult,
+    RecordingExecutor,
+    RunContext,
+)
 from odoo_instance_sdk.internal.project_data_purge import (
     BackupPurgeAdapter,
     ComposeClusterPurgeAdapter,
@@ -75,12 +80,12 @@ def test_database_adapter_flattens_guarded_child_without_rebuilding_it(tmp_path:
     )
     calls: list[str] = []
 
-    def factory(_target: DatabasePurgeTarget) -> Command[object]:
-        def run(context):
+    def factory(_target: DatabasePurgeTarget) -> Command[JsonValue]:
+        def run(context: RunContext[JsonValue]) -> JsonValue:
             calls.append(action.step_id)
             context.action(action.step_id)
             context.complete_action(action.step_id)
-            return object()
+            return None
 
         return Command.create(
             ExecutionPlan(steps=(action.public_projection(),)),
