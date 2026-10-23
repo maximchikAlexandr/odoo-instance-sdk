@@ -213,6 +213,18 @@ def _record_audit_diagnostic(diagnostics: list[str] | None, value: str) -> None:
         diagnostics.append(value)
 
 
+def _scanner_output_sample(value: str) -> str:
+    """Return a small printable scanner-output prefix without credential material."""
+    sample = value[:160]
+    sample = re.sub(r"(?i)(https?://)[^/@\s]+:[^/@\s]+@", r"\1<redacted>@", sample)
+    sample = re.sub(
+        r"(?i)(token|password|secret|authorization)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2<redacted>",
+        sample,
+    )
+    return " ".join(sample.split())
+
+
 def _run_pinned_python_audit(
     lock_path: Path,
     diagnostics: list[str] | None = None,
@@ -261,8 +273,15 @@ def _run_pinned_python_audit(
         return None
     try:
         payload = json.loads(result.stdout)
-    except (TypeError, json.JSONDecodeError):
-        _record_audit_diagnostic(diagnostics, "scanner_invalid_json")
+    except (TypeError, json.JSONDecodeError) as error:
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        sample = _scanner_output_sample(stdout)
+        _record_audit_diagnostic(
+            diagnostics,
+            "scanner_invalid_json:"
+            f"returncode={result.returncode};stdout_chars={len(stdout)};"
+            f"error={type(error).__name__};sample={sample!r}",
+        )
         return None
     findings = _parse_scanner_payload(payload)
     if findings is None:
