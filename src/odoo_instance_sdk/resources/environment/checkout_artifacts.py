@@ -657,23 +657,24 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
             db_port = int(raw_port) if raw_port else 5432
         except ValueError:
             db_port = 5432
-        escaped_database = plan.target_database.replace("'", "''")
+        import odoo_instance_sdk.resources.database.backup_restore_parts.backup as restore
+
         steps.extend(
-            build_psql_specification(
-                step_id=step_id,
-                host=plan.config_values.get("db_host"),
-                port=db_port,
-                user=plan.config_values.get("db_user"),
-                password=plan.config_values.get("db_password"),
-                database="postgres",
-                args=(
-                    "-c",
-                    f"SELECT 1 FROM pg_database WHERE datname='{escaped_database}'",
-                ),
-                _trusted_args=("-t", "-A"),
-                timeout=30.0,
-                _require_binary=False,
-            ).prepared_step
+            restore._protect_restore_oid_probe(
+                build_psql_specification(
+                    step_id=step_id,
+                    host=plan.config_values.get("db_host"),
+                    port=db_port,
+                    user=plan.config_values.get("db_user"),
+                    password=plan.config_values.get("db_password"),
+                    database="postgres",
+                    args=("-c", restore._restore_probe_query(plan.target_database, step_id)),
+                    _trusted_args=("-t", "-A"),
+                    timeout=30.0,
+                    _require_binary=False,
+                ).prepared_step,
+                step_id,
+            )
             for step_id in (
                 "database.restore.exists-before",
                 "database.restore.exists-after",
@@ -817,7 +818,6 @@ def _pgadmin_command_steps(
         # selectors/configuration.  A command with no process manifest keeps
         # that error path observable rather than inventing a partial plan.
         return ()
-
     status_steps: list[PreparedStep | PreparedAction] = [
         PreparedStep(
             step_id="pgadmin.postgres.status.ps",

@@ -25,6 +25,7 @@ from odoo_instance_sdk.internal.pg.drop import (
     DatabaseDropPartialError,
     DatabaseDropSafetyError,
     _cleanup_proven_filestore,
+    _decode_inspection,
     build_database_drop_command,
 )
 from odoo_instance_sdk.internal.pg.drop_types import AdoptedCopyDatabaseClaim
@@ -37,6 +38,29 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.fixtures.transport import OPEN_ODOO_HTTP_CLIENT
 from tests.unit.monitor_support import make_env
+
+
+@pytest.mark.unit
+def test_drop_inspection_rejects_string_database_oid() -> None:
+    result = ProcessResult(
+        argv=("psql",),
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "exists": True,
+                "is_template": False,
+                "sessions": [],
+                "database_oid": "19557",
+            }
+        ),
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+
+    with pytest.raises(ConfigError, match="invalid database identity"):
+        _decode_inspection(result, "feature_db")
 
 
 def _instance(project: Path, *, database: str = "feature_db") -> OdooInstance:
@@ -332,13 +356,13 @@ def test_drop_rich_dry_run_uses_real_builder_process_displays(
 
 
 @pytest.mark.unit
-def test_drop_records_catalogue_only_after_verified_absence(
+def test_drop_decodes_numeric_oid_and_records_after_verified_absence(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
 ) -> None:
     monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
     instance = _instance(project_manifest)
     catalog = cast("Any", instance._client.get_catalog())
-    executor = _executor()
+    executor = _executor(database_oid=19557)
     result = build_database_drop_command(
         instance, project_manifest, "feature_db", executor=executor
     ).run()
@@ -2042,6 +2066,19 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
     action = PreparedAction(
         step_id="database.restore.local-archive", action="restore-local-archive", mutating=True
     )
+    after = instance.databases._psql_probe_for("feature_db", "database.restore.exists-after")
+    assert after is not None
+    executor = RecordingExecutor(
+        result_factory=lambda step: ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=("102\n" if step.step_id == after.step_id else ""),
+            stderr="",
+            duration=0.0,
+            cwd=step.cwd,  # type: ignore[attr-defined]
+            environment=step.environment,  # type: ignore[attr-defined]
+        )
+    )
     http = MagicMock()
     http.post.return_value.is_error = False
     http_context = MagicMock()
@@ -2052,7 +2089,10 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
         instance.databases._restore_local_archive(payload, "feature_db")
 
     command = Command.create(
-        ExecutionPlan(steps=(action.public_projection(),)), callback, (action,)
+        ExecutionPlan(steps=(action.public_projection(), after.public_projection())),
+        callback,
+        (action, after),
+        executor=executor,
     )
     monkeypatch.chdir(tmp_path)
     with (
@@ -2070,7 +2110,7 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
     assert binding["data_directory"] == str(configured_data.resolve())
 
     result = build_database_drop_command(
-        instance, project_manifest, "feature_db", executor=_executor()
+        instance, project_manifest, "feature_db", executor=_executor(database_oid=102)
     ).run()
 
     assert result.filestore_state == "deleted"

@@ -47,7 +47,14 @@ def _output_limit_error(
     setattr(
         error,
         "stdout_tail",
-        cast("str", redacted_projection(stdout_tail, secrets=secrets, field="stdout")),
+        cast(
+            "str",
+            redacted_projection(
+                b"" if prepared.private_stdout_value_free else stdout_tail,
+                secrets=secrets,
+                field="stdout",
+            ),
+        ),
     )
     setattr(
         error,
@@ -230,7 +237,7 @@ def run_windows_communicate(  # noqa: C901
             duration=time.perf_counter() - started,
             secrets=captured_secret_values(prepared),
             sensitive_indices=prepared.sensitive_argv_indices,
-            stdout_tail=bytes(tails["stdout"]),
+            stdout_tail=(b"" if prepared.private_stdout_value_free else bytes(tails["stdout"])),
             stderr_tail=bytes(tails["stderr"]),
             stdout_truncated=tail_truncated["stdout"],
             stderr_truncated=tail_truncated["stderr"],

@@ -153,12 +153,17 @@ def _verify_database_via_psql(
     from odoo_instance_sdk.internal.pg.transport import run_psql
 
     escaped = database_name.replace("'", "''")
+    query = (
+        f"SELECT oid FROM pg_database WHERE datname='{escaped}'"
+        if step_id == "database.restore.exists-after"
+        else f"SELECT 1 FROM pg_database WHERE datname='{escaped}'"
+    )
     proc = run_psql(
         host=db_host,
         port=db_port,
         user=db_user,
         password=db_password,
-        query=f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
+        query=query,
         timeout=30,
         step_id=step_id,
     )

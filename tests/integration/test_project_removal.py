@@ -9,6 +9,8 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -60,6 +62,7 @@ from odoo_instance_sdk.internal.resource_inventory import (
     OwnershipConfidence,
     VolumeResourceSource,
 )
+from odoo_instance_sdk.models import Backup, BackupFormat
 from odoo_instance_sdk.models.database_inventory import (
     DatabaseInventoryItem,
     DatabaseInventoryResult,
@@ -902,8 +905,10 @@ def _capture_missing_source_purge(  # noqa: C901
     database_names: tuple[str, ...],
     seed_catalog: Callable[[BackupCatalog, str, object, Path], None] = lambda *_args: None,
     publish_observed: Callable[[BackupCatalog, object | None, Path], object | None] | None = None,
+    prepare_catalog: Callable[[BackupCatalog, str, object, Path], None] | None = None,
     real_children: bool = False,
     observed_oids: Mapping[str, int] | None = None,
+    recovery_password: str | None = None,
 ) -> tuple[BackupCatalog, Command[ProjectRemovalResult], RecordingExecutor, str]:
     root = tmp_path / "source"
     common = root / ".git"
@@ -933,6 +938,8 @@ def _capture_missing_source_purge(  # noqa: C901
             cluster_id=claim.cluster_id,
             data_directory=tmp_path / "data",
         )
+    if prepare_catalog is not None:
+        prepare_catalog(catalog, claim_project_id, claim, root)
     if publish_observed is None:
         seed_catalog(catalog, claim_project_id, claim, tmp_path / "data")
     else:
@@ -959,6 +966,10 @@ def _capture_missing_source_purge(  # noqa: C901
     full_container_id = "b" * 64
     compose_project = f"odcli_pg_{claim_project_id}"
     volume_name = f"pgdata_{claim_project_id}"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
+        lambda project_id: tmp_path / "postgres" / str(project_id),
+    )
     fake_cluster = PostgresCluster(
         _repository_root=root,
         _project_id=claim_project_id,
@@ -971,6 +982,9 @@ def _capture_missing_source_purge(  # noqa: C901
             inspect_volume_identity=lambda *_args, **_kwargs: True,
         ),
     )
+    if recovery_password is not None:
+        fake_cluster.password_file.parent.mkdir(parents=True, exist_ok=True)
+        fake_cluster.password_file.write_text(recovery_password, encoding="utf-8")
     monkeypatch.setattr(
         PostgresCluster,
         "resource_snapshot",
@@ -1050,6 +1064,8 @@ def _capture_missing_source_purge(  # noqa: C901
             _executor: SubprocessExecutor, step: PreparedStep, **_kwargs: object
         ) -> ProcessResult:
             step_id = step.step_id
+            if recovery_password is not None and step_id.startswith("database.drop"):
+                assert dict(step.environment_snapshot).get("PGPASSWORD") == recovery_password
             if "verify-volume" in step_id or "verify-container" in step_id:
                 return ProcessResult(
                     argv=step.argv,
@@ -1091,7 +1107,14 @@ def _capture_missing_source_purge(  # noqa: C901
             elif "database.drop" in step_id and (
                 "inspect" in step_id or "revalidate-drop" in step_id
             ):
-                database_oid = 101 if ":tmp:" in step_id else 102
+                database_oid = next(
+                    (
+                        oid
+                        for name, oid in (observed_oids or {}).items()
+                        if f":{name}:" in step_id or step_id.endswith(f":{name}")
+                    ),
+                    101 if ":tmp:" in step_id else 102,
+                )
                 stdout = json.dumps(
                     {
                         "exists": True,
@@ -1209,10 +1232,137 @@ def test_public_purge_recovers_missing_source_with_exact_claim(
         project_id,
         ("owned_db",),
         _seed_exact_restore,
+        recovery_password="test-recovery-password",
     )
     result = command.run()
     assert result.registration_state == "forgotten"
     assert len(executor.executed) == 2
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+def test_public_restore_publishes_oid_for_source_less_purge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Link the public restore publication to the later source-less purge."""
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
+    from odoo_instance_sdk.config import InstanceConfig
+    from tests.fixtures.transport import (
+        make_http_client,
+        make_response,
+        patch_open_odoo_http_client,
+    )
+
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+    catalog_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: catalog_path
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+    )
+
+    def restore_with_public_command(
+        catalog: BackupCatalog, claim_project_id: str, claim: object, source_root: Path
+    ) -> None:
+        backup_path = source_root.parent / "owned.zip"
+        backup_path.write_bytes(b"owned")
+        backup_id = uuid.uuid4()
+        catalog.start_download(
+            str(backup_id),
+            "http://127.0.0.1:8069",
+            "source_db",
+            BackupFormat.ZIP.value,
+            True,
+            backup_path,
+            project_id=f"project_{repo_key(source_root, source_root / '.git')}",
+        )
+        catalog.success_download(
+            str(backup_id), backup_path.name, backup_path.stat().st_size, "a" * 64
+        )
+        backup = Backup(
+            id=backup_id,
+            source_base_url="http://127.0.0.1:8069",
+            database_name="source_db",
+            format=BackupFormat.ZIP,
+            filestore_requested=True,
+            path=str(backup_path),
+            filename=backup_path.name,
+            size_bytes=backup_path.stat().st_size,
+            sha256="a" * 64,
+            downloaded_at=datetime.now(UTC),
+        )
+        cluster = PostgresCluster(
+            _repository_root=source_root,
+            _project_id=claim_project_id,
+            _mode="compose",
+            _endpoint_host="127.0.0.1",
+            _endpoint_port=15432,
+            _image="pgvector/pgvector:pg16",
+            _user="odoo",
+            _compose_runner=SimpleNamespace(),
+        )
+        client = OdooClient(config=OdooClientConfig(executable="odoo"))
+        client._catalog = catalog
+        instance = client.instance("http://127.0.0.1:8069", master_password="admin")
+        object.__setattr__(
+            instance,
+            "config",
+            InstanceConfig(
+                base_url="http://127.0.0.1:8069",
+                master_password="admin",
+                db_host="127.0.0.1",
+                db_port=15432,
+                db_user="odoo",
+            ),
+        )
+        object.__setattr__(instance, "_postgres_cluster", cluster)
+        executor = RecordingExecutor(
+            result_factory=lambda step: ProcessResult(
+                argv=(prepared := cast("PreparedStep", step)).argv,
+                returncode=0,
+                stdout=("19557\n" if prepared.step_id == "database.restore.exists-after" else ""),
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+        )
+        http = make_http_client(post=make_response())
+        with patch_open_odoo_http_client(http):
+            instance.databases.restore_command(backup, "owned_db", executor=executor).run()
+        assert any(step.step_id == "database.restore.exists-after" for step in executor.executed)
+        http.post.assert_called_once()
+
+    catalog, command, _executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        legacy_project_id,
+        ("owned_db",),
+        prepare_catalog=restore_with_public_command,
+        real_children=True,
+        observed_oids={"owned_db": 19557},
+        recovery_password="test-recovery-password",
+    )
+    claim = catalog._get_postgres_cluster(legacy_project_id)
+    assert claim is not None
+    assert catalog._project_restored_database_records(
+        project_id, claim.cluster_id, "127.0.0.1", 15432
+    ) == (("owned_db", 19557),)
+    assert catalog._project_bound_database_records(
+        legacy_project_id, claim.cluster_id, "127.0.0.1", 15432
+    ) == (("owned_db", 19557),)
+    assert any("database" in step.step_id for step in command.plan.steps)
+
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert tuple(item.resource_type for item in result.completed) == (
+        "database",
+        "volume",
+        "project",
+    )
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
     catalog.close()
 
@@ -1243,6 +1393,53 @@ def test_public_purge_refuses_same_name_replaced_restored_database(
     catalog.close()
 
 
+def test_public_purge_refuses_missing_source_restore_without_oid_before_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+
+    def seed_restore_without_oid(
+        catalog: BackupCatalog, _project_id: str, claim: object, data_directory: Path
+    ) -> None:
+        backup_id = str(uuid.uuid4())
+        backup_path = data_directory.parent / "owned.zip"
+        backup_path.write_bytes(b"owned")
+        catalog.start_download(
+            backup_id,
+            "http://127.0.0.1:8069",
+            "owned_db",
+            "zip",
+            True,
+            backup_path,
+            project_id=f"project_{legacy_project_id}",
+        )
+        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
+        catalog.record_restore(
+            "127.0.0.1",
+            15432,
+            "owned_db",
+            backup_id,
+            cluster_id=getattr(claim, "cluster_id"),
+            data_directory=data_directory,
+        )
+
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        legacy_project_id,
+        ("owned_db",),
+        seed_restore_without_oid,
+        observed_oids={"owned_db": 19557},
+    )
+    assert all(step.action == "retain" for step in command.plan.steps if hasattr(step, "action"))
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
+
+
 def test_public_purge_recovers_missing_source_with_legacy_init_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1264,6 +1461,7 @@ def test_public_purge_recovers_missing_source_with_legacy_init_binding(
         ("tmp", "odoo"),
         publish_observed=_publish_observed_init_binding,
         real_children=True,
+        recovery_password="test-recovery-password",
     )
     result = command.run()
     assert result.registration_state == "forgotten"
@@ -1274,6 +1472,96 @@ def test_public_purge_recovers_missing_source_with_legacy_init_binding(
         "project",
     )
     assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+def _assert_legacy_restore_completion(
+    command: Command[ProjectRemovalResult],
+    _executor: RecordingExecutor,
+    _catalog: BackupCatalog,
+    _project_id: str,
+) -> None:
+    assert any("database" in step.step_id for step in command.plan.steps)
+    result = command.run()
+    assert result.registration_state == "forgotten"
+    assert tuple(item.resource_type for item in result.completed) == (
+        "database",
+        "volume",
+        "project",
+    )
+
+
+def _assert_legacy_restore_replacement_refusal(
+    command: Command[ProjectRemovalResult],
+    executor: RecordingExecutor,
+    catalog: BackupCatalog,
+    project_id: str,
+) -> None:
+    with pytest.raises(ProjectRemovalError, match="unavailable or unproven"):
+        command.run()
+    assert executor.executed == []
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("recorded_oid", "observed_oid", "assert_result"),
+    (
+        (102, 102, _assert_legacy_restore_completion),
+        (101, 202, _assert_legacy_restore_replacement_refusal),
+    ),
+    ids=("stable-restore", "same-name-replacement"),
+)
+def test_public_purge_handles_missing_source_with_legacy_restore_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_oid: int,
+    observed_oid: int,
+    assert_result: Callable[
+        [Command[ProjectRemovalResult], RecordingExecutor, BackupCatalog, str], None
+    ],
+) -> None:
+    root = tmp_path / "source"
+    legacy_project_id = repo_key(root, root / ".git")
+    registered_project_id = f"project_{legacy_project_id}"
+
+    def seed_legacy_restore(
+        catalog: BackupCatalog, _claim_project_id: str, claim: object, data_directory: Path
+    ) -> None:
+        backup_id = str(uuid.uuid4())
+        backup_path = data_directory.parent / "owned.zip"
+        backup_path.write_bytes(b"owned")
+        catalog.start_download(
+            backup_id,
+            "http://127.0.0.1:8069",
+            "owned_db",
+            "zip",
+            True,
+            backup_path,
+            project_id=registered_project_id,
+        )
+        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "a" * 64)
+        catalog.record_restore(
+            "127.0.0.1",
+            15432,
+            "owned_db",
+            backup_id,
+            cluster_id=getattr(claim, "cluster_id"),
+            data_directory=data_directory,
+            database_oid=recorded_oid,
+        )
+
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        legacy_project_id,
+        ("owned_db",),
+        seed_legacy_restore,
+        real_children=True,
+        observed_oids={"owned_db": observed_oid},
+        recovery_password="test-recovery-password",
+    )
+    assert project_id == registered_project_id
+    assert_result(command, executor, catalog, project_id)
     catalog.close()
 
 

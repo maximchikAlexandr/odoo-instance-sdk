@@ -3,9 +3,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import subprocess
+import sys
 import uuid
 import zipfile
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -25,7 +27,15 @@ from odoo_instance_sdk.exceptions import (
     NonLocalInstanceError,
     RestoreFailedError,
 )
-from odoo_instance_sdk.internal.proc import ProcessResult, ProcessTimeoutError, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
+    ProcessResult,
+    ProcessTimeoutError,
+    RecordingExecutor,
+    RunContext,
+    StepEvent,
+    SubprocessExecutor,
+)
 from odoo_instance_sdk.internal.transport import (
     TransportError,
     TransportStatusError,
@@ -216,6 +226,185 @@ class TestList:
         with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             dbs = instance.databases.list()
         assert [db.name for db in dbs] == ["db1", "db2", "db3"]
+
+    def test_restore_command_persists_oid_from_post_restore_identity_probe(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_bytes(b"fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client, db_user="odoo")
+        mock_catalog = MagicMock()
+        executor = RecordingExecutor(
+            result_factory=lambda step: ProcessResult(
+                argv=(prepared := cast("PreparedStep", step)).argv,
+                returncode=0,
+                stdout="19557\n" if prepared.step_id == "database.restore.exists-after" else "",
+                stderr="restore-stderr\n",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+        )
+
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
+        ):
+            mock_client.get_catalog.return_value = mock_catalog
+            instance.databases.restore_command(backup, "newdb", executor=executor).run()
+
+        assert any(step.step_id == "database.restore.exists-after" for step in executor.executed)
+        assert mock_catalog.record_restore.call_args.kwargs["database_oid"] == 19557
+
+    def test_active_restore_uses_captured_identity_probe_for_catalogue_binding(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction
+
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_bytes(b"fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client, db_user="odoo")
+        before = instance.databases._psql_probe_for("newdb", "database.restore.exists-before")
+        after = instance.databases._psql_probe_for("newdb", "database.restore.exists-after")
+        assert before is not None
+        assert after is not None
+        action = PreparedAction("restore-wrapper", action="restore", mutating=True)
+        executor = RecordingExecutor(
+            result_factory=lambda step: ProcessResult(
+                argv=(prepared := cast("PreparedStep", step)).argv,
+                returncode=0,
+                stdout="19557\n" if prepared.step_id == after.step_id else "",
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+        )
+
+        def run(
+            context: RunContext[tuple[RestoreResult, ProcessResult]],
+        ) -> tuple[RestoreResult, ProcessResult]:
+            typed = context
+            typed.action(action.step_id)
+            result = instance.databases.restore(backup, "newdb")
+            typed.complete_action(action.step_id)
+            after_result = typed.results[after.step_id]
+            assert isinstance(after_result, ProcessResult)
+            return result, after_result
+
+        command = Command.create(
+            ExecutionPlan(
+                steps=(
+                    action.public_projection(),
+                    before.public_projection(),
+                    after.public_projection(),
+                )
+            ),
+            run,
+            (action, before, after),
+            executor=executor,
+        )
+        mock_catalog = MagicMock()
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
+        ):
+            mock_client.get_catalog.return_value = mock_catalog
+            events: list[StepEvent] = []
+            public_result, stored_result = command.run(
+                observer=events.append,
+                observe_output=True,
+            )
+
+        assert mock_catalog.record_restore.call_args.kwargs["database_oid"] == 19557
+        assert isinstance(public_result, RestoreResult)
+        assert stored_result.stdout == ""
+        rendered_events = " ".join(map(str, events))
+        assert "19557" not in str(public_result)
+        assert "19557" not in str(stored_result)
+        assert "19557" not in rendered_events
+        assert any(event.kind == "completed" for event in events)
+
+    def test_restore_oid_timeout_is_value_free_at_public_command_boundary(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, active_context
+
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_bytes(b"fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client, db_user="odoo")
+        before = instance.databases._psql_probe_for("newdb", "database.restore.exists-before")
+        after = instance.databases._psql_probe_for("newdb", "database.restore.exists-after")
+        assert before is not None
+        assert after is not None
+        action = PreparedAction("restore-wrapper", action="restore", mutating=True)
+        before = replace(before, argv=(sys.executable, "-c", "pass"))
+        after = replace(
+            after,
+            argv=(
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time; sys.stdout.write(sys.stdin.read()); "
+                    "sys.stderr.write('restore-stderr\\n'); sys.stdout.flush(); "
+                    "sys.stderr.flush(); time.sleep(2)"
+                ),
+            ),
+            stdin=b"987654321\\n",
+            timeout=0.1,
+        )
+
+        def run(context: RunContext[RestoreResult]) -> RestoreResult:
+            context.action(action.step_id)
+            return instance.databases.restore(backup, "newdb")
+
+        command = Command.create(
+            ExecutionPlan(
+                steps=(
+                    action.public_projection(),
+                    before.public_projection(),
+                    after.public_projection(),
+                )
+            ),
+            run,
+            (action, before, after),
+            executor=SubprocessExecutor(),
+        )
+
+        def verify(*_args: object, step_id: str | None = None, **_kwargs: object) -> bool:
+            assert step_id == before.step_id
+            assert step_id is not None
+            context = active_context()
+            assert context is not None
+            result = cast("ProcessResult", context.process(step_id))
+            return bool(result.stdout)
+
+        events: list[StepEvent] = []
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
+            patch(
+                "odoo_instance_sdk.resources.database.backup_restore_parts.queries._verify_database_via_psql",
+                side_effect=verify,
+            ),
+            pytest.raises(ProcessTimeoutError) as failure,
+        ):
+            mock_client.get_catalog.return_value = MagicMock()
+            command.run(observer=events.append, observe_output=True)
+
+        marker = "987654321"
+        rendered_events = " ".join(map(str, events))
+        assert failure.value.stdout_tail == ""
+        assert marker not in str(failure.value)
+        assert marker not in rendered_events
+        assert "restore-stderr" in failure.value.stderr_tail
+        assert "restore-stderr" in rendered_events
+        assert any(event.kind == "failed" for event in events)
 
     def test_with_cluster_key_populates_backup(self, client: OdooClient) -> None:
         mock_cm = _mock_http({"result": ["prod", "staging"]})
@@ -452,7 +641,7 @@ class TestExists:
         self, client: OdooClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
-        from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+        from odoo_instance_sdk.internal.proc import PreparedAction
 
         inst = _make_instance_with_cluster_key(client, db_user="odoo")
         with patch(
@@ -1036,8 +1225,6 @@ class TestBackupProvenance:
         headers: dict[str, str],
         expected_total: int | None,
     ) -> None:
-        from odoo_instance_sdk.internal.proc import StepEvent
-
         response = make_response()
         response.headers = {"content-disposition": 'attachment; filename="demo.zip"', **headers}
         response.iter_bytes.return_value = [b"back", b"up"]
@@ -1717,7 +1904,7 @@ class TestRestore:
         self, client: OdooClient, tmp_path: Path
     ) -> None:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
-        from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+        from odoo_instance_sdk.internal.proc import PreparedAction
 
         backup_path = tmp_path / "test.zip"
         backup_path.write_text("fake content")
@@ -1745,7 +1932,7 @@ class TestRestore:
                 after.step_id: ProcessResult(
                     argv=after.argv,
                     returncode=0,
-                    stdout="1\n",
+                    stdout="19557\n",
                     stderr="",
                     duration=0.0,
                     cwd=after.cwd,
@@ -1758,9 +1945,7 @@ class TestRestore:
         def callback(context: RunContext[RestoreResult]) -> RestoreResult:
             context.action(action.step_id)
             context.process(before.step_id)
-            result = inst.databases._restore_after_verified_absence(backup, "newdb")
-            context.process(after.step_id)
-            return result
+            return inst.databases._restore_after_verified_absence(backup, "newdb")
 
         command = Command.create(
             ExecutionPlan(
@@ -1795,7 +1980,7 @@ class TestRestore:
         ]
         list_method.assert_not_called()
         mock_catalog.record_restore.assert_called_once_with(
-            "localhost", 5432, "newdb", str(backup.id)
+            "localhost", 5432, "newdb", str(backup.id), database_oid=19557
         )
 
     def test_default_timeout_uses_long_running_backup_budget(
@@ -1892,7 +2077,7 @@ class TestRestore:
             mock_client.get_catalog.return_value = catalog
             with pytest.raises(DatabaseError, match="Database restore"):
                 from odoo_instance_sdk.execution import Command, ExecutionPlan
-                from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+                from odoo_instance_sdk.internal.proc import PreparedAction
 
                 action = PreparedAction("database.restore")
 

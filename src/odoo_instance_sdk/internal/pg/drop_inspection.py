@@ -45,7 +45,7 @@ def inspection_sql(database: str) -> str:
     return (
         "SELECT json_build_object("
         f"'exists', EXISTS (SELECT 1 FROM pg_database WHERE datname={literal}),"
-        f"'database_oid', (SELECT oid FROM pg_database WHERE datname={literal}),"
+        f"'database_oid', (SELECT oid::bigint FROM pg_database WHERE datname={literal}),"
         f"'is_template', COALESCE((SELECT datistemplate FROM pg_database WHERE datname={literal}), false),"
         "'sessions', COALESCE((SELECT json_agg(json_build_object("
         "'pid', pid, 'user', usename, 'client', client_addr::text, "

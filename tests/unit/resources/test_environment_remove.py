@@ -113,7 +113,14 @@ def _checkout_copy(
     if instance.databases._restore_after_verified_absence.side_effect is None:
 
         def record_restore(_backup: Backup, target: str, **_kwargs: object) -> None:
-            env_client.get_catalog().record_restore("localhost", 5432, target, str(_backup.id))
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            assert context is not None
+            context.process("database.restore.exists-after")
+            env_client.get_catalog().record_restore(
+                "localhost", 5432, target, str(_backup.id), database_oid=19557
+            )
 
         instance.databases._restore_after_verified_absence.side_effect = record_restore
     InstanceFactory.from_config = MagicMock(return_value=instance)  # type: ignore[method-assign]
@@ -628,9 +635,10 @@ class TestCopyRemoveRecovery:
         marker = tmp_path / "psql-called"
         executable.write_text(
             "#!/bin/sh\n"
-            'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
+            'sql="$*"\n'
+            'case "$sql" in *ir_attachment*|*store_fname*) exit 0;; *"SELECT oid"*) printf \'19557\\n\'; exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
-            "  printf '1\\n'\n"
+            "  printf '19557\\n'\n"
             "else\n"
             f'  : > "{marker}"\n'
             "fi\n"
@@ -1222,8 +1230,8 @@ class TestCopyRemoveRecovery:
         executable = tmp_path / "psql"
         marker = tmp_path / "psql-called"
         executable.write_text(
-            f'#!/bin/sh\ncase "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
-            f'if [ -f "{marker}" ]; then printf \'1\\n\'; else : > "{marker}"; fi\n'
+            f'#!/bin/sh\nsql="$*"\ncase "$sql" in *ir_attachment*|*store_fname*) exit 0;; *"SELECT oid"*) printf \'19557\\n\'; exit 0;; esac\n'
+            f'if [ -f "{marker}" ]; then printf \'19557\\n\'; else : > "{marker}"; fi\n'
         )
         executable.chmod(0o755)
         monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
@@ -1256,9 +1264,10 @@ class TestRetainedReplacementRemove:
         marker = tmp_path / "psql-called"
         executable.write_text(
             "#!/bin/sh\n"
-            'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
+            'sql="$*"\n'
+            'case "$sql" in *ir_attachment*|*store_fname*) exit 0;; *"SELECT oid"*) printf \'19557\\n\'; exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
-            "  printf '1\\n'\n"
+            "  printf '19557\\n'\n"
             "else\n"
             f'  : > "{marker}"\n'
             "fi\n"
@@ -1427,12 +1436,12 @@ class TestCopyRestoreClusterIdentity:
             "  exit 1\n"
             "fi\n"
             'if [ "${ODCLI_TEST_PSQL_EXISTS_BEFORE:-}" = "1" ]; then\n'
-            "  printf '1\\n'\n"
+            "  printf '19557\\n'\n"
             "  exit 0\n"
             "fi\n"
             'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
-            "  printf '1\\n'\n"
+            "  printf '19557\\n'\n"
             "else\n"
             f'  : > "{marker}"\n'
             "fi\n"
@@ -1496,6 +1505,7 @@ class TestCopyRestoreClusterIdentity:
             *,
             cluster_id: str | None = None,
             data_directory: str | Path | None = None,
+            database_oid: int | None = None,
         ) -> None:
             captured_cluster_ids.append(cluster_id)
             original_record_restore(
@@ -1505,7 +1515,7 @@ class TestCopyRestoreClusterIdentity:
                 backup_id,
                 cluster_id=cluster_id,
                 data_directory=data_directory,
-                database_oid=102,
+                database_oid=database_oid,
             )
 
         catalog.record_restore = capture_restore  # type: ignore[assignment]
@@ -1541,11 +1551,12 @@ class TestCopyRestoreClusterIdentity:
         assert captured_cluster_ids == [cluster_id]
 
         restore_row = catalog._conn.execute(
-            "SELECT cluster_id FROM restores WHERE database_name=? AND backup_id=?",
+            "SELECT cluster_id, database_oid FROM restores WHERE database_name=? AND backup_id=?",
             ("copy_target", str(backup.id)),
         ).fetchone()
         assert restore_row is not None
         assert str(restore_row["cluster_id"]) == cluster_id
+        assert restore_row["database_oid"] == 19557
 
         from odoo_instance_sdk.resources.postgres import PostgresCluster
         from tests.unit.internal.test_postgres_drop import _executor
@@ -1554,7 +1565,7 @@ class TestCopyRestoreClusterIdentity:
         monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
 
         selected = env_client.environments.get(str(env.id))
-        drop_executor = _executor(exists=False)
+        drop_executor = _executor(exists=False, database_oid=19557)
         subprocess_executor = SubprocessExecutor()
 
         class _HybridRemoveExecutor:
@@ -1657,6 +1668,7 @@ class TestCopyRestoreClusterIdentity:
             *,
             cluster_id: str | None = None,
             data_directory: str | Path | None = None,
+            database_oid: int | None = None,
         ) -> None:
             captured_cluster_ids.append(cluster_id)
             original_record_restore(
@@ -1666,6 +1678,7 @@ class TestCopyRestoreClusterIdentity:
                 backup_id,
                 cluster_id=cluster_id,
                 data_directory=data_directory,
+                database_oid=database_oid,
             )
 
         catalog.record_restore = capture_restore  # type: ignore[assignment]
@@ -1722,7 +1735,8 @@ class TestEnvRemoveForceConnections:
         marker = tmp_path / "psql-called"
         executable.write_text(
             "#!/bin/sh\n"
-            'case "$*" in *ir_attachment*|*store_fname*) exit 0;; esac\n'
+            'sql="$*"\n'
+            'case "$sql" in *ir_attachment*|*store_fname*) exit 0;; *"SELECT oid"*) printf \'19557\\n\'; exit 0;; esac\n'
             f'if [ -f "{marker}" ]; then\n'
             "  printf '1\\n'\n"
             "else\n"

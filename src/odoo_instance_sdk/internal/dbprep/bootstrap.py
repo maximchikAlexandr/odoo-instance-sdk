@@ -14,7 +14,8 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
@@ -95,6 +96,41 @@ class ObservedDatabase:
 
     name: str
     database_oid: int
+
+
+@dataclass(slots=True)
+class _InventoryProbeCapture:
+    """Keep the typed inventory payload private until the parser consumes it."""
+
+    value: str | bytes | None = None
+    captured: bool = False
+
+    def capture(self, value: str | bytes | None) -> None:
+        self.value = value
+        self.captured = True
+
+    def take(self, result: ProcessResultLike) -> str | bytes | None:
+        value = (
+            self.value
+            if self.captured
+            else result.stdout
+            if isinstance(result, ProcessResult)
+            else None
+        )
+        self.value = None
+        self.captured = False
+        return value
+
+
+_INVENTORY_CAPTURE: ContextVar[_InventoryProbeCapture | None] = ContextVar(
+    "inventory_probe_capture", default=None
+)
+
+
+def _capture_inventory_stdout(value: str | bytes | None) -> None:
+    capture = _INVENTORY_CAPTURE.get()
+    if capture is not None:
+        capture.capture(value)
 
 
 class BootstrapOutcome(StrEnum):
@@ -236,14 +272,18 @@ def bootstrap_tmp_plan(
         step_id=_BOOTSTRAP_READY_STEP_ID,
     )
     inventory_step = (
-        _bootstrap_sql_step(
-            db_host=db_host,
-            db_port=db_port,
-            db_user=db_user,
-            db_password=db_password,
-            step_id=_BOOTSTRAP_INVENTORY_STEP_ID,
-            database="postgres",
-            stdin=_BOOTSTRAP_INVENTORY_SQL,
+        replace(
+            _bootstrap_sql_step(
+                db_host=db_host,
+                db_port=db_port,
+                db_user=db_user,
+                db_password=db_password,
+                step_id=_BOOTSTRAP_INVENTORY_STEP_ID,
+                database="postgres",
+                stdin=_BOOTSTRAP_INVENTORY_SQL,
+            ),
+            private_stdout_consumer=_capture_inventory_stdout,
+            private_stdout_value_free=True,
         )
         if capture_inventory
         else None
@@ -314,31 +354,120 @@ def run_bootstrap_tmp(
     return BootstrapOutcome.CREATED
 
 
+def _inventory_shape_metadata(
+    result: ProcessResultLike,
+    stdout: str | bytes | None = None,
+    *,
+    line_count: int | None = None,
+) -> str:
+    """Return bounded shape-only diagnostics for an inventory failure."""
+    if not isinstance(result, ProcessResult):
+        return "result_type=unsupported"
+    if stdout is None:
+        stdout = result.stdout
+    if stdout is None:
+        stdout_type = "none"
+        stdout_length = 0
+    elif isinstance(stdout, str):
+        stdout_type = "str"
+        stdout_length = len(stdout)
+    elif isinstance(stdout, bytes):
+        stdout_type = "bytes"
+        stdout_length = len(stdout)
+    else:
+        stdout_type = "unsupported"
+        stdout_length = 0
+    if isinstance(stdout, str):
+        delimiter_tab_count = stdout.count("\t")
+        delimiter_literal_backslash_t_count = stdout.count("\\t")
+        first_delimiter = next(
+            (
+                "tab" if character == "\t" else "literal_backslash_t"
+                for index, character in enumerate(stdout)
+                if character == "\t"
+                or (character == "\\" and index + 1 < len(stdout) and stdout[index + 1] == "t")
+            ),
+            "none",
+        )
+    elif isinstance(stdout, bytes):
+        delimiter_tab_count = stdout.count(bytes((9,)))
+        delimiter_literal_backslash_t_count = stdout.count(bytes((92, 116)))
+        first_delimiter = next(
+            (
+                "tab" if byte == 9 else "literal_backslash_t"
+                for index, byte in enumerate(stdout)
+                if byte == 9
+                or (byte == 92 and index + 1 < len(stdout) and stdout[index + 1] == 116)
+            ),
+            "none",
+        )
+    else:
+        delimiter_tab_count = 0
+        delimiter_literal_backslash_t_count = 0
+        first_delimiter = "unavailable"
+    fields = [
+        "result_type=ProcessResult",
+        f"stdout_type={stdout_type}",
+        f"stdout_length={stdout_length}",
+        f"delimiter_tab_count={delimiter_tab_count}",
+        f"delimiter_literal_backslash_t_count={delimiter_literal_backslash_t_count}",
+        f"first_delimiter={first_delimiter}",
+    ]
+    if line_count is not None:
+        fields.append(f"line_count={line_count}")
+    return " ".join(fields)
+
+
 def _read_database_inventory(result: ProcessResultLike) -> tuple[ObservedDatabase, ...]:
     """Decode one successful, non-empty PostgreSQL inventory observation."""
     if not isinstance(result, ProcessResult):
-        raise BootstrapFailedError("database inventory observation returned no process result")
+        raise BootstrapFailedError(
+            "database inventory observation returned no process result "
+            f"({_inventory_shape_metadata(result)})"
+        )
     if result.returncode != 0:
-        raise BootstrapFailedError("database inventory observation failed")
-    stdout = result.stdout or ""
+        raise BootstrapFailedError(
+            "database inventory observation failed "
+            f"(returncode={result.returncode} {_inventory_shape_metadata(result)})"
+        )
+    raw_stdout = result.stdout
+    stdout = "" if raw_stdout is None else raw_stdout
     if isinstance(stdout, bytes):
         try:
             stdout = stdout.decode("utf-8")
         except UnicodeDecodeError as error:
             raise BootstrapFailedError(
-                "database inventory observation was not valid UTF-8"
+                "database inventory observation was not valid UTF-8 "
+                f"({_inventory_shape_metadata(result, raw_stdout)})"
             ) from error
+    if not isinstance(stdout, str):
+        raise BootstrapFailedError(
+            "database inventory observation was invalid "
+            f"({_inventory_shape_metadata(result, raw_stdout)})"
+        )
+    lines = stdout.splitlines()
     observations: list[ObservedDatabase] = []
-    for line in str(stdout).splitlines():
+    for line_index, line in enumerate(lines):
         parts = line.strip().split("\t")
         if len(parts) != 2 or not parts[0] or not parts[1].isdigit():
-            raise BootstrapFailedError("database inventory observation was invalid")
+            raise BootstrapFailedError(
+                "database inventory observation was invalid "
+                f"({_inventory_shape_metadata(result, raw_stdout, line_count=len(lines))} "
+                f"invalid_line={line_index} field_count={len(parts)})"
+            )
         oid = int(parts[1])
         if oid <= 0 or any(ord(char) < 0x20 and char != "\t" for char in line):
-            raise BootstrapFailedError("database inventory observation was invalid")
+            raise BootstrapFailedError(
+                "database inventory observation was invalid "
+                f"({_inventory_shape_metadata(result, raw_stdout, line_count=len(lines))} "
+                f"invalid_line={line_index} field_count={len(parts)})"
+            )
         observations.append(ObservedDatabase(parts[0], oid))
     if not observations:
-        raise BootstrapFailedError("database inventory observation was invalid")
+        raise BootstrapFailedError(
+            "database inventory observation was invalid "
+            f"({_inventory_shape_metadata(result, raw_stdout, line_count=len(lines))})"
+        )
     return tuple({item.name: item for item in observations}.values())
 
 
@@ -366,7 +495,15 @@ def execute_bootstrap_tmp(
         context.complete_action(plan.verify_action.step_id)
         observed: tuple[ObservedDatabase, ...] = ()
         if plan.inventory_step is not None:
-            observed = _read_database_inventory(context.process_prepared(plan.inventory_step))
+            capture = _InventoryProbeCapture()
+            token = _INVENTORY_CAPTURE.set(capture)
+            try:
+                result = context.process_prepared(plan.inventory_step)
+            finally:
+                _INVENTORY_CAPTURE.reset(token)
+            if isinstance(result, ProcessResult):
+                result = replace(result, stdout=capture.take(result))
+            observed = _read_database_inventory(result)
             if on_observed is not None:
                 on_observed(observed)
         if plan.record_action is not None:

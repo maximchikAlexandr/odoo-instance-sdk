@@ -164,11 +164,16 @@ def _real_adoption_command(  # noqa: C901
     restored_targets: list[str] = []
 
     def restore_success(selected_backup: Backup, target: str, **_kwargs: object) -> None:
+        from odoo_instance_sdk.internal.proc import active_context
+
         restored_targets.append(target)
+        context = active_context()
+        assert context is not None
+        context.process("database.restore.exists-after")
         filestore.mkdir(parents=True, exist_ok=True)
         (filestore / "asset").write_bytes(b"restored")
         env_client.get_catalog().record_restore(  # type: ignore[attr-defined]
-            "localhost", 5432, target, str(selected_backup.id)
+            "localhost", 5432, target, str(selected_backup.id), database_oid=1
         )
 
     restore_effect: object = restore_error if restore_error is not None else restore_success

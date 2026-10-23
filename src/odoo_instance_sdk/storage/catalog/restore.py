@@ -541,6 +541,39 @@ class _RestoreMixin:
         return tuple(str(row["database_name"]) for row in rows)
 
     @_translate_sqlite_error
+    def _project_restored_database_records(
+        self,
+        project_id: str,
+        cluster_id: uuid.UUID | str,
+        db_host: str | None,
+        db_port: int,
+    ) -> tuple[tuple[str, int], ...]:
+        """Return the latest exact project restore identities with positive OIDs."""
+        identity = self._cluster_uuid(cluster_id)
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            """SELECT r.database_name, r.database_oid
+               FROM restores r JOIN backups b ON b.id = r.backup_id
+               WHERE b.project_id = ? AND b.state <> 'deleted'
+                 AND r.state = 'complete' AND r.cluster_id = ?
+                 AND r.db_host = ? AND r.db_port = ?
+                 AND r.database_oid IS NOT NULL
+                 AND r.sequence = (
+                     SELECT MAX(latest.sequence) FROM restores latest
+                     WHERE latest.db_host = r.db_host
+                       AND latest.db_port = r.db_port
+                       AND latest.database_name = r.database_name
+                 )
+               ORDER BY r.database_name""",
+            (str(project_id), identity, host, db_port),
+        ).fetchall()
+        return tuple(
+            (str(row["database_name"]), int(row["database_oid"]))
+            for row in rows
+            if type(row["database_oid"]) is int and row["database_oid"] > 0
+        )
+
+    @_translate_sqlite_error
     def _project_bootstrapped_database_names(
         self, cluster_id: uuid.UUID | str, db_host: str | None, db_port: int
     ) -> tuple[str, ...]:
