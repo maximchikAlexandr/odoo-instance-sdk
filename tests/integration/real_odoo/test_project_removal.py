@@ -419,7 +419,13 @@ def test_public_project_forget_reinit_and_purge(
         "--confirm-project",
         token,
     )
-    assert purge.returncode == 0, purge.stdout + purge.stderr
+    metadata_dir = project / ".odcli"
+    remaining_metadata = (
+        sorted(path.name for path in metadata_dir.iterdir()) if metadata_dir.is_dir() else []
+    )
+    assert purge.returncode == 0, (
+        purge.stdout + purge.stderr + f"\nremaining project metadata names: {remaining_metadata!r}"
+    )
     purge_document = _document(purge)
     assert purge_document["result"]["registration_state"] == "forgotten"
     assert project.exists() is retain_source
