@@ -97,7 +97,12 @@ def _project_runtime(
     return tuple(sources)
 
 
-def _forgotten_project_is_inert(catalog: BackupCatalog, registration: ProjectRegistration) -> bool:
+def _forgotten_project_is_inert(
+    catalog: BackupCatalog,
+    registration: ProjectRegistration,
+    *,
+    check_publications: bool = True,
+) -> bool:
     """Treat a forgotten project as inert only while every owned resource stays absent."""
     if registration.registration_state != "forgotten":
         return False
@@ -130,6 +135,15 @@ def _forgotten_project_is_inert(catalog: BackupCatalog, registration: ProjectReg
         if environment.python_environment_owned and (
             environment.python_environment_path.exists()
             or environment.python_environment_path.is_symlink()
+        ):
+            return False
+    if check_publications:
+        from odoo_instance_sdk.internal.publication_routes import read_owned_routes
+
+        if any(
+            route.project_id == registration.project_id
+            or (route.owner_kind == "project" and route.owner_id == registration.project_id)
+            for route in read_owned_routes()
         ):
             return False
     return True

@@ -20,6 +20,7 @@ import pytest
 
 from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+from odoo_instance_sdk.internal import publication_routes
 from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.dbprep import bootstrap
 from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
@@ -80,6 +81,7 @@ from odoo_instance_sdk.project_init import (
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.resources.project import ProjectResource
+from odoo_instance_sdk.resources.publication import PublicationSettings
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
@@ -437,47 +439,111 @@ def test_public_purge_does_not_treat_reappeared_owned_manifest_as_inert(
     catalog.close()
 
 
-@pytest.mark.parametrize(
-    "state",
-    (
-        "registered-empty",
-        "current-environment-active",
-        "legacy-environment-active",
-        "current-worktree-reappeared",
-        "legacy-python-symlink-reappeared",
-    ),
-)
-def test_public_purge_keeps_unproven_or_reappeared_environment_state_non_inert(
-    tmp_path: Path, state: str
+def _prepare_registered_empty(
+    _catalog: BackupCatalog, _project_id: str, _root: Path
+) -> None:
+    return
+
+
+def _prepare_current_environment_active(
+    catalog: BackupCatalog, project_id: str, root: Path
+) -> None:
+    assert catalog.forget_project(project_id)
+    _legacy_environment(catalog, "environment-after-purge", root)
+    catalog._conn.execute(
+        "UPDATE environments SET project_id = ?, state = 'ready' WHERE id = ?",
+        (project_id, "environment-after-purge"),
+    )
+    catalog._conn.commit()
+
+
+def _prepare_legacy_environment_active(
+    catalog: BackupCatalog, project_id: str, root: Path
+) -> None:
+    assert catalog.forget_project(project_id)
+    _legacy_environment(catalog, "environment-after-purge", root)
+    catalog._conn.execute(
+        "UPDATE environments SET state = 'ready' WHERE id = ?",
+        ("environment-after-purge",),
+    )
+    catalog._conn.commit()
+
+
+def _prepare_current_worktree_reappeared(
+    catalog: BackupCatalog, project_id: str, root: Path
+) -> None:
+    assert catalog.forget_project(project_id)
+    _legacy_environment(catalog, "environment-after-purge", root)
+    catalog._conn.execute(
+        "UPDATE environments SET project_id = ?, state = 'removed' WHERE id = ?",
+        (project_id, "environment-after-purge"),
+    )
+    catalog._conn.commit()
+    (root / "worktree").mkdir()
+
+
+def _prepare_legacy_python_symlink_reappeared(
+    catalog: BackupCatalog, project_id: str, root: Path
+) -> None:
+    assert catalog.forget_project(project_id)
+    _legacy_environment(catalog, "environment-after-purge", root)
+    catalog._conn.execute(
+        "UPDATE environments SET state = 'removed', python_environment_owned = 1 "
+        "WHERE id = ?",
+        ("environment-after-purge",),
+    )
+    catalog._conn.commit()
+    (root / ".venv").symlink_to(root / "missing-python", target_is_directory=True)
+
+
+def _assert_registered_empty(catalog: BackupCatalog, project_id: str, _root: Path) -> None:
+    row = catalog.get_project(project_id)
+    assert row is not None and row["registration_state"] == "registered"
+    assert catalog.get_environment("environment-after-purge") is None
+
+
+def _assert_current_environment_active(
+    catalog: BackupCatalog, project_id: str, _root: Path
+) -> None:
+    _assert_forgotten_environment_state(catalog, project_id, "ready")
+
+
+def _assert_legacy_environment_active(
+    catalog: BackupCatalog, project_id: str, _root: Path
+) -> None:
+    _assert_forgotten_environment_state(catalog, project_id, "ready")
+
+
+def _assert_current_worktree_reappeared(
+    catalog: BackupCatalog, project_id: str, root: Path
+) -> None:
+    _assert_forgotten_environment_state(catalog, project_id, "removed")
+    assert (root / "worktree").is_dir()
+
+
+def _assert_legacy_python_symlink_reappeared(
+    catalog: BackupCatalog, project_id: str, root: Path
+) -> None:
+    _assert_forgotten_environment_state(catalog, project_id, "removed")
+    assert (root / ".venv").is_symlink()
+
+
+def _assert_forgotten_environment_state(
+    catalog: BackupCatalog, project_id: str, expected_state: str
+) -> None:
+    row = catalog.get_project(project_id)
+    assert row is not None and row["registration_state"] == "forgotten"
+    environment = catalog.get_environment("environment-after-purge")
+    assert environment is not None and str(environment["state"]) == expected_state
+
+
+def _assert_public_purge_refuses_environment_state(
+    tmp_path: Path,
+    arrange: Callable[[BackupCatalog, str, Path], None],
+    assert_preserved: Callable[[BackupCatalog, str, Path], None],
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
-    if state != "registered-empty":
-        assert catalog.forget_project(project_id)
-        environment_id = "environment-after-purge"
-        _legacy_environment(catalog, environment_id, root)
-        if state == "current-environment-active":
-            catalog._conn.execute(
-                "UPDATE environments SET project_id = ?, state = 'ready' WHERE id = ?",
-                (project_id, environment_id),
-            )
-        elif state == "legacy-environment-active":
-            catalog._conn.execute(
-                "UPDATE environments SET state = 'ready' WHERE id = ?", (environment_id,)
-            )
-        elif state == "current-worktree-reappeared":
-            catalog._conn.execute(
-                "UPDATE environments SET project_id = ?, state = 'removed' WHERE id = ?",
-                (project_id, environment_id),
-            )
-            (root / "worktree").mkdir()
-        elif state == "legacy-python-symlink-reappeared":
-            catalog._conn.execute(
-                "UPDATE environments SET state = 'removed', python_environment_owned = 1 "
-                "WHERE id = ?",
-                (environment_id,),
-            )
-            (root / ".venv").symlink_to(tmp_path / "missing-python", target_is_directory=True)
-        catalog._conn.commit()
+    arrange(catalog, project_id, root)
 
     client = SimpleNamespace(get_catalog=lambda: catalog)
     command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
@@ -493,24 +559,258 @@ def test_public_purge_keeps_unproven_or_reappeared_environment_state_non_inert(
 
     details = cast("dict[str, object]", error.value.details["removal"])
     assert details["failed_step"] == "project-removal:observations"
-    expected_registration_state = "registered" if state == "registered-empty" else "forgotten"
-    registration = catalog.get_project(project_id)
-    assert registration is not None
-    assert registration["registration_state"] == expected_registration_state
-    environment = catalog._conn.execute(
-        "SELECT state FROM environments WHERE id = ?", ("environment-after-purge",)
-    ).fetchone()
-    if state == "registered-empty":
-        assert environment is None
-    else:
-        assert environment is not None
-        assert str(environment["state"]) == (
-            "removed"
-            if state in {"current-worktree-reappeared", "legacy-python-symlink-reappeared"}
-            else "ready"
-        )
+    assert_preserved(catalog, project_id, root)
     assert catalog._conn.total_changes == catalogue_changes_before_run
     _assert_no_purge_completion_marker(catalog)
+    catalog.close()
+
+
+def test_public_purge_keeps_registered_empty_project_non_inert(tmp_path: Path) -> None:
+    _assert_public_purge_refuses_environment_state(
+        tmp_path, _prepare_registered_empty, _assert_registered_empty
+    )
+
+
+def test_public_purge_keeps_current_active_environment_non_inert(tmp_path: Path) -> None:
+    _assert_public_purge_refuses_environment_state(
+        tmp_path, _prepare_current_environment_active, _assert_current_environment_active
+    )
+
+
+def test_public_purge_keeps_legacy_active_environment_non_inert(tmp_path: Path) -> None:
+    _assert_public_purge_refuses_environment_state(
+        tmp_path, _prepare_legacy_environment_active, _assert_legacy_environment_active
+    )
+
+
+def test_public_purge_keeps_reappeared_current_worktree_non_inert(tmp_path: Path) -> None:
+    _assert_public_purge_refuses_environment_state(
+        tmp_path, _prepare_current_worktree_reappeared, _assert_current_worktree_reappeared
+    )
+
+
+def test_public_purge_keeps_reappeared_legacy_owned_python_non_inert(tmp_path: Path) -> None:
+    _assert_public_purge_refuses_environment_state(
+        tmp_path,
+        _prepare_legacy_python_symlink_reappeared,
+        _assert_legacy_python_symlink_reappeared,
+    )
+
+
+def _assert_public_purge_refuses_forgotten_owned_fact(
+    catalog: BackupCatalog,
+    project_id: str,
+    root: Path,
+    preserved: Callable[[], None],
+) -> None:
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    catalogue_changes_before_run = catalog._conn.total_changes
+    with pytest.raises(ProjectRemovalError) as error:
+        command.run()
+    details = cast("dict[str, object]", error.value.details["removal"])
+    assert details["completed_total"] == 0
+    assert catalog._conn.total_changes == catalogue_changes_before_run
+    row = catalog.get_project(project_id)
+    assert row is not None and row["registration_state"] == "forgotten"
+    preserved()
+
+
+def test_public_purge_does_not_treat_surviving_database_binding_as_inert(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    assert catalog.forget_project(project_id)
+    catalog._conn.execute(
+        "INSERT INTO project_database_bindings "
+        "(project_id, cluster_id, db_host, db_port, database_name, bound_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, "cluster-id", "127.0.0.1", 5432, "owned-db", "2026-01-01T00:00:00Z"),
+    )
+    catalog._conn.commit()
+
+    _assert_public_purge_refuses_forgotten_owned_fact(
+        catalog,
+        project_id,
+        root,
+        lambda: _assert_database_binding_preserved(catalog, project_id),
+    )
+    catalog.close()
+
+
+def _assert_database_binding_preserved(catalog: BackupCatalog, project_id: str) -> None:
+    assert catalog._conn.execute(
+        "SELECT database_name FROM project_database_bindings WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()[0] == "owned-db"
+
+
+def _prepare_removed_owned_python_environment(
+    catalog: BackupCatalog, project_id: str, root: Path, path: Path
+) -> None:
+    assert catalog.forget_project(project_id)
+    _legacy_environment(catalog, "environment-with-owned-python", root)
+    catalog._conn.execute(
+        "UPDATE environments SET project_id = ?, state = 'removed', "
+        "python_environment_path = ?, python_environment_owned = 1 WHERE id = ?",
+        (project_id, str(path), "environment-with-owned-python"),
+    )
+    catalog._conn.commit()
+
+
+def _assert_owned_python_environment_preserved(
+    catalog: BackupCatalog, project_id: str, path: Path
+) -> None:
+    project = catalog.get_project(project_id)
+    assert project is not None and project["registration_state"] == "forgotten"
+    row = catalog.get_environment("environment-with-owned-python")
+    assert row is not None and row["state"] == "removed"
+    assert Path(str(row["python_environment_path"])) == path
+    assert bool(row["python_environment_owned"])
+    assert path.exists() or path.is_symlink()
+
+
+def test_public_purge_does_not_treat_owned_python_directory_as_inert(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    python_path = tmp_path / "unrelated-owned-python"
+    python_path.mkdir()
+    _prepare_removed_owned_python_environment(catalog, project_id, root, python_path)
+
+    _assert_public_purge_refuses_forgotten_owned_fact(
+        catalog,
+        project_id,
+        root,
+        lambda: _assert_owned_python_environment_preserved(catalog, project_id, python_path),
+    )
+    catalog.close()
+
+
+def test_public_purge_does_not_treat_owned_python_symlink_as_inert(
+    tmp_path: Path,
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    python_path = tmp_path / "unrelated-owned-python"
+    python_path.symlink_to(tmp_path / "missing-python", target_is_directory=True)
+    _prepare_removed_owned_python_environment(catalog, project_id, root, python_path)
+
+    _assert_public_purge_refuses_forgotten_owned_fact(
+        catalog,
+        project_id,
+        root,
+        lambda: _assert_owned_python_environment_preserved(catalog, project_id, python_path),
+    )
+    catalog.close()
+
+
+def _isolated_publication_settings(root: Path) -> tuple[PublicationSettings, Path]:
+    config_root = root / "config"
+    config_root.mkdir(mode=0o700, parents=True)
+    routes_path = config_root / "routes.caddy"
+    settings = PublicationSettings(
+        domain_suffix="example.test",
+        caddy_executable="caddy",
+        caddy_control_endpoint="http://127.0.0.1:2019",
+        owned_route_file=routes_path,
+        basic_auth_username="odoo",
+        basic_auth_password_hash=(
+            "$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ),
+    )
+    settings_path = config_root / "publication.toml"
+    settings_path.write_text(
+        "[publication]\n"
+        'domain_suffix = "example.test"\n'
+        'caddy_executable = "caddy"\n'
+        'caddy_control_endpoint = "http://127.0.0.1:2019"\n'
+        f"owned_route_file = {json.dumps(str(routes_path))}\n"
+        'basic_auth_username = "odoo"\n'
+        'basic_auth_password_hash = "$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n',
+        encoding="utf-8",
+    )
+    settings_path.chmod(0o600)
+    return settings, routes_path
+
+
+def _project_route(project_id: str) -> publication_routes.PublicationRoute:
+    return publication_routes.PublicationRoute(
+        owner_kind="project",
+        owner_id=project_id,
+        project_id=project_id,
+        environment_id=None,
+        local_endpoint="http://127.0.0.1:8069",
+        external_url="https://project.example.test",
+        route_identity=publication_routes.route_identity(
+            "project", project_id, "https://project.example.test"
+        ),
+    )
+
+
+def _write_owned_routes(
+    settings: PublicationSettings,
+    routes_path: Path,
+    routes: tuple[publication_routes.PublicationRoute, ...],
+) -> None:
+    routes_path.write_bytes(publication_routes._render_routes(routes, settings))
+    routes_path.chmod(0o600)
+
+
+def test_public_purge_refuses_owned_route_present_before_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ODCLI_USER_ROOT", str(tmp_path / "isolated-user-root"))
+    catalog, project_id, root = _catalog(tmp_path)
+    assert catalog.forget_project(project_id)
+    settings, routes_path = _isolated_publication_settings(tmp_path / "isolated-user-root")
+    route = _project_route(project_id)
+    _write_owned_routes(settings, routes_path, (route,))
+    previous_routes = routes_path.read_bytes()
+    catalogue_changes_before_capture = catalog._conn.total_changes
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+
+    with pytest.raises(ProjectRemovalError, match="publication reappeared"):
+        ProjectResource(_client=cast("OdooClient", client)).remove_command(
+            ProjectSelector.from_project_id(project_id),
+            purge=True,
+            confirmation=f"{root.name}:{project_id}",
+        )
+
+    assert catalog._conn.total_changes == catalogue_changes_before_capture
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert routes_path.read_bytes() == previous_routes
+    catalog.close()
+
+
+def test_public_purge_refuses_owned_route_reappearing_after_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ODCLI_USER_ROOT", str(tmp_path / "isolated-user-root"))
+    catalog, project_id, root = _catalog(tmp_path)
+    assert catalog.forget_project(project_id)
+    settings, routes_path = _isolated_publication_settings(tmp_path / "isolated-user-root")
+    _write_owned_routes(settings, routes_path, ())
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+    route = _project_route(project_id)
+    _write_owned_routes(settings, routes_path, (route,))
+    previous_routes = routes_path.read_bytes()
+    catalogue_changes_before_run = catalog._conn.total_changes
+
+    with pytest.raises(ProjectRemovalError, match="state changed before retry"):
+        command.run()
+
+    assert catalog._conn.total_changes == catalogue_changes_before_run
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    assert routes_path.read_bytes() == previous_routes
     catalog.close()
 
 
