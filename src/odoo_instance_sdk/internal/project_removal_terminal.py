@@ -147,9 +147,7 @@ def _forgotten_project_is_inert(
             or environment.python_environment_path.is_symlink()
         ):
             return False
-    return not (
-        check_publications and _has_owned_publication(registration.project_id)
-    )
+    return not (check_publications and _has_owned_publication(registration.project_id))
 
 
 __all__ = [
