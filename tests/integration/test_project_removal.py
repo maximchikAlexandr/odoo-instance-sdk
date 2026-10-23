@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import traceback
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -820,10 +821,13 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
 
     writer_holds_lock = threading.Event()
     release_writer = threading.Event()
-    terminal_observed_absence = threading.Event()
+    terminal_checked_absence = threading.Event()
+    allow_terminal_to_continue = threading.Event()
     terminal_done = threading.Event()
+    publication_done = threading.Event()
     outcome: dict[str, object] = {}
     published_route_bytes: dict[str, bytes] = {}
+    inert_checks: list[bool] = []
     original_atomic_write = publication_routes._atomic_write
     original_has_owned_publication = (
         project_removal_terminal._has_owned_publication
@@ -839,8 +843,13 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
             published_route_bytes["value"] = content
 
     def observe_terminal_publication_check(project_id: str) -> bool:
-        terminal_observed_absence.set()
-        return original_has_owned_publication(project_id)
+        result = original_has_owned_publication(project_id)
+        inert_checks.append(result)
+        if not result:
+            terminal_checked_absence.set()
+            if not allow_terminal_to_continue.wait(timeout=10):
+                raise TimeoutError("terminal continuation was not released")
+        return result
 
     monkeypatch.setattr(publication_routes, "_atomic_write", pause_before_route_write)
     monkeypatch.setattr(
@@ -857,43 +866,65 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
             outcome["publication"] = publication_command.run()
         except BaseException as exc:
             outcome["publication_error"] = exc
+            outcome["publication_traceback"] = traceback.format_exc()
+        finally:
+            publication_done.set()
 
     def run_terminal_purge() -> None:
         try:
             outcome["terminal"] = command.run()
         except BaseException as exc:
             outcome["terminal_error"] = exc
+            outcome["terminal_details"] = getattr(exc, "details", None)
+            outcome["terminal_traceback"] = traceback.format_exc()
         finally:
             terminal_done.set()
 
     publication_thread = threading.Thread(target=run_publication)
     terminal_thread = threading.Thread(target=run_terminal_purge)
+    terminal_reached_absence = False
+    writer_published_during_terminal_gap = False
+    publication_started = False
     try:
-        publication_thread.start()
-        assert writer_holds_lock.wait(timeout=10), (
-            "publisher never entered the locked route write"
-        )
-        assert publication_lock_path() == tmp_path / "locks" / "publication.lock"
         terminal_thread.start()
-        assert terminal_observed_absence.wait(timeout=10), (
-            "terminal purge did not reach its publication check while writer held the real lock"
-        )
-        assert terminal_done.wait(timeout=10), (
-            "baseline terminal check did not complete at the race boundary"
-        )
+        terminal_reached_absence = terminal_checked_absence.wait(timeout=10)
+        if terminal_reached_absence:
+            publication_thread.start()
+            publication_started = True
+            writer_reached_route_write = writer_holds_lock.wait(timeout=10)
+            release_writer.set()
+            writer_published_during_terminal_gap = (
+                writer_reached_route_write and publication_done.wait(timeout=10)
+            )
+            allow_terminal_to_continue.set()
     finally:
+        allow_terminal_to_continue.set()
         release_writer.set()
-        publication_thread.join(timeout=10)
+        if publication_started:
+            publication_thread.join(timeout=10)
         terminal_thread.join(timeout=10)
         catalog.close()
 
-    assert not publication_thread.is_alive()
+    assert not (publication_started and publication_thread.is_alive())
     assert not terminal_thread.is_alive()
+    assert terminal_reached_absence, (
+        "baseline terminal did not execute the publication absence check; "
+        f"outcome={outcome!r}; plan={command.plan!r}; inert_checks={inert_checks!r}; "
+        f"route_exists={routes_path.exists()}"
+    )
+    assert writer_published_during_terminal_gap, (
+        "publication writer did not finish while terminal was paused after its unlocked "
+        f"absence result; outcome={outcome!r}; plan={command.plan!r}; "
+        f"inert_checks={inert_checks!r}; route_exists={routes_path.exists()}"
+    )
     assert "publication_error" not in outcome
+    assert "value" in published_route_bytes
     assert routes_path.read_bytes() == published_route_bytes["value"]
     assert isinstance(outcome.get("terminal_error"), ProjectRemovalError), (
-        "terminal purge returned success while an owned publication writer held the lock "
-        "before making its route visible"
+        "terminal purge returned success after its unlocked absence check, while a public "
+        "publication command committed an owned route before terminal finalization; "
+        f"outcome={outcome!r}; plan={command.plan!r}; inert_checks={inert_checks!r}; "
+        f"route_bytes={routes_path.read_bytes()!r}"
     )
 
 
@@ -932,7 +963,11 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     )
     client = SimpleNamespace(
         get_catalog=lambda: catalog,
-        publication=publication,
+        publication=SimpleNamespace(
+            unpublish_command=lambda *args, **kwargs: publication.unpublish_command(
+                *args, executor=RecordingExecutor(), **kwargs
+            )
+        ),
         instance=SimpleNamespace(from_project=lambda _project: instance),
     )
     publication.publish_command(
@@ -952,9 +987,18 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     assert replacement_bytes != original_bytes
     catalogue_changes_before_run = catalog._conn.total_changes
 
-    with pytest.raises(ProjectRemovalError, match="publication route identity changed"):
+    removal_error: ProjectRemovalError | None = None
+    try:
         command.run()
+    except ProjectRemovalError as exc:
+        removal_error = exc
 
+    assert removal_error is not None, (
+        "baseline purge removed the same-owner replacement route instead of refusing; "
+        f"before={replacement_bytes!r}; after={routes_path.read_bytes()!r}; "
+        f"catalogue_changes={catalog._conn.total_changes - catalogue_changes_before_run}"
+    )
+    assert "publication route identity changed" in str(removal_error)
     assert routes_path.read_bytes() == replacement_bytes
     assert catalog._conn.total_changes == catalogue_changes_before_run
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
