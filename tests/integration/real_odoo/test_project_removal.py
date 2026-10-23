@@ -284,7 +284,9 @@ def test_public_project_forget_reinit_and_purge(
         ProjectConfig.load(project)
     )
     database_inventory = project_instance.databases.list_inventory(project, tracked=False)
-    owned_database = next(item for item in database_inventory.databases if item.name == project_database)
+    owned_database = next(
+        item for item in database_inventory.databases if item.name == project_database
+    )
     assert type(owned_database.database_oid) is int and owned_database.database_oid > 0
     resumed_claim = BackupCatalog(db_path=catalog_path)
     current_claim = resumed_claim._get_postgres_cluster_for_project(
@@ -358,7 +360,11 @@ def test_public_project_forget_reinit_and_purge(
     # required-observation boundary or during the later fingerprint check.
     # Both are fail-closed outcomes; retain the structured step and durable
     # no-write assertions below so this does not accept an arbitrary refusal.
-    assert drift_error.value.details["removal"]["failed_step"] in {
+    removal_details = drift_error.value.details.get("removal")
+    assert isinstance(removal_details, dict)
+    failed_step = removal_details.get("failed_step")
+    assert isinstance(failed_step, str)
+    assert failed_step in {
         "project-removal:observations",
         "project-removal:revalidate",
     }
