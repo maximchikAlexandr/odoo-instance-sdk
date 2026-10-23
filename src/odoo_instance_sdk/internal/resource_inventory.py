@@ -18,11 +18,11 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import msgspec
 
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 from odoo_instance_sdk.internal.resource_inventory_storage import (
     open_catalog_read_only,
     stable_resource_identity,
 )
+from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 from odoo_instance_sdk.models import StorageFootprint
 
 if TYPE_CHECKING:

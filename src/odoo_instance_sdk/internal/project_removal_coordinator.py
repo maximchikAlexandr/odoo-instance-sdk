@@ -48,6 +48,12 @@ from odoo_instance_sdk.internal.project_removal import (
     forget_resource_fingerprint,
     resolve_project_selector,
 )
+from odoo_instance_sdk.internal.project_removal_terminal import (
+    _completed_purge_is_inert,
+    _environment_owner_clause,
+    _environment_sources,
+    _project_runtime,
+)
 from odoo_instance_sdk.internal.publication_routes import read_owned_routes
 from odoo_instance_sdk.internal.resource_inventory import (
     ActiveUse,
@@ -55,12 +61,6 @@ from odoo_instance_sdk.internal.resource_inventory import (
     ProjectResourceSource,
     VolumeResourceSource,
     collect_resource_inventory,
-)
-from odoo_instance_sdk.internal.project_removal_terminal import (
-    _completed_purge_is_inert,
-    _environment_owner_clause,
-    _environment_sources,
-    _project_runtime,
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 from odoo_instance_sdk.models.database_inventory import (
