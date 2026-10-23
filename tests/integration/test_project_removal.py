@@ -1103,12 +1103,14 @@ def test_public_purge_refuses_same_owner_route_replaced_between_projection_and_c
     resume_capture = threading.Event()
     command_finished = threading.Event()
     outcome: dict[str, object] = {}
-    original_projection = project_removal_coordinator.build_project_removal_projection
+    original_projection: Callable[..., ProjectRemovalProjection] = (
+        project_removal_coordinator.build_project_removal_projection
+    )
     projection_paused = False
 
-    def pause_after_projection(*args: object, **kwargs: object) -> ProjectRemovalProjection:
+    def pause_after_projection(**kwargs: object) -> ProjectRemovalProjection:
         nonlocal projection_paused
-        projection = original_projection(*args, **kwargs)
+        projection = original_projection(**kwargs)
         if not projection_paused and any(
             decision.resource_type == "publication" for decision in projection.decisions
         ):
@@ -1198,15 +1200,28 @@ def test_public_purge_refuses_same_owner_route_replaced_between_projection_and_c
     assert replacement_route_bytes != source_route_bytes
     replacement_digest = hashlib.sha256(replacement_route_bytes).hexdigest()
     removal_error = outcome.get("error")
+    result = outcome.get("result")
+    completed_actions = (
+        tuple(f"{item.resource_type}:{item.action}" for item in result.completed)
+        if isinstance(result, ProjectRemovalResult)
+        else ()
+    )
+    remaining_owners = tuple(
+        f"{route.owner_kind}:{route.owner_id}"
+        for route in publication_routes.decode_routes(routes_path.read_bytes())
+    )
     assert isinstance(removal_error, ProjectRemovalError), (
         "purge accepted a same-owner replacement that appeared after projection; "
         f"result_type={type(outcome.get('result')).__name__}; "
+        f"completed_actions={completed_actions!r}; "
+        f"route_owners_after={remaining_owners!r}; "
         f"replacement_route_sha256={replacement_digest}; "
         f"route_preserved={routes_path.read_bytes() == replacement_route_bytes}; "
         f"worker_traceback={outcome.get('traceback')!r}"
     )
     details = cast("dict[str, object]", removal_error.details["removal"])
     assert details["failed_step"] == "project-removal:revalidate"
+    assert details["completed_total"] == 0
     assert catalog._conn.total_changes == catalogue_changes_before
     assert int(catalog._conn.execute("PRAGMA data_version").fetchone()[0]) == (
         catalogue_version_before
