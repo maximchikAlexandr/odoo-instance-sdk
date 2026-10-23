@@ -44,16 +44,19 @@ from odoo_instance_sdk.internal.project_removal import (
     ProjectRegistration,
     ProjectRemovalProjection,
     RemovalPublicationSource,
-    RemovalRuntimeSource,
+    _publication_sources_from_routes,
     build_project_removal_projection,
     forget_resource_fingerprint,
     resolve_project_selector,
 )
+from odoo_instance_sdk.internal.project_removal_terminal import (
+    _completed_purge_is_inert,
+    _environment_owner_clause,
+    _environment_sources,
+    _project_runtime,
+)
 from odoo_instance_sdk.internal.publication_routes import read_owned_routes
 from odoo_instance_sdk.internal.resource_inventory import (
-    ActiveUse,
-    EnvironmentResourceSource,
-    OwnershipConfidence,
     ProjectResourceSource,
     VolumeResourceSource,
     collect_resource_inventory,
@@ -174,84 +177,6 @@ def _row_registration(row: sqlite3.Row) -> ProjectRegistration:
             str(row["registration_state"]),
         ),
     )
-
-
-def _environment_owner_clause(
-    registration: ProjectRegistration,
-    *,
-    alias: str = "e",
-) -> tuple[str, tuple[str, ...]]:
-    """Select current and legacy rows owned by one captured registration."""
-    if registration.git_common_dir is None:
-        return f"{alias}.project_id = ?", (registration.project_id,)
-    return (
-        (
-            f"({alias}.project_id = ? OR ({alias}.project_id IS NULL "
-            f"AND {alias}.repository_root = ? AND {alias}.git_common_dir = ?))"
-        ),
-        (
-            registration.project_id,
-            str(registration.repository_root),
-            str(registration.git_common_dir),
-        ),
-    )
-
-
-def _environment_sources(
-    catalog: BackupCatalog, registration: ProjectRegistration
-) -> tuple[EnvironmentResourceSource, ...]:
-    owner_clause, owner_params = _environment_owner_clause(registration)
-    rows = catalog._conn.execute(
-        f"SELECT * FROM environments e WHERE {owner_clause} ORDER BY id", owner_params
-    ).fetchall()
-    return tuple(
-        EnvironmentResourceSource(
-            environment_id=str(row["id"]),
-            project_id=registration.project_id,
-            name=str(row["name"]),
-            worktree_path=Path(str(row["worktree_path"])),
-            python_environment_path=Path(str(row["python_environment_path"])),
-            python_environment_owned=bool(row["python_environment_owned"]),
-            state=str(row["state"]),
-            backup_id=str(row["backup_id"]) if row["backup_id"] else None,
-            last_error=str(row["last_error"]) if row["last_error"] else None,
-        )
-        for row in rows
-    )
-
-
-def _project_runtime(
-    catalog: BackupCatalog, registration: ProjectRegistration
-) -> tuple[RemovalRuntimeSource, ...]:
-    project_id = registration.project_id
-    sources: list[RemovalRuntimeSource] = []
-    if catalog.get_runtime("project", project_id) is not None:
-        sources.append(
-            RemovalRuntimeSource(
-                project_id=project_id,
-                identity=f"runtime:project:{project_id}",
-                active_use=ActiveUse.ACTIVE,
-                ownership=OwnershipConfidence.PROVEN,
-                stale=False,
-            )
-        )
-    owner_clause, owner_params = _environment_owner_clause(registration)
-    for row in catalog._conn.execute(
-        f"SELECT e.id FROM environments e WHERE {owner_clause} ORDER BY e.id", owner_params
-    ):
-        environment_id = str(row["id"])
-        if catalog.get_runtime("environment", environment_id) is not None:
-            sources.append(
-                RemovalRuntimeSource(
-                    project_id=project_id,
-                    identity=f"runtime:environment:{environment_id}",
-                    target="environment runtime",
-                    active_use=ActiveUse.ACTIVE,
-                    ownership=OwnershipConfidence.PROVEN,
-                    stale=False,
-                )
-            )
-    return tuple(sources)
 
 
 def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...]:
@@ -655,6 +580,7 @@ def capture_project_removal_command(  # noqa: C901
         git_status_step_id=git_status_step_id,
         git_status_hardened=True,
     )
+    terminal_purge = purge and _completed_purge_is_inert(catalog, registration)
     mode: Literal["forget", "purge"] = "purge" if purge else "forget"
     decisions: tuple[ProjectResourceDecision, ...]
     if not purge:
@@ -676,6 +602,8 @@ def capture_project_removal_command(  # noqa: C901
                 target="<catalogue>",
             ),
         )
+    elif terminal_purge:
+        decisions = ()
     else:
         projected_decisions = projection.decisions
         if not projection.complete:
@@ -863,6 +791,27 @@ def capture_project_removal_command(  # noqa: C901
                     registration_state="forgotten",
                     completed=(decisions[0],),
                     retained=forget_retained,
+                )
+            if terminal_purge:
+                if source_status_step is not None:
+                    context.process(source_status_step.step_id)
+                if not _completed_purge_is_inert(catalog, current):
+                    raise _error(
+                        "completed project purge state changed before retry",
+                        projection,
+                        mode=mode,
+                        failed_step="project-removal:revalidate",
+                        decisions=(),
+                    )
+                return ProjectRemovalResult(
+                    project_id=registration.project_id,
+                    mode="purge",
+                    registration_state="forgotten",
+                    retained=tuple(
+                        decision.public()
+                        for decision in projection.decisions
+                        if decision.action == "retain"
+                    ),
                 )
             current_projection = _planned_projection(
                 catalog,

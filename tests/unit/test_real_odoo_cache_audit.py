@@ -130,7 +130,10 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
             subprocess.CompletedProcess(["uvx"], 2, "", "connection refused"),
             "scanner_transport_failure",
         ),
-        (subprocess.CompletedProcess(["uvx"], 0, "not-json", ""), "scanner_invalid_json"),
+        (
+            subprocess.CompletedProcess(["uvx"], 0, "not-json token=secretvalue", ""),
+            "scanner_invalid_json:",
+        ),
         (subprocess.CompletedProcess(["uvx"], 0, "[]", ""), "scanner_invalid_payload"),
     ],
     ids=("timeout", "exit", "transport", "json", "payload"),
@@ -150,7 +153,14 @@ def test_pinned_scanner_reports_bounded_sanitized_failure_reason(
     diagnostics: list[str] = []
 
     assert bootstrap._run_pinned_python_audit(tmp_path / "odoo.lock", diagnostics) is None
-    assert diagnostics == [expected_diagnostic]
+    if expected_diagnostic == "scanner_invalid_json:":
+        assert diagnostics[0].startswith(expected_diagnostic)
+        assert "returncode=0" in diagnostics[0]
+        assert "stdout_chars=26" in diagnostics[0]
+        assert "not-json token=<redacted>" in diagnostics[0]
+        assert "secretvalue" not in diagnostics[0]
+    else:
+        assert diagnostics == [expected_diagnostic]
 
 
 @pytest.mark.parametrize(

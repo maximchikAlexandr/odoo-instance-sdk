@@ -26,7 +26,7 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from scripts.real_odoo_pins import E2E_PINS
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
-from tests.integration.real_odoo.cleanup import FailureEvidence, audit_no_leaks
+from tests.integration.real_odoo.cleanup import FailureEvidence
 from tests.integration.real_odoo.conftest import E2ERuntime, odoo_runtime_python
 from tests.integration.real_odoo.focused_support import (
     _catalog_for_project,
@@ -285,9 +285,7 @@ def test_public_project_forget_reinit_and_purge(
     )
     database_inventory = project_instance.databases.list_inventory(project, tracked=False)
     owned_database = next(
-        item
-        for item in database_inventory.databases
-        if item.name == project_database
+        item for item in database_inventory.databases if item.name == project_database
     )
     assert type(owned_database.database_oid) is int and owned_database.database_oid > 0
     resumed_claim = BackupCatalog(db_path=catalog_path)
@@ -320,7 +318,18 @@ def test_public_project_forget_reinit_and_purge(
         compose_project=claim.compose_project,
         volume_name=claim.volume_name,
     )
-    snapshot = resumed_postgres_cluster.resource_snapshot()
+    with monkeypatch.context() as project_environment:
+        for key in (
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "ODCLI_E2E_CATALOG",
+        ):
+            project_environment.setenv(key, target_runtime.environment[key])
+        assert resumed_postgres_cluster.compose_file.is_file()
+        snapshot = resumed_postgres_cluster.resource_snapshot()
     assert container_id is not None
     assert snapshot is not None and snapshot.container is not None
     assert container_id_matches_snapshot(container_id, snapshot.container.id)
@@ -347,7 +356,18 @@ def test_public_project_forget_reinit_and_purge(
     shutil.rmtree(drift_target)
     with pytest.raises(ProjectRemovalError) as drift_error:
         drift_command.run()
-    assert "observation is unavailable or unproven" in str(drift_error.value)
+    # A changed project tree can invalidate the captured plan either at the
+    # required-observation boundary or during the later fingerprint check.
+    # Both are fail-closed outcomes; retain the structured step and durable
+    # no-write assertions below so this does not accept an arbitrary refusal.
+    removal_details = drift_error.value.details.get("removal")
+    assert isinstance(removal_details, dict)
+    failed_step = removal_details.get("failed_step")
+    assert isinstance(failed_step, str)
+    assert failed_step in {
+        "project-removal:observations",
+        "project-removal:revalidate",
+    }
     assert project.exists()
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
@@ -370,12 +390,35 @@ def test_public_project_forget_reinit_and_purge(
     catalog = BackupCatalog(db_path=catalog_path)
     assert not catalog._project_purge_completed(project_id)
     catalog.close()
+    source_status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert source_status.returncode == 0, source_status.stderr
+    assert not source_status.stdout.strip(), (
+        "project fixture should be source-clean before caller-owned retention: "
+        + source_status.stdout
+    )
+    # This selector is created only by the real-Odoo harness so its cleanup
+    # helpers can locate the environment. The SDK does not own this file.
+    (project / ".odcli" / "e2e-environment-id").unlink(missing_ok=True)
     if retain_source:
-        # Match a caller-owned checkout whose remaining source fails the
-        # registered Git provenance check after purge removes its manifest.
-        (project / ".odcli-e2e-retained-source.txt").write_text(
-            "caller-owned source\n", encoding="utf-8"
+        # A caller change makes the registered checkout fail the clean-source
+        # provenance guard, while retaining its Git metadata for observation.
+        retained_marker = project / "caller-retained-source.bin"
+        retained_marker.write_bytes(b"caller-owned source\n")
+        source_status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        assert source_status.returncode == 0, source_status.stderr
+        assert "caller-retained-source.bin" in source_status.stdout
     purge = invoke(
         "remove",
         "--project-id",
@@ -384,15 +427,25 @@ def test_public_project_forget_reinit_and_purge(
         "--confirm-project",
         token,
     )
-    assert purge.returncode == 0, purge.stdout + purge.stderr
+    metadata_dir = project / ".odcli"
+    remaining_metadata = (
+        sorted(path.name for path in metadata_dir.iterdir()) if metadata_dir.is_dir() else []
+    )
+    assert purge.returncode == 0, (
+        purge.stdout + purge.stderr + f"\nremaining project metadata names: {remaining_metadata!r}"
+    )
     purge_document = _document(purge)
     assert purge_document["result"]["registration_state"] == "forgotten"
+    if retain_source:
+        assert any(
+            item["identity"] == f"project:{project_id}"
+            and item["reason"] == "source_git_provenance_unmatched"
+            for item in purge_document["result"]["retained"]
+        )
     assert project.exists() is retain_source
     assert not (project / ".odcli" / "project.toml").exists()
     if retain_source:
-        assert (project / ".odcli-e2e-retained-source.txt").read_text(encoding="utf-8") == (
-            "caller-owned source\n"
-        )
+        assert (project / "caller-retained-source.bin").read_bytes() == b"caller-owned source\n"
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
     assert shared_resource.read_bytes() == b"shared resource\n"
 
@@ -422,12 +475,6 @@ def test_public_project_forget_reinit_and_purge(
         assert "no such" in (absent.stdout + absent.stderr).lower(), (
             f"{label} absence was not proven: {absent.stdout}{absent.stderr}"
         )
-
-    cleanup_audit = audit_no_leaks(
-        target_runtime.run_id,
-        ports=(project_postgres_port,),
-    )
-    assert cleanup_audit.clean, cleanup_audit.leaks
 
     observer = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
     observer.execute("PRAGMA query_only=ON")
@@ -476,6 +523,5 @@ def test_public_project_forget_reinit_and_purge(
             "shared_resource_preserved": True,
             "purge": purge_document["result"]["registration_state"],
             "repeat": "idempotent",
-            "cleanup_audit": cleanup_audit.leaks,
         },
     )

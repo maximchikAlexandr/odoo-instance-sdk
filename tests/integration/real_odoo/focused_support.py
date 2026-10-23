@@ -374,10 +374,11 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     )
     public_http.release()
     bootstrap_config = root / "focused-odoo.conf"
+    bootstrap_log = runtime.root / f"odoo-bootstrap-{runtime.run_id}-{root.name}.log"
     shutil.copy2(runtime.config_file, bootstrap_config)
     replace_http_port(bootstrap_config, public_http_port)
     with bootstrap_config.open("a", encoding="utf-8") as stream:
-        stream.write(f"logfile = {root / 'odoo.log'}\n")
+        stream.write(f"logfile = {bootstrap_log}\n")
     bootstrap_config.chmod(0o600)
     odoo_python = odoo_runtime_python(runtime, root, bootstrap_odoo_bin)
     command = shutil.which("odcli")
@@ -438,6 +439,10 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         check=False,
     )
     assert init.returncode == 0, init.stdout + init.stderr
+    # Bootstrap-only config belongs to the project metadata boundary; keeping
+    # it in the repository root makes an otherwise clean source appear dirty
+    # to the guarded purge provenance check.
+    bootstrap_config.unlink(missing_ok=True)
     manifest = root / ".odcli" / "project.toml"
     initialized = ProjectConfig.load(root)
     initialized = msgspec.structs.replace(
@@ -461,7 +466,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     config_lines.append(f"addons_path = {root / 'addons'}")
     local_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
     fixture_addon = Path(__file__).parents[2] / "fixtures" / "addons" / "odcli_e2e_probe"
-    logfile = root / f"odoo-{runtime.run_id}.log"
+    logfile = runtime.root / f"odoo-{runtime.run_id}-{root.name}.log"
     logfile.write_text("INFO focused leaf completed; secret=redacted\n", encoding="utf-8")
     with local_config.open("a", encoding="utf-8") as stream:
         stream.write(f"logfile = {logfile}\n")
@@ -624,6 +629,13 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     def remove_environment() -> None:
         if probe_destination.exists():
             _remove_owned_fixture_tree(worktree, probe_destination)
+        cleanup_catalog = BackupCatalog(db_path=Path(process_environment["ODCLI_E2E_CATALOG"]))
+        try:
+            environment_row = cleanup_catalog.get_environment(environment_id)
+        finally:
+            cleanup_catalog.close()
+        if environment_row is None or str(environment_row["state"]) == "removed":
+            return
         removed = subprocess.run(
             [
                 command,

@@ -402,6 +402,40 @@ def test_environment_adapter_rejects_unrelated_environment(
         )
 
 
+def test_environment_adapter_accepts_legacy_row_only_for_exact_project_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment_id = "88888888-8888-4888-8888-888888888888"
+    repository_root = tmp_path / "project"
+    git_common_dir = repository_root / ".git"
+    client = MagicMock()
+    client.get_catalog().get_environment.return_value = {
+        "project_id": None,
+        "repository_root": str(repository_root),
+        "git_common_dir": str(git_common_dir),
+    }
+    environment = SimpleNamespace(id=environment_id)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_removal_runtime._row_to_env",
+        lambda _row: environment,
+    )
+    client.environments.remove_command.return_value = _child("environment.remove")
+    adapter = EnvironmentPurgeAdapter(
+        client,
+        repository_root=repository_root,
+        git_common_dir=git_common_dir,
+    )
+
+    captured = adapter.capture(
+        _decision(f"environment:{environment_id}", "environment", "delete"),
+        project_id="project-a",
+    )
+
+    assert captured.plan.steps[0].step_id == "environment.remove"
+    client.environments.remove_command.assert_called_once()
+
+
 def test_registry_only_selects_wp05_decisions() -> None:
     registry = RuntimeEnvironmentPurgeAdapters(MagicMock())
 

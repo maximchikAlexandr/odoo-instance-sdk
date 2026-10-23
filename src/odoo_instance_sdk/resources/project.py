@@ -61,6 +61,7 @@ class ProjectResource:
             FilesystemPurgeTarget,
             project_owned_paths,
         )
+        from odoo_instance_sdk.internal.project_manifest import default_project_ignore_contents
         from odoo_instance_sdk.internal.project_removal import (
             ProjectRegistration,
             resolve_project_selector,
@@ -343,7 +344,11 @@ class ProjectResource:
 
         class _Adapters:
             def __init__(self) -> None:
-                self._runtime = RuntimeEnvironmentPurgeAdapters(client)
+                self._runtime = RuntimeEnvironmentPurgeAdapters(
+                    client,
+                    repository_root=registration.repository_root,
+                    git_common_dir=registration.git_common_dir,
+                )
                 self._filesystem = FilesystemPurgeAdapter(
                     (
                         *(
@@ -354,6 +359,11 @@ class ProjectResource:
                                 project_id=registration.project_id,
                                 path=path,
                                 allowed_root=registration.repository_root,
+                                expected_content=(
+                                    default_project_ignore_contents()
+                                    if path.name == ".gitignore" and path.parent.name == ".odcli"
+                                    else None
+                                ),
                             )
                             for kind, path in project_owned_paths(
                                 registration.repository_root,
