@@ -391,6 +391,60 @@ def test_public_purge_does_not_treat_reappeared_owned_manifest_as_inert(
     catalog.close()
 
 
+@pytest.mark.parametrize(
+    "state",
+    (
+        "registered-empty",
+        "current-environment-active",
+        "legacy-environment-active",
+        "current-worktree-reappeared",
+        "legacy-python-symlink-reappeared",
+    ),
+)
+def test_public_purge_keeps_unproven_or_reappeared_environment_state_non_inert(
+    tmp_path: Path, state: str
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    if state != "registered-empty":
+        assert catalog.forget_project(project_id)
+        environment_id = "environment-after-purge"
+        _legacy_environment(catalog, environment_id, root)
+        if state == "current-environment-active":
+            catalog._conn.execute(
+                "UPDATE environments SET project_id = ?, state = 'ready' WHERE id = ?",
+                (project_id, environment_id),
+            )
+        elif state == "legacy-environment-active":
+            catalog._conn.execute(
+                "UPDATE environments SET state = 'ready' WHERE id = ?", (environment_id,)
+            )
+        elif state == "current-worktree-reappeared":
+            catalog._conn.execute(
+                "UPDATE environments SET project_id = ?, state = 'removed' WHERE id = ?",
+                (project_id, environment_id),
+            )
+            (root / "worktree").mkdir()
+        elif state == "legacy-python-symlink-reappeared":
+            catalog._conn.execute(
+                "UPDATE environments SET state = 'removed', python_environment_owned = 1 "
+                "WHERE id = ?",
+                (environment_id,),
+            )
+            (root / ".venv").symlink_to(tmp_path / "missing-python", target_is_directory=True)
+        catalog._conn.commit()
+
+    client = SimpleNamespace(get_catalog=lambda: catalog)
+    command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+        ProjectSelector.from_project_id(project_id),
+        purge=True,
+        confirmation=f"{root.name}:{project_id}",
+    )
+
+    assert command.plan.steps
+    assert any(step.mutating for step in command.plan.steps)
+    catalog.close()
+
+
 def test_public_forget_preserves_dirty_source_decision_across_execution(
     tmp_path: Path,
 ) -> None:
