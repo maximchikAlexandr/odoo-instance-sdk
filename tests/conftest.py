@@ -106,6 +106,39 @@ def production_catalogue_path() -> Path:
     )
 
 
+@pytest.fixture(autouse=True)
+def valid_admin_config_for_non_admin_tests(
+    request: pytest.FixtureRequest,
+    isolated_cli_catalogue: Path,
+) -> None:
+    """Give ordinary non-headless HTTP tests the required private Admin config."""
+    del isolated_cli_catalogue
+    if request.path.name not in {
+        "test_http_contract.py",
+        "test_http_runtime.py",
+        "test_serve.py",
+    }:
+        return
+    if request.node.get_closest_marker("dashboard") is None:
+        return
+    from pwdlib import PasswordHash
+
+    from odoo_instance_sdk.internal.paths import get_user_root
+
+    config = get_user_root(ensure_exists=True) / "config"
+    config.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = config / "admin.toml"
+    if path.exists():
+        return
+    path.write_text(
+        "[admin]\n"
+        f'password_hash = "{PasswordHash.recommended().hash("test-password")}"\n'
+        f'session_key = "{"t" * 40}"\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
 def _run_docker_volume_ls() -> subprocess.CompletedProcess[str]:
     result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(3):

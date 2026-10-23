@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from odoo_instance_sdk.http.app import create_app
 from odoo_instance_sdk.models import (
@@ -19,6 +21,7 @@ from odoo_instance_sdk.models import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 OPENAPI_PATH = REPOSITORY_ROOT / "openapi.json"
+
 
 _UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -57,15 +60,31 @@ def _schema_runtime_controller(action: str, target: RuntimeActionRequest) -> Run
 
 
 def build_openapi() -> dict[str, Any]:
-    """Build OpenAPI exclusively through the static-free production app."""
-    document: dict[str, Any] = create_app(
-        headless=False,
-        static_assets=False,
-        monitor=_SchemaMonitor(),
-        pgadmin_opener=_schema_pgadmin_opener,
-        runtime_controller=_schema_runtime_controller,
-    ).openapi()
-    return document
+    """Build OpenAPI without reading or writing the operator's credentials."""
+    from pwdlib import PasswordHash
+
+    from odoo_instance_sdk.http.admin_auth import AdminSettings
+
+    settings = AdminSettings(
+        password_hash=PasswordHash.recommended().hash(secrets.token_urlsafe(32)),
+        session_key=secrets.token_urlsafe(32),
+    )
+    with patch.object(AdminSettings, "load", return_value=settings):
+        document = create_app(
+            headless=False,
+            static_assets=False,
+            monitor=_SchemaMonitor(),
+            pgadmin_opener=_schema_pgadmin_opener,
+            runtime_controller=_schema_runtime_controller,
+        ).openapi()
+    if not isinstance(document, dict):
+        raise TypeError("OpenAPI schema must be an object")
+    result: dict[str, Any] = {}
+    for key, value in document.items():
+        if not isinstance(key, str):
+            raise TypeError("OpenAPI schema keys must be strings")
+        result[key] = value
+    return result
 
 
 def _reject_unsafe(value: object, *, key: str = "") -> None:  # noqa: C901
