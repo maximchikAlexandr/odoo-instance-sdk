@@ -21,7 +21,11 @@ import odoo_instance_sdk.resources.publication as publication_resource
 from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal import paths as internal_paths
-from odoo_instance_sdk.internal import publication_routes, project_removal_coordinator
+from odoo_instance_sdk.internal import (
+    publication_routes,
+    project_removal_coordinator,
+    project_removal_terminal,
+)
 from odoo_instance_sdk.internal.cluster_resources import build_container
 from odoo_instance_sdk.internal.dbprep import bootstrap
 from odoo_instance_sdk.internal.locks import (
@@ -819,8 +823,11 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     terminal_observed_absence = threading.Event()
     terminal_done = threading.Event()
     outcome: dict[str, object] = {}
+    published_route_bytes: dict[str, bytes] = {}
     original_atomic_write = publication_routes._atomic_write
-    original_route_reader = publication_routes.read_owned_routes
+    original_has_owned_publication = (
+        project_removal_terminal._has_owned_publication
+    )
 
     def pause_before_route_write(path: Path, content: bytes) -> None:
         if path == routes_path.with_name(f".{routes_path.name}.candidate"):
@@ -828,14 +835,19 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
             if not release_writer.wait(timeout=10):
                 raise TimeoutError("publication writer was not released")
         original_atomic_write(path, content)
+        if path == routes_path:
+            published_route_bytes["value"] = content
 
-    def observe_terminal_route_read() -> tuple[publication_routes.PublicationRoute, ...]:
-        routes = original_route_reader()
+    def observe_terminal_publication_check(project_id: str) -> bool:
         terminal_observed_absence.set()
-        return routes
+        return original_has_owned_publication(project_id)
 
     monkeypatch.setattr(publication_routes, "_atomic_write", pause_before_route_write)
-    monkeypatch.setattr(publication_routes, "read_owned_routes", observe_terminal_route_read)
+    monkeypatch.setattr(
+        project_removal_terminal,
+        "_has_owned_publication",
+        observe_terminal_publication_check,
+    )
     publication_command = publication.publish_command(
         target, settings=settings, executor=RecordingExecutor()
     )
@@ -864,17 +876,10 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
         assert publication_lock_path() == tmp_path / "locks" / "publication.lock"
         terminal_thread.start()
         assert terminal_observed_absence.wait(timeout=10), (
-            "terminal purge did not reach its route-absence observation while publication held "
-            "the real publication lock"
+            "terminal purge did not reach its publication check while writer held the real lock"
         )
         assert terminal_done.wait(timeout=10), (
-            "terminal purge did not complete at the race boundary"
-        )
-        assert routes_path.exists() is False
-        assert "terminal" in outcome
-        assert isinstance(outcome.get("terminal_error"), ProjectRemovalError), (
-            "terminal purge returned success while an owned publication writer held the lock "
-            "before making its route visible"
+            "baseline terminal check did not complete at the race boundary"
         )
     finally:
         release_writer.set()
@@ -885,7 +890,11 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     assert not publication_thread.is_alive()
     assert not terminal_thread.is_alive()
     assert "publication_error" not in outcome
-    assert routes_path.exists()
+    assert routes_path.read_bytes() == published_route_bytes["value"]
+    assert isinstance(outcome.get("terminal_error"), ProjectRemovalError), (
+        "terminal purge returned success while an owned publication writer held the lock "
+        "before making its route visible"
+    )
 
 
 def test_public_purge_preserves_same_owner_route_replaced_after_capture(
@@ -913,7 +922,19 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
         project_id=project_id,
         local_endpoint="http://127.0.0.1:8070",
     )
-    client = SimpleNamespace(get_catalog=lambda: catalog, publication=publication)
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(
+            list_inventory=lambda *_args, **_kwargs: DatabaseInventoryResult(
+                cluster="127.0.0.1:5432", databases=(), tracked=True
+            )
+        ),
+        _postgres_cluster=None,
+    )
+    client = SimpleNamespace(
+        get_catalog=lambda: catalog,
+        publication=publication,
+        instance=SimpleNamespace(from_project=lambda _project: instance),
+    )
     publication.publish_command(
         original_target, settings=settings, executor=RecordingExecutor()
     ).run()
