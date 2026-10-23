@@ -216,13 +216,17 @@ def test_public_project_forget_reinit_and_purge(
     ]
     catalog.close()
     resumed_cluster = invoke("--project", str(project), "postgres", "up")
-    assert resumed_cluster.returncode == 0, resumed_cluster.stdout + resumed_cluster.stderr
+    assert resumed_cluster.returncode == 0, (
+        resumed_cluster.stdout + resumed_cluster.stderr
+    )
     database_probe = _project_database_probe(
         project,
         target_runtime.topology.target_sentinel_database,
         home=target_runtime.environment["HOME"],
     )
-    assert database_probe.returncode == 0, database_probe.stdout + database_probe.stderr
+    assert database_probe.returncode == 0, (
+        database_probe.stdout + database_probe.stderr
+    )
     assert database_probe.stdout.strip() == target_runtime.topology.target_sentinel_database
 
     token = f"{project.name}:{project_id}"
