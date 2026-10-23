@@ -447,9 +447,7 @@ def test_public_purge_keeps_unproven_or_reappeared_environment_state_non_inert(
 
     details = cast("dict[str, object]", error.value.details["removal"])
     assert details["failed_step"] == "project-removal:observations"
-    expected_registration_state = (
-        "registered" if state == "registered-empty" else "forgotten"
-    )
+    expected_registration_state = "registered" if state == "registered-empty" else "forgotten"
     registration = catalog.get_project(project_id)
     assert registration is not None
     assert registration["registration_state"] == expected_registration_state
