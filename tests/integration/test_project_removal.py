@@ -713,9 +713,7 @@ def _isolated_publication_settings(
     config_root.mkdir(mode=0o700, parents=True)
     routes_path = config_root / "routes.caddy"
     settings_path = config_root / "publication.toml"
-    monkeypatch.setattr(
-        publication_resource, "get_config_root", lambda **_kwargs: config_root
-    )
+    monkeypatch.setattr(publication_resource, "get_config_root", lambda **_kwargs: config_root)
     monkeypatch.setattr(
         publication_resource,
         "get_publication_config_path",
@@ -733,6 +731,7 @@ def _isolated_publication_settings(
         owned_route_file=routes_path,
         basic_auth_username="odoo",
         basic_auth_password_hash=("$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        trusted_proxy_addresses=("127.0.0.1",),
     )
     settings_path.write_text(
         "[publication]\n"
@@ -741,7 +740,8 @@ def _isolated_publication_settings(
         'caddy_control_endpoint = "http://127.0.0.1:2019"\n'
         f"owned_route_file = {json.dumps(str(routes_path))}\n"
         'basic_auth_username = "odoo"\n'
-        'basic_auth_password_hash = "$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n',
+        'basic_auth_password_hash = "$2a$10$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+        'trusted_proxy_addresses = ["127.0.0.1"]\n',
         encoding="utf-8",
     )
     settings_path.chmod(0o600)
