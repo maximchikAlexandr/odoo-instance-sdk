@@ -14,6 +14,11 @@ _MANIFEST_DIR = ".odcli"
 _MANIFEST_FILE = "project.toml"
 _PROJECT_LOCAL_IGNORES = (".env", "odoo.conf")
 
+
+def default_project_ignore_contents() -> bytes:
+    """Return the exact SDK-managed ignore file contents when no caller rules exist."""
+    return "".join(f"{entry}\n" for entry in _PROJECT_LOCAL_IGNORES).encode("utf-8")
+
 _SECRET_KEYS = frozenset(
     {
         "admin_passwd",
@@ -82,7 +87,7 @@ def ensure_project_ignore(project_path: str | Path) -> Path:
         base = "".join(preserved)
         if base and not base.endswith(("\n", "\r")):
             base += "\n"
-        updated = (base + "".join(f"{entry}\n" for entry in _PROJECT_LOCAL_IGNORES)).encode()
+        updated = base.encode("utf-8") + default_project_ignore_contents()
         if updated == content.encode():
             return ignore
 
@@ -122,7 +127,7 @@ def _ensure_project_ignore_windows(root: Path) -> Path:
     base = "".join(preserved)
     if base and not base.endswith(("\n", "\r")):
         base += "\n"
-    updated = base + "".join(f"{entry}\n" for entry in _PROJECT_LOCAL_IGNORES)
+    updated = base + default_project_ignore_contents().decode("utf-8")
     if updated == content:
         return ignore
     temporary_name: str | None = None
