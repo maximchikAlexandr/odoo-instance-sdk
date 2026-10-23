@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import traceback
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
@@ -862,8 +863,33 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
     waiting_for_publication = threading.Event()
     terminal_done = threading.Event()
     published_route_bytes: dict[str, bytes] = {}
+    lock_attempts: list[str] = []
+    inert_checks: list[dict[str, object]] = []
     original_lock_until = exclusive_lock_until
     original_atomic_write = publication_routes._atomic_write
+    original_inert_check = _forgotten_project_is_inert
+
+    def observe_inert_check(
+        catalog_arg: BackupCatalog,
+        registration: ProjectRegistration,
+        *,
+        check_publications: bool = True,
+        publication_lock_held: bool = False,
+    ) -> bool:
+        result = original_inert_check(
+            catalog_arg,
+            registration,
+            check_publications=check_publications,
+            publication_lock_held=publication_lock_held,
+        )
+        inert_checks.append(
+            {
+                "check_publications": check_publications,
+                "publication_lock_held": publication_lock_held,
+                "result": result,
+            }
+        )
+        return result
 
     def pause_before_route_write(path: Path, content: bytes) -> None:
         if path == routes_path.with_name(f".{routes_path.name}.candidate"):
@@ -875,6 +901,7 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
             published_route_bytes["value"] = content
 
     def observe_terminal_lock(path: Path, deadline: float) -> AbstractContextManager[int]:
+        lock_attempts.append(str(path))
         if path == lock_paths.publication_lock_path():
             waiting_for_publication.set()
         return original_lock_until(path, deadline)
@@ -884,43 +911,58 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
         "odoo_instance_sdk.internal.project_removal_coordinator.exclusive_lock_until",
         observe_terminal_lock,
     )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_removal_coordinator._forgotten_project_is_inert",
+        observe_inert_check,
+    )
     outcome: dict[str, object] = {}
 
     publication_command = publication.publish_command(
         target, settings=settings, executor=RecordingExecutor()
     )
 
-    def run_publication() -> None:
-        try:
-            outcome["publication"] = publication_command.run()
-        except BaseException as exc:  # preserve the command failure for the asserting thread
-            outcome["publication_error"] = exc
-
-    def run_terminal_repeat() -> None:
-        try:
-            outcome["result"] = command.run()
-        except BaseException as exc:  # preserve the command failure for the asserting thread
-            outcome["error"] = exc
-        finally:
-            terminal_done.set()
-
-    publication_thread = threading.Thread(target=run_publication)
-    repeat_thread = threading.Thread(target=run_terminal_repeat)
+    publication_thread = threading.Thread(
+        target=_record_race_worker_outcome,
+        args=(outcome, publication_command.run),
+        kwargs={
+            "result_key": "publication",
+            "error_key": "publication_error",
+            "traceback_key": "publication_traceback",
+        },
+    )
+    repeat_thread = threading.Thread(
+        target=_record_race_worker_outcome,
+        args=(
+            outcome,
+            partial(
+                _run_fresh_public_project_purge,
+                tmp_path / "catalog.sqlite3",
+                project_id,
+                root.name,
+                outcome,
+            ),
+        ),
+        kwargs={
+            "result_key": "result",
+            "error_key": "error",
+            "traceback_key": "traceback",
+            "details_key": "error_details",
+            "completion_event": terminal_done,
+        },
+    )
+    writer_reached_route_write = False
+    terminal_reached_publication_lock = False
+    terminal_was_blocked = False
     try:
         publication_thread.start()
-        assert writer_holds_lock.wait(timeout=10), (
-            "publisher never entered the locked route write"
-        )
-        assert lock_paths.publication_lock_path() == tmp_path / "locks" / "publication.lock"
+        writer_reached_route_write = writer_holds_lock.wait(timeout=10)
         catalogue_changes_before_repeat = catalog._conn.total_changes
         catalogue_version_before_repeat = int(
             catalog._conn.execute("PRAGMA data_version").fetchone()[0]
         )
         repeat_thread.start()
-        assert waiting_for_publication.wait(timeout=10), (
-            "terminal repeat did not reach the publication lock boundary"
-        )
-        assert not terminal_done.is_set(), "terminal repeat bypassed the held publication lock"
+        terminal_reached_publication_lock = waiting_for_publication.wait(timeout=10)
+        terminal_was_blocked = not terminal_done.is_set()
     finally:
         release_writer.set()
         publication_thread.join(timeout=10)
@@ -928,6 +970,21 @@ def test_public_terminal_repeat_waits_for_publication_writer_and_refuses_owned_r
 
     assert not publication_thread.is_alive()
     assert not repeat_thread.is_alive()
+    assert lock_paths.publication_lock_path() == tmp_path / "locks" / "publication.lock"
+    assert writer_reached_route_write, (
+        "publisher did not reach the real route write; "
+        f"outcome={outcome!r}; plan={outcome.get('plan')!r}; lock_attempts={lock_attempts!r}; "
+        f"inert_checks={inert_checks!r}"
+    )
+    assert terminal_reached_publication_lock, (
+        "terminal repeat did not reach the instrumented publication lock; "
+        f"outcome={outcome!r}; plan={outcome.get('plan')!r}; lock_attempts={lock_attempts!r}; "
+        f"inert_checks={inert_checks!r}"
+    )
+    assert terminal_was_blocked, (
+        "terminal repeat bypassed the held publication lock; "
+        f"outcome={outcome!r}; lock_attempts={lock_attempts!r}; inert_checks={inert_checks!r}"
+    )
     assert "publication_error" not in outcome
     assert "value" in published_route_bytes
     assert routes_path.read_bytes() == published_route_bytes["value"]
@@ -947,6 +1004,9 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
     settings, routes_path = _isolated_publication_settings(
         tmp_path / "isolated-user-root", monkeypatch
     )
@@ -967,9 +1027,14 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
         project_id=project_id,
         local_endpoint="http://127.0.0.1:8069",
     )
+    unpublish_executor = RecordingExecutor()
     client = SimpleNamespace(
         get_catalog=lambda: catalog,
-        publication=publication,
+        publication=SimpleNamespace(
+            unpublish_command=lambda *args, **kwargs: publication.unpublish_command(
+                *args, executor=unpublish_executor, **kwargs
+            )
+        ),
         instance=SimpleNamespace(from_project=lambda _project: instance),
     )
     publication.publish_command(target, settings=settings, executor=RecordingExecutor()).run()
@@ -991,9 +1056,14 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     replacement_bytes = routes_path.read_bytes()
     catalogue_changes = catalog._conn.total_changes
 
-    with pytest.raises(ProjectRemovalError, match="publication route identity changed"):
+    removal_error: ProjectRemovalError | None = None
+    try:
         command.run()
+    except ProjectRemovalError as exc:
+        removal_error = exc
 
+    assert removal_error is not None, "changed route identity was not refused"
+    assert "publication route identity changed" in str(removal_error)
     assert catalog._conn.total_changes == catalogue_changes
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert routes_path.read_bytes() == replacement_bytes
