@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 
+from odoo_instance_sdk.internal.locks import exclusive_lock_until, publication_lock_path
 from odoo_instance_sdk.internal.project_removal import (
     ProjectRegistration,
     RemovalRuntimeSource,
@@ -98,13 +100,13 @@ def _project_runtime(
 
 
 def _has_owned_publication(project_id: str) -> bool:
-    from odoo_instance_sdk.internal.publication_routes import read_owned_routes
-
-    return any(
-        route.project_id == project_id
-        or (route.owner_kind == "project" and route.owner_id == project_id)
-        for route in read_owned_routes()
+    from odoo_instance_sdk.internal.publication_routes import (
+        read_owned_routes,
+        routes_owned_by_project,
     )
+
+    with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+        return bool(routes_owned_by_project(read_owned_routes(), project_id))
 
 
 def _forgotten_project_is_inert(
@@ -112,6 +114,7 @@ def _forgotten_project_is_inert(
     registration: ProjectRegistration,
     *,
     check_publications: bool = True,
+    publication_lock_held: bool = False,
 ) -> bool:
     """Treat a forgotten project as inert only while every owned resource stays absent."""
     if registration.registration_state != "forgotten":
@@ -147,7 +150,16 @@ def _forgotten_project_is_inert(
             or environment.python_environment_path.is_symlink()
         ):
             return False
-    return not (check_publications and _has_owned_publication(registration.project_id))
+    if not check_publications:
+        return True
+    if publication_lock_held:
+        from odoo_instance_sdk.internal.publication_routes import (
+            read_owned_routes,
+            routes_owned_by_project,
+        )
+
+        return not routes_owned_by_project(read_owned_routes(), registration.project_id)
+    return not _has_owned_publication(registration.project_id)
 
 
 __all__ = [

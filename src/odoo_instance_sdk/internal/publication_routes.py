@@ -146,6 +146,18 @@ def read_owned_routes() -> tuple[PublicationRoute, ...]:
     return tuple(decode_routes(route_path.read_bytes()))
 
 
+def routes_owned_by_project(
+    routes: Sequence[PublicationRoute], project_id: str
+) -> tuple[PublicationRoute, ...]:
+    """Select only routes whose durable owner identity belongs to a project."""
+    return tuple(
+        route
+        for route in routes
+        if route.project_id == project_id
+        or (route.owner_kind == "project" and route.owner_id == project_id)
+    )
+
+
 def root_imports_owned_route(root_config: Path, owned_route_file: Path) -> bool:
     """Prove that an existing Caddy root imports this exact route file."""
     try:
@@ -337,6 +349,8 @@ def reconcile_route_file(  # noqa: C901
     owner_id: str,
     route: PublicationRoute | None,
     remove: bool,
+    expected_route_identity: str | None = None,
+    expected_current_route: PublicationRoute | None = None,
 ) -> PublicationRoute | None:
     """Run the one locked route transaction shared by every publication caller."""
     context.action(action_id)
@@ -362,6 +376,18 @@ def reconcile_route_file(  # noqa: C901
             ),
             None,
         )
+        if (
+            expected_route_identity is not None
+            and matching is not None
+            and (
+                matching.route_identity != expected_route_identity
+                or (
+                    expected_current_route is not None
+                    and matching != expected_current_route
+                )
+            )
+        ):
+            raise PublicationError("publication route identity changed after planning")
         if remove and matching is None:
             for step_id in (
                 validation_id,
@@ -427,6 +453,7 @@ __all__ = [
     "decode_routes",
     "panel_route",
     "read_owned_routes",
+    "routes_owned_by_project",
     "reconcile_route_file",
     "render_panel_route",
     "root_imports_owned_route",

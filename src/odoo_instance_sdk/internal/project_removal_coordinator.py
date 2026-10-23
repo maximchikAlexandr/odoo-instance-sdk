@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import msgspec
@@ -28,7 +29,12 @@ from odoo_instance_sdk.execution import (
     SemanticPlanObservation,
 )
 from odoo_instance_sdk.internal.git_worktree import project_git_status_argv
-from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
+from odoo_instance_sdk.internal.locks import (
+    exclusive_lock,
+    exclusive_lock_until,
+    project_manifest_lock_path,
+    publication_lock_path,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedCommand,
@@ -54,7 +60,10 @@ from odoo_instance_sdk.internal.project_removal_terminal import (
     _forgotten_project_is_inert,
     _project_runtime,
 )
-from odoo_instance_sdk.internal.publication_routes import read_owned_routes
+from odoo_instance_sdk.internal.publication_routes import (
+    read_owned_routes,
+    routes_owned_by_project,
+)
 from odoo_instance_sdk.internal.resource_inventory import (
     ActiveUse,
     OwnershipConfidence,
@@ -170,20 +179,18 @@ def _row_registration(row: sqlite3.Row) -> ProjectRegistration:
 
 def _publication_sources(project_id: str) -> tuple[RemovalPublicationSource, ...]:
     sources: list[RemovalPublicationSource] = []
-    for route in read_owned_routes():
-        belongs = route.project_id == project_id or (
-            route.owner_kind == "project" and route.owner_id == project_id
-        )
-        if belongs:
-            sources.append(
-                RemovalPublicationSource(
-                    project_id=project_id,
-                    identity=f"publication:{route.owner_kind}:{route.owner_id}",
-                    target="publication route",
-                    active_use=ActiveUse.ACTIVE,
-                    ownership=OwnershipConfidence.PROVEN,
-                )
+    with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+        routes = routes_owned_by_project(read_owned_routes(), project_id)
+    for route in routes:
+        sources.append(
+            RemovalPublicationSource(
+                project_id=project_id,
+                identity=f"publication:{route.owner_kind}:{route.owner_id}",
+                target="publication route",
+                active_use=ActiveUse.ACTIVE,
+                ownership=OwnershipConfidence.PROVEN,
             )
+        )
     return tuple(sources)
 
 
@@ -782,19 +789,25 @@ def capture_project_removal_command(  # noqa: C901
             if terminal_purge:
                 if source_status_step is not None:
                     context.process(source_status_step.step_id)
-                if not _forgotten_project_is_inert(catalog, current):
-                    raise _error(
-                        "completed project purge state changed before retry",
-                        projection,
-                        mode=mode,
-                        failed_step="project-removal:revalidate",
-                        decisions=(),
+                # Lock order is project manifest then the existing global
+                # publication transaction lock, matching project purge's
+                # captured unpublish child. Hold it through the terminal return.
+                with exclusive_lock_until(publication_lock_path(), monotonic() + 30.0):
+                    if not _forgotten_project_is_inert(
+                        catalog, current, publication_lock_held=True
+                    ):
+                        raise _error(
+                            "completed project purge state changed before retry",
+                            projection,
+                            mode=mode,
+                            failed_step="project-removal:revalidate",
+                            decisions=(),
+                        )
+                    return ProjectRemovalResult(
+                        project_id=registration.project_id,
+                        mode="purge",
+                        registration_state="forgotten",
                     )
-                return ProjectRemovalResult(
-                    project_id=registration.project_id,
-                    mode="purge",
-                    registration_state="forgotten",
-                )
             current_projection = _planned_projection(
                 catalog,
                 current,

@@ -177,9 +177,35 @@ def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
     catalog.close()
 
 
-@pytest.mark.parametrize("predecessor", ("0012", "0013"))
-def test_backup_catalog_opens_stamped_purge_predecessors_without_losing_rows(
-    tmp_path: Path, predecessor: str
+def _downgrade_to_stamped_0012(db: Path) -> None:
+    command.downgrade(_alembic_config(db), "0012")
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("ALTER TABLE projects DROP COLUMN purge_completed_at")
+        conn.commit()
+
+
+def _downgrade_to_stamped_0013(db: Path) -> None:
+    command.downgrade(_alembic_config(db), "0013")
+
+
+def _assert_0012_predecessor_schema(conn: sqlite3.Connection) -> None:
+    assert "purge_completed_at" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(projects)")
+    }
+
+
+def _assert_0013_predecessor_schema(conn: sqlite3.Connection) -> None:
+    assert "purge_completed_at" in {
+        row[1] for row in conn.execute("PRAGMA table_info(projects)")
+    }
+
+
+def _assert_backup_catalog_opens_stamped_purge_predecessor_without_losing_rows(
+    tmp_path: Path,
+    *,
+    predecessor: str,
+    prepare_predecessor: Callable[[Path], None],
+    assert_predecessor_schema: Callable[[sqlite3.Connection], None],
 ) -> None:
     db = tmp_path / f"catalog-{predecessor}.sqlite3"
     root = tmp_path / "registered-project"
@@ -211,17 +237,10 @@ def test_backup_catalog_opens_stamped_purge_predecessors_without_losing_rows(
     assert catalog.forget_project(project_id)
     catalog.close()
 
-    config = _alembic_config(db)
-    command.downgrade(config, predecessor)
+    prepare_predecessor(db)
     with sqlite3.connect(str(db)) as conn:
         assert catalog_revision(conn) == predecessor
-        if predecessor == "0012":
-            conn.execute("ALTER TABLE projects DROP COLUMN purge_completed_at")
-            conn.commit()
-        has_legacy_column = "purge_completed_at" in {
-            row[1] for row in conn.execute("PRAGMA table_info(projects)")
-        }
-        assert has_legacy_column is (predecessor == "0013")
+        assert_predecessor_schema(conn)
 
     reopened = BackupCatalog(db_path=db)
     assert catalog_revision(reopened._conn) == CATALOG_REVISION
@@ -240,6 +259,28 @@ def test_backup_catalog_opens_stamped_purge_predecessors_without_losing_rows(
     assert reopened._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     verify_schema_equivalence(reopened._conn)
     reopened.close()
+
+
+def test_backup_catalog_opens_stamped_0012_purge_predecessor_without_losing_rows(
+    tmp_path: Path,
+) -> None:
+    _assert_backup_catalog_opens_stamped_purge_predecessor_without_losing_rows(
+        tmp_path,
+        predecessor="0012",
+        prepare_predecessor=_downgrade_to_stamped_0012,
+        assert_predecessor_schema=_assert_0012_predecessor_schema,
+    )
+
+
+def test_backup_catalog_opens_stamped_0013_purge_predecessor_without_losing_rows(
+    tmp_path: Path,
+) -> None:
+    _assert_backup_catalog_opens_stamped_purge_predecessor_without_losing_rows(
+        tmp_path,
+        predecessor="0013",
+        prepare_predecessor=_downgrade_to_stamped_0013,
+        assert_predecessor_schema=_assert_0013_predecessor_schema,
+    )
 
 
 def test_backup_catalog_rejects_unknown_future_revision(tmp_path: Path) -> None:
