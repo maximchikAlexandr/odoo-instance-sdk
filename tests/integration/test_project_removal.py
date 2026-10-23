@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -20,6 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import odoo_instance_sdk.internal.project_removal_coordinator as project_removal_coordinator
 import odoo_instance_sdk.resources.publication as publication_resource
 from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
@@ -1067,6 +1069,150 @@ def test_public_purge_preserves_same_owner_route_replaced_after_capture(
     assert catalog._conn.total_changes == catalogue_changes
     assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
     assert routes_path.read_bytes() == replacement_bytes
+    catalog.close()
+
+
+def test_public_purge_refuses_same_owner_route_replaced_between_projection_and_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, project_id, root = _catalog(tmp_path)
+    manifest = root / ".odcli" / "project.toml"
+    manifest.parent.mkdir()
+    manifest.write_text("[project]\n", encoding="utf-8")
+    settings, routes_path = _isolated_publication_settings(
+        tmp_path / "isolated-user-root", monkeypatch
+    )
+    monkeypatch.setattr(internal_paths, "get_locks_dir", lambda **_kwargs: tmp_path / "locks")
+    monkeypatch.setattr(publication_resource, "_assert_runtime_ready", lambda _target: None)
+    publication = PublicationResource(_client=cast("OdooClient", SimpleNamespace()))
+    target = PublicationTarget(
+        owner_kind="project",
+        owner_id=project_id,
+        project_id=project_id,
+        local_endpoint="http://127.0.0.1:8069",
+    )
+    publication.publish_command(target, settings=settings, executor=RecordingExecutor()).run()
+    source_route_bytes = routes_path.read_bytes()
+    replacement_target = PublicationTarget(
+        owner_kind="project",
+        owner_id=project_id,
+        project_id=project_id,
+        local_endpoint="http://127.0.0.1:8070",
+    )
+    projection_observed = threading.Event()
+    resume_capture = threading.Event()
+    command_finished = threading.Event()
+    outcome: dict[str, object] = {}
+    original_projection = project_removal_coordinator.build_project_removal_projection
+    projection_paused = False
+
+    def pause_after_projection(*args: object, **kwargs: object) -> ProjectRemovalProjection:
+        nonlocal projection_paused
+        projection = original_projection(*args, **kwargs)
+        if not projection_paused and any(
+            decision.resource_type == "publication" for decision in projection.decisions
+        ):
+            projection_paused = True
+            projection_observed.set()
+            if not resume_capture.wait(timeout=20):
+                raise TimeoutError("test did not resume project-removal capture")
+        return projection
+
+    monkeypatch.setattr(
+        project_removal_coordinator,
+        "build_project_removal_projection",
+        pause_after_projection,
+    )
+    instance = SimpleNamespace(
+        databases=SimpleNamespace(
+            list_inventory=lambda *_args, **_kwargs: DatabaseInventoryResult(
+                cluster="127.0.0.1:5432", databases=(), tracked=True
+            )
+        ),
+        _postgres_cluster=None,
+    )
+    unpublish_executor = RecordingExecutor()
+
+    def capture_and_run() -> ProjectRemovalResult:
+        command_catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+        try:
+            client = SimpleNamespace(
+                get_catalog=lambda: command_catalog,
+                publication=SimpleNamespace(
+                    unpublish_command=lambda *args, **kwargs: publication.unpublish_command(
+                        *args, executor=unpublish_executor, **kwargs
+                    )
+                ),
+                instance=SimpleNamespace(from_project=lambda _project: instance),
+            )
+            command = ProjectResource(_client=cast("OdooClient", client)).remove_command(
+                ProjectSelector.from_project_id(project_id),
+                purge=True,
+                confirmation=f"{root.name}:{project_id}",
+            )
+            outcome["plan"] = command.plan
+            return command.run()
+        finally:
+            command_catalog.close()
+
+    removal_thread = threading.Thread(
+        target=_record_race_worker_outcome,
+        args=(outcome, capture_and_run),
+        kwargs={
+            "result_key": "result",
+            "error_key": "error",
+            "traceback_key": "traceback",
+            "details_key": "error_details",
+            "completion_event": command_finished,
+        },
+    )
+    catalogue_changes_before = catalog._conn.total_changes
+    catalogue_version_before = int(catalog._conn.execute("PRAGMA data_version").fetchone()[0])
+    removal_thread.start()
+    reached_projection = projection_observed.wait(timeout=20)
+    replacement_error: BaseException | None = None
+    try:
+        if reached_projection:
+            publication.publish_command(
+                replacement_target, settings=settings, executor=RecordingExecutor()
+            ).run()
+    except BaseException as exc:
+        replacement_error = exc
+    finally:
+        replacement_route_bytes = routes_path.read_bytes()
+        resume_capture.set()
+        removal_thread.join(timeout=20)
+
+    assert not removal_thread.is_alive(), (
+        "project removal worker did not finish; "
+        f"outcome_keys={tuple(sorted(outcome))!r}; traceback={outcome.get('traceback')!r}"
+    )
+    assert reached_projection, (
+        "public purge did not reach the post-projection/pre-adapter boundary; "
+        f"outcome_keys={tuple(sorted(outcome))!r}; traceback={outcome.get('traceback')!r}"
+    )
+    assert replacement_error is None, (
+        "public publisher could not replace the same-owner route; "
+        f"error_type={type(replacement_error).__name__ if replacement_error else None}"
+    )
+    assert replacement_route_bytes != source_route_bytes
+    replacement_digest = hashlib.sha256(replacement_route_bytes).hexdigest()
+    removal_error = outcome.get("error")
+    assert isinstance(removal_error, ProjectRemovalError), (
+        "purge accepted a same-owner replacement that appeared after projection; "
+        f"result_type={type(outcome.get('result')).__name__}; "
+        f"replacement_route_sha256={replacement_digest}; "
+        f"route_preserved={routes_path.read_bytes() == replacement_route_bytes}; "
+        f"worker_traceback={outcome.get('traceback')!r}"
+    )
+    details = cast("dict[str, object]", removal_error.details["removal"])
+    assert details["failed_step"] == "project-removal:revalidate"
+    assert catalog._conn.total_changes == catalogue_changes_before
+    assert int(catalog._conn.execute("PRAGMA data_version").fetchone()[0]) == (
+        catalogue_version_before
+    )
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    assert hashlib.sha256(routes_path.read_bytes()).hexdigest() == replacement_digest
     catalog.close()
 
 

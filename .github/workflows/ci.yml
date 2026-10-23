@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, proof/MYL-522-r47-capture-baseline]
   pull_request:
     branches: [main]
 
