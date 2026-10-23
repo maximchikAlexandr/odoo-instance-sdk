@@ -396,6 +396,9 @@ def test_public_project_forget_reinit_and_purge(
         "project fixture should be source-clean before caller-owned retention: "
         + source_status.stdout
     )
+    # This selector is created only by the real-Odoo harness so its cleanup
+    # helpers can locate the environment. The SDK does not own this file.
+    (project / ".odcli" / "e2e-environment-id").unlink(missing_ok=True)
     if retain_source:
         # Match a caller-owned checkout whose remaining source fails the
         # registered Git provenance check after purge removes its manifest.
