@@ -94,6 +94,7 @@ class _CollectMixin:
 
         def _prune_caches(
             self,
+            project_ids: set[str],
             environment_ids: set[str],
             worktrees: set[Path],
             clusters: set[str],
@@ -805,6 +806,28 @@ class _CollectMixin:
             if project_id is None or resolved_project == project_id:
                 projects.add((repository, resolved_project))
 
+        if "storage" in selected:
+            du = shutil.which("du") or "du"
+            for repository, project_name in sorted(
+                projects, key=lambda item: (str(item[0]), item[1])
+            ):
+                if (
+                    request is not None
+                    and request.project_ids
+                    and project_name not in request.project_ids
+                ):
+                    continue
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{project_name}.storage.project",
+                        argv=(du, "-sb", str(repository)),
+                        cwd=str(repository.parent),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
+                    )
+                )
+
         for repository, project_name in sorted(projects, key=lambda item: (str(item[0]), item[1])):
             if "docker" not in selected or self.docker_provider is not None:
                 continue
@@ -922,6 +945,7 @@ class _CollectMixin:
             section_outcomes=section_outcomes,
         )
         self._prune_caches(
+            {item.project_id for item in plan.projects},
             set(plan.environment_ids),
             set(plan.worktrees),
             active_clusters,

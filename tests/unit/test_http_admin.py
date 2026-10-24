@@ -469,6 +469,18 @@ def test_catalogue_resources_are_exactly_three_read_only_views(
         )
         == 3
     )
+    index = client.get("/admin/")
+    assert index.status_code == 200
+    labels = {getattr(view, "menu_label") for view in admin._model_views}
+    assert labels == {
+        "Backups",
+        "Incomplete operations",
+        "Environment history",
+        "Remote Odoo secrets",
+        "GitLab member secrets",
+    }
+    assert all(getattr(view, "icon") for view in admin._model_views)
+    assert all(label in index.text for label in labels)
 
     for key in ("backups", "incomplete-operations", "environment-history"):
         assert client.get(f"/admin/{key}/list").status_code == 200
@@ -734,6 +746,13 @@ def test_secret_form_is_write_only_and_creates_direct_store_record(
     assert listing.status_code == 200
     assert "odoo.example" in listing.text
     assert "persisted-password" not in listing.text
+    from odoo_instance_sdk.http.admin import RemoteOdooSecretView
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    record = SecretStore().get_remote_odoo("https://odoo.example")
+    assert record is not None
+    assert asyncio.run(RemoteOdooSecretView().find_by_pk(_request(), record.admin_id)) == record
+    assert all(field.name != "admin_id" for field in RemoteOdooSecretView.fields)
 
 
 def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
@@ -752,7 +771,7 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
     view = RemoteOdooSecretView()
     empty_edit = asyncio.run(
         view.edit(
-            _request(), original.base_url, {"revision": original.revision, "master_password": ""}
+            _request(), original.admin_id, {"revision": original.revision, "master_password": ""}
         )
     )
     assert empty_edit.revision == 2
@@ -763,7 +782,7 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
     replaced = asyncio.run(
         view.edit(
             _request(),
-            original.base_url,
+            empty_edit.admin_id,
             {"revision": empty_edit.revision, "master_password": "replacement-secret"},
         )
     )
@@ -774,17 +793,56 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
         asyncio.run(
             view.edit(
                 _request(),
-                original.base_url,
+                original.admin_id,
                 {"revision": original.revision, "master_password": "stale"},
             )
         )
 
-    stale_token = f"{original.base_url}|{original.revision}"
+    stale_token = original.admin_id
     with pytest.raises(ActionFailed, match="reload and retry"):
         asyncio.run(view.delete(_request(), [stale_token]))
     assert store.get_remote_odoo(original.base_url) is not None
-    assert (
-        asyncio.run(view.delete(_request(f"revision={replaced.revision}"), [original.base_url]))
-        == 1
-    )
+    assert asyncio.run(view.delete(_request(), [replaced.admin_id])) == 1
     assert store.get_remote_odoo(original.base_url) is None
+
+
+def test_gitlab_admin_identity_keeps_hosts_separate_and_rejects_stale_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from starlette_admin.exceptions import FormValidationError
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    from odoo_instance_sdk.http.admin import GitLabMemberSecretView
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    store = SecretStore()
+    member_id = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    first = store.create_gitlab_member(member_id, "https://gitlab.example/", "alice", "first-token")
+    second = store.create_gitlab_member(member_id, "https://gitlab.other/", "alice", "second-token")
+    view = GitLabMemberSecretView()
+    assert view.pk_attr == "admin_id"
+    assert asyncio.run(view.find_by_pk(_request(), first.admin_id)) == first
+    assert asyncio.run(view.find_by_pk(_request(), second.admin_id)) == second
+    assert (
+        asyncio.run(
+            view.edit(
+                _request(),
+                first.admin_id,
+                {"revision": first.revision, "login": "alice2", "token": ""},
+            )
+        ).revision
+        == 2
+    )
+    assert asyncio.run(view.find_by_pk(_request(), first.admin_id)) is None
+    assert asyncio.run(view.find_by_pk(_request(), second.admin_id)) == second
+    with pytest.raises(FormValidationError):
+        asyncio.run(
+            view.edit(
+                _request(),
+                first.admin_id,
+                {"revision": first.revision, "login": "stale", "token": ""},
+            )
+        )
+    assert store.get_gitlab_member(member_id, "https://gitlab.example") is not None
+    assert store.get_gitlab_member(member_id, "https://gitlab.other") == second

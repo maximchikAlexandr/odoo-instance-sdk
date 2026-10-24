@@ -186,6 +186,7 @@ if TYPE_CHECKING:
         ProjectRemovalResult,
         ProjectResourceDecision,
         ProjectSelector,
+        ProjectStorageFootprint,
         ProjectSummary,
         PythonEnvFootprint,
         ReadinessResult,
@@ -573,6 +574,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "ProjectManifestNotFoundError",
     ),
     "ProjectSummary": ("odoo_instance_sdk.models", "ProjectSummary"),
+    "ProjectStorageFootprint": ("odoo_instance_sdk.models", "ProjectStorageFootprint"),
     "ProjectRemovalError": ("odoo_instance_sdk.exceptions", "ProjectRemovalError"),
     "ProjectRemovalErrorDetails": (
         "odoo_instance_sdk.models",
@@ -842,6 +844,7 @@ if TYPE_CHECKING:
         "ProjectResource",
         "ProjectResourceDecision",
         "ProjectSelector",
+        "ProjectStorageFootprint",
         "ProjectSummary",
         "PythonEnvFootprint",
         "ReadinessResult",

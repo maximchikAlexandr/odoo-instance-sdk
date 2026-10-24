@@ -10,6 +10,7 @@ from odoo_instance_sdk.internal.secret_store import (
     GitLabMemberSecret,
     RemoteOdooSecret,
     SecretStore,
+    decode_admin_id,
 )
 
 from .admin_support import (
@@ -28,13 +29,6 @@ from .admin_support import (
 
 if TYPE_CHECKING:
     from .admin_support import FilterGroup, Request
-
-
-def _revision_token(value: _PrimaryKey) -> tuple[str, int | None]:
-    identity, separator, raw_revision = str(value).rpartition("|")
-    if separator and raw_revision.isdigit() and int(raw_revision) > 0:
-        return identity, int(raw_revision)
-    return str(value), None
 
 
 def _request_revision(request: Request) -> int | None:
@@ -90,8 +84,10 @@ class _SecretView(_DashboardBaseModelView):
 class RemoteOdooSecretView(_SecretView):
     key = "remote-odoo-secrets"
     display_name = "Remote Odoo secrets"
-    pk_attr = "base_url"
-    show_pk_in_forms = True
+    menu_label = "Remote Odoo secrets"
+    icon = "fa fa-cloud"
+    pk_attr = "admin_id"
+    show_pk_in_forms = False
     secret_field = "master_password"
     fields = (
         StringField("base_url", exclude_from_edit=True),
@@ -137,8 +133,11 @@ class RemoteOdooSecretView(_SecretView):
 
     async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> RemoteOdooSecret | None:
         del request
-        identity, _revision = _revision_token(pk)
-        return self._store().get_remote_odoo(identity)
+        identity = decode_admin_id(str(pk))
+        if identity is None or identity.kind != "remote-odoo":
+            return None
+        record = self._store().get_remote_odoo(identity.components[0])
+        return record if record is not None and record.revision == identity.revision else None
 
     async def find_by_pks(
         self, request: Request, pks: list[_PrimaryKey]
@@ -157,16 +156,22 @@ class RemoteOdooSecretView(_SecretView):
 
     async def get_pk_value(self, request: Request, obj: RemoteOdooSecret) -> str:
         del request
-        return f"{obj.base_url}|{obj.revision}"
+        return obj.admin_id
 
     async def edit(
         self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
     ) -> RemoteOdooSecret:
-        identity, _revision = _revision_token(pk)
+        identity = decode_admin_id(str(pk))
+        if (
+            identity is None
+            or identity.kind != "remote-odoo"
+            or _form_revision(data) != identity.revision
+        ):
+            raise _conflict()
         try:
             return self._store().update_remote_odoo(
-                identity,
-                revision=_form_revision(data),
+                identity.components[0],
+                revision=identity.revision,
                 master_password=str(data.get("master_password") or ""),
             )
         except SecretStoreConflictError as exc:
@@ -174,12 +179,14 @@ class RemoteOdooSecretView(_SecretView):
 
     async def delete(self, request: Request, pks: list[_PrimaryKey]) -> int:
         for pk in pks:
-            identity, token_revision = _revision_token(pk)
-            revision = _request_revision(request) or token_revision
-            if revision is None:
+            identity = decode_admin_id(str(pk))
+            if identity is None or identity.kind != "remote-odoo":
+                raise _conflict()
+            requested_revision = _request_revision(request)
+            if requested_revision is not None and requested_revision != identity.revision:
                 raise _conflict()
             try:
-                self._store().delete_remote_odoo(identity, revision=revision)
+                self._store().delete_remote_odoo(identity.components[0], revision=identity.revision)
             except SecretStoreConflictError as exc:
                 raise _conflict() from exc
         return len(pks)
@@ -188,8 +195,10 @@ class RemoteOdooSecretView(_SecretView):
 class GitLabMemberSecretView(_SecretView):
     key = "gitlab-member-secrets"
     display_name = "GitLab member secrets"
-    pk_attr = "member_id"
-    show_pk_in_forms = True
+    menu_label = "GitLab member secrets"
+    icon = "fa fa-gitlab"
+    pk_attr = "admin_id"
+    show_pk_in_forms = False
     secret_field = "token"
     fields = (
         StringField("member_id", exclude_from_edit=True),
@@ -220,7 +229,7 @@ class GitLabMemberSecretView(_SecretView):
 
     async def get_pk_value(self, request: Request, obj: GitLabMemberSecret) -> str:
         del request
-        return f"{obj.member_id}|{obj.host}|{obj.revision}"
+        return obj.admin_id
 
     async def find_all(
         self,
@@ -241,12 +250,11 @@ class GitLabMemberSecretView(_SecretView):
 
     async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> GitLabMemberSecret | None:
         del request
-        try:
-            identity, _revision = _revision_token(pk)
-            member_id, host = identity.split("|", 1)
-        except ValueError:
+        identity = decode_admin_id(str(pk))
+        if identity is None or identity.kind != "gitlab-member":
             return None
-        return self._store().get_gitlab_member(member_id, host)
+        record = self._store().get_gitlab_member(*identity.components)
+        return record if record is not None and record.revision == identity.revision else None
 
     async def find_by_pks(
         self, request: Request, pks: list[_PrimaryKey]
@@ -269,13 +277,17 @@ class GitLabMemberSecretView(_SecretView):
     async def edit(
         self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
     ) -> GitLabMemberSecret:
-        identity, _revision = _revision_token(pk)
-        member_id, host = identity.split("|", 1)
+        identity = decode_admin_id(str(pk))
+        if (
+            identity is None
+            or identity.kind != "gitlab-member"
+            or _form_revision(data) != identity.revision
+        ):
+            raise _conflict()
         try:
             return self._store().update_gitlab_member(
-                member_id,
-                host,
-                revision=_form_revision(data),
+                *identity.components,
+                revision=identity.revision,
                 login=str(data["login"]),
                 token=str(data.get("token") or ""),
             )
@@ -284,13 +296,14 @@ class GitLabMemberSecretView(_SecretView):
 
     async def delete(self, request: Request, pks: list[_PrimaryKey]) -> int:
         for pk in pks:
-            identity, token_revision = _revision_token(pk)
-            revision = _request_revision(request) or token_revision
-            if revision is None:
+            identity = decode_admin_id(str(pk))
+            if identity is None or identity.kind != "gitlab-member":
+                raise _conflict()
+            requested_revision = _request_revision(request)
+            if requested_revision is not None and requested_revision != identity.revision:
                 raise _conflict()
             try:
-                member_id, host = identity.split("|", 1)
-                self._store().delete_gitlab_member(member_id, host, revision=revision)
+                self._store().delete_gitlab_member(*identity.components, revision=identity.revision)
             except SecretStoreConflictError as exc:
                 raise _conflict() from exc
         return len(pks)

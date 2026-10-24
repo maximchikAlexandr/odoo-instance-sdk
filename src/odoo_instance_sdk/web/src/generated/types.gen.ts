@@ -286,6 +286,14 @@ export type PostgresServerInfo = {
 };
 
 /**
+ * ProjectStorageFootprint
+ */
+export type ProjectStorageFootprint = {
+    complete: boolean;
+    total_bytes: number | null;
+};
+
+/**
  * ProjectSummary
  */
 export type ProjectSummary = {
@@ -298,6 +306,7 @@ export type ProjectSummary = {
     publication?: PublicationSnapshot;
     repository_root: string;
     runtime: null | RuntimeMetrics;
+    storage: ProjectStorageFootprint;
 };
 
 /**

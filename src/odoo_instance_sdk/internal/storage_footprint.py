@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from odoo_instance_sdk.models import (
 )
 
 _DU_TIMEOUT = 10.0
+_WALK_TIMEOUT = 10.0
+_WALK_ENTRY_BUDGET = 100_000
 _SUBPROCESS_COMPAT = subprocess
 
 
@@ -58,15 +62,38 @@ def _du_size(du: str, path: Path) -> int | None:
         return None
 
 
-def _walk_size(path: Path) -> int | None:
-    """``os.walk`` with realpath dedup, symlinks skipped. ``None`` on OSError."""
+def _walk_size(path: Path, *, monotonic: Callable[[], float] = time.monotonic) -> int | None:  # noqa: C901
+    """Bounded ``os.walk`` with realpath dedup and symlinks skipped."""
     seen: set[Path] = set()
     total = 0
+    deadline = monotonic() + _WALK_TIMEOUT
+    visited = 0
+
+    def visit() -> bool:
+        nonlocal visited
+        if monotonic() >= deadline:
+            return False
+        visited += 1
+        return visited < _WALK_ENTRY_BUDGET
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
     try:
-        for dirpath, _dirnames, filenames in os.walk(path, followlinks=False):
-            for name in filenames:
+        if not path.is_dir():
+            return None
+        for dirpath, dirnames, filenames in os.walk(
+            path, followlinks=False, onerror=raise_walk_error
+        ):
+            if not visit():
+                return None
+            for name in (*dirnames, *filenames):
+                if not visit():
+                    return None
                 full = Path(dirpath, name)
-                if os.path.islink(full):
+                if full.is_symlink():
+                    continue
+                if name in dirnames:
                     continue
                 try:
                     resolved = full.resolve()

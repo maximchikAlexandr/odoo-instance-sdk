@@ -100,6 +100,7 @@ from odoo_instance_sdk.models import (
     PostgresClusterState,
     ProcessInventory,
     ProjectRemovalResult,
+    ProjectStorageFootprint,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -1323,6 +1324,7 @@ def _matrix_snapshot_selection() -> object:
         pgadmin=PgAdminEligibility(state=PgAdminEligibilityState.CLUSTER_NOT_OWNED),
     )
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project-1",
         name="demo",
         display_hint="demo",
@@ -1817,6 +1819,7 @@ def _patch_leaf_external(  # noqa: C901
             generated_at=datetime(2020, 1, 1, tzinfo=UTC),
             projects=(
                 ProjectSummary(
+                    storage=ProjectStorageFootprint(total_bytes=None, complete=False),
                     id="project-1",
                     name="demo",
                     display_hint="demo",
@@ -4037,6 +4040,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                     generated_at=datetime(2020, 1, 1, tzinfo=UTC),
                     projects=(
                         ProjectSummary(
+                            storage=ProjectStorageFootprint(total_bytes=None, complete=False),
                             id="project",
                             name=payload,
                             display_hint=payload,
