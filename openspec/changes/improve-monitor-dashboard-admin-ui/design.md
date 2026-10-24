@@ -1,6 +1,6 @@
 ## Context
 
-`EnvironmentSnapshot.storage` already carries a bounded, ownership-aware `StorageFootprint`: worktree bytes, an owned venv, an owned COPY database/filestore, and environment-local artifacts. The monitor currently omits an equivalent field from `ProjectSummary`, although every project plan has a canonical registered repository root. Numbered and ordinary environment worktrees live under the global OdCLI user root rather than inside the registered checkout, so the main checkout and environment measurements have separate ownership roots.
+`EnvironmentSnapshot.storage` already carries an ownership-aware `StorageFootprint`: worktree bytes, an owned venv, an owned COPY database/filestore, and environment-local artifacts. Its preferred `du` probe has a ten-second timeout, but the Python traversal used after a missing, failed, or timed-out `du` has no deadline or entry budget at the approved base. The monitor currently omits an equivalent field from `ProjectSummary`, although every project plan has a canonical registered repository root. Numbered and ordinary environment worktrees live under the global OdCLI user root rather than inside the registered checkout, so the main checkout and environment measurements have separate ownership roots.
 
 The React application already uses one generated `Snapshot`, one shared card component, and client-side project filtering. Starlette Admin 1.0 provides its own sidebar and default index panels from each view's `menu_label`; the current five views only set `display_name`, leaving built-in navigation labels blank. Secret views return composite route identities from `get_pk_value`, but list-row routing still indexes the serialized `pk_attr`, which is only `member_id` for GitLab records and therefore cannot resolve the detail record by `(member_id, host)`.
 
@@ -9,7 +9,7 @@ The React application already uses one generated `Snapshot`, one shared card com
 **Goals:**
 
 - Make timestamps, filtering, resource totals, and Admin navigation understandable without weakening canonical typed contracts.
-- Reuse existing bounded storage probes, snapshot caching, generated client, shared card, Starlette Admin navigation/index, and encrypted-store safe projections.
+- Put the existing storage fallback behind an explicit finite-work boundary, then reuse that probe, snapshot caching, generated client, shared card, Starlette Admin navigation/index, and encrypted-store safe projections.
 - Keep storage ownership honest and prevent double attribution between main checkout and environment cards.
 - Repair GitLab secret detail navigation while keeping secrets write-only and revision-safe.
 
@@ -22,11 +22,13 @@ The React application already uses one generated `Snapshot`, one shared card com
 
 ## Decisions
 
-### D1. Add one project checkout footprint using the existing storage boundary
+### D1. Bound the existing fallback, then add one project checkout footprint
 
-Add a frozen `ProjectStorageFootprint` with `total_bytes` and `complete` to `ProjectSummary`. Measure only the canonical registered repository root with the existing bounded, symlink-skipping directory-size helper and cache it under stable project identity for the existing expensive-section TTL. Environment cards continue using their existing `StorageFootprint.total_bytes`; project storage does not sum environment rows, Compose volumes, backups, or external/shared databases.
+First make `_walk_size` finite without adding another subsystem: it SHALL accept one monotonic deadline ten seconds after fallback entry and a budget of 100,000 visited entries. A visited entry includes every yielded directory and every directory entry before symlink, resolution, deduplication, or stat handling, so skipped and failing entries cannot evade the budget. The implementation SHALL check the deadline before consuming each yielded directory and before processing each entry; reaching either limit before traversal completes returns `None`. Existing `du` execution retains its ten-second subprocess timeout. Tests SHALL inject the monotonic clock and synthetic walk entries instead of creating a huge real tree, and SHALL cover `du` missing/failure/timeout, deadline exhaustion, the 100,000-entry boundary, completion immediately below the boundary, symlinks, deduplication, and `OSError`.
 
-When the `storage` section is not requested or the directory probe fails, return `complete=false` with no invented successful total. The public snapshot remains path-free. This preserves separate ownership: the project card means the main checkout tree, and each worktree card means the already-defined environment-owned footprint.
+Add a frozen `ProjectStorageFootprint` with nullable `total_bytes` and boolean `complete` to `ProjectSummary`. Measure only the canonical registered repository root with the now-bounded, symlink-skipping directory-size helper and cache it under stable project identity for the existing expensive-section TTL. Environment cards continue using their existing `StorageFootprint.total_bytes`; project storage does not sum environment rows, Compose volumes, backups, or external/shared databases.
+
+When the `storage` section is not requested, `du` and fallback both fail, the fallback deadline expires, the entry budget is reached, or containment is ambiguous, return `ProjectStorageFootprint(total_bytes=None, complete=false)`; never publish a partial fallback sum. Existing environment storage keeps its established component/partial-total contract but receives the same finite helper failure. The public snapshot remains path-free. This preserves separate ownership: the project card means the main checkout tree, and each worktree card means the already-defined environment-owned footprint.
 
 ### D2. Keep display changes inside the existing React view model
 
@@ -52,7 +54,7 @@ The additive project storage model flows through the existing msgspec schema bri
 
 ### D6. Ponytail full subsystem gate
 
-- New storage subsystem: unnecessary; `storage_footprint` and the monitor TTL cache already provide the required probe and failure semantics. Decision: remove.
+- New storage subsystem: unnecessary; extend the existing `storage_footprint` helper with a deadline/entry budget and reuse the monitor TTL cache. Decision: keep that narrow boundary repair and remove any separate scanner, worker, or service.
 - Server-side filter/API: unnecessary because the complete snapshot is already polled and the requested predicate is purely presentational. Decision: remove.
 - Custom Admin navigation/dashboard: unnecessary because Starlette Admin's `menu_label`, icons, sidebar, and `DefaultIndexView` already provide the requested UI. Decision: remove.
 - Composite-key framework: unnecessary; two secret projections can share one narrow safe Admin identity encoder/decoder. Decision: keep only that helper.
@@ -60,7 +62,7 @@ The additive project storage model flows through the existing msgspec schema bri
 
 ## Risks / Trade-offs
 
-- Main checkout traversal may be expensive for very large repositories. The existing bounded helper timeout/fallback behavior and expensive-section TTL limit repeated work; unavailable measurement is shown as incomplete instead of blocking the snapshot.
+- Main checkout traversal may be expensive for very large repositories. The `du` timeout plus the fallback's ten-second monotonic deadline and 100,000-entry budget bound attempted work; either limit discards the partial sum and exposes an incomplete project measurement. The deadline is cooperative between filesystem operations, so an individual blocked local-filesystem call is not preempted; the entry budget still prevents an unbounded number of calls, and introducing a worker/process cancellation subsystem is outside this change.
 - A repository could contain an unusual nested environment worktree. Canonical OdCLI-created environments are outside the repository root; if an adopted legacy layout violates that invariant, the measurement is incomplete/ambiguous and implementation SHALL not claim separate totals until containment is excluded.
 - Browser-local timestamp text varies by locale. Tests SHALL assert a fixed injected locale/timezone for deterministic formatting while production follows the user agent.
 - Changing secret route IDs invalidates already-open Admin detail URLs after an edit because the revision advances. That is desirable stale-session behavior; the committed update redirects through the newly serialized identity.

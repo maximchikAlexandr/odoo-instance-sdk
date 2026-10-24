@@ -1,6 +1,6 @@
 ## 1. Canonical storage projection
 
-- [ ] 1.1 Add a frozen path-free project checkout storage model and collect/cache it from the canonical registered repository root with the existing bounded symlink-safe storage helper, including section-selection, failure, cache, containment, schema, and snapshot regressions.
+- [ ] 1.1 Bound the existing symlink-safe Python storage fallback with a ten-second injected monotonic deadline and 100,000-entry budget that returns no partial total on exhaustion; cover `du` missing/failure/timeout, below/at-budget large synthetic trees, deadline, symlink/deduplication, and `OSError`; then add the frozen path-free project checkout storage model and collect/cache it from the canonical registered repository root with section-selection, failure, cache, containment, schema, and snapshot regressions.
 - [ ] 1.2 Regenerate canonical OpenAPI and TypeScript artifacts and extend generated-contract tests for the additive project storage field without changing environment storage or optional-import boundaries.
 
 ## 2. Monitor presentation

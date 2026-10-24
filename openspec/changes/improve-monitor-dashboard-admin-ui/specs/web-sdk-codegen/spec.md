@@ -17,6 +17,21 @@ The compact panel SHALL hide cluster/container diagnostics and badges, separate 
 - **WHEN** a selected project has one main runtime and one worktree
 - **THEN** both render equal-size cards with the same field/action layout and exactly one status indicator
 
+#### Scenario: Branch data is available or absent
+
+- **WHEN** the generated snapshot supplies a launch branch for the main checkout and a catalog branch for a worktree
+- **THEN** each card displays its corresponding value under Branch; absent main runtime/branch displays Not recorded
+
+#### Scenario: Metrics and technical details are hidden selectively
+
+- **WHEN** a runtime has unavailable CPU/RAM or its project cluster reports unavailable metrics
+- **THEN** the card shows no empty metric placeholders or cluster diagnostics while preserving available runtime values and backend fields
+
+#### Scenario: No hand-written Basic Auth credentials
+
+- **WHEN** the panel and API share one HTTPS origin protected by Caddy Basic Auth
+- **THEN** generated Fetch operations use the browser's same-origin credentials behavior; React does not embed the proxy login/password or manually construct its Authorization header
+
 #### Scenario: Running filter composes with project selection
 
 - **WHEN** the user selects one project and then selects `running`
