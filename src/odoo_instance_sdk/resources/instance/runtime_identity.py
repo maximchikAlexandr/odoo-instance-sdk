@@ -162,14 +162,22 @@ def _runtime_owner_matches(
 ) -> bool:
     owner_kind = str(runtime["owner_kind"])
     if binding.owner_kind == "environment":
-        return (
+        if not (
             owner_kind == "environment"
             and str(runtime["owner_id"]) == binding.owner_id
             and environment is not None
-            and str(environment["project_id"]) == binding.project_id
-            and _canonical_runtime_path(str(environment["repository_root"]))
-            == _canonical_runtime_path(str(binding.repository_root))
-        )
+        ):
+            return False
+        repository_matches = _canonical_runtime_path(
+            str(environment["repository_root"])
+        ) == _canonical_runtime_path(str(binding.repository_root))
+        stored_project_id = environment["project_id"]
+        if stored_project_id is None:
+            return repository_matches and (
+                _canonical_runtime_path(str(environment["git_common_dir"]))
+                == _canonical_runtime_path(str(binding.git_common_dir))
+            )
+        return str(stored_project_id) == binding.project_id and repository_matches
     if owner_kind == "project":
         return str(runtime["owner_id"]) == binding.owner_id
     if owner_kind == "environment" and environment is not None:

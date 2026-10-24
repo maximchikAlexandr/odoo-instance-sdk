@@ -8,6 +8,7 @@ import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -94,6 +95,28 @@ class _FakeCatalog:
     ) -> bool:
         self.clear_calls.append(environment_id)
         return True
+
+
+class _LegacyRuntimeCatalog(_FakeCatalog):
+    def __init__(self, environment: dict[str, JsonValue], project_id: str) -> None:
+        super().__init__()
+        self.environment = environment
+        self.project_id = project_id
+        self.runtime: dict[str, JsonValue] | None = None
+
+    def _upsert_runtime(self, owner_kind: str, owner_id: str, **kw: object) -> None:
+        super()._upsert_runtime(owner_kind, owner_id, **kw)
+        self.runtime = {
+            **{key: cast("JsonValue", value) for key, value in kw.items()},
+            "owner_kind": owner_kind,
+            "owner_id": owner_id,
+            "http_url": f"http://127.0.0.1:{cast('int', kw['http_port'])}",
+        }
+
+    def _monitor_snapshot_rows(self, *, project_id: str) -> object:
+        assert project_id == self.project_id
+        environments = ((self.environment, self.runtime),) if self.runtime is not None else ()
+        return SimpleNamespace(project_runtimes=(), environments=environments)
 
 
 def _make_env(env_id: str) -> dict[str, CatalogValue]:
@@ -910,10 +933,93 @@ def test_environment_runtime_proof_uses_exact_owner_and_project_identity(tmp_pat
         )
         assert (
             runtime_identity._runtime_row_matches(
+                instance,
+                config,
+                binding,
+                runtime,
+                {**environment, "repository_root": str(checkout_root)},
+            )
+            is None
+        )
+        assert (
+            runtime_identity._runtime_row_matches(
                 instance, config, binding, {**runtime, "owner_kind": "project"}, environment
             )
             is None
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("runtime_changes", "environment_changes", "expected"),
+    [
+        pytest.param(
+            {}, {"project_id": None}, True, id="legacy-null-matching-repository-and-common-dir"
+        ),
+        pytest.param(
+            {},
+            {"project_id": None, "repository_root": "/other"},
+            False,
+            id="legacy-null-wrong-repository",
+        ),
+        pytest.param(
+            {},
+            {"project_id": None, "git_common_dir": "/other/.git"},
+            False,
+            id="legacy-null-wrong-common-dir",
+        ),
+        pytest.param(
+            {},
+            {"project_id": "project-wrong"},
+            False,
+            id="explicit-wrong-project-id-does-not-fallback",
+        ),
+        pytest.param(
+            {"owner_kind": "project"},
+            {"project_id": None},
+            False,
+            id="legacy-null-wrong-owner-kind",
+        ),
+        pytest.param(
+            {"owner_id": "env-wrong"},
+            {"project_id": None},
+            False,
+            id="legacy-null-wrong-owner-id",
+        ),
+    ],
+)
+def test_environment_runtime_owner_matches_explicit_and_legacy_identities(
+    tmp_path: Path,
+    runtime_changes: dict[str, str],
+    environment_changes: dict[str, str | None],
+    expected: bool,
+) -> None:
+    repository_root = tmp_path / "project"
+    binding = _RuntimeBinding(
+        owner_kind="environment",
+        owner_id="env-a",
+        project_id="project-a",
+        repository_root=repository_root,
+        git_common_dir=repository_root / ".git",
+    )
+    runtime: dict[str, JsonValue] = {
+        "owner_kind": "environment",
+        "owner_id": "env-a",
+    }
+    environment: dict[str, JsonValue] = {
+        "project_id": "project-a",
+        "repository_root": str(repository_root),
+        "git_common_dir": str(repository_root / ".git"),
+    }
+
+    assert (
+        runtime_identity._runtime_owner_matches(
+            binding,
+            {**runtime, **runtime_changes},
+            {**environment, **environment_changes},
+        )
+        is expected
+    )
 
 
 @pytest.mark.unit
@@ -1086,6 +1192,102 @@ def test_cli_run_detach_returns_typed_result(env_id: str, http_port: int, tmp_pa
     assert envelope["result"]["pid"] == 4242
     assert envelope["result"]["owner_kind"] == "environment"
     assert envelope["result"]["http_endpoint"] == f"http://127.0.0.1:{http_port}"
+
+
+@pytest.mark.unit
+def test_public_cli_run_wait_ready_accepts_registered_legacy_environment(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    project_id = "project-legacy"
+    environment: dict[str, JsonValue] = {
+        "id": env_id,
+        "project_id": None,
+        "repository_root": str(wt.resolve()),
+        "git_common_dir": str((wt / ".git").resolve()),
+    }
+    catalog = _LegacyRuntimeCatalog(environment, project_id)
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(catalog),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    instance._runtime_binding = _RuntimeBinding(
+        owner_kind="environment",
+        owner_id=env_id,
+        project_id=project_id,
+        repository_root=wt.resolve(),
+        git_common_dir=(wt / ".git").resolve(),
+    )
+    executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
+    process = MagicMock()
+    process.is_running.return_value = True
+    process.status.return_value = "running"
+    process.create_time.return_value = 1.0
+
+    def poll_health(*_args: object, **kwargs: object) -> ReadinessResult:
+        assert cast("Callable[[], bool]", kwargs["alive_check"])()
+        return ReadinessResult(ok=True, elapsed=0.1, attempts=1)
+
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity._process_create_time",
+            return_value=1.0,
+        ),
+        patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch.object(OdooInstance, "_read_runtime_identity", return_value=None),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime_identity.psutil.Process",
+            return_value=process,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime_identity._runtime_process_matches",
+            return_value=True,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime_identity._socket_owned_by",
+            return_value=True,
+        ),
+        patch(
+            "odoo_instance_sdk.internal.health.poll_health",
+            side_effect=poll_health,
+        ),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate"),
+        patch("odoo_instance_sdk.resources.instance.planning._verify_process_exit"),
+    ):
+        result = _cli_invoke(
+            instance,
+            [
+                "--env",
+                env_id,
+                "run",
+                "--detach",
+                "--wait-ready",
+                "--readiness-timeout",
+                "60",
+                "--format",
+                "json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["result"]["pid"] == 4242
+    assert catalog.runtime is not None
+    assert catalog.runtime["owner_kind"] == "environment"
+    assert catalog.runtime["owner_id"] == env_id
+    assert environment["project_id"] is None
+    assert catalog.clear_calls == []
 
 
 @pytest.mark.unit
