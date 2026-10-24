@@ -12,3 +12,20 @@ export function formatPercent(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return `${n.toFixed(1)}%`;
 }
+
+export function formatLocalTimestamp(
+  value: string,
+  locale?: string,
+  timeZone?: string,
+): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(locale, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
+  }).format(date);
+}

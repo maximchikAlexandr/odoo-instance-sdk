@@ -783,6 +783,30 @@
         "title": "PostgresServerInfo",
         "type": "object"
       },
+      "ProjectStorageFootprint": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "total_bytes",
+          "complete"
+        ],
+        "title": "ProjectStorageFootprint",
+        "type": "object"
+      },
       "ProjectSummary": {
         "additionalProperties": false,
         "properties": {
@@ -836,6 +860,9 @@
                 "$ref": "#/components/schemas/RuntimeMetrics"
               }
             ]
+          },
+          "storage": {
+            "$ref": "#/components/schemas/ProjectStorageFootprint"
           }
         },
         "required": [
@@ -845,7 +872,8 @@
           "repository_root",
           "environment_count",
           "cluster",
-          "runtime"
+          "runtime",
+          "storage"
         ],
         "title": "ProjectSummary",
         "type": "object"

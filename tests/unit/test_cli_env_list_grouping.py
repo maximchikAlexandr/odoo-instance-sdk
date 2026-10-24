@@ -29,6 +29,7 @@ from odoo_instance_sdk.models import (
     PgAdminEligibility,
     PgAdminEligibilityState,
     PostgresClusterState,
+    ProjectStorageFootprint,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -227,6 +228,7 @@ def test_env_list_human_shows_project_header_and_cluster_summary(
 ) -> None:
     cluster = _healthy_cluster()
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -251,6 +253,7 @@ def test_env_list_human_shows_project_header_and_cluster_summary(
 def test_env_list_human_env_row_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     cluster = _healthy_cluster()
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -287,6 +290,7 @@ def test_env_list_human_table_uses_rich_columns_and_json_is_sanitized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -317,6 +321,7 @@ def test_env_list_human_table_uses_rich_columns_and_json_is_sanitized(
 @pytest.mark.unit
 def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> None:
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -352,6 +357,7 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
 def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     cluster = _healthy_cluster()
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -387,6 +393,7 @@ def test_env_list_joins_catalogue_worktree_by_environment_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -431,6 +438,7 @@ def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -514,6 +522,7 @@ def test_env_list_degrades_when_catalogue_cannot_enrich(
     catalogue_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -538,6 +547,7 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -588,6 +598,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
 ) -> None:
     """Human --all is a deterministic project-scoped rendering, not a side list."""
     project_a = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_a",
         name="alpha",
         display_hint="a",
@@ -597,6 +608,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
         runtime=None,
     )
     project_b = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_b",
         name="beta",
         display_hint="b",
@@ -693,6 +705,7 @@ def test_env_list_external_cluster_summary(monkeypatch: pytest.MonkeyPatch) -> N
         sampled_at=None,
     )
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
@@ -717,6 +730,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project_b = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_b",
         name="beta",
         display_hint="b",
@@ -726,6 +740,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
         runtime=None,
     )
     project_a = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_a",
         name="alpha",
         display_hint="a",
@@ -988,6 +1003,7 @@ def test_rich_renderer_neutralizes_tty_control_sequences() -> None:
     c1_csi = "\x9b31m"
     payload = f"{esc_csi}{osc}{c1_csi}"
     project = ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_malicious",
         name=f"project-{payload}",
         display_hint="malicious",

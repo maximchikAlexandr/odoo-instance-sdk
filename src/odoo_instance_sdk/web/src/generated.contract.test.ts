@@ -14,6 +14,7 @@ import {
   type PgAdminOpenRequest,
   type PgAdminOpenResult,
   type ProjectSummary,
+  type ProjectStorageFootprint,
   type RuntimeMetrics,
 } from "./generated";
 import client from "./client-config";
@@ -69,6 +70,8 @@ it("preserves the exact generated enum values and required nullable boundaries",
   expectTypeOf<PgAdminOpenResult["url"]>().toEqualTypeOf<string>();
   expectTypeOf<PgAdminOpenResult["state"]>().toEqualTypeOf<PgAdminOpenState>();
   expectTypeOf<ProjectSummary["runtime"]>().toEqualTypeOf<RuntimeMetrics | null>();
+  expectTypeOf<ProjectSummary["storage"]>().toEqualTypeOf<ProjectStorageFootprint>();
+  expectTypeOf<ProjectStorageFootprint["total_bytes"]>().toEqualTypeOf<number | null>();
 });
 
 it("uses the generated client boundary without handwritten endpoint contracts", () => {

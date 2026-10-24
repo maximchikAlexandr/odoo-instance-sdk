@@ -40,6 +40,7 @@ from odoo_instance_sdk.models import (
     PostgresClusterState,
     ProcessContribution,
     ProcessInventory,
+    ProjectStorageFootprint,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -70,6 +71,7 @@ def _project(
     cluster: ClusterSnapshot | None = None,
 ) -> ProjectSummary:
     return ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id=project_id,
         name="demo",
         display_hint="demo",

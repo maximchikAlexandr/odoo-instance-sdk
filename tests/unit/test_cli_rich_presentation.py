@@ -251,9 +251,10 @@ def _render(snapshot: object, *, width: int, worktree_path: str) -> str:
 
 
 def _project() -> ProjectSummary:
-    from odoo_instance_sdk.models import ProjectSummary
+    from odoo_instance_sdk.models import ProjectStorageFootprint, ProjectSummary
 
     return ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",

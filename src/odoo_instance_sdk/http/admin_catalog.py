@@ -263,6 +263,8 @@ async def _backup_events(request: Request, obj: BackupSummary) -> str:
 class BackupView(_ReadOnlyCatalogView):
     key = "backups"
     display_name = "Backups"
+    menu_label = "Backups"
+    icon = "fa fa-database"
     pk_attr = "backup_id"
     fields = (
         StringField("backup_id", read_only=True),
@@ -359,6 +361,8 @@ class BackupView(_ReadOnlyCatalogView):
 class IncompleteOperationView(_ReadOnlyCatalogView):
     key = "incomplete-operations"
     display_name = "Incomplete operations"
+    menu_label = "Incomplete operations"
+    icon = "fa fa-exclamation-triangle"
     pk_attr = "sequence"
     fields = (
         IntegerField("sequence", read_only=True),
@@ -447,6 +451,8 @@ class IncompleteOperationView(_ReadOnlyCatalogView):
 class EnvironmentHistoryView(_ReadOnlyCatalogView):
     key = "environment-history"
     display_name = "Environment history"
+    menu_label = "Environment history"
+    icon = "fa fa-history"
     pk_attr = "sequence"
     fields = (
         IntegerField("sequence", read_only=True),

@@ -277,10 +277,9 @@ class _SnapshotPlanningMixin:
         ):
             completed.discard("git")
             reasons["git"] = "git observation unavailable"
-        if (
-            "storage" in sections
-            and environments
-            and any(not item.storage.complete for item in environments)
+        if "storage" in sections and (
+            any(not item.storage.complete for item in environments)
+            or any(not item.storage.complete for item in projects)
         ):
             completed.discard("storage")
             reasons["storage"] = "storage observation incomplete"
