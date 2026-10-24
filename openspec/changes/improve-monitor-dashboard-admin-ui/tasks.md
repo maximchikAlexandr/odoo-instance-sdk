@@ -18,5 +18,5 @@
 ## 4. Documentation and verification
 
 - [ ] 4.1 Update monitor/Admin operator documentation for the running filter, local timestamp, storage semantics/incompleteness, canonical Admin navigation, and five entities.
-- [ ] 4.2 Extend existing focused dashboard, monitor, schema/codegen, package, and optional-import checks; run repository gates and strict OpenSpec validation on the exact implementation candidate.
+- [ ] 4.2 Extend existing focused dashboard, monitor, schema/codegen, package, and optional-import checks; run repository gates on the exact implementation candidate; with `@fission-ai/openspec@1.14.3`, require scoped strict validation to pass and prove repository-wide strict non-regression by recording baseline/candidate findings and showing the candidate adds none.
 - [ ] 4.3 Perform the independent numbered-slot browser walkthrough from `delivery-plan.md`, retain the evidence MR/branch/commits, attach genuine baseline/candidate screenshots and safe assertions to Multica with read-back, and remove only the disposable slot/service while preserving evidence.

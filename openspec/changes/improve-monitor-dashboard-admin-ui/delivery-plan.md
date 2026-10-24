@@ -116,14 +116,40 @@ If startup fails before `MONITOR_PID` exists, skip only the monitor stop; still 
 
 - Python focused command: `uv run pytest -q -o addopts='' tests/unit/internal/test_storage_footprint.py tests/unit/test_monitor_cache_and_docker.py tests/unit/test_monitor_snapshot.py tests/unit/test_monitor_schema_v2.py tests/unit/test_http_admin.py`. Implementer may replace a path with the repository's directly affected successor test, but SHALL not create a duplicate harness.
 - Frontend command: `npm test -- --run` from `src/odoo_instance_sdk/web`, followed by `npm run build`; generated contract check: `make web-codegen-check` after Python dashboard/test and `npm ci` prerequisites.
-- Repository gates: `make lint`, `make types`, the focused tests above, `make test`, `make package`, `openspec validate improve-monitor-dashboard-admin-ui --strict`, `openspec validate --all --strict`, and `git diff --check`. Any command expected to exceed the workspace's ten-minute local limit SHALL run only in GitHub Actions on the exact published candidate; a local run reaching ten minutes is stopped by its exact owned PID and recorded as moved to CI.
+- Repository gates: `make lint`, `make types`, the focused tests above, `make test`, `make package`, pinned scoped OpenSpec validation and pinned repository-wide OpenSpec non-regression as defined below, and `git diff --check`. Any command expected to exceed the workspace's ten-minute local limit SHALL run only in GitHub Actions on the exact published candidate; a local run reaching ten minutes is stopped by its exact owned PID and recorded as moved to CI.
 - Existing `.github/workflows/ci.yml` `dashboard-tests` owns the dashboard extra, Python Admin tests, `npm ci`, generated-contract check, frontend tests, and build. Existing `offline-tests`, `lint`, `types`, and `package` jobs retain their normal scopes. Implementer owns any required test/fixture/generated artifact edits; Tester verifies and reports findings only.
+
+#### Pinned OpenSpec validation contract
+
+All OpenSpec validation SHALL use `@fission-ai/openspec@1.14.3`; the evidence SHALL record `1.14.3` before interpreting results. On the exact implementation candidate, `npx --yes @fission-ai/openspec@1.14.3 validate improve-monitor-dashboard-admin-ui --strict` SHALL exit zero.
+
+Repository-wide strict validation is a baseline non-regression comparison, not a known-impossible clean-tree PASS gate. Run the following `validate --all --strict --json --report findings` command in two clean detached worktrees: approved baseline `350d308fd04ed9e32380571a848e04e231a9d0c9` and the exact candidate. Both use the same Node runtime and pinned CLI. Preserve each command's exit code and raw JSON as Multica-only evidence; a nonzero baseline or candidate exit is expected while pre-existing findings remain.
+
+```bash
+npx --yes @fission-ai/openspec@1.14.3 validate --all --strict \
+  --json --report findings >"$EVIDENCE_DIR/openspec-all-$REVISION.json"
+OPEN_SPEC_ALL_EXIT=$?
+jq -cS '.itemFindings[] as $item | $item.issues[] | {type:$item.type,id:$item.id,level,path,message}' \
+  "$EVIDENCE_DIR/openspec-all-$REVISION.json" | LC_ALL=C sort -u \
+  >"$EVIDENCE_DIR/openspec-findings-$REVISION.jsonl"
+```
+
+Set `REVISION=baseline` in the approved-base worktree and `REVISION=candidate` in the exact-candidate worktree. The non-regression assertion is:
+
+```bash
+comm -13 "$EVIDENCE_DIR/openspec-findings-baseline.jsonl" \
+  "$EVIDENCE_DIR/openspec-findings-candidate.jsonl" \
+  >"$EVIDENCE_DIR/openspec-findings-new.jsonl"
+test ! -s "$EVIDENCE_DIR/openspec-findings-new.jsonl"
+```
+
+The candidate passes this gate only when its scoped strict command exits zero, both diagnostics decode successfully, and `openspec-findings-new.jsonl` is empty. Removing baseline findings is allowed; adding any finding at any item/type/level/path/message tuple fails. The raw diagnostics, canonical finding sets, comparison output, exact SHAs, CLI version, commands, and exit codes remain Multica-only evidence and SHALL NOT be committed.
 
 ### Evidence and cleanup contract
 
 Before a live attempt, Tester records the exact product SHA, baseline SHA, test-repository revision, slot ID, target database, port, locale/timezone/viewport, health result, focused CI disposition, and absence of another owner on those resources. Candidate and baseline use equivalent sanitized fixtures and independent/reset browser sessions.
 
-Tester publishes one final Multica comment with product PR and exact commit links; any necessary test-repository MR/commit/file links; case-level PASS/FAIL and concise assertions; commands and exit codes; generated image attachments; SHA/hashes and provenance; cleanup result; and attachment read-back. Private URLs/hostnames, credentials, personal identifiers, raw response bodies, logs, diagnostic JSON, and hashes belong only in Multica and SHALL be sanitized. No evidence-only JSON/HTML/image/log file is committed.
+Tester publishes one final Multica comment with product PR and exact commit links; any necessary test-repository MR/commit/file links; case-level PASS/FAIL and concise assertions; commands and exit codes; pinned OpenSpec CLI version plus scoped PASS and baseline/candidate non-regression result; generated image attachments; SHA/hashes and provenance; cleanup result; and attachment read-back. Private URLs/hostnames, credentials, personal identifiers, raw response bodies, logs, diagnostic JSON, and hashes belong only in Multica and SHALL be sanitized. No evidence-only JSON/HTML/image/log file is committed.
 
 Cleanup stops only the exact monitor PID started by the case after comparing it with `multica daemon status --output json`, removes the disposable numbered slot through the same Binta wrapper and `--project`, and confirms the unique database/port are gone. It preserves the product PR/branch/commits and any evidence-bearing test-repository MR/branch/functional commits. It does not merge, close, or delete either branch/MR without a separate instruction.
 
@@ -138,7 +164,7 @@ Cleanup stops only the exact monitor PID started by the case after comparing it 
 - **Owned responsibility scope:** the existing `_walk_size` deadline/100,000-entry boundary, discard-on-incomplete semantics, and synthetic fallback/large-tree tests; project checkout storage model/collection/cache and directly related tests; canonical msgspec/OpenAPI/TypeScript generated artifacts; existing React app/format/style/tests; five current Admin view metadata; safe secret projection identity and Admin route handling; affected documentation, fixtures, packaging, and validation files. Directly related tests, snapshots, generated artifacts, and service files are included without turning this scope into an exhaustive allowlist.
 - **Critical shared files:** `models/monitor.py`, `models/footprint.py`, `internal/storage_footprint.py`, `resources/monitor/collection_parts/snapshot.py`, monitor planning/cache code, `http/admin*.py`, `internal/secret_store.py`, `openapi.json`, `web/src/generated/`, `web/src/App.tsx`, `web/src/format.ts`, `web/src/monitor.css`, focused Python/React tests, README, and packaging/generated-contract metadata.
 - **Contract surface:** the four delta specs in this change; ten-second `du` timeout plus ten-second cooperative fallback deadline and 100,000-entry budget; no partial project total on incomplete traversal; existing snapshot section/caching/redaction rules; environment storage ownership; generated-client determinism; runtime action/publication behavior; Starlette Admin auth/session/read-only/write-only/CAS guarantees; optional dashboard dependencies.
-- **Definition of done / evidence:** every delta scenario has a focused automated assertion or mapped independent browser case; `du` missing/failure/timeout and synthetic below/at-budget/deadline fallback cases prove finite traversal and no partial project total; main/worktree totals are separate and path-free; time has no visible seconds but retains exact `dateTime`; running filter/count/empty state are correct without extra fetches; `/admin/` and five built-in labels work; GitLab detail and multi-host identities work without secret disclosure; generated artifacts are current; required repository/CI gates pass on the exact candidate; numbered-slot images and assertions are attached/read back; cleanup is proven.
+- **Definition of done / evidence:** every delta scenario has a focused automated assertion or mapped independent browser case; `du` missing/failure/timeout and synthetic below/at-budget/deadline fallback cases prove finite traversal and no partial project total; main/worktree totals are separate and path-free; time has no visible seconds but retains exact `dateTime`; running filter/count/empty state are correct without extra fetches; `/admin/` and five built-in labels work; GitLab detail and multi-host identities work without secret disclosure; generated artifacts are current; required product/CI gates pass on the exact candidate; pinned scoped OpenSpec strict validation passes and the candidate adds no repository-wide finding versus the approved-base diagnostic; numbered-slot images and assertions are attached/read back; cleanup is proven.
 - **Parallel-safety rationale:** this is the sole all-covering WP. There are no sibling write zones, dependencies, stages, frontiers, or DAG coordination.
 
 ## Coverage audit
