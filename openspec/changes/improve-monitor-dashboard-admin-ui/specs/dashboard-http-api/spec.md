@@ -2,7 +2,7 @@
 
 ### Requirement: Built-in Admin navigation names every registered entity
 
-The authenticated Admin SHALL continue to register exactly the existing five model views directly with Starlette Admin: Backups, Incomplete operations, Environment history, Remote Odoo secrets, and GitLab member secrets. Each view SHALL define a nonblank built-in `menu_label` and an appropriate built-in icon so the Starlette Admin sidebar and generated default index identify every entity. The implementation SHALL NOT add a custom dashboard, template override, navigation component, ORM model layer, or sixth entity.
+Authenticated Admin SHALL register exactly the existing five model views directly with Starlette Admin: Backups, Incomplete operations, Environment history, Remote Odoo secrets, and GitLab member secrets. Each SHALL define a nonblank built-in `menu_label` and icon. Navigation SHALL use the built-in sidebar and default index; it SHALL NOT add a custom dashboard, template, navigation component, ORM layer, or sixth entity.
 
 #### Scenario: Authenticated sidebar lists all entities
 
@@ -16,7 +16,7 @@ The authenticated Admin SHALL continue to register exactly the existing five mod
 
 ### Requirement: Secret Admin routes use complete safe record identity
 
-Remote Odoo and GitLab secret views SHALL use a dedicated hidden safe `admin_id` as their Starlette Admin `pk_attr`. The value SHALL encode the complete normalized record identity and current positive revision required for exact list, detail, edit, and delete routing. GitLab identity SHALL include both opaque member ID and normalized host; remote Odoo identity SHALL include normalized base URL. The value SHALL contain no password, token, ciphertext, key material, or secret-derived metadata and SHALL be excluded from list/detail/create/edit/import/export fields.
+Remote Odoo and GitLab secret views SHALL use a hidden safe `admin_id` as Starlette Admin `pk_attr`. It SHALL encode the complete normalized public identity and current positive revision for exact list/detail/edit/delete routing: member ID plus host for GitLab, and base URL for remote Odoo. It SHALL contain no secret or secret-derived metadata and SHALL be excluded from list, detail, create, edit, import, and export fields.
 
 #### Scenario: Created GitLab secret opens from its list row
 

@@ -2,7 +2,7 @@
 
 ### Requirement: Safe Admin projections carry opaque route identity
 
-Each safe remote Odoo and GitLab secret projection SHALL expose a deterministic `admin_id` for Starlette Admin routing. The identifier SHALL be derived only from the record's normalized public identity fields and current positive revision, SHALL round-trip through one exact bounded decoder, and SHALL never include or derive from a password, token, ciphertext, encryption key, internal token key, or secret length. It is an Admin transport identity, not a persisted schema column or credential lookup key.
+Each safe remote Odoo and GitLab projection SHALL expose a deterministic `admin_id` derived only from normalized public identity and current positive revision. It SHALL round-trip through one exact bounded decoder and SHALL contain or derive from no password, token, ciphertext, key material, internal token key, or secret length. It SHALL remain an Admin transport identity, not a persisted column or credential lookup key.
 
 #### Scenario: Projection identity round-trips
 

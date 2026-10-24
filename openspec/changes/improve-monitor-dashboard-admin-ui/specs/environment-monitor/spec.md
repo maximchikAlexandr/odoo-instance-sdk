@@ -2,15 +2,7 @@
 
 ### Requirement: Project summaries expose bounded main-checkout storage
 
-Each registered `ProjectSummary` SHALL contain one frozen path-free main-checkout storage projection with nullable `total_bytes` and boolean `complete`. WHEN the `storage` snapshot section is requested, THEN the monitor SHALL measure only the canonical registered repository root through the existing directory-size helper after bounding its Python fallback with a monotonic ten-second deadline and a maximum of 100,000 visited directories/entries. The budget SHALL count entries before skip, resolution, deduplication, or stat outcomes; the deadline SHALL be checked before each yielded directory and entry. The probe SHALL skip symlink targets, cache its result under stable project identity for the existing expensive-section TTL, and keep an unavailable or ambiguous measurement explicit instead of returning an invented complete total.
-
-Environment worktrees SHALL retain their existing independent `EnvironmentSnapshot.storage` measurements. Project totals SHALL NOT sum environment worktrees, backups, Compose volumes, or external/shared databases, and SHALL NOT expose repository paths. An OdCLI-managed environment root SHALL be distinct from its registered project root; WHEN containment cannot be disproved for a legacy/adopted row, THEN separate attribution SHALL be incomplete rather than double-counted.
-
-#### Scenario: Main checkout and managed worktree remain separate
-
-- **WHEN** a registered project and one OdCLI-managed environment are collected with the storage section selected
-- **THEN** the project summary reports only the main checkout tree and the environment summary reports its existing environment-owned footprint
-- **AND** neither card total includes the other's canonical root
+Each `ProjectSummary` SHALL expose a frozen path-free footprint with nullable `total_bytes` and boolean `complete`. WHEN storage is requested, THEN only the canonical registered root SHALL be measured. The existing Python fallback SHALL have a ten-second monotonic deadline and a 100,000-entry budget counted before skip/resolve/dedup/stat; it SHALL check time before each yielded directory and entry, skip symlink targets, and return no partial total.
 
 #### Scenario: Project measurement is unavailable
 
@@ -33,3 +25,18 @@ Environment worktrees SHALL retain their existing independent `EnvironmentSnapsh
 
 - **WHEN** two snapshots request project storage within the existing expensive-section TTL for the same project identity
 - **THEN** the second snapshot reuses the cached footprint while live runtime collection remains fresh
+
+### Requirement: Project and environment storage attribution remains separate
+
+Project storage SHALL contain only the registered main checkout. Environment worktrees SHALL retain their independent `EnvironmentSnapshot.storage`. Project totals SHALL NOT include worktrees, backups, Compose volumes, or external/shared databases, and SHALL expose no path. WHEN project/environment containment cannot be disproved for a legacy or adopted row, THEN separate attribution SHALL be incomplete instead of double-counted.
+
+#### Scenario: Main checkout and managed worktree remain separate
+
+- **WHEN** a registered project and one OdCLI-managed environment are collected with storage selected
+- **THEN** the project reports only its main checkout and the environment reports its existing owned footprint
+- **AND** neither total includes the other's canonical root
+
+#### Scenario: Legacy containment is ambiguous
+
+- **WHEN** a legacy or adopted environment root may be contained by its registered project root
+- **THEN** the project measurement is incomplete and no separate complete totals are claimed
