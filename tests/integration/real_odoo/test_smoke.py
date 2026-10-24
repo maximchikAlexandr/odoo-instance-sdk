@@ -295,7 +295,7 @@ def _record_smoke_initialization(workflow: _SmokeWorkflow, record_property: Any)
         workflow.project,
         workflow.environment,
         "init",
-        "--no-input",
+        "--yes",
         "--allow-partial",
         "--odoo-bin",
         str(workflow.proxy),

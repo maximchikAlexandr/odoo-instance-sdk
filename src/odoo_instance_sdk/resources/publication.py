@@ -591,6 +591,9 @@ class PublicationResource:
         *,
         settings: PublicationSettings | None = None,
         executor: ProcessExecutor | None = None,
+        step_prefix: str = "",
+        expected_route_identity: str | None = None,
+        expected_current_route: PublicationRoute | None = None,
     ) -> Command[PublicationResult]:
         if isinstance(target, tuple):
             kind, owner_id = target
@@ -604,7 +607,16 @@ class PublicationResource:
         else:
             selected = self._target(target)
         loaded = settings or PublicationSettings.load()
-        return self._mutation_command(selected, loaded, route=None, remove=True, executor=executor)
+        return self._mutation_command(
+            selected,
+            loaded,
+            route=None,
+            remove=True,
+            executor=executor,
+            step_prefix=step_prefix,
+            expected_route_identity=expected_route_identity,
+            expected_current_route=expected_current_route,
+        )
 
     def unpublish(
         self,
@@ -683,8 +695,15 @@ class PublicationResource:
         route: PublicationRoute | None,
         remove: bool,
         executor: ProcessExecutor | None,
+        step_prefix: str = "",
+        expected_route_identity: str | None = None,
+        expected_current_route: PublicationRoute | None = None,
     ) -> Command[PublicationResult]:
-        action_id = "publication.unpublish" if remove else "publication.publish"
+        action_id = (
+            f"{step_prefix}{'publication.unpublish' if remove else 'publication.publish'}"
+            if step_prefix
+            else ("publication.unpublish" if remove else "publication.publish")
+        )
         steps = _publication_steps(
             settings,
             action_id,
@@ -703,6 +722,8 @@ class PublicationResource:
                 owner_id=target.owner_id,
                 route=route,
                 remove=remove,
+                expected_route_identity=expected_route_identity,
+                expected_current_route=expected_current_route,
             )
             if remove:
                 return _result(

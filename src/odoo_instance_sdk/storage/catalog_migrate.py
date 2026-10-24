@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0008"
+CATALOG_REVISION = "0014"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -402,6 +402,7 @@ def _ddl_fingerprint(
 
 
 _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
+    "projects": frozenset({"registration_state"}),
     "environments": frozenset(
         {
             "project_id",
@@ -417,7 +418,7 @@ _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
     "backups": frozenset({"source_name", "pinned"}),
     "environment_copy_journal": frozenset({"backup_ownership"}),
     "runtime": frozenset({"launch_identity_json"}),
-    "restores": frozenset({"source_kind", "source_sha256"}),
+    "restores": frozenset({"source_kind", "source_sha256", "database_oid"}),
     "database_events": frozenset({"source_kind", "source_sha256"}),
 }
 
@@ -589,6 +590,8 @@ def _historical_ddl_fingerprint(
     }
     historical_tables = []
     for table, columns, keys, checks, collations, generated, options, _definition in tables:
+        if table not in _V16_TABLE_DEFINITIONS:
+            continue
         variant_omitted = variant_omissions.get(table, frozenset())
         omitted = _HISTORICAL_COMMON_OMISSIONS.get(table, frozenset()) | variant_omitted
         historical_columns = tuple(
@@ -650,7 +653,12 @@ def _historical_ddl_fingerprint(
     historical_indexes = frozenset(
         (name, sql)
         for name, sql in indexes
-        if name not in {"backups_source_group_idx", "environments_project_checkout_idx"}
+        if name
+        not in {
+            "backups_source_group_idx",
+            "environments_project_checkout_idx",
+            "project_database_bindings_identity_idx",
+        }
         and not (version == "v16" and name == "environments_one_active_branch")
     )
     historical_foreign_keys = tuple(
@@ -659,6 +667,7 @@ def _historical_ddl_fingerprint(
             tuple(fk for fk in rows if not _is_historical_common_omission(table, fk[1])),
         )
         for table, rows in foreign_keys
+        if table in _V16_TABLE_DEFINITIONS
     )
     historical_views = frozenset(
         (
@@ -683,7 +692,9 @@ FROM runtime WHERE owner_kind = 'environment'"""),
 def _historical_checks(
     table: str, checks: tuple[str, ...], version: Literal["v16", "pre_source_neutral"]
 ) -> tuple[str, ...]:
-    if table == "backups":
+    if table == "projects":
+        checks = tuple(check for check in checks if "registration_state" not in check)
+    elif table == "backups":
         checks = tuple(check for check in checks if "pinned IN" not in check)
     elif table == "backup_events":
         checks = tuple(check.replace(",'pin_set'", "") for check in checks)
@@ -758,6 +769,7 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> bool:
                 "ALTER TABLE restores ADD COLUMN state TEXT NOT NULL DEFAULT 'complete' "
                 "CHECK (state IN ('complete', 'incomplete'))"
             )
+            conn.execute("ALTER TABLE restores ADD COLUMN database_oid INTEGER")
             conn.execute(
                 "CREATE UNIQUE INDEX environments_one_active_branch "
                 "ON environments(git_common_dir, branch) WHERE state <> 'removed'"
@@ -774,12 +786,16 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
     expected_tables, expected_indexes, expected_foreign_keys, expected_view = (
         _reference_fingerprint()
     )
+    expected_tables = tuple(
+        item for item in expected_tables if item[0] != "project_database_bindings"
+    )
     legacy_indexes = expected_indexes - {
         "backups_source_group_idx",
         "environments_project_checkout_idx",
         "backups_project_idx",
         "restores_cluster_identity_idx",
         "database_events_cluster_identity_idx",
+        "project_database_bindings_identity_idx",
     }
     expected_foreign_keys = tuple(
         (table, () if table == "backups" else keys) for table, keys in expected_foreign_keys
@@ -791,12 +807,9 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
     expected_by_name = {table: (columns, keys) for table, columns, keys in expected_tables}
     for table, columns, keys in actual_tables:
         expected_columns, expected_keys = expected_by_name.get(table, ((), frozenset()))
-        if table == "environments":
-            expected_columns = tuple(
-                item
-                for item in expected_columns
-                if not _is_historical_common_omission(table, item[0])
-            )
+        expected_columns = tuple(
+            item for item in expected_columns if not _is_historical_common_omission(table, item[0])
+        )
         if table == "runtime":
             expected_columns = _without_runtime_launch_identity(expected_columns)
         if table == "backups":
@@ -813,7 +826,7 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
             expected_columns = tuple(
                 item
                 for item in expected_columns
-                if item[0] not in {"source_kind", "source_sha256", "state"}
+                if item[0] not in {"source_kind", "source_sha256", "state", "database_oid"}
             )
             expected_columns = tuple(
                 (name, type_name, 1 if name == "backup_id" and table == "restores" else required)
@@ -900,6 +913,7 @@ def _repair_known_v15_catalog(conn: sqlite3.Connection) -> bool:
                 "ALTER TABLE restores ADD COLUMN state TEXT NOT NULL DEFAULT 'complete' "
                 "CHECK (state IN ('complete', 'incomplete'))"
             )
+            conn.execute("ALTER TABLE restores ADD COLUMN database_oid INTEGER")
             if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise BackupCatalogError("legacy catalog has invalid foreign key references")
             conn.execute("PRAGMA user_version = 16")

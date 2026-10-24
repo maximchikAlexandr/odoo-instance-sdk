@@ -41,7 +41,7 @@ PYTHON_RESOLUTION_AUDIT: Final[Path] = (
     ROOT / "tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.audit.json"
 )
 AUDITED_EXCEPTION_PACKAGES: Final[frozenset[str]] = frozenset(
-    {"cryptography", "pypdf2", "requests", "urllib3"}
+    {"cryptography", "pypdf2", "requests"}
 )
 PINNED_AUDIT_SCANNER: Final[str] = E2E_PINS.pip_audit
 PACKAGE_NAME = re.compile(r"\A[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*\Z")
@@ -208,10 +208,28 @@ def _parse_scanner_payload(payload: object) -> set[tuple[str, str, str]] | None:
     return findings
 
 
+def _record_audit_diagnostic(diagnostics: list[str] | None, value: str) -> None:
+    if diagnostics is not None:
+        diagnostics.append(value)
+
+
+def _scanner_output_sample(value: str) -> str:
+    """Return a small printable scanner-output prefix without credential material."""
+    sample = value[:160]
+    sample = re.sub(r"(?i)(https?://)[^/@\s]+:[^/@\s]+@", r"\1<redacted>@", sample)
+    sample = re.sub(
+        r"(?i)(token|password|secret|authorization)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2<redacted>",
+        sample,
+    )
+    return " ".join(sample.split())
+
+
 def _run_pinned_python_audit(
     lock_path: Path,
+    diagnostics: list[str] | None = None,
 ) -> set[tuple[str, str, str]] | None:
-    """Return pip-audit's canonical findings, or ``None`` on any probe error."""
+    """Return pip-audit findings or a bounded, sanitized probe diagnostic."""
     try:
         result = _run(
             [
@@ -234,15 +252,41 @@ def _run_pinned_python_audit(
             ],
             timeout=120.0,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        failure = (
+            "scanner_timeout"
+            if isinstance(error, subprocess.TimeoutExpired)
+            else (f"scanner_execution_error:{type(error).__name__}")
+        )
+        _record_audit_diagnostic(diagnostics, failure)
         return None
     if result.returncode not in (0, 1):
+        scanner_output = f"{result.stdout}\n{result.stderr}".lower()
+        transport_errors = ("connection error", "connection refused", "tls error")
+        if any(term in scanner_output for term in transport_errors):
+            failure = "scanner_transport_failure"
+        elif "no matching distribution" in scanner_output or "failed to resolve" in scanner_output:
+            failure = "scanner_distribution_resolution_failure"
+        else:
+            failure = f"scanner_exit_code:{result.returncode}"
+        _record_audit_diagnostic(diagnostics, failure)
         return None
     try:
         payload = json.loads(result.stdout)
-    except (TypeError, json.JSONDecodeError):
+    except (TypeError, json.JSONDecodeError) as error:
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        sample = _scanner_output_sample(stdout)
+        _record_audit_diagnostic(
+            diagnostics,
+            "scanner_invalid_json:"
+            f"returncode={result.returncode};stdout_chars={len(stdout)};"
+            f"error={type(error).__name__};sample={sample!r}",
+        )
         return None
-    return _parse_scanner_payload(payload)
+    findings = _parse_scanner_payload(payload)
+    if findings is None:
+        _record_audit_diagnostic(diagnostics, "scanner_invalid_payload")
+    return findings
 
 
 def python_resolution_audit_is_valid(  # noqa: C901
@@ -250,56 +294,64 @@ def python_resolution_audit_is_valid(  # noqa: C901
     *,
     lock_path: Path | None = None,
     scanner_result: set[tuple[str, str, str]] | None = None,
+    diagnostics: list[str] | None = None,
 ) -> bool:
+    def reject(reason: str) -> bool:
+        _record_audit_diagnostic(diagnostics, reason)
+        return False
+
     audit_path = path or PYTHON_RESOLUTION_AUDIT
     resolved_lock = lock_path or PYTHON_RESOLUTION_LOCK
     try:
         audit_content = audit_path.read_bytes()
         lock_content = resolved_lock.read_bytes()
+    except OSError:
+        return reject("audit_or_lock_unreadable")
+    try:
         value = json.loads(audit_content)
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return False
+    except (UnicodeError, json.JSONDecodeError):
+        return reject("audit_invalid_json")
     if hashlib.sha256(audit_content).hexdigest() != E2E_PINS.odoo_python_audit_sha256:
-        return False
+        return reject("audit_hash_mismatch")
     if not isinstance(value, dict):
-        return False
+        return reject("audit_schema_invalid")
     if value.get("schema") != "odoo19-python-resolution-audit-v1":
-        return False
+        return reject("audit_schema_invalid")
     if value.get("scanner") != _audit_scanner_label():
-        return False
+        return reject("audit_scanner_pin_mismatch")
     if value.get("source_commit") != E2E_PINS.odoo_source_commit:
-        return False
+        return reject("audit_source_commit_pin_mismatch")
     if value.get("python") != E2E_PINS.cpython:
-        return False
+        return reject("audit_python_pin_mismatch")
     if value.get("platform") != "x86_64-manylinux_2_17":
-        return False
+        return reject("audit_platform_mismatch")
     if value.get("lock_sha256") != hashlib.sha256(lock_content).hexdigest():
-        return False
+        return reject("audit_lock_hash_mismatch")
     versions = _locked_package_versions(lock_content)
     overrides = value.get("reviewed_overrides")
     exceptions = value.get("exceptions")
     if not isinstance(overrides, dict) or not isinstance(exceptions, list):
-        return False
+        return reject("audit_allowlist_invalid")
     normalized_overrides: set[str] = set()
     for package, version in overrides.items():
         canonical_package = _canonical_package(package)
         if canonical_package is None or canonical_package in normalized_overrides:
-            return False
+            return reject("audit_allowlist_invalid")
         if not _valid_version(version) or versions.get(canonical_package) != version:
-            return False
+            return reject("audit_allowlist_invalid")
         normalized_overrides.add(canonical_package)
     expected_findings: set[tuple[str, str, str]] = set()
     observed: set[str] = set()
     for exception in exceptions:
         if not isinstance(exception, dict):
-            return False
+            return reject("audit_allowlist_invalid")
         package = exception.get("package")
         version = exception.get("version")
         advisories = exception.get("advisories")
         expires = exception.get("expires")
         canonical_package = _canonical_package(package)
         if not isinstance(version, str) or VERSION.fullmatch(version) is None:
-            return False
+            return reject("audit_allowlist_invalid")
         if (
             canonical_package is None
             or canonical_package not in AUDITED_EXCEPTION_PACKAGES
@@ -314,26 +366,45 @@ def python_resolution_audit_is_valid(  # noqa: C901
             )
             or not _valid_exception_text(expires)
         ):
-            return False
+            return reject("audit_allowlist_invalid")
         if not isinstance(expires, str):
-            return False
+            return reject("audit_allowlist_invalid")
         try:
             if datetime.fromisoformat(expires).date() < datetime.now(UTC).date():
-                return False
+                return reject("audit_allowlist_expired")
         except ValueError:
-            return False
+            return reject("audit_allowlist_invalid")
         observed.add(canonical_package)
         for advisory in advisories:
             finding = (canonical_package, version, advisory)
             if finding in expected_findings:
-                return False
+                return reject("audit_allowlist_duplicate_finding")
             expected_findings.add(finding)
     if observed != AUDITED_EXCEPTION_PACKAGES:
+        return reject("audit_allowlist_package_set_mismatch")
+    if scanner_result is None:
+        actual_findings = (
+            _run_pinned_python_audit(resolved_lock)
+            if diagnostics is None
+            else _run_pinned_python_audit(resolved_lock, diagnostics)
+        )
+    else:
+        actual_findings = scanner_result
+    if actual_findings is None:
+        if diagnostics:
+            return False
+        return reject("scanner_probe_failed")
+    if actual_findings != expected_findings:
+        unexpected = sorted(actual_findings - expected_findings)
+        missing = sorted(expected_findings - actual_findings)
+        _record_audit_diagnostic(
+            diagnostics,
+            "scanner_advisory_mismatch:"
+            f"unexpected_count={len(unexpected)};unexpected_sample={unexpected[:64]};"
+            f"missing_count={len(missing)};missing_sample={missing[:64]}",
+        )
         return False
-    actual_findings = (
-        scanner_result if scanner_result is not None else _run_pinned_python_audit(resolved_lock)
-    )
-    return actual_findings is not None and actual_findings == expected_findings
+    return True
 
 
 def _configured_cache_key(name: str, computed: str) -> str:
@@ -406,7 +477,7 @@ def _write_cached_requirements(cache: Path) -> bool:
     return True
 
 
-def _source_revision_is_available() -> bool:
+def _source_revision_is_available(diagnostics: list[str] | None = None) -> bool:
     """Populate and verify the pinned commit in the executable bare cache."""
     cache = _source_cache_path()
     try:
@@ -414,6 +485,9 @@ def _source_revision_is_available() -> bool:
             cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             result = _run(["git", "init", "--bare", str(cache)])
             if result.returncode:
+                _record_audit_diagnostic(
+                    diagnostics, f"source_cache_init_exit_code:{result.returncode}"
+                )
                 return False
         check = _run(
             [
@@ -426,7 +500,10 @@ def _source_revision_is_available() -> bool:
             ]
         )
         if check.returncode == 0:
-            return _write_cached_requirements(cache)
+            if not _write_cached_requirements(cache):
+                _record_audit_diagnostic(diagnostics, "pinned_source_requirements_missing")
+                return False
+            return True
         result = _run(
             [
                 "git",
@@ -439,23 +516,33 @@ def _source_revision_is_available() -> bool:
             ],
             timeout=600.0,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        _record_audit_diagnostic(diagnostics, f"source_probe_error:{type(error).__name__}")
         return False
     if result.returncode:
+        _record_audit_diagnostic(diagnostics, f"source_fetch_exit_code:{result.returncode}")
         return False
-    check = _run(
-        [
-            "git",
-            "-C",
-            str(cache),
-            "cat-file",
-            "-e",
-            f"{E2E_PINS.odoo_source_commit}^{{commit}}",
-        ]
-    )
+    try:
+        check = _run(
+            [
+                "git",
+                "-C",
+                str(cache),
+                "cat-file",
+                "-e",
+                f"{E2E_PINS.odoo_source_commit}^{{commit}}",
+            ]
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        _record_audit_diagnostic(diagnostics, f"source_probe_error:{type(error).__name__}")
+        return False
     if check.returncode:
+        _record_audit_diagnostic(diagnostics, "pinned_source_commit_missing")
         return False
-    return _write_cached_requirements(cache)
+    if not _write_cached_requirements(cache):
+        _record_audit_diagnostic(diagnostics, "pinned_source_requirements_missing")
+        return False
+    return True
 
 
 def _runner_metadata() -> dict[str, str]:
@@ -466,7 +553,11 @@ def _runner_metadata() -> dict[str, str]:
     }
 
 
-def prerequisite_checks(tier: Tier, resolved_platform: str) -> dict[str, bool]:
+def prerequisite_checks(
+    tier: Tier,
+    resolved_platform: str,
+    diagnostics: dict[str, str] | None = None,
+) -> dict[str, bool]:
     """Probe every required input; this function never provisions a resource."""
     docker = shutil.which("docker") is not None
     checks = {
@@ -494,9 +585,33 @@ def prerequisite_checks(tier: Tier, resolved_platform: str) -> dict[str, bool]:
     if tier == "full":
         lock_valid = python_resolution_lock_is_valid()
         checks["python_resolution_lock"] = lock_valid
-        audit_valid = lock_valid and python_resolution_audit_is_valid()
+        audit_failures: list[str] = []
+        if not lock_valid:
+            audit_valid = False
+        elif diagnostics is None:
+            audit_valid = python_resolution_audit_is_valid()
+        else:
+            audit_valid = python_resolution_audit_is_valid(diagnostics=audit_failures)
         checks["python_resolution_audit"] = audit_valid
-        checks["odoo_source_revision"] = audit_valid and _source_revision_is_available()
+        if diagnostics is not None and not lock_valid:
+            diagnostics["python_resolution_lock"] = "lock_hash_or_hash_directive_invalid"
+            diagnostics["python_resolution_audit"] = "not_checked_lock_invalid"
+        if diagnostics is not None and audit_failures:
+            diagnostics["python_resolution_audit"] = ";".join(audit_failures)
+        if audit_valid:
+            source_failures: list[str] = []
+            source_valid = (
+                _source_revision_is_available()
+                if diagnostics is None
+                else _source_revision_is_available(source_failures)
+            )
+            checks["odoo_source_revision"] = source_valid
+            if diagnostics is not None and source_failures:
+                diagnostics["odoo_source_revision"] = ";".join(source_failures)
+        else:
+            checks["odoo_source_revision"] = False
+            if diagnostics is not None:
+                diagnostics["odoo_source_revision"] = "not_checked_audit_invalid"
     return checks
 
 
@@ -571,6 +686,7 @@ def bootstrap(
             "uv_key": None,
         },
         "prerequisites": {},
+        "diagnostics": {},
         "missing": [],
         "artifact_root": str(root),
         "bootstrap_seconds": None,
@@ -587,8 +703,10 @@ def bootstrap(
             cache["source_key"] = _configured_cache_key(
                 "ODCLI_E2E_SOURCE_CACHE_KEY", source_cache_key(cache_os, cache_arch)
             )
-        checks = prerequisite_checks(tier, resolved)
+        diagnostics: dict[str, str] = {}
+        checks = prerequisite_checks(tier, resolved, diagnostics)
         manifest["prerequisites"] = checks
+        manifest["diagnostics"] = diagnostics
         if isinstance(cache, dict):
             requirements_path = os.environ.get(
                 "ODCLI_E2E_ODOO_REQUIREMENTS", str(ROOT / ".cache" / "odoo-requirements.txt")

@@ -25,6 +25,7 @@ from odoo_instance_sdk.internal.pg.drop import (
     DatabaseDropPartialError,
     DatabaseDropSafetyError,
     _cleanup_proven_filestore,
+    _decode_inspection,
     build_database_drop_command,
 )
 from odoo_instance_sdk.internal.pg.drop_types import AdoptedCopyDatabaseClaim
@@ -37,6 +38,29 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.fixtures.transport import OPEN_ODOO_HTTP_CLIENT
 from tests.unit.monitor_support import make_env
+
+
+@pytest.mark.unit
+def test_drop_inspection_rejects_string_database_oid() -> None:
+    result = ProcessResult(
+        argv=("psql",),
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "exists": True,
+                "is_template": False,
+                "sessions": [],
+                "database_oid": "19557",
+            }
+        ),
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+
+    with pytest.raises(ConfigError, match="invalid database identity"):
+        _decode_inspection(result, "feature_db")
 
 
 def _instance(project: Path, *, database: str = "feature_db") -> OdooInstance:
@@ -75,12 +99,14 @@ def _inspection(
     exists: bool = True,
     sessions: list[dict[str, object]] | None = None,
     template: bool = False,
+    database_oid: int | None = None,
 ) -> str:
     return json.dumps(
         {
             "exists": exists,
             "is_template": template,
             "sessions": sessions or [],
+            **({"database_oid": database_oid} if database_oid is not None else {}),
         }
     )
 
@@ -95,15 +121,25 @@ def _executor(
     revalidate_terminate_returncode: int = 0,
     revalidate_drop_stdout: str | None = None,
     revalidate_drop_returncode: int = 0,
+    database_oid: int | None = 102,
+    revalidate_database_oid: int | None = None,
     drop_returncode: int = 0,
     verify_stdout: str = "t\n",
     verify_returncode: int = 0,
 ) -> RecordingExecutor:
-    initial = _inspection(exists=exists, template=template, sessions=sessions)
+    initial = _inspection(
+        exists=exists,
+        template=template,
+        sessions=sessions,
+        database_oid=database_oid,
+    )
     checked = _inspection(
         exists=exists,
         template=template,
         sessions=revalidation_sessions if revalidation_sessions is not None else sessions,
+        database_oid=(
+            revalidate_database_oid if revalidate_database_oid is not None else database_oid
+        ),
     )
 
     def result_factory(step: object) -> ProcessResult:
@@ -190,6 +226,15 @@ def _managed_instance(
         cluster_id=restore_cluster_id,
         data_directory=data_directory,
     )
+    if not foreign_binding:
+        catalog._record_project_database_binding(
+            cluster._project_id,
+            restore_cluster_id,
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+            "feature_db",
+            database_oid=102,
+        )
     return instance, backup_file
 
 
@@ -227,6 +272,14 @@ def _managed_bootstrap_instance(
         cluster_id=active.cluster_id,
         data_directory=data_directory,
     )
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        active.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "tmp",
+        database_oid=101,
+    )
     return instance, active
 
 
@@ -235,7 +288,7 @@ def test_drop_plan_is_maintenance_bound_and_redacts_credentials(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
 ) -> None:
     monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
-    executor = _executor()
+    executor = _executor(database_oid=101)
     command = build_database_drop_command(
         _instance(project_manifest), project_manifest, "feature_db", executor=executor
     )
@@ -303,13 +356,13 @@ def test_drop_rich_dry_run_uses_real_builder_process_displays(
 
 
 @pytest.mark.unit
-def test_drop_records_catalogue_only_after_verified_absence(
+def test_drop_decodes_numeric_oid_and_records_after_verified_absence(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
 ) -> None:
     monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
     instance = _instance(project_manifest)
     catalog = cast("Any", instance._client.get_catalog())
-    executor = _executor()
+    executor = _executor(database_oid=19557)
     result = build_database_drop_command(
         instance, project_manifest, "feature_db", executor=executor
     ).run()
@@ -674,7 +727,7 @@ def test_drop_fails_closed_when_pre_drop_revalidation_changes(
     ("stdout", "returncode", "message"),
     [
         (_inspection(exists=False), 0, "does not exist"),
-        (_inspection(template=True), 0, "template"),
+        (_inspection(template=True, database_oid=102), 0, "template"),
         ("not-json", 0, "invalid data"),
         ("", 1, "inspection failed"),
     ],
@@ -715,8 +768,12 @@ def test_drop_refuses_every_termination_revalidation_read_failure(
     ("stdout", "returncode", "message"),
     [
         (_inspection(exists=False), 0, "does not exist"),
-        (_inspection(template=True), 0, "template"),
-        (_inspection(sessions=[{"pid": 9, "user": "other"}]), 0, "active session"),
+        (_inspection(template=True, database_oid=102), 0, "template"),
+        (
+            _inspection(sessions=[{"pid": 9, "user": "other"}], database_oid=102),
+            0,
+            "active session",
+        ),
         ("not-json", 0, "invalid data"),
         ("", 1, "inspection failed"),
     ],
@@ -1045,7 +1102,7 @@ def test_drop_allows_only_the_selected_environment_binding(
         instance,
         project_manifest,
         "feature_db",
-        executor=_executor(),
+        executor=_executor(database_oid=102),
         allow_environment_id="selected-environment",
     ).run()
 
@@ -1500,7 +1557,7 @@ def test_bootstrap_drop_accepts_exact_event_and_records_drop(
     instance, _claim = _managed_bootstrap_instance(
         project_manifest, catalog, tmp_path / "bootstrap-data"
     )
-    executor = _executor()
+    executor = _executor(database_oid=101)
 
     result = build_database_drop_command(
         instance,
@@ -1514,6 +1571,215 @@ def test_bootstrap_drop_accepts_exact_event_and_records_drop(
     assert any(step.step_id.endswith("execute") for step in executor.executed)
     latest = catalog._latest_database_event("127.0.0.1", 5432, "tmp")
     assert latest is not None and latest["event_type"] == "dropped"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_init_binding_drop_accepts_exact_observed_database(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "init-binding.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        database_oid=101,
+    )
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "feature_db",
+        force_default=True,
+        executor=_executor(database_oid=101),
+    ).run()
+
+    assert result.database == "feature_db"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_init_binding_drop_refuses_missing_current_database_oid_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "init-binding-identity.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        database_oid=101,
+    )
+    executor = _executor()
+
+    with pytest.raises(ConfigError, match="database identity changed"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            force_default=True,
+            defer_planning=True,
+            expected_database_oid=101,
+            executor=executor,
+        ).run()
+    assert not any(step.step_id.endswith("database.drop.execute") for step in executor.executed)
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_init_binding_drop_refuses_replaced_database_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "replaced-database.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        database_oid=101,
+    )
+    executor = _executor(database_oid=101, revalidate_database_oid=202)
+
+    with pytest.raises(ConfigError, match="database identity changed"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            force_default=True,
+            defer_planning=True,
+            expected_database_oid=101,
+            executor=executor,
+        ).run()
+    assert not any(step.step_id.endswith("database.drop.execute") for step in executor.executed)
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_non_deferred_drop_refuses_replaced_database_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "non-deferred-identity.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        database_oid=101,
+    )
+    executor = _executor(database_oid=101, revalidate_database_oid=202)
+
+    with pytest.raises(ConfigError, match="database identity changed"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            force_default=True,
+            executor=executor,
+        ).run()
+    assert not any(step.step_id.endswith("database.drop.execute") for step in executor.executed)
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_non_deferred_drop_refuses_missing_planning_database_oid_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "missing-planning-identity.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        database_oid=101,
+    )
+    executor = _executor(database_oid=None)
+
+    with pytest.raises(ConfigError, match="identity evidence is unavailable"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "feature_db",
+            force_default=True,
+            executor=executor,
+        ).run()
+    assert not any(
+        step.step_id.endswith("database.terminate.execute") for step in executor.executed
+    )
+    assert not any(step.step_id.endswith("database.drop.execute") for step in executor.executed)
+    assert catalog._project_bound_database_records(
+        cluster._project_id, claim.cluster_id, cluster.endpoint_host, cluster.endpoint_port
+    ) == (("feature_db", 101), ("tmp", 101))
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_binding_without_database_oid_refuses_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "null-identity.sqlite3")
+    instance, claim = _managed_bootstrap_instance(
+        project_manifest, catalog, tmp_path / "binding-data"
+    )
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    catalog._record_project_database_binding(
+        cluster._project_id,
+        claim.cluster_id,
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "unproven_db",
+    )
+    with pytest.raises(ConfigError, match="exact current lifecycle event"):
+        build_database_drop_command(
+            instance,
+            project_manifest,
+            "unproven_db",
+            force_default=True,
+            executor=_executor(database_oid=102),
+        ).run()
     catalog.close()
 
 
@@ -1569,7 +1835,7 @@ def test_bootstrap_absent_retry_reconciles_without_drop(
     instance, _claim = _managed_bootstrap_instance(
         project_manifest, catalog, tmp_path / "bootstrap-data"
     )
-    executor = _executor(exists=False)
+    executor = _executor(exists=False, database_oid=101)
 
     result = build_database_drop_command(
         instance,
@@ -1605,7 +1871,7 @@ def test_bootstrap_locked_revalidation_refuses_changed_event(
 
     original = drop_module._drop_ownership_evidence
     calls = 0
-    executor = _executor()
+    executor = _executor(database_oid=101)
 
     def change_after_planning(*args: Any, **kwargs: Any) -> object:
         nonlocal calls
@@ -1800,6 +2066,19 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
     action = PreparedAction(
         step_id="database.restore.local-archive", action="restore-local-archive", mutating=True
     )
+    after = instance.databases._psql_probe_for("feature_db", "database.restore.exists-after")
+    assert after is not None
+    executor = RecordingExecutor(
+        result_factory=lambda step: ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=("102\n" if step.step_id == after.step_id else ""),
+            stderr="",
+            duration=0.0,
+            cwd=step.cwd,  # type: ignore[attr-defined]
+            environment=step.environment,  # type: ignore[attr-defined]
+        )
+    )
     http = MagicMock()
     http.post.return_value.is_error = False
     http_context = MagicMock()
@@ -1810,7 +2089,10 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
         instance.databases._restore_local_archive(payload, "feature_db")
 
     command = Command.create(
-        ExecutionPlan(steps=(action.public_projection(),)), callback, (action,)
+        ExecutionPlan(steps=(action.public_projection(), after.public_projection())),
+        callback,
+        (action, after),
+        executor=executor,
     )
     monkeypatch.chdir(tmp_path)
     with (
@@ -1828,7 +2110,7 @@ def test_local_archive_restore_resolves_relative_provenance_for_drop(
     assert binding["data_directory"] == str(configured_data.resolve())
 
     result = build_database_drop_command(
-        instance, project_manifest, "feature_db", executor=_executor()
+        instance, project_manifest, "feature_db", executor=_executor(database_oid=102)
     ).run()
 
     assert result.filestore_state == "deleted"

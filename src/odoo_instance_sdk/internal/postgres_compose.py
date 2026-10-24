@@ -34,6 +34,18 @@ _PROJECT_NAME_PREFIX = "odcli_pg_"
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@+-]+$")
 _USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DIGEST_RE = re.compile(r"^(?P<repo>[A-Za-z0-9._/:-]+)@sha256:(?P<digest>[a-f0-9]{64})$")
+_DOCKER_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def container_id_matches_snapshot(inspected_id: str | None, snapshot_id: str | None) -> bool:
+    """Match a full Docker identity to the snapshot's display prefix."""
+    return bool(
+        inspected_id is not None
+        and snapshot_id is not None
+        and _DOCKER_CONTAINER_ID_RE.fullmatch(inspected_id) is not None
+        and len(snapshot_id) == 12
+        and snapshot_id == inspected_id[:12]
+    )
 
 
 def _require_timeout_budget(timeout: float | None) -> None:
@@ -242,22 +254,37 @@ def render_compose_yaml(
     )
 
 
+def read_owned_password_file(path: Path) -> str:
+    """Read an existing owner-controlled Compose password without mutating it."""
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        raise PostgresComposeInvalidError("postgres password file is unavailable") from None
+    if not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode):
+        raise PostgresComposeInvalidError("postgres password file must be a regular file")
+    if hasattr(os, "getuid") and existing.st_uid != os.getuid():
+        raise PostgresComposeInvalidError(
+            "postgres password file must be owned by the current user"
+        )
+    password = path.read_text(encoding="utf-8").strip()
+    if not password:
+        raise PostgresComposeInvalidError("postgres password file must not be empty")
+    return password
+
+
 def ensure_password_file(path: Path) -> str:
     """Create the password file with mode 0600 if missing; never overwrite existing."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        existing = os.lstat(path)
+        os.lstat(path)
     except FileNotFoundError:
         existing = None
+    else:
+        existing = True
     if existing is not None:
-        if not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode):
-            raise PostgresComposeInvalidError("postgres password file must be a regular file")
-        if hasattr(os, "getuid") and existing.st_uid != os.getuid():
-            raise PostgresComposeInvalidError(
-                "postgres password file must be owned by the current user"
-            )
+        password = read_owned_password_file(path)
         os.chmod(path, 0o600)
-        return path.read_text(encoding="utf-8").strip()
+        return password
     password = secrets.token_urlsafe(32)
     try:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -571,30 +598,33 @@ def inspect_container_identity(
     cluster_id: str,
     *,
     project_id: str,
+    compose_project: str,
     volume_name: str,
     timeout: float | None = None,
     step_id: str | None = None,
-) -> bool:
-    """Prove the managed service label and its exact named-volume mount."""
+) -> str | None:
+    """Return the exact managed container ID when identity and mount match."""
     _require_timeout_budget(timeout)
     args = ["docker", "inspect", "--format", "{{json .}}", container_name]
     try:
         result = _run_compose(runner, args, cwd=None, timeout=timeout, step_id=step_id)
-    except (OSError, subprocess.SubprocessError):
-        return False
+    except (AttributeError, OSError, subprocess.SubprocessError):
+        return None
     if result.returncode != 0:
-        return False
+        return None
     try:
         value = json.loads(result.stdout)
         if isinstance(value, list):
             value = value[0] if value else None
         if not isinstance(value, dict):
-            return False
+            return None
         config = value.get("Config")
         labels = config.get("Labels") if isinstance(config, dict) else None
         mounts = value.get("Mounts")
-        return (
-            isinstance(labels, dict)
+        if not (
+            value.get("Name") in {f"/{container_name}", container_name}
+            and isinstance(labels, dict)
+            and labels.get("com.docker.compose.project") == compose_project
             and labels.get("io.odoo-instance-sdk.cluster-id") == cluster_id
             and labels.get("io.odoo-instance-sdk.project-id") == project_id
             and isinstance(mounts, list)
@@ -604,9 +634,17 @@ def inspect_container_identity(
                 and mount.get("Name") == volume_name
                 for mount in mounts
             )
+        ):
+            return None
+        container_id = value.get("Id")
+        return (
+            container_id
+            if isinstance(container_id, str)
+            and _DOCKER_CONTAINER_ID_RE.fullmatch(container_id) is not None
+            else None
         )
     except (json.JSONDecodeError, IndexError, TypeError):
-        return False
+        return None
 
 
 def derive_state(  # noqa: C901

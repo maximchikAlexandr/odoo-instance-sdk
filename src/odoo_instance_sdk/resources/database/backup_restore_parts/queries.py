@@ -644,8 +644,13 @@ class _QueriesMixin:
         from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 
         query_name = name.replace("'", "''")
+        query = (
+            f"SELECT oid FROM pg_database WHERE datname='{query_name}'"
+            if step_id == "database.restore.exists-after"
+            else f"SELECT 1 FROM pg_database WHERE datname='{query_name}'"
+        )
         try:
-            return build_psql_specification(
+            prepared = build_psql_specification(
                 step_id=step_id,
                 host=host,
                 port=port,
@@ -654,13 +659,19 @@ class _QueriesMixin:
                 database="postgres",
                 args=(
                     "-c",
-                    f"SELECT 1 FROM pg_database WHERE datname='{query_name}'",
+                    query,
                 ),
                 _trusted_args=("-t", "-A"),
                 timeout=30.0,
             ).prepared_step
+            if step_id == "database.restore.exists-after":
+                from .backup import _protect_restore_oid_probe
+
+                prepared = _protect_restore_oid_probe(prepared, step_id)
         except FileNotFoundError:
             return None
+        else:
+            return prepared
 
     def _current_impl(self, *, psql_step_id: str | None = None) -> Database:
         configured = self._instance.config.configured_database_names

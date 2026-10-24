@@ -271,7 +271,7 @@ def test_full_bootstrap_rejects_audit_before_source_cache_probe(
     monkeypatch.setattr(bootstrap, "_version_is_exact", lambda _command, _expected: True)
     monkeypatch.setattr(bootstrap, "_image_manifest_is_pinned", lambda _image, _digest: True)
     monkeypatch.setattr(bootstrap, "python_resolution_lock_is_valid", lambda: True)
-    monkeypatch.setattr(bootstrap, "python_resolution_audit_is_valid", lambda: False)
+    monkeypatch.setattr(bootstrap, "python_resolution_audit_is_valid", lambda *, diagnostics: False)
     source_probe_calls: list[bool] = []
 
     def source_revision_probe() -> bool:
@@ -280,11 +280,13 @@ def test_full_bootstrap_rejects_audit_before_source_cache_probe(
 
     monkeypatch.setattr(bootstrap, "_source_revision_is_available", source_revision_probe)
 
-    checks = bootstrap.prerequisite_checks("full", "linux/amd64")
+    diagnostics: dict[str, str] = {}
+    checks = bootstrap.prerequisite_checks("full", "linux/amd64", diagnostics)
 
     assert checks["python_resolution_audit"] is False
     assert checks["odoo_source_revision"] is False
     assert source_probe_calls == []
+    assert diagnostics["odoo_source_revision"] == "not_checked_audit_invalid"
 
 
 def test_full_bootstrap_hashes_requirements_after_source_probe(
@@ -295,7 +297,9 @@ def test_full_bootstrap_hashes_requirements_after_source_probe(
     requirements = tmp_path / ".cache" / "odoo-requirements.txt"
     (tmp_path / "uv.lock").write_bytes(b"repository lock bytes")
 
-    def fake_prerequisites(_tier: str, _platform: str) -> dict[str, bool]:
+    def fake_prerequisites(
+        _tier: str, _platform: str, _diagnostics: dict[str, str] | None = None
+    ) -> dict[str, bool]:
         requirements.parent.mkdir()
         requirements.write_bytes(b"pinned requirement bytes\r\n")
         return {"odoo_source_revision": True}
@@ -389,6 +393,23 @@ def test_full_workflow_installs_ldap_and_psql_prerequisites() -> None:
         "Bootstrap required full prerequisites", 1
     )[0]
     assert "python-ldap" not in deps
+
+
+def test_full_workflow_initializes_private_registry_before_pretest_failure_paths() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github/workflows/real-odoo-tier.yml").read_text(encoding="utf-8")
+    initialize = workflow.index("Initialize owner-only secret registry")
+    bootstrap_step = workflow.index("Bootstrap required full prerequisites")
+    package_step = workflow.index("Package bounded E2E evidence")
+    initialization = workflow[initialize:bootstrap_step]
+
+    assert 'test ! -L "$ODCLI_E2E_SECRET_REGISTRY"' in initialization
+    assert "write_secret_registry(path, ())" in initialization
+    assert "read_secret_registry(path)" in initialization
+    assert initialize < bootstrap_step < package_step
+    assert "secret_registry_initialized=owner-only" in initialization
+    assert "rev-parse 'cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}'" in workflow
+    assert 'test "$resolved_commit" = cd992ceebbaf343c03e1941d39cfe423d35ba6c6' in workflow
 
 
 def test_owned_process_cleanup_targets_the_whole_session(

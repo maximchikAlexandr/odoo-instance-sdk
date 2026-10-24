@@ -16,7 +16,7 @@ def test_cache_keys_include_all_immutable_inputs() -> None:
     source = bootstrap.source_cache_key("Linux", "amd64")
     uv = bootstrap.uv_cache_key("Linux", "amd64", b"odoo requirements", b"uv lock")
     assert source == "odoo19-Linux-amd64-cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
-    assert uv.startswith("uv-Linux-amd64-3.12.13-0.10.8-")
+    assert uv.startswith("uv-Linux-amd64-3.12.13-0.13.4-")
     assert len(uv.rsplit("-", 1)[1]) == 64
 
 
@@ -48,10 +48,14 @@ def test_full_python_resolution_audit_rejects_lock_or_report_drift(
     monkeypatch.setattr(bootstrap, "_run_pinned_python_audit", lambda _lock: expected)
     assert bootstrap.python_resolution_audit_is_valid()
     lock.write_bytes(lock.read_bytes() + b"\n")
-    assert bootstrap.python_resolution_audit_is_valid() is False
+    diagnostics: list[str] = []
+    assert bootstrap.python_resolution_audit_is_valid(diagnostics=diagnostics) is False
+    assert diagnostics == ["audit_lock_hash_mismatch"]
     lock.write_bytes(bootstrap.PYTHON_RESOLUTION_LOCK.read_bytes())
     audit.write_bytes(audit.read_bytes() + b"\n")
-    assert bootstrap.python_resolution_audit_is_valid() is False
+    diagnostics.clear()
+    assert bootstrap.python_resolution_audit_is_valid(diagnostics=diagnostics) is False
+    assert diagnostics == ["audit_hash_mismatch"]
 
 
 def test_python_resolution_audit_rejects_scanner_metadata_drift(
@@ -115,6 +119,71 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
     assert "--require-hashes" in calls[0]
     assert calls[0][calls[0].index("--desc") + 1] == "off"
     assert calls[0][calls[0].index("--aliases") + 1] == "off"
+
+
+def _run_pinned_audit_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: subprocess.CompletedProcess[str] | subprocess.SubprocessError,
+) -> list[str]:
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if isinstance(probe, subprocess.SubprocessError):
+            raise probe
+        return probe
+
+    monkeypatch.setattr(bootstrap, "_run", fake_run)
+    diagnostics: list[str] = []
+    assert bootstrap._run_pinned_python_audit(tmp_path / "odoo.lock", diagnostics) is None
+    return diagnostics
+
+
+def test_pinned_scanner_reports_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path, monkeypatch, subprocess.TimeoutExpired("uvx", 120)
+    )
+    assert diagnostics == ["scanner_timeout"]
+
+
+def test_pinned_scanner_reports_exit_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path, monkeypatch, subprocess.CompletedProcess(["uvx"], 2, "", "")
+    )
+    assert diagnostics == ["scanner_exit_code:2"]
+
+
+def test_pinned_scanner_reports_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path,
+        monkeypatch,
+        subprocess.CompletedProcess(["uvx"], 2, "", "connection refused"),
+    )
+    assert diagnostics == ["scanner_transport_failure"]
+
+
+def test_pinned_scanner_reports_sanitized_invalid_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path,
+        monkeypatch,
+        subprocess.CompletedProcess(["uvx"], 0, "not-json token=secretvalue", ""),
+    )
+    assert diagnostics[0].startswith("scanner_invalid_json:")
+    assert "returncode=0" in diagnostics[0]
+    assert "stdout_chars=26" in diagnostics[0]
+    assert "not-json token=<redacted>" in diagnostics[0]
+    assert "secretvalue" not in diagnostics[0]
+
+
+def test_pinned_scanner_reports_invalid_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    diagnostics = _run_pinned_audit_probe(
+        tmp_path, monkeypatch, subprocess.CompletedProcess(["uvx"], 0, "[]", "")
+    )
+    assert diagnostics == ["scanner_invalid_payload"]
 
 
 @pytest.mark.parametrize(
@@ -207,8 +276,19 @@ def test_python_resolution_audit_rejects_unknown_scanner_finding() -> None:
     """E2E-SEC-04: an unknown live scanner tuple stops provisioning."""
     "E2E-SEC-04"
     findings = _fixture_audit_findings()
-    findings.add(("unexpected", "1.0", "CVE-unknown"))
-    assert bootstrap.python_resolution_audit_is_valid(scanner_result=findings) is False
+    finding = ("unexpected", "1.0", "CVE-unknown")
+    findings.add(finding)
+    diagnostics: list[str] = []
+    assert (
+        bootstrap.python_resolution_audit_is_valid(scanner_result=findings, diagnostics=diagnostics)
+        is False
+    )
+    assert diagnostics == [
+        (
+            "scanner_advisory_mismatch:unexpected_count=1;"
+            f"unexpected_sample={[finding]};missing_count=0;missing_sample=[]"
+        )
+    ]
 
 
 def test_python_resolution_audit_rejects_missing_scanner_finding() -> None:
@@ -225,7 +305,7 @@ def test_bootstrap_emits_fail_closed_machine_manifest(
     monkeypatch.setattr(
         bootstrap,
         "prerequisite_checks",
-        lambda _tier, _platform: {"docker": False, "compose": True},
+        lambda _tier, _platform, _diagnostics=None: {"docker": False, "compose": True},
     )
     output = tmp_path / "bootstrap.json"
     manifest = bootstrap.bootstrap("smoke", output, platform_name="linux/amd64", run_id="a" * 32)

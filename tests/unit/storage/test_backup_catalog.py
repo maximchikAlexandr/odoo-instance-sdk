@@ -1586,4 +1586,23 @@ def test_postgres_claim_validation_is_fail_closed_and_idempotent(tmp_path: Path)
         catalog._activate_postgres_cluster(active.cluster_id, "project", "compose", "volume").state
         == "active"
     )
+    for database_name in ("postgres", "template0", "template1"):
+        with pytest.raises(BackupCatalogError, match="identity is invalid"):
+            catalog._record_project_database_binding(
+                "project",
+                active.cluster_id,
+                "localhost",
+                5432,
+                database_name,
+                database_oid=1,
+            )
+    with pytest.raises(BackupCatalogError, match="PostgreSQL identity is invalid"):
+        catalog._record_project_database_binding(
+            "project",
+            active.cluster_id,
+            "localhost",
+            5432,
+            "owned_db",
+            database_oid=0,
+        )
     catalog.close()

@@ -43,6 +43,7 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes, rich_cell
 from odoo_instance_sdk.internal.paths import get_backups_dir, get_catalog_path, get_data_root
+from odoo_instance_sdk.internal.repo_key import parse_git_common_dir
 from odoo_instance_sdk.internal.resource_inventory import (
     FileResourceSource,
     OwnershipConfidence,
@@ -458,6 +459,15 @@ def _resource_command(
                 owned_directories=(plan.backup_root,),
                 database_measurement_reason=database_reason,
                 project_id=plan.catalogue_project_id,
+                repository_root=(
+                    str(plan.project.repository_root) if plan.project is not None else None
+                ),
+                git_common_dir=(
+                    str(parse_git_common_dir(plan.project.repository_root))
+                    if plan.project is not None
+                    and parse_git_common_dir(plan.project.repository_root) is not None
+                    else None
+                ),
                 all_projects=plan.catalogue_all_projects,
             )
             context.complete_action(_RESOURCE_STEP)

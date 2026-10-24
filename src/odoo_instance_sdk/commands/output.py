@@ -158,9 +158,7 @@ class OutputDocument(
     provenance: JsonValue
     dry_run: bool
     warnings: tuple[str, ...]
-    # Optional fields are omitted by msgspec when they do not belong to the
-    # success/failure variant.  This preserves the existing v1 envelope shape
-    # while keeping construction and transport projection typed.
+    # Optional fields are omitted for the success/failure variant.
     result: JsonValue = msgspec.field(default=None)
     data: JsonValue = msgspec.field(default=None)
     error: OutputError | None = msgspec.field(default=None)
@@ -931,10 +929,16 @@ def fail(
 ) -> Never:
     mode = output_mode
     context = _failure_context(message if isinstance(message, BaseException) else None)
+    from odoo_instance_sdk.exceptions import PlanError
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropSafetyError
 
     if isinstance(message, DatabaseDropSafetyError) and details is None:
         details = context
+    if isinstance(message, PlanError):
+        if error_code is None:
+            error_code = message.code
+        if details is None and message.details:
+            details = message.details
     rendered_message = _failure_message(message, context)
     if mode is not OutputMode.RICH:
         emit(

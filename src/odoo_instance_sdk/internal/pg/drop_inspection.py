@@ -29,6 +29,7 @@ class DropInspection:
     exists: bool
     is_template: bool
     sessions: tuple[DatabaseDropSession, ...]
+    database_oid: int | None = None
 
 
 def sql_literal(value: str) -> str:
@@ -44,6 +45,7 @@ def inspection_sql(database: str) -> str:
     return (
         "SELECT json_build_object("
         f"'exists', EXISTS (SELECT 1 FROM pg_database WHERE datname={literal}),"
+        f"'database_oid', (SELECT oid::bigint FROM pg_database WHERE datname={literal}),"
         f"'is_template', COALESCE((SELECT datistemplate FROM pg_database WHERE datname={literal}), false),"
         "'sessions', COALESCE((SELECT json_agg(json_build_object("
         "'pid', pid, 'user', usename, 'client', client_addr::text, "
@@ -124,7 +126,12 @@ def decode_inspection(result: ProcessResult, database: str) -> DropInspection:
     is_template = payload.get("is_template")
     if not isinstance(exists, bool) or not isinstance(is_template, bool):
         raise ConfigError("database safety inspection returned invalid preconditions")
-    return DropInspection(exists, is_template, tuple(sessions))
+    database_oid = payload.get("database_oid")
+    if database_oid is not None and (
+        not isinstance(database_oid, int) or isinstance(database_oid, bool) or database_oid <= 0
+    ):
+        raise ConfigError("database safety inspection returned invalid database identity")
+    return DropInspection(exists, is_template, tuple(sessions), database_oid)
 
 
 def decode_verify(result: ProcessResult, database: str) -> bool:

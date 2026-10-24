@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 from scripts.real_odoo_ci import capture_cleanup
 from scripts.real_odoo_pins import E2E_PINS
 from scripts.real_odoo_secrets import write_secret_registry
@@ -220,6 +221,52 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
         scope,
         Path.cwd().resolve(),
     )
+
+
+def odoo_runtime_python(runtime: E2ERuntime, source_root: Path, odoo_bin: Path) -> Path:
+    """Prepare and verify the pinned Odoo interpreter independently of SDK uv sync."""
+    if sha256(PYTHON_RESOLUTION_LOCK.read_bytes()).hexdigest() != (
+        E2E_PINS.odoo_python_lock_sha256
+    ):
+        raise AssertionError("pinned Odoo dependency lock digest changed")
+    environment = runtime.root / "odoo-python"
+    python = environment / "bin" / "python"
+    if not python.is_file():
+        created = subprocess.run(
+            ["uv", "venv", "--python", sys.executable, str(environment)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert created.returncode == 0, f"Odoo runtime venv creation failed: {created.returncode}"
+    synced = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "sync",
+            "--python",
+            str(python),
+            "--require-hashes",
+            str(PYTHON_RESOLUTION_LOCK),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert synced.returncode == 0, f"Odoo runtime lock sync failed: {synced.returncode}"
+    version = subprocess.run(
+        [str(python), "--version"], capture_output=True, text=True, check=False
+    )
+    assert version.returncode == 0 and E2E_PINS.cpython in version.stdout + version.stderr
+    probe = subprocess.run(
+        [str(python), str(odoo_bin), "--version"],
+        cwd=source_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0, f"pinned Odoo runtime import probe failed: {probe.returncode}"
+    return python
 
 
 def _compose_runner(

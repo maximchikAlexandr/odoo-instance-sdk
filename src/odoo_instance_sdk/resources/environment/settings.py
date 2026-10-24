@@ -21,7 +21,6 @@ from odoo_instance_sdk.exceptions import (
     PgAdminNotEligibleError,
     PgAdminUnavailableError,
     PostgresClusterError,
-    RestoreFailedError,
     StalePlanError,
 )
 from odoo_instance_sdk.internal.dbprep.source import acquire_copy_backup
@@ -74,6 +73,7 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _process_stderr,
     discover_dependency_inputs,
 )
+from odoo_instance_sdk.resources.environment.checkout_restore import consume_copy_database_probe
 from odoo_instance_sdk.resources.environment.inventory import _CheckoutInventoryMixin
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
 
@@ -113,6 +113,7 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             mutating: bool,
             steps: Sequence[PreparedStep | PreparedAction] = (),
             optional_steps: Sequence[str] = (),
+            step_prefix: str = "",
         ) -> Command[T]: ...
 
         def list_command(
@@ -203,11 +204,12 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             backup_ownership=ownership,
         )
 
-        self._consume_copy_database_probe(
+        consume_copy_database_probe(
             context,
             "database.restore.exists-before",
             target_db,
             expected_exists=False,
+            databases=instance.databases,
         )
         # The restore endpoint can create a database and then fail.  Persist
         # uncertainty only after the target is proven absent, so compensation
@@ -228,11 +230,12 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             copy=True,
             neutralize_database=True,
         )
-        self._consume_copy_database_probe(
+        consume_copy_database_probe(
             context,
             "database.restore.exists-after",
             target_db,
             expected_exists=True,
+            databases=instance.databases,
         )
         attachment_result = context.process_prepared(
             context.prepared("database.restore.attachments")
@@ -276,32 +279,6 @@ class _SettingsMixin(_CheckoutInventoryMixin):
         raise_restore_preflight_errors(
             result.uncompressed_bytes, Path(data_dir) if data_dir else None
         )
-
-    @staticmethod
-    def _consume_copy_database_probe(
-        context: RunContext[DevelopmentEnvironment],
-        step_id: str,
-        target_db: str,
-        *,
-        expected_exists: bool,
-    ) -> None:
-        result = cast("ProcessResult", context.process(step_id))
-        if result.returncode != 0:
-            detail = _process_stderr(result).strip()
-            suffix = f": {detail}" if detail else ""
-            raise InstanceConfigurationError(
-                f"PostgreSQL database existence probe failed for {target_db!r}"
-                f" (returncode={result.returncode}){suffix}"
-            )
-        stdout = result.stdout
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode(errors="replace")
-        exists = bool(str(stdout or "").strip())
-        if exists == expected_exists:
-            return
-        if expected_exists:
-            raise RestoreFailedError(f"Database {target_db!r} was not created after restore")
-        raise DatabaseAlreadyExistsError(f"Target database {target_db!r} already exists")
 
     def _preflight_copy_archive(self, plan: _CheckoutPlan) -> None:
         """Validate a retained archive before starting the auxiliary runtime."""

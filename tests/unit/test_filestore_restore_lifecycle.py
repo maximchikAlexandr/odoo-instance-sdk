@@ -16,8 +16,15 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
-def _inspection(*, exists: bool = True) -> str:
-    return json.dumps({"exists": exists, "is_template": False, "sessions": []})
+def _inspection(*, exists: bool = True, database_oid: int = 102) -> str:
+    return json.dumps(
+        {
+            "exists": exists,
+            "is_template": False,
+            "sessions": [],
+            "database_oid": database_oid,
+        }
+    )
 
 
 def _executor(*, exists: bool = True) -> object:
@@ -154,6 +161,7 @@ def test_db_rm_deletes_proven_filestore_after_self_contained_restore(
         backup_id,
         cluster_id=active.cluster_id,
         data_directory=data_dir,
+        database_oid=102,
     )
 
     from odoo_instance_sdk import OdooClient, OdooClientConfig

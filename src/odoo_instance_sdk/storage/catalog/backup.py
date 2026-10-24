@@ -1,5 +1,6 @@
 from __future__ import annotations  # noqa: I001 -- keep backup catalog helper aliases grouped; remove when Ruff supports grouped aliases.
 
+import contextlib
 import hashlib
 import sqlite3
 import uuid
@@ -12,6 +13,7 @@ from odoo_instance_sdk.exceptions import (
     BackupNotAvailableError,
     BackupNotFoundError,
 )
+from odoo_instance_sdk.internal.locks import exclusive_lock, project_manifest_lock_path
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
@@ -36,9 +38,7 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     CatalogValue as CatalogValue,
     CopyJournalStage as CopyJournalStage,
     MonitorCatalogSnapshot as MonitorCatalogSnapshot,
-    PostgresClusterClaim as PostgresClusterClaim,
     _row_to_backup as _row_to_backup,
-    _row_to_cluster_claim as _row_to_cluster_claim,
     _row_to_event as _row_to_event,
     _translate_sqlite_error as _translate_sqlite_error,
     decode_catalog_cursor as decode_catalog_cursor,
@@ -53,6 +53,9 @@ class _BackupMixin:
         _conn: sqlite3.Connection
         db_path: Path
         _read_only: bool
+
+        @staticmethod
+        def _cluster_text(value: str, label: str) -> str: ...
 
         def _add_event(
             self,
@@ -103,7 +106,7 @@ class _BackupMixin:
     def _register_project(
         self, project_id: str, repository_root: str | Path, git_common_dir: str | Path
     ) -> None:
-        """Register a canonical initialized project at an authorized write point."""
+        """Register or reactivate a canonical project at an authorized write point."""
         root = Path(repository_root).resolve()
         common = Path(git_common_dir).resolve()
         expected = f"project_{repo_key(root, common)}"
@@ -114,14 +117,120 @@ class _BackupMixin:
         with self._conn:
             self._conn.execute(
                 """INSERT INTO projects
-                   (project_id, repository_root, git_common_dir, registered_at, updated_at)
-                   VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                   (project_id, repository_root, git_common_dir, registered_at, updated_at,
+                    registration_state)
+                   VALUES (?, ?, ?, datetime('now'), datetime('now'), 'registered')
                    ON CONFLICT(project_id) DO UPDATE SET
                      repository_root=excluded.repository_root,
                      git_common_dir=excluded.git_common_dir,
-                     updated_at=excluded.updated_at""",
+                     registration_state='registered'""",
                 (project_id, str(root), str(common)),
             )
+
+    @_translate_sqlite_error
+    def list_projects(self, *, include_forgotten: bool = False) -> list[sqlite3.Row]:
+        """List ordinary projects, optionally including forgotten lifecycle rows."""
+        query = "SELECT * FROM projects"
+        if not include_forgotten:
+            query += " WHERE registration_state = 'registered'"
+        query += " ORDER BY project_id"
+        return self._conn.execute(query).fetchall()
+
+    @_translate_sqlite_error
+    def list_registered_projects(self) -> list[sqlite3.Row]:
+        """Return only projects visible to ordinary discovery and monitoring."""
+        return self.list_projects()
+
+    @_translate_sqlite_error
+    def forget_project(self, project_id: str, *, _lock_held: bool = False) -> bool:
+        """Mark one project forgotten without deleting any ownership rows."""
+        lock = (
+            contextlib.nullcontext()
+            if _lock_held
+            else exclusive_lock(project_manifest_lock_path(project_id))
+        )
+        with lock:
+            return self._forget_project_unlocked(project_id)
+
+    def _forget_project_unlocked(self, project_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT registration_state FROM projects WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            raise BackupCatalogError(f"project {project_id!r} is not registered")
+        if row["registration_state"] == "forgotten":
+            return False
+        if row["registration_state"] != "registered":
+            raise BackupCatalogError("project registration state is invalid")
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE projects SET registration_state = 'forgotten' "
+                "WHERE project_id = ? AND registration_state = 'registered'",
+                (project_id,),
+            )
+        return cursor.rowcount == 1
+
+    @_translate_sqlite_error
+    def reactivate_project(
+        self,
+        project_id: str,
+        repository_root: str | Path | None = None,
+        git_common_dir: str | Path | None = None,
+        *,
+        _lock_held: bool = False,
+    ) -> bool:
+        """Restore a forgotten project to ordinary discovery by full id."""
+        if (repository_root is None) != (git_common_dir is None):
+            raise BackupCatalogError("repository_root and git_common_dir must be supplied together")
+        canonical_root = Path(repository_root).resolve() if repository_root is not None else None
+        canonical_common = Path(git_common_dir).resolve() if git_common_dir is not None else None
+        if (
+            canonical_root is not None
+            and canonical_common is not None
+            and project_id != f"project_{repo_key(canonical_root, canonical_common)}"
+        ):
+            raise BackupCatalogError(
+                "project registration identity does not match repository metadata"
+            )
+        lock = (
+            contextlib.nullcontext()
+            if _lock_held
+            else exclusive_lock(project_manifest_lock_path(project_id))
+        )
+        with lock:
+            return self._reactivate_project_unlocked(
+                project_id, canonical_root=canonical_root, canonical_common=canonical_common
+            )
+
+    def _reactivate_project_unlocked(
+        self,
+        project_id: str,
+        *,
+        canonical_root: Path | None,
+        canonical_common: Path | None,
+    ) -> bool:
+        row = self._conn.execute(
+            "SELECT registration_state FROM projects WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            raise BackupCatalogError(f"project {project_id!r} is not registered")
+        if row["registration_state"] == "registered":
+            return False
+        if row["registration_state"] != "forgotten":
+            raise BackupCatalogError("project registration state is invalid")
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE projects SET repository_root = COALESCE(?, repository_root), "
+                "git_common_dir = COALESCE(?, git_common_dir), "
+                "registration_state = 'registered' "
+                "WHERE project_id = ? AND registration_state = 'forgotten'",
+                (
+                    str(canonical_root) if canonical_root is not None else None,
+                    str(canonical_common) if canonical_common is not None else None,
+                    project_id,
+                ),
+            )
+        return cursor.rowcount == 1
 
     def close(self) -> None:
         self._conn.close()
@@ -732,114 +841,3 @@ class _BackupMixin:
                 raise BackupNotAvailableError(
                     f"Backup {backup.id} content hash mismatch (tampered or modified)"
                 )
-
-    @staticmethod
-    def _cluster_uuid(value: uuid.UUID | str) -> str:
-        try:
-            parsed = value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise BackupCatalogError("cluster_id must be a complete UUID") from exc
-        return str(parsed)
-
-    @staticmethod
-    def _cluster_text(value: str, label: str) -> str:
-        if (
-            not isinstance(value, str)
-            or not value.strip()
-            or any(ord(char) < 0x20 for char in value)
-        ):
-            raise BackupCatalogError(f"{label} must be non-empty text")
-        return value.strip()
-
-    @_translate_sqlite_error
-    def _get_postgres_cluster(self, project_id: str) -> PostgresClusterClaim | None:
-        """Return the one persisted claim for a project, if it exists."""
-        project = self._cluster_text(project_id, "project_id")
-        row = self._conn.execute(
-            "SELECT * FROM postgres_clusters WHERE project_id = ?", (project,)
-        ).fetchone()
-        return _row_to_cluster_claim(row) if row is not None else None
-
-    @_translate_sqlite_error
-    def _get_postgres_cluster_by_id(
-        self, cluster_id: uuid.UUID | str
-    ) -> PostgresClusterClaim | None:
-        identifier = self._cluster_uuid(cluster_id)
-        row = self._conn.execute(
-            "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
-        ).fetchone()
-        return _row_to_cluster_claim(row) if row is not None else None
-
-    @_translate_sqlite_error
-    def _ensure_postgres_cluster_pending(
-        self,
-        project_id: str,
-        compose_project: str,
-        volume_name: str,
-    ) -> PostgresClusterClaim:
-        """Create or reuse a pending claim without replacing its identity."""
-        project = self._cluster_text(project_id, "project_id")
-        compose = self._cluster_text(compose_project, "compose_project")
-        volume = self._cluster_text(volume_name, "volume_name")
-        with self._conn:
-            row = self._conn.execute(
-                "SELECT * FROM postgres_clusters WHERE project_id = ?", (project,)
-            ).fetchone()
-            if row is not None:
-                claim = _row_to_cluster_claim(row)
-                if claim.compose_project != compose or claim.volume_name != volume:
-                    raise BackupCatalogError("existing postgres cluster claim does not match")
-                return claim
-            identifier = str(uuid.uuid4())
-            self._conn.execute(
-                """INSERT INTO postgres_clusters
-                   (cluster_id, project_id, compose_project, volume_name, state, created_at)
-                   VALUES (?, ?, ?, ?, 'pending', datetime('now'))""",
-                (identifier, project, compose, volume),
-            )
-            created = self._conn.execute(
-                "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
-            ).fetchone()
-            assert created is not None
-            return _row_to_cluster_claim(created)
-
-    @_translate_sqlite_error
-    def _activate_postgres_cluster(
-        self,
-        cluster_id: uuid.UUID | str,
-        project_id: str,
-        compose_project: str,
-        volume_name: str,
-    ) -> PostgresClusterClaim:
-        """Promote only the exact pending claim after external inspection."""
-        identifier = self._cluster_uuid(cluster_id)
-        project = self._cluster_text(project_id, "project_id")
-        compose = self._cluster_text(compose_project, "compose_project")
-        volume = self._cluster_text(volume_name, "volume_name")
-        with self._conn:
-            row = self._conn.execute(
-                "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
-            ).fetchone()
-            if row is None:
-                raise BackupCatalogError("postgres cluster claim does not exist")
-            claim = _row_to_cluster_claim(row)
-            if (
-                claim.project_id != project
-                or claim.compose_project != compose
-                or claim.volume_name != volume
-            ):
-                raise BackupCatalogError("postgres cluster claim identity does not match")
-            if claim.state == "active":
-                return claim
-            if claim.state != "pending":
-                raise BackupCatalogError("postgres cluster claim has an invalid state")
-            self._conn.execute(
-                "UPDATE postgres_clusters SET state='active', activated_at=datetime('now') "
-                "WHERE cluster_id = ? AND state='pending'",
-                (identifier,),
-            )
-            activated = self._conn.execute(
-                "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
-            ).fetchone()
-            assert activated is not None
-            return _row_to_cluster_claim(activated)

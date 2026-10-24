@@ -200,6 +200,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "monitor",
         "resource",
         "ps",
+        "remove",
     }
     assert "--project" in result.output
     assert "--env" in result.output
@@ -661,12 +662,14 @@ PUBLIC_METHOD_EXPECTATIONS = (
             "deletion_protection_reason",
             "distinct_restored_database_names",
             "fail_download",
+            "forget_project",
             "get_backup_history",
             "get_by_id",
             "get_copy_journal",
             "get_environment",
             "get_environment_runtime",
             "get_project",
+            "get_project_for_lifecycle",
             "get_runtime",
             "has_tracked_database",
             "is_owned_copy_backup",
@@ -682,6 +685,9 @@ PUBLIC_METHOD_EXPECTATIONS = (
             "list_environments",
             "list_environments_with_runtimes",
             "list_incomplete_operations",
+            "list_projects",
+            "list_registered_projects",
+            "reactivate_project",
             "reconcile_databases_dropped",
             "record_database_dropped",
             "record_databases_dropped",

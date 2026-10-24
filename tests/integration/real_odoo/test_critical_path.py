@@ -22,7 +22,7 @@ from tests.fixtures.xmlrpc_probe import xmlrpc_probe
 from .archive import ArchiveIdentity
 from .cleanup import audit_no_leaks, compose_down, write_odoo_config
 from .compose import ComposeLifecycle, wait_for_http
-from .conftest import E2ERuntime
+from .conftest import E2ERuntime, odoo_runtime_python
 
 pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
 
@@ -398,6 +398,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     # The public checkout owns the audited lock contract. It must not discover
     # Odoo requirements or compile/install an alternate lock.
     odoo_bin_path = project / odoo_bin_relative
+    odoo_python = odoo_runtime_python(runtime, project, odoo_bin_path)
 
     # The shared target fixture owns a disposable PostgreSQL only to establish
     # the target namespace.  The public project lifecycle owns the cluster used
@@ -406,6 +407,11 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "down", "--volumes", "--remove-orphans", timeout=60.0
     )
     assert down.returncode == 0, down.stderr
+    bootstrap_config = runtime.root / "critical-path-bootstrap.conf"
+    shutil.copy2(runtime.config_file, bootstrap_config)
+    with bootstrap_config.open("a", encoding="utf-8") as stream:
+        stream.write(f"logfile = {runtime.root / 'odoo.log'}\n")
+    bootstrap_config.chmod(0o600)
 
     init = runner.invoke(
         cli,
@@ -413,12 +419,14 @@ def test_source_backed_full_critical_path(  # noqa: C901
             "init",
             "--project",
             str(project),
-            "--no-input",
+            "--yes",
             "--allow-partial",
             "--odoo-bin",
             str(odoo_bin_path),
+            "--python",
+            str(odoo_python),
             "--config",
-            str(runtime.config_file),
+            str(bootstrap_config),
             "--database",
             runtime.topology.target_sentinel_database,
             "--postgres",

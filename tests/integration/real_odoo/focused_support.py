@@ -30,7 +30,7 @@ from scripts.real_odoo_pins import E2E_PINS
 from .archive import SourceBackupPlan
 from .cleanup import FailureEvidence, compose_down, replace_http_port
 from .compose import ComposeLifecycle, reserve_ports
-from .conftest import E2ERuntime
+from .conftest import E2ERuntime, odoo_runtime_python
 from .failures import assert_secret_free, write_failure_evidence
 from .test_critical_path import _remove_owned_fixture_tree
 
@@ -374,27 +374,46 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     )
     public_http.release()
     bootstrap_config = root / "focused-odoo.conf"
+    bootstrap_log = runtime.root / f"odoo-bootstrap-{runtime.run_id}-{root.name}.log"
     shutil.copy2(runtime.config_file, bootstrap_config)
     replace_http_port(bootstrap_config, public_http_port)
+    with bootstrap_config.open("a", encoding="utf-8") as stream:
+        stream.write(f"logfile = {bootstrap_log}\n")
+    bootstrap_config.chmod(0o600)
+    odoo_python = odoo_runtime_python(runtime, root, bootstrap_odoo_bin)
     command = shutil.which("odcli")
     if command is None:
         pytest.fail("odcli executable is required for focused public leaves")
     process_environment = {**os.environ, **environment}
     project_postgres_port = project_postgres.port
-    init = subprocess.run(
-        [
-            command,
-            "init",
-            "--project",
-            str(root),
-            "--no-input",
-            "--allow-partial",
-            "--odoo-bin",
-            str(bootstrap_odoo_bin),
-            "--python",
-            E2E_PINS.cpython,
-            "--config",
-            str(bootstrap_config),
+    init_args = [
+        command,
+        "init",
+        "--project",
+        str(root),
+        "--yes",
+        "--odoo-bin",
+        str(bootstrap_odoo_bin),
+        "--python",
+        str(odoo_python),
+        "--config",
+        str(bootstrap_config),
+    ]
+    if source is not None:
+        init_args.extend(
+            (
+                "--test-url",
+                source.endpoint,
+                "--test-database",
+                source.database,
+                "--test-branch",
+                E2E_PINS.odoo_source_commit,
+            )
+        )
+    else:
+        init_args.append("--allow-partial")
+    init_args.extend(
+        (
             "--database",
             runtime.topology.target_sentinel_database,
             "--postgres",
@@ -409,7 +428,10 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             str(public_http_port),
             "--format",
             "json",
-        ],
+        )
+    )
+    init = subprocess.run(
+        init_args,
         cwd=root,
         env=process_environment,
         capture_output=True,
@@ -417,6 +439,10 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         check=False,
     )
     assert init.returncode == 0, init.stdout + init.stderr
+    # Bootstrap-only config belongs to the project metadata boundary; keeping
+    # it in the repository root makes an otherwise clean source appear dirty
+    # to the guarded purge provenance check.
+    bootstrap_config.unlink(missing_ok=True)
     manifest = root / ".odcli" / "project.toml"
     initialized = ProjectConfig.load(root)
     initialized = msgspec.structs.replace(
@@ -435,12 +461,12 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     config_lines = [
         line
         for line in local_config.read_text(encoding="utf-8").splitlines()
-        if not line.lstrip().startswith("addons_path")
+        if not line.lstrip().startswith(("addons_path", "logfile"))
     ]
     config_lines.append(f"addons_path = {root / 'addons'}")
     local_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
     fixture_addon = Path(__file__).parents[2] / "fixtures" / "addons" / "odcli_e2e_probe"
-    logfile = root / f"odoo-{runtime.run_id}.log"
+    logfile = runtime.root / f"odoo-{runtime.run_id}-{root.name}.log"
     logfile.write_text("INFO focused leaf completed; secret=redacted\n", encoding="utf-8")
     with local_config.open("a", encoding="utf-8") as stream:
         stream.write(f"logfile = {logfile}\n")
@@ -603,6 +629,13 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     def remove_environment() -> None:
         if probe_destination.exists():
             _remove_owned_fixture_tree(worktree, probe_destination)
+        cleanup_catalog = BackupCatalog(db_path=Path(process_environment["ODCLI_E2E_CATALOG"]))
+        try:
+            environment_row = cleanup_catalog.get_environment(environment_id)
+        finally:
+            cleanup_catalog.close()
+        if environment_row is None or str(environment_row["state"]) == "removed":
+            return
         removed = subprocess.run(
             [
                 command,

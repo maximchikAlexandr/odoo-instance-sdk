@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -99,6 +99,7 @@ from odoo_instance_sdk.models import (
     PortObservation,
     PostgresClusterState,
     ProcessInventory,
+    ProjectRemovalResult,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -220,6 +221,18 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="primary project venv creation and refresh",
         success_path_argument=True,
         failure_args=("prepare-venv", "--python", sys.executable, "--venv", ".venv", "--dry-run"),
+    ),
+    PublicLeafCase(
+        ("remove",),
+        ("remove", "--project-id", "project-test", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="ProjectResource.remove_command",
+        aliases=(("rm",),),
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-16",),
+        e2e_rationale="public forget, re-init, exact-token purge, and full-id retry lifecycle",
+        failure_args=("remove", "--project-id", "project-test", "--purge", "--dry-run"),
     ),
     PublicLeafCase(
         ("doctor",),
@@ -1438,7 +1451,7 @@ def _patch_leaf_external(  # noqa: C901
 ) -> None:
     """Give one public leaf an isolated operation seam for the parity matrix."""
 
-    def fail_operation(*_args: object, **_kwargs: object) -> object:
+    def fail_operation(*_args: object, **_kwargs: object) -> NoReturn:
         raise RuntimeError("isolated external operation failed")
 
     path = case.path
@@ -1452,6 +1465,24 @@ def _patch_leaf_external(  # noqa: C901
             monkeypatch.setattr(
                 "odoo_instance_sdk.commands.prepare_venv.prepare_venv_command", fail_operation
             )
+        return
+    if path == ("remove",):
+
+        def remove_command(*_args: object, **_kwargs: object) -> object:
+            if failing:
+                fail_operation()
+            return _matrix_command(
+                ProjectRemovalResult(
+                    project_id="project-test",
+                    mode="purge",
+                    registration_state="registered",
+                )
+            )
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.project.ProjectResource.remove_command",
+            remove_command,
+        )
         return
     if path == ("doctor",):
         project_cfg = ProjectConfig(

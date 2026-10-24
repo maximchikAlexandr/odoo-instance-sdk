@@ -14,6 +14,7 @@ class DatabaseInventoryItem(msgspec.Struct, frozen=True, forbid_unknown_fields=T
     logical_size_bytes: int | None
     active_sessions: int
     is_default: bool
+    database_oid: int | None = None
     environment_ids: tuple[str, ...] = ()
     runtime_bindings: tuple[str, ...] = ()
     restore_backup_ids: tuple[str, ...] = ()

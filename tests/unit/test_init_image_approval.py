@@ -49,7 +49,12 @@ def image_executor(monkeypatch: pytest.MonkeyPatch) -> RecordingExecutor:
     def skip(
         context: RunContext[dict[str, JsonValue]], followup: _ComposeFollowup | _BootstrapFollowup
     ) -> None:
-        for step in followup.steps:
+        steps = (
+            followup.steps
+            if isinstance(followup, _ComposeFollowup)
+            else followup.plan.execution_steps
+        )
+        for step in steps:
             context.skip(step.step_id)
 
     monkeypatch.setattr("odoo_instance_sdk.project_init._execute_compose_followup_phase", skip)

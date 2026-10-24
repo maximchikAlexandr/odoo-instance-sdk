@@ -8,9 +8,7 @@ small source dataclasses make the expensive probes injectable while
 
 from __future__ import annotations
 
-import hashlib
 import os
-import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -20,6 +18,10 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import msgspec
 
 from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.resource_inventory_storage import (
+    open_catalog_read_only,
+    stable_resource_identity,
+)
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 from odoo_instance_sdk.models import StorageFootprint
 
@@ -41,6 +43,9 @@ class ResourceType(StrEnum):
     VOLUME = "volume"
     LOG = "log"
     FILESTORE = "filestore"
+    CONFIG = "config"
+    SECRET = "secret"
+    TEMPORARY = "temporary"
     OTHER = "other"
 
 
@@ -140,6 +145,11 @@ class EnvironmentResourceSource:
     storage: StorageFootprint | None = None
     backup_id: str | None = None
     last_error: str | None = None
+    generated_config_path: Path | None = None
+    log_paths: tuple[Path, ...] = ()
+    temp_paths: tuple[Path, ...] = ()
+    worktree_ownership: OwnershipConfidence = OwnershipConfidence.PROVEN
+    worktree_symlink_escape: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +158,12 @@ class ProjectResourceSource:
     repository_root: Path
     runtime_database: str | None = None
     database_cluster: str | None = None
+    config_paths: tuple[Path, ...] = ()
+    secret_paths: tuple[Path, ...] = ()
+    filestore_paths: tuple[Path, ...] = ()
+    primary_python_environment_path: Path | None = None
+    log_paths: tuple[Path, ...] = ()
+    temp_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,8 +171,9 @@ class VolumeResourceSource:
     """Result of the existing Compose volume probe.
 
     ``volume_name`` is an internal input only.  The projection exposes a
-    stable digest, never the Docker name, and a retained volume is never
-    marked reclaimable (including when it is stopped).
+    stable digest, never the Docker name. Reclaimability requires an exact
+    owned Compose identity; a live container is reclaimable only when it is
+    the exact container scheduled by the guarded removal adapter.
     """
 
     project_id: str
@@ -166,41 +183,17 @@ class VolumeResourceSource:
     available: bool
     usage_bytes: int | None
     active: bool | None = None
+    container_identity_verified: bool = False
     reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FileResourceSource:
     path: Path
-    kind: Literal["log", "filestore", "owned_file", "part"]
+    kind: Literal["log", "filestore", "config", "secret", "temporary", "owned_file", "part"]
     owner_identity: str | None = None
     ownership: OwnershipConfidence = OwnershipConfidence.UNKNOWN
-
-
-def stable_resource_identity(kind: str, value: str) -> str:
-    """Return a deterministic, non-path identity for local resource joins."""
-    if not kind.strip() or not value.strip():
-        raise ValueError("resource identity inputs must not be empty")
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
-    return f"{kind}:{digest}"
-
-
-def open_catalog_read_only(path: Path) -> BackupCatalog | None:
-    """Open an existing catalogue without schema creation or reconciliation."""
-    if not path.is_file():
-        return None
-    from urllib.parse import quote
-
-    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-    catalog = BackupCatalog.__new__(BackupCatalog)
-    catalog.db_path = path
-    catalog._read_only = True
-    catalog._conn = sqlite3.connect(
-        f"file:{quote(str(path.resolve()), safe='/')}?mode=ro", uri=True
-    )
-    catalog._conn.row_factory = sqlite3.Row
-    return catalog
+    symlink_escape: bool = False
 
 
 def _path_display(path: Path | None, roots: Sequence[Path]) -> str | None:
@@ -227,7 +220,7 @@ def _safe_message(message: str | None, fallback: str) -> str:
 
 def _file_size(path: Path) -> int | None:
     try:
-        return path.stat().st_size if path.is_file() else None
+        return path.stat().st_size if path.is_file() and not path.is_symlink() else None
     except OSError:
         return None
 
@@ -269,6 +262,7 @@ def _backup_item(
     projection: BackupProjection,
     roots: Sequence[Path],
     database_identities: Mapping[tuple[str, str], str],
+    project_id: str | None = None,
 ) -> tuple[ResourceInventoryItem, ResourceFinding | None]:
     backup_id = str(projection.backup.id)
     identity = f"backup:{backup_id}"
@@ -298,7 +292,8 @@ def _backup_item(
         recommendation=(
             f"backup delete {backup_id}" if projection.state.value == "available" else None
         ),
-        relationships=tuple(
+        relationships=((f"project:{project_id}",) if project_id is not None else ())
+        + tuple(
             database_identities.get(
                 (f"{link.db_host}:{link.db_port}", link.database_name),
                 _database_identity(f"{link.db_host}:{link.db_port}", link.database_name),
@@ -363,7 +358,11 @@ def _environment_items(
             type=ResourceType.WORKTREE,
             name=source.worktree_path.name or "worktree",
             relationships=(env_id,),
-            ownership_confidence=OwnershipConfidence.PROVEN,
+            ownership_confidence=(
+                OwnershipConfidence.UNKNOWN
+                if source.worktree_symlink_escape
+                else source.worktree_ownership
+            ),
             active_use=active,
             measured_bytes=worktree_bytes,
             measured_bytes_semantics="filesystem bytes" if worktree_bytes is not None else None,
@@ -375,7 +374,11 @@ def _environment_items(
             completeness_reason=None
             if worktree_bytes is not None
             else "worktree measurement unavailable",
-            reclaimability_reason="environment removal is evidence-gated",
+            reclaimability_reason=(
+                "worktree path crosses a symlink boundary"
+                if source.worktree_symlink_escape
+                else "environment removal is evidence-gated"
+            ),
             sanitized_path=_path_display(source.worktree_path, roots),
         ),
         ResourceInventoryItem(
@@ -405,6 +408,28 @@ def _environment_items(
             sanitized_path=_path_display(source.python_environment_path, roots),
         ),
     ]
+    if source.generated_config_path is not None:
+        items.append(
+            _file_item(
+                FileResourceSource(
+                    path=source.generated_config_path,
+                    kind="config",
+                    owner_identity=env_id,
+                    ownership=OwnershipConfidence.PROVEN,
+                ),
+                roots,
+            )
+        )
+    for path in source.log_paths:
+        items.append(
+            _file_item(FileResourceSource(path=path, kind="log", owner_identity=env_id), roots)
+        )
+    for path in source.temp_paths:
+        items.append(
+            _file_item(
+                FileResourceSource(path=path, kind="temporary", owner_identity=env_id), roots
+            )
+        )
     return tuple(items)
 
 
@@ -412,7 +437,14 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
     value = f"{source.project_id}\x00{source.volume_name}"
     identity = stable_resource_identity("volume", value)
     ownership = OwnershipConfidence.PROVEN if source.owned else OwnershipConfidence.UNKNOWN
-    complete = source.available and source.usage_bytes is not None
+    complete = source.available
+    reclaimable = (
+        source.owned
+        and source.available
+        and (
+            source.active is False or (source.active is True and source.container_identity_verified)
+        )
+    )
     return ResourceInventoryItem(
         stable_identity=identity,
         type=ResourceType.VOLUME,
@@ -436,9 +468,15 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
         completeness_reason=None
         if complete
         else _safe_message(source.reason, "volume measurement unavailable"),
-        reclaimable=False,
+        reclaimable=reclaimable,
         reclaimability_reason=(
-            "retained by postgres lifecycle" if source.owned else "volume ownership is not proven"
+            "exact inactive Compose identity observed"
+            if reclaimable and source.active is False
+            else "exact active Compose identity scheduled for guarded stop"
+            if reclaimable
+            else "retained by postgres lifecycle"
+            if source.owned
+            else "volume ownership is not proven"
         ),
         recommendation=None,
     )
@@ -447,6 +485,7 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
 def _file_item(source: FileResourceSource, roots: Sequence[Path]) -> ResourceInventoryItem:
     measured = _file_size(source.path)
     identity = stable_resource_identity(source.kind, str(source.path.resolve(strict=False)))
+    ownership = OwnershipConfidence.UNKNOWN if source.symlink_escape else source.ownership
     return ResourceInventoryItem(
         stable_identity=identity,
         type=(
@@ -454,11 +493,17 @@ def _file_item(source: FileResourceSource, roots: Sequence[Path]) -> ResourceInv
             if source.kind == "filestore"
             else ResourceType.LOG
             if source.kind == "log"
+            else ResourceType.CONFIG
+            if source.kind == "config"
+            else ResourceType.SECRET
+            if source.kind == "secret"
+            else ResourceType.TEMPORARY
+            if source.kind == "temporary"
             else ResourceType.OTHER
         ),
         name=source.path.name or source.kind,
         relationships=((source.owner_identity,) if source.owner_identity else ()),
-        ownership_confidence=source.ownership,
+        ownership_confidence=ownership,
         measured_bytes=measured,
         measured_bytes_semantics="filesystem bytes" if measured is not None else None,
         completeness=(
@@ -467,7 +512,11 @@ def _file_item(source: FileResourceSource, roots: Sequence[Path]) -> ResourceInv
             else MeasurementCompleteness.UNAVAILABLE
         ),
         completeness_reason=None if measured is not None else "filesystem measurement unavailable",
-        reclaimability_reason="preserved until ownership is proven",
+        reclaimability_reason=(
+            "symlink escape is never traversed"
+            if source.symlink_escape
+            else "preserved until ownership is proven"
+        ),
         sanitized_path=_path_display(source.path, roots),
     )
 
@@ -477,14 +526,35 @@ def _read_only_files(roots: Iterable[Path], known: set[Path]) -> tuple[FileResou
     result: list[FileResourceSource] = []
     for root in roots:
         try:
-            for directory, _directories, filenames in os.walk(root, followlinks=False):
+            for directory, directories, filenames in os.walk(root, followlinks=False):
+                for dirname in directories:
+                    path = Path(directory, dirname)
+                    if path.is_symlink():
+                        result.append(
+                            FileResourceSource(
+                                path=path,
+                                kind="owned_file",
+                                ownership=OwnershipConfidence.UNKNOWN,
+                                symlink_escape=True,
+                            )
+                        )
                 for filename in filenames:
                     path = Path(directory, filename)
                     try:
                         resolved = path.resolve(strict=False)
                     except OSError:
                         continue
-                    if resolved in known or path.is_symlink():
+                    if resolved in known:
+                        continue
+                    if path.is_symlink():
+                        result.append(
+                            FileResourceSource(
+                                path=path,
+                                kind="owned_file",
+                                ownership=OwnershipConfidence.UNKNOWN,
+                                symlink_escape=True,
+                            )
+                        )
                         continue
                     result.append(
                         FileResourceSource(
@@ -508,6 +578,7 @@ def build_resource_inventory(  # noqa: C901
     roots: Sequence[Path] = (),
     database_measurement_complete: bool = True,
     database_measurement_reason: str | None = None,
+    project_id: str | None = None,
 ) -> ResourceInventory:
     """Compose deterministic resource records from already captured inputs."""
     resources: dict[str, ResourceInventoryItem] = {}
@@ -520,13 +591,41 @@ def build_resource_inventory(  # noqa: C901
         if current is None:
             resources[item.stable_identity] = item
             return
-        relationships = tuple(dict.fromkeys((*current.relationships, *item.relationships)))
-        resources[item.stable_identity] = current.__class__(
-            **{**msgspec.structs.asdict(current), "relationships": relationships}
+        relationships = tuple(sorted(set(current.relationships).union(item.relationships)))
+        ownership = current.ownership_confidence
+        if ownership is not item.ownership_confidence:
+            if OwnershipConfidence.SHARED in {ownership, item.ownership_confidence}:
+                ownership = OwnershipConfidence.SHARED
+            elif OwnershipConfidence.UNKNOWN in {ownership, item.ownership_confidence}:
+                ownership = OwnershipConfidence.UNKNOWN
+            else:
+                ownership = OwnershipConfidence.EXTERNAL
+        active_use = current.active_use
+        if ActiveUse.ACTIVE in {active_use, item.active_use}:
+            active_use = ActiveUse.ACTIVE
+        elif ActiveUse.UNKNOWN in {active_use, item.active_use}:
+            active_use = ActiveUse.UNKNOWN
+        completeness = current.completeness
+        if MeasurementCompleteness.UNAVAILABLE in {completeness, item.completeness}:
+            completeness = MeasurementCompleteness.UNAVAILABLE
+        elif MeasurementCompleteness.PARTIAL in {completeness, item.completeness}:
+            completeness = MeasurementCompleteness.PARTIAL
+        values = msgspec.structs.asdict(current)
+        values.update(
+            relationships=relationships,
+            ownership_confidence=ownership,
+            active_use=active_use,
+            completeness=completeness,
+            reclaimable=current.reclaimable
+            and item.reclaimable
+            and ownership is OwnershipConfidence.PROVEN,
         )
+        if ownership is not OwnershipConfidence.PROVEN:
+            values["reclaimability_reason"] = "ownership evidence conflicts or is shared"
+        resources[item.stable_identity] = current.__class__(**values)
 
     for projection in backups:
-        item, finding = _backup_item(projection, roots, by_cluster_name)
+        item, finding = _backup_item(projection, roots, by_cluster_name, project_id)
         add(item)
         if finding is not None:
             findings[(finding.code, finding.stable_identity)] = finding
@@ -534,7 +633,7 @@ def build_resource_inventory(  # noqa: C901
     for database in database_items:
         cluster = str(database.cluster_id or database.cluster)
         identity = _database_identity(cluster, database.name)
-        complete = database.logical_size_bytes is not None and database_measurement_complete
+        complete = database_measurement_complete
         add(
             ResourceInventoryItem(
                 stable_identity=identity,
@@ -593,6 +692,78 @@ def build_resource_inventory(  # noqa: C901
                 sanitized_path=_path_display(project.repository_root, roots),
             )
         )
+        for path in project.config_paths:
+            add(
+                _file_item(
+                    FileResourceSource(
+                        path=path,
+                        kind="config",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
+                )
+            )
+        for path in project.secret_paths:
+            add(
+                _file_item(
+                    FileResourceSource(
+                        path=path,
+                        kind="secret",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
+                )
+            )
+        for path in project.filestore_paths:
+            add(
+                _file_item(
+                    FileResourceSource(
+                        path=path,
+                        kind="filestore",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
+                )
+            )
+        if project.primary_python_environment_path is not None:
+            add(
+                ResourceInventoryItem(
+                    stable_identity=stable_resource_identity(
+                        "python_environment", str(project.primary_python_environment_path.resolve())
+                    ),
+                    type=ResourceType.PYTHON_ENVIRONMENT,
+                    name=project.primary_python_environment_path.name or "python-environment",
+                    relationships=(identity,),
+                    ownership_confidence=OwnershipConfidence.PROVEN,
+                    active_use=ActiveUse.INACTIVE,
+                    completeness=MeasurementCompleteness.UNAVAILABLE,
+                    completeness_reason="Python environment measurement unavailable",
+                    sanitized_path=_path_display(project.primary_python_environment_path, roots),
+                    reclaimability_reason="primary project Python environment",
+                )
+            )
+        for path in project.log_paths:
+            add(
+                _file_item(
+                    FileResourceSource(
+                        path=path,
+                        kind="log",
+                        owner_identity=identity,
+                        ownership=OwnershipConfidence.PROVEN,
+                    ),
+                    roots,
+                )
+            )
+        for path in project.temp_paths:
+            add(
+                _file_item(
+                    FileResourceSource(path=path, kind="temporary", owner_identity=identity),
+                    roots,
+                )
+            )
 
     for environment in environments:
         for item in _environment_items(environment, roots):
@@ -655,6 +826,18 @@ def build_resource_inventory(  # noqa: C901
                 recommendation=None,
             )
             findings[(finding.code, finding.stable_identity)] = finding
+        if file_source.symlink_escape:
+            finding = ResourceFinding(
+                code="symlink_escape_retained",
+                severity="error",
+                stable_identity=stable_resource_identity(
+                    file_source.kind, str(file_source.path.resolve(strict=False))
+                ),
+                message="symlink escape was retained without following its target",
+                sanitized_path=_path_display(file_source.path, roots),
+                recommendation="inspect the link before removing its containing directory",
+            )
+            findings[(finding.code, finding.stable_identity)] = finding
 
     complete = database_measurement_complete
     if not database_measurement_complete:
@@ -688,7 +871,10 @@ def collect_resource_inventory(
     backup_root: Path | None = None,
     owned_directories: Sequence[Path] = (),
     database_measurement_reason: str | None = None,
+    database_measurement_complete: bool | None = None,
     project_id: str | None = None,
+    repository_root: str | None = None,
+    git_common_dir: str | None = None,
     all_projects: bool = False,
 ) -> ResourceInventory:
     """Read existing catalogue projections, then build the same pure graph.
@@ -707,7 +893,12 @@ def collect_resource_inventory(
             include_all_states=True, limit=1000, project_id=project_id
         )
         backups = page.items
-        rows = catalog._monitor_snapshot_rows(include_removed=False, project_id=project_id)
+        rows = catalog._monitor_snapshot_rows(
+            include_removed=False,
+            project_id=project_id,
+            repository_root=repository_root,
+            git_common_dir=git_common_dir,
+        )
         if not env_sources:
             env_sources = tuple(
                 EnvironmentResourceSource(
@@ -758,12 +949,17 @@ def collect_resource_inventory(
         volumes=volumes,
         files=(*supplied_files, *discovered_files),
         roots=roots,
-        database_measurement_complete=database_inventory is not None,
+        database_measurement_complete=(
+            database_inventory is not None
+            if database_measurement_complete is None
+            else database_measurement_complete
+        ),
         database_measurement_reason=(
             None
             if database_inventory is not None
             else database_measurement_reason or "PostgreSQL inventory was not collected"
         ),
+        project_id=project_id,
     )
 
 

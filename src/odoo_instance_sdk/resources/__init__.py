@@ -10,6 +10,7 @@ from odoo_instance_sdk.resources.environment import (
 from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 from odoo_instance_sdk.resources.module import ModuleResource
+from odoo_instance_sdk.resources.project import ProjectResource
 from odoo_instance_sdk.resources.publication import (
     PublicationResource,
     PublicationResult,
@@ -30,6 +31,7 @@ __all__ = [
     "InstanceFactory",
     "ModuleResource",
     "OdooInstance",
+    "ProjectResource",
     "PublicationResource",
     "PublicationResult",
     "PublicationSettings",

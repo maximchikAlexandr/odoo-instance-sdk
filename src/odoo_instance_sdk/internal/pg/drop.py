@@ -75,6 +75,7 @@ _verify_sql = verify_sql
 _catalog_database_in_use = catalog_database_in_use
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -209,6 +210,19 @@ def _assert_safe(
         )
 
 
+def _assert_database_identity(
+    inspection: _DropInspection,
+    *,
+    expected_database_oid: int | None,
+) -> None:
+    if not inspection.exists:
+        return
+    if type(inspection.database_oid) is not int or inspection.database_oid <= 0:
+        raise ConfigError("database drop database identity evidence is unavailable")
+    if expected_database_oid is not None and inspection.database_oid != expected_database_oid:
+        raise ConfigError("database drop database identity changed before mutation")
+
+
 def _drop_ownership_evidence(  # noqa: C901
     instance: OdooInstance,
     cluster: PostgresCluster,
@@ -221,6 +235,7 @@ def _drop_ownership_evidence(  # noqa: C901
     allow_environment_rollback_database: str | None = None,
     adopted_copy_claim: AdoptedCopyDatabaseClaim | None = None,
     allow_reconciled_absent: bool = False,
+    expected_database_oid: int | None = None,
 ) -> _DropOwnershipEvidence | None:
     from odoo_instance_sdk.internal.pg.adopted_drop import (
         adopted_copy_ownership_evidence,
@@ -305,8 +320,46 @@ def _drop_ownership_evidence(  # noqa: C901
         cluster.endpoint_host, cluster.endpoint_port, binding_database
     )
     if event is None:
-        raise ConfigError("database drop requires an exact current lifecycle event")
+        bound_records = catalog._project_bound_database_records(
+            claim.project_id,
+            claim.cluster_id,
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+        )
+        bound_oid = next((oid for name, oid in bound_records if name == binding_database), None)
+        if (
+            not any(name == binding_database for name, _oid in bound_records)
+            or type(bound_oid) is not int
+            or bound_oid <= 0
+            or (expected_database_oid is not None and bound_oid != expected_database_oid)
+        ):
+            raise ConfigError("database drop requires an exact current lifecycle event")
+        return _DropOwnershipEvidence(
+            event_type="bound",
+            event_sequence=0,
+            cluster_id=str(claim.cluster_id),
+            compose_project=claim.compose_project,
+            volume_name=claim.volume_name,
+            backup_id=None,
+            source_kind="init-binding",
+            source_sha256=None,
+            data_directory=None,
+            restore_state="complete",
+        )
     if event["event_type"] == "bootstrapped":
+        bound_oid = next(
+            (
+                oid
+                for name, oid in catalog._project_bound_database_records(
+                    claim.project_id,
+                    claim.cluster_id,
+                    cluster.endpoint_host,
+                    cluster.endpoint_port,
+                )
+                if name == binding_database
+            ),
+            None,
+        )
         if (
             allow_environment_rollback_database is not None
             or binding_database != "tmp"
@@ -317,6 +370,9 @@ def _drop_ownership_evidence(  # noqa: C901
             or event["source_sha256"] is not None
             or not isinstance(event["data_directory"], str)
             or not _safe_bootstrap_data_directory(event["data_directory"])
+            or type(bound_oid) is not int
+            or bound_oid <= 0
+            or (expected_database_oid is not None and bound_oid != expected_database_oid)
         ):
             raise ConfigError("database drop bootstrap ownership evidence does not match")
         return _DropOwnershipEvidence(
@@ -357,6 +413,29 @@ def _drop_ownership_evidence(  # noqa: C901
         or any(char not in "0123456789abcdef" for char in source_sha256)
     ):
         raise ConfigError("database drop restore binding provenance is invalid")
+    bound_oid = next(
+        (
+            oid
+            for name, oid in catalog._project_bound_database_records(
+                claim.project_id,
+                claim.cluster_id,
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+            )
+            if name == binding_database
+        ),
+        None,
+    )
+    restore_oid = binding["database_oid"]
+    if type(bound_oid) is int and type(restore_oid) is int and bound_oid != restore_oid:
+        raise ConfigError("database drop restore identity evidence does not match")
+    authorized_oid = bound_oid if type(bound_oid) is int else restore_oid
+    if (
+        type(authorized_oid) is not int
+        or authorized_oid <= 0
+        or (expected_database_oid is not None and authorized_oid != expected_database_oid)
+    ):
+        raise ConfigError("database drop restore identity evidence is unavailable")
     if (
         event["cluster_id"] != str(claim.cluster_id)
         or event["database_name"] != binding_database
@@ -475,6 +554,8 @@ def build_database_drop_command(  # noqa: C901
     command_origin: str | None = None,
     defer_planning: bool = False,
     expected_restore: Callable[[], DatabaseDropRestoreExpectation | None] | None = None,
+    project: ProjectConfig | None = None,
+    expected_database_oid: int | None = None,
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
     database = database_name
@@ -505,14 +586,15 @@ def build_database_drop_command(  # noqa: C901
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
     from odoo_instance_sdk.project import ProjectConfig
 
-    project = ProjectConfig.load(project_path)
+    project = project or ProjectConfig.load(project_path)
     binding = resolve_database_context(instance, explicit=database, project=project)
     cluster = binding.cluster
     if cluster is None:
         raise ConfigError("database drop requires the resolved project's PostgreSQL cluster")
     process_executor = executor or SubprocessExecutor()
+    planning_step_id = scoped(_PLANNING_INSPECT_STEP)
     planning_step = _inspect_command_step(
-        binding, database=database, step_id=_PLANNING_INSPECT_STEP, timeout=timeout
+        binding, database=database, step_id=planning_step_id, timeout=timeout
     )
     ownership: _DropOwnershipEvidence | None = None
     if defer_planning:
@@ -532,6 +614,10 @@ def build_database_drop_command(  # noqa: C901
         if not isinstance(planning_result, ProcessResult):
             raise ConfigError("database safety inspection returned no process result")
         inspection = _decode_inspection(planning_result, database)
+        _assert_database_identity(
+            inspection,
+            expected_database_oid=expected_database_oid,
+        )
     project_default = project.default_source_database
     preconditions = _safety_preconditions(
         inspection,
@@ -662,9 +748,21 @@ def build_database_drop_command(  # noqa: C901
     )
 
     def current_default() -> str | None:
-        return ProjectConfig.load(project_path).default_source_database
+        return project.default_source_database
 
     def _execute_locked(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:  # noqa: C901
+        planned_before_lock: _DropInspection | None = None
+        captured_database_oid = expected_database_oid if defer_planning else inspection.database_oid
+        if defer_planning:
+            planned_before_lock = _decode_inspection(
+                _process_result(context, planning_step_id), database
+            )
+            _assert_database_identity(
+                planned_before_lock,
+                expected_database_oid=expected_database_oid,
+            )
+            if planned_before_lock.database_oid is not None:
+                captured_database_oid = planned_before_lock.database_oid
         current_ownership = _drop_ownership_evidence(
             instance,
             cluster,
@@ -676,6 +774,7 @@ def build_database_drop_command(  # noqa: C901
             allow_environment_rollback_database=allow_environment_rollback_database,
             adopted_copy_claim=adopted_copy_claim,
             allow_reconciled_absent=idempotent_absent,
+            expected_database_oid=captured_database_oid,
         )
         expected = expected_restore() if expected_restore is not None else None
         if command_origin == "database-restore-retry":
@@ -692,10 +791,7 @@ def build_database_drop_command(  # noqa: C901
         if ownership is not None and current_ownership != ownership:
             raise ConfigError("database drop ownership evidence changed before mutation")
         current_project_default = current_default()
-        if defer_planning:
-            planned_before_lock = _decode_inspection(
-                _process_result(context, _PLANNING_INSPECT_STEP), database
-            )
+        if planned_before_lock is not None:
             _assert_safe(
                 planned_before_lock,
                 database=database,
@@ -751,6 +847,10 @@ def build_database_drop_command(  # noqa: C901
             checked = _decode_inspection(
                 _process_result(context, revalidate_terminate_step_id), database
             )
+            _assert_database_identity(
+                checked,
+                expected_database_oid=captured_database_oid,
+            )
             _assert_safe(
                 checked,
                 database=database,
@@ -767,6 +867,10 @@ def build_database_drop_command(  # noqa: C901
             context.skip(revalidate_terminate_step_id)
             context.skip(terminate_step_id)
         checked = _decode_inspection(_process_result(context, revalidate_drop_step_id), database)
+        _assert_database_identity(
+            checked,
+            expected_database_oid=captured_database_oid,
+        )
         if idempotent_absent and not checked.exists:
             if context.planned(drop_step_id) and not context.consumed(drop_step_id):
                 context.skip(drop_step_id)

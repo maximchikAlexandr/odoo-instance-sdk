@@ -4,8 +4,10 @@ import contextlib
 import os
 import uuid
 from collections.abc import Callable, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypedDict, TypeVar
 
 from odoo_instance_sdk.exceptions import (
     BackupDownloadError,
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
         PreparedAction,
         PreparedStep,
         ProcessExecutor,
+        ProcessResultLike,
         RunContext,
     )
     from odoo_instance_sdk.internal.transport import OdooHttpClient
@@ -52,6 +55,59 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
+
+
+class _RestoreIdentity(TypedDict, total=False):
+    database_oid: int
+
+
+@dataclass(slots=True)
+class _RestoreOidCapture:
+    """Keep the post-restore OID private to one command execution."""
+
+    value: str | bytes | None = None
+    captured: bool = False
+
+    def capture(self, value: str | bytes | None) -> None:
+        self.value = value
+        self.captured = True
+
+    def take(self, result: ProcessResultLike | None) -> str | bytes | None:
+        from odoo_instance_sdk.internal.proc import ProcessResult
+
+        value = self.value
+        if not self.captured and isinstance(result, ProcessResult):
+            value = result.stdout
+        self.value = None
+        self.captured = False
+        return value
+
+
+_RESTORE_OID_CAPTURE: ContextVar[_RestoreOidCapture | None] = ContextVar(
+    "restore_oid_capture", default=None
+)
+
+
+def _capture_restore_oid_stdout(value: str | bytes | None) -> None:
+    capture = _RESTORE_OID_CAPTURE.get()
+    if capture is not None:
+        capture.capture(value)
+
+
+def _protect_restore_oid_probe(prepared: PreparedStep, step_id: str) -> PreparedStep:
+    if step_id != "database.restore.exists-after":
+        return prepared
+    return replace(
+        prepared,
+        private_stdout_consumer=_capture_restore_oid_stdout,
+        private_stdout_value_free=True,
+    )
+
+
+def _restore_probe_query(database: str, step_id: str) -> str:
+    prefix = "oid" if step_id == "database.restore.exists-after" else "1"
+    escaped_database = database.replace("'", "''")
+    return f"SELECT {prefix} FROM pg_database WHERE datname='{escaped_database}'"
 
 
 class _BackupMixin:
@@ -294,13 +350,28 @@ class _BackupMixin:
     ) -> RestoreResult:
         from odoo_instance_sdk.internal.proc import active_context
 
-        if active_context() is not None:
+        context = active_context()
+        if context is not None:
+            before_step_id = (
+                "database.restore.exists-before"
+                if context.planned("database.restore.exists-before")
+                and not context.consumed("database.restore.exists-before")
+                else None
+            )
+            after_step_id = (
+                "database.restore.exists-after"
+                if context.planned("database.restore.exists-after")
+                and not context.consumed("database.restore.exists-after")
+                else None
+            )
             return self._restore_impl(
                 backup,
                 target_database_name,
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
+                before_step_id=before_step_id,
+                after_step_id=after_step_id,
             )
         return self.restore_command(
             backup,
@@ -365,6 +436,14 @@ class _BackupMixin:
 
         if active_context() is None:
             raise RuntimeError("verified restore requires an active command context")
+        context = active_context()
+        after_step_id = (
+            "database.restore.exists-after"
+            if context is not None
+            and context.planned("database.restore.exists-after")
+            and not context.consumed("database.restore.exists-after")
+            else None
+        )
         return self._restore_impl(
             backup,
             target_database_name,
@@ -372,6 +451,7 @@ class _BackupMixin:
             neutralize_database=neutralize_database,
             timeout=timeout,
             skip_existence_checks=True,
+            after_step_id=after_step_id,
             record_provenance=record_provenance,
         )
 
@@ -396,12 +476,29 @@ class _BackupMixin:
         if not isinstance(payload, SelectedBackupRestorePayload):
             raise InstanceConfigurationError("local restore evidence is unavailable")
         _assert_verified_snapshot_unchanged(payload)
+        context = active_context()
+        before_step_id = (
+            "database.restore.exists-before"
+            if context is not None
+            and context.planned("database.restore.exists-before")
+            and not context.consumed("database.restore.exists-before")
+            else None
+        )
+        after_step_id = (
+            "database.restore.exists-after"
+            if context is not None
+            and context.planned("database.restore.exists-after")
+            and not context.consumed("database.restore.exists-after")
+            else None
+        )
         self._restore_impl_locked(
             payload,
             target_database_name,
             copy=copy,
             neutralize_database=neutralize_database,
             timeout=timeout,
+            before_step_id=before_step_id,
+            after_step_id=after_step_id,
         )
 
     def _restore_impl(
@@ -498,8 +595,24 @@ class _BackupMixin:
                 raise BackupNotAvailableError("Backup file not found or unreadable")
             raise DatabaseManagerUnavailableError("local restore snapshot is unavailable")
 
+        restore_oid_capture = _RestoreOidCapture()
+
         def target_exists(step_id: str | None) -> bool:
             if step_id is not None:
+                if step_id == "database.restore.exists-after":
+                    from odoo_instance_sdk.internal.proc import active_context
+
+                    context = active_context()
+                    if context is not None and context.planned(step_id):
+                        result = context.process(step_id)
+                        if getattr(result, "returncode", 1) != 0:
+                            return False
+                        observed = restore_oid_capture.value
+                        if observed is None:
+                            observed = getattr(result, "stdout", None)
+                        if isinstance(observed, bytes):
+                            observed = observed.decode("utf-8", errors="replace")
+                        return bool(isinstance(observed, str) and observed.strip())
                 return self._exists_impl(target_database_name, psql_step_id=step_id)
             return self.exists(target_database_name)
 
@@ -575,14 +688,57 @@ class _BackupMixin:
             status_code, message = http_failure
             raise DatabaseError(status_code=status_code or 0, message=message, body=b"") from None
 
-        if not skip_existence_checks and not target_exists(after_step_id):
+        restore_oid_token = (
+            _RESTORE_OID_CAPTURE.set(restore_oid_capture) if after_step_id is not None else None
+        )
+        try:
+            after_exists = target_exists(after_step_id)
+        finally:
+            if restore_oid_token is not None:
+                _RESTORE_OID_CAPTURE.reset(restore_oid_token)
+        if not skip_existence_checks and not after_exists:
             raise RestoreFailedError(
                 f"Database {target_database_name!r} was not created after restore"
             )
 
+        database_oid: int | None = None
+        if after_step_id is not None:
+            from odoo_instance_sdk.internal.proc import ProcessResult
+
+            context = active_context()
+            result = None if context is None else context.results.get(after_step_id)
+            # The after probe is consumed above by ``target_exists``.  Its
+            # private stdout callback therefore has already populated the
+            # execution-local capture; do not read the public redacted
+            # ProcessResult as the ownership source of truth.
+            raw_oid = restore_oid_capture.take(result)
+            if isinstance(result, ProcessResult):
+                raw_oid = raw_oid if raw_oid is not None else result.stdout
+                raw_text = (
+                    raw_oid.decode("utf-8", errors="replace")
+                    if isinstance(raw_oid, bytes)
+                    else raw_oid
+                )
+                if raw_text is None or not raw_text.strip().isdigit() or int(raw_text.strip()) <= 0:
+                    raise RestoreFailedError(
+                        "Database identity observation was invalid after restore"
+                    )
+                database_oid = int(raw_text.strip())
+
+        if (
+            record_provenance
+            and postgres_cluster is not None
+            and getattr(postgres_cluster, "owned", False)
+            and database_oid is None
+        ):
+            raise RestoreFailedError("Database identity observation was unavailable after restore")
+
         ck = self._cluster
         if ck is not None and record_provenance:
             db_host, db_port = ck
+            restore_identity: _RestoreIdentity = (
+                {"database_oid": database_oid} if database_oid is not None else {}
+            )
             if source_kind == "local_archive":
                 catalog.record_restore(
                     db_host,
@@ -592,6 +748,7 @@ class _BackupMixin:
                     source_sha256=source_sha256,
                     cluster_id=cluster_identity,
                     data_directory=data_directory,
+                    **restore_identity,
                 )
             elif cluster_identity is None and data_directory is None:
                 assert isinstance(source, Backup)
@@ -600,6 +757,7 @@ class _BackupMixin:
                     db_port,
                     target_database_name,
                     str(source.id),
+                    **restore_identity,
                 )
             else:
                 assert isinstance(source, Backup)
@@ -610,6 +768,20 @@ class _BackupMixin:
                     str(source.id),
                     cluster_id=cluster_identity,
                     data_directory=data_directory,
+                    **restore_identity,
+                )
+            if (
+                database_oid is not None
+                and cluster_identity is not None
+                and postgres_cluster is not None
+            ):
+                catalog._record_project_database_binding(
+                    postgres_cluster._project_id,
+                    cluster_identity,
+                    db_host,
+                    db_port,
+                    target_database_name,
+                    database_oid=database_oid,
                 )
 
     def drop(

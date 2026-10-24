@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         ProcessNotFoundError,
         ProjectContextError,
         ProjectManifestNotFoundError,
+        ProjectRemovalError,
         ReadinessTimeoutError,
         RestoreFailedError,
         UnplannedStepError,
@@ -181,6 +182,10 @@ if TYPE_CHECKING:
         PostgresServerInfo,
         PostgresStatsResult,
         ProcessStatus,
+        ProjectRemovalErrorDetails,
+        ProjectRemovalResult,
+        ProjectResourceDecision,
+        ProjectSelector,
         ProjectSummary,
         PythonEnvFootprint,
         ReadinessResult,
@@ -222,6 +227,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.resources.project import ProjectResource
     from odoo_instance_sdk.resources.publication import (
         PublicationResource,
         PublicationResult,
@@ -259,6 +265,12 @@ if TYPE_CHECKING:
             | PublicationResult
             | PublicationSettings
             | PublicationTarget
+            | ProjectRemovalErrorDetails
+            | ProjectRemovalResult
+            | ProjectResourceDecision
+            | ProjectResource
+            | ProjectSelector
+            | ProjectRemovalError
         ]
         | _CanonicalBytes
         | _CanonicalProjection
@@ -547,6 +559,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "PublicationResult": ("odoo_instance_sdk.resources.publication", "PublicationResult"),
     "PublicationSettings": ("odoo_instance_sdk.resources.publication", "PublicationSettings"),
     "PublicationTarget": ("odoo_instance_sdk.resources.publication", "PublicationTarget"),
+    "ProjectResource": ("odoo_instance_sdk.resources.project", "ProjectResource"),
     "render_panel_route": ("odoo_instance_sdk.resources.publication", "render_panel_route"),
     "PostgresProjectConfig": ("odoo_instance_sdk.project", "PostgresProjectConfig"),
     "ProcessExitedBeforeReady": ("odoo_instance_sdk.exceptions", "ProcessExitedBeforeReady"),
@@ -560,6 +573,17 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "ProjectManifestNotFoundError",
     ),
     "ProjectSummary": ("odoo_instance_sdk.models", "ProjectSummary"),
+    "ProjectRemovalError": ("odoo_instance_sdk.exceptions", "ProjectRemovalError"),
+    "ProjectRemovalErrorDetails": (
+        "odoo_instance_sdk.models",
+        "ProjectRemovalErrorDetails",
+    ),
+    "ProjectRemovalMode": ("odoo_instance_sdk.models", "ProjectRemovalMode"),
+    "ProjectRemovalResult": ("odoo_instance_sdk.models", "ProjectRemovalResult"),
+    "ProjectRegistrationState": ("odoo_instance_sdk.models", "ProjectRegistrationState"),
+    "ProjectResourceAction": ("odoo_instance_sdk.models", "ProjectResourceAction"),
+    "ProjectResourceDecision": ("odoo_instance_sdk.models", "ProjectResourceDecision"),
+    "ProjectSelector": ("odoo_instance_sdk.models", "ProjectSelector"),
     "PythonEnvFootprint": ("odoo_instance_sdk.models", "PythonEnvFootprint"),
     "prepare_venv": ("odoo_instance_sdk.project_init", "prepare_venv"),
     "prepare_venv_command": ("odoo_instance_sdk.project_init", "prepare_venv_command"),
@@ -814,6 +838,10 @@ if TYPE_CHECKING:
         "ProjectConfig",
         "ProjectContextError",
         "ProjectManifestNotFoundError",
+        "ProjectRemovalResult",
+        "ProjectResource",
+        "ProjectResourceDecision",
+        "ProjectSelector",
         "ProjectSummary",
         "PythonEnvFootprint",
         "ReadinessResult",
