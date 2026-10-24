@@ -419,6 +419,25 @@ def test_admin_keeps_the_trusted_proxy_boundary(
         ).status_code
         == 400
     )
+    assert (
+        client.get(
+            "/admin/",
+            headers={**forwarded, "X-Forwarded-Proto": "http"},
+            follow_redirects=False,
+        ).status_code
+        == 400
+    )
+
+    # Caddy connects to the monitor over HTTP. Admin must still generate HTTPS
+    # asset URLs for the external browser after the proxy boundary is checked.
+    upstream_client = TestClient(app, base_url="http://panel.example.test")
+    login_page = upstream_client.get("/admin/login", headers=forwarded)
+    assert login_page.status_code == 200
+    assert "https://panel.example.test/admin/static/css/vendor/tabler.min.css" in login_page.text
+    assert "http://panel.example.test/admin/static/css/" not in login_page.text
+    css = upstream_client.get("/admin/static/css/vendor/tabler.min.css", headers=forwarded)
+    assert css.status_code == 200
+    assert "text/css" in css.headers["content-type"]
 
 
 def test_catalogue_resources_are_exactly_three_read_only_views(

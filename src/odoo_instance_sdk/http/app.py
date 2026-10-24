@@ -133,6 +133,8 @@ def create_app(  # noqa: C901
             or "," in request.headers.get("x-forwarded-proto", "")
         ):
             return Response(content="Invalid external proxy boundary", status_code=400)
+        # The trusted HTTPS origin is authoritative for generated Admin asset URLs.
+        request.scope["scheme"] = external_proxy.scheme
         return await call_next(request)
 
     app.middleware("http")(trusted_external_proxy if external_proxy else loopback_host_only)
