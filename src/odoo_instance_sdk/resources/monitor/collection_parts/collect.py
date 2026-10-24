@@ -36,6 +36,8 @@ from odoo_instance_sdk.resources.monitor.planning import (
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, MonitorCatalogSnapshot
 
+_PROJECT_STORAGE_TIMEOUT_SECONDS = 10.0
+
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
@@ -822,7 +824,7 @@ class _CollectMixin:
                         step_id=f"monitor.{project_name}.storage.project",
                         argv=(du, "-sb", str(repository)),
                         cwd=str(repository.parent),
-                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        timeout=_PROJECT_STORAGE_TIMEOUT_SECONDS,
                         read_only=True,
                         text=True,
                     )

@@ -21,11 +21,13 @@ from tests.fixtures.transport import (
 
 from odoo_instance_sdk.exceptions import MonitorError
 from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.internal import storage_footprint as storage_footprint_module
 from odoo_instance_sdk.internal.git_activity import collect_git_activity
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
     ProcessResult,
+    ProcessTimeoutError,
     RecordingExecutor,
     SubprocessExecutor,
 )
@@ -45,6 +47,7 @@ from odoo_instance_sdk.models import (
     Snapshot,
 )
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.resources.monitor.collection_parts import storage as storage_module
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.monitor_support import (
@@ -1104,6 +1107,71 @@ def test_snapshot_command_failed_git_and_docker_probes_are_not_retried(
 
     assert snapshot.environments[0].git.state is GitActivityState.ORPHAN
     assert tuple(step.step_id for step in executor.executed) == process_ids
+
+
+def test_project_storage_du_timeout_uses_bounded_fallback_without_partial_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "a.bin").write_bytes(b"partial")
+    (repository / "b.bin").write_bytes(b"expires")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(
+        catalog,
+        _make_env(
+            str(uuid.uuid4()),
+            repository_root=str(repository),
+            git_common_dir=str(repository / ".git"),
+            worktree_path=str(worktree),
+        ),
+    )
+    catalog.close()
+
+    timed_out_steps: list[PreparedStep] = []
+
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        if prepared.step_id.endswith(".storage.project"):
+            timed_out_steps.append(prepared)
+            raise ProcessTimeoutError(prepared.argv, 10.0, duration=10.0)
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    fallback_paths: list[Path] = []
+    original_walk_size = storage_footprint_module._walk_size
+
+    def expire_during_walk(path: Path) -> int | None:
+        fallback_paths.append(path)
+        clock = iter((0.0, 0.0, 0.0, 11.0))
+        return original_walk_size(path, monotonic=lambda: next(clock))
+
+    monkeypatch.setattr(storage_module, "_walk_size", expire_during_walk)
+    executor = RecordingExecutor(result_factory=result_factory)
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3", _executor=executor)
+
+    command = monitor.snapshot_command()
+    project_step = next(
+        step for step in command.plan.process_steps if step.step_id.endswith(".storage.project")
+    )
+    snapshot = command.run()
+
+    assert project_step.timeout == 10.0
+    assert len(timed_out_steps) == 1
+    assert timed_out_steps[0].step_id == project_step.step_id
+    assert timed_out_steps[0].timeout == 10.0
+    assert fallback_paths == [repository]
+    assert snapshot.projects[0].storage.total_bytes is None
+    assert snapshot.projects[0].storage.complete is False
 
 
 @pytest.mark.parametrize("base_ref", ["HEAD", "refs/tags/v1"])
