@@ -69,6 +69,31 @@ class ClusterSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, k
             )
 
 
+class BackupFreshnessSnapshot(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Proven source-backup age for one displayed database.
+
+    Both fields are null when the current database provenance is unknown.  A
+    known timestamp always carries its non-negative age from the snapshot
+    generation time; this keeps clock skew visible without inventing a date.
+    """
+
+    downloaded_at: datetime | None = None
+    age_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.downloaded_at is None:
+            if self.age_seconds is not None:
+                raise ValueError("unknown backup freshness cannot have an age")
+            return
+        if self.age_seconds is None or self.age_seconds < 0:
+            raise ValueError("known backup freshness requires a non-negative age")
+
+
+_UNKNOWN_BACKUP_FRESHNESS = BackupFreshnessSnapshot()
+
+
 class EnvironmentSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     id: str
     project_id: str
@@ -86,6 +111,7 @@ class EnvironmentSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     storage: StorageFootprint
     pgadmin: PgAdminEligibility
     publication: PublicationSnapshot = _UNPUBLISHED
+    backup_freshness: BackupFreshnessSnapshot = _UNKNOWN_BACKUP_FRESHNESS
 
 
 class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -97,6 +123,7 @@ class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     cluster: ClusterSnapshot | None
     runtime: RuntimeMetrics | None
     publication: PublicationSnapshot = _UNPUBLISHED
+    backup_freshness: BackupFreshnessSnapshot = _UNKNOWN_BACKUP_FRESHNESS
 
 
 class CheckoutClusterSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

@@ -8,6 +8,7 @@ import re
 import shutil
 import tomllib
 from dataclasses import dataclass
+from importlib import import_module
 from importlib.metadata import Distribution
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -414,9 +415,9 @@ def verify_dashboard_installation(provenance: _DashboardProvenance) -> None:
     if "dashboard" not in extras:
         return
     try:
-        import fastapi  # noqa: F401
-        import starlette  # type: ignore[import-not-found]  # noqa: F401
-        import uvicorn  # noqa: F401
+        import_module("fastapi")
+        import_module("starlette")
+        import_module("uvicorn")
 
         import odoo_instance_sdk
     except ImportError as exc:

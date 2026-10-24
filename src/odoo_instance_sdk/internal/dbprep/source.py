@@ -47,6 +47,7 @@ from odoo_instance_sdk.internal.project_runtime import (
     resolve_uv_executable,
 )
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
+from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
@@ -479,8 +480,16 @@ def remote_password_key(remote_name: str | None = None) -> str:
 
 
 def _remote_password(
-    environ: Mapping[str, str] | None = None, *, remote_name: str | None = None
+    environ: Mapping[str, str] | None = None,
+    *,
+    remote_name: str | None = None,
+    base_url: str | None = None,
+    user_root: Path | str | None = None,
 ) -> str:
+    if base_url is not None:
+        credential = SecretStore(user_root=user_root).lookup_remote_odoo(base_url)
+        if credential is not None:
+            return credential.master_password
     source = os.environ if environ is None else environ
     key = remote_password_key(remote_name)
     value = source.get(key)
@@ -508,6 +517,7 @@ def acquire_copy_backup(
         password = _remote_password(
             effective_project_environment(load_project_environment(repo_root)),
             remote_name=remote_name,
+            base_url=source.config.base_url,
         )
         remote = client.instance(source.config.base_url, master_password=password)
         project_id = f"project_{repo_key(repo_root, git_common_dir(repo_root))}"

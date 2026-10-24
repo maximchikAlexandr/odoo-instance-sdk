@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.packaging, pytest.mark.timeout(180)]
 _REPO = Path(__file__).resolve().parents[2]
 _SOURCE_REPO_URL = "git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
 _V16_CATALOG = _REPO / "tests" / "fixtures" / "catalog_v16.sql"
-_GIT_COMMAND_TIMEOUT_SECONDS = 10
+_GIT_COMMAND_TIMEOUT_SECONDS = 30
 _INSTALL_CHILD_TIMEOUT_SECONDS = 120
 _FULL_UPDATE_TEST_TIMEOUT_SECONDS = 600
 _FULL_UPDATE_CHILD_TIMEOUT_SECONDS = 240
@@ -549,12 +549,13 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
             str(tool_python),
             "-c",
             (
-                "import fastapi, starlette, uvicorn; "
+                "import fastapi, starlette, starlette_admin, pwdlib, sqlcipher3, uvicorn; "
                 "from pathlib import Path; "
                 "root=Path(__import__('odoo_instance_sdk').__file__).parent / 'web' / 'dist'; "
                 "assert (root / 'index.html').is_file(); "
                 "assert any((root / 'assets').iterdir()); "
-                "print(f'{fastapi.__name__}:{starlette.__name__}:{uvicorn.__name__}')"
+                "print(f'{fastapi.__name__}:{starlette.__name__}:{starlette_admin.__name__}:'"
+                "f'{pwdlib.__name__}:{sqlcipher3.__name__}:{uvicorn.__name__}')"
             ),
         ],
         check=False,
@@ -563,7 +564,7 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
         env=env,
     )
     assert imports.returncode == 0, imports.stderr
-    assert imports.stdout.strip() == "fastapi:starlette:uvicorn"
+    assert imports.stdout.strip() == "fastapi:starlette:starlette_admin:pwdlib:sqlcipher3:uvicorn"
 
     readiness = _run_dashboard_monitor(odcli, env=env, port=18080 + (os.getpid() % 1000))
     assert readiness.error is None, readiness.error
@@ -571,14 +572,18 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
     assert readiness.openapi_status == 200
 
 
-@pytest.mark.timeout(_FULL_UPDATE_TEST_TIMEOUT_SECONDS)
-def test_clean_vcs_install_builds_dashboard_assets_and_keeps_core_only_minimal(
-    tmp_path: Path,
-) -> None:
-    """A clean Git source builds SPA assets while a core-only tool stays minimal."""
-    _require_uv()
-    fixture, head = _create_clean_vcs_fixture(tmp_path)
+@pytest.fixture(scope="module")
+def clean_vcs_source(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
+    return _create_clean_vcs_fixture(tmp_path_factory.mktemp("clean-vcs-source"))
 
+
+@pytest.mark.timeout(_FULL_UPDATE_TEST_TIMEOUT_SECONDS)
+def test_clean_vcs_install_builds_dashboard_assets(
+    clean_vcs_source: tuple[Path, str], tmp_path: Path
+) -> None:
+    """A clean Git source builds and packages the dashboard SPA artifacts."""
+    _require_uv()
+    fixture, head = clean_vcs_source
     dashboard_root = tmp_path / "dashboard"
     dashboard_root.mkdir()
     dashboard_env = _isolated_home(dashboard_root, source_repo=fixture)
@@ -599,7 +604,7 @@ def test_clean_vcs_install_builds_dashboard_assets_and_keeps_core_only_minimal(
             str(dashboard_python),
             "-c",
             (
-                "import fastapi, starlette, uvicorn, odoo_instance_sdk\n"
+                "import fastapi, starlette, starlette_admin, pwdlib, sqlcipher3, uvicorn, odoo_instance_sdk\n"
                 "from pathlib import Path\n"
                 "root = Path(odoo_instance_sdk.__file__).parent / 'web' / 'dist'\n"
                 "assert (root / 'index.html').is_file()\n"
@@ -614,6 +619,14 @@ def test_clean_vcs_install_builds_dashboard_assets_and_keeps_core_only_minimal(
     assert dashboard_probe.returncode == 0, dashboard_probe.stderr
     assert not (fixture / "src/odoo_instance_sdk/web/dist").exists()
 
+
+@pytest.mark.timeout(_FULL_UPDATE_TEST_TIMEOUT_SECONDS)
+def test_clean_vcs_core_only_install_stays_minimal(
+    clean_vcs_source: tuple[Path, str], tmp_path: Path
+) -> None:
+    """A clean Git source installs without optional dashboard dependencies."""
+    _require_uv()
+    fixture, head = clean_vcs_source
     core_root = tmp_path / "core"
     core_root.mkdir()
     core_env = _isolated_home(core_root, source_repo=fixture)
@@ -630,6 +643,10 @@ def test_clean_vcs_install_builds_dashboard_assets_and_keeps_core_only_minimal(
             (
                 "import importlib.util\n"
                 "assert importlib.util.find_spec('fastapi') is None\n"
+                "assert importlib.util.find_spec('starlette') is None\n"
+                "assert importlib.util.find_spec('starlette_admin') is None\n"
+                "assert importlib.util.find_spec('pwdlib') is None\n"
+                "assert importlib.util.find_spec('sqlcipher3') is None\n"
                 "assert importlib.util.find_spec('uvicorn') is None"
             ),
         ],

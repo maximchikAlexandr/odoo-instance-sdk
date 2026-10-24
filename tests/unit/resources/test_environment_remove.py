@@ -28,6 +28,7 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
     prepared_command,
 )
+from odoo_instance_sdk.internal.proc.run import ProcessResult
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
@@ -127,6 +128,142 @@ def _checkout_copy(
             http_port=http_port,
         ),
     )
+
+
+def _failed_adopted_copy_case(
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    target_exists: bool = False,
+) -> tuple[DevelopmentEnvironment, uuid.UUID, MagicMock, Path]:
+    from odoo_instance_sdk.internal.git_worktree import rev_parse_git_common_dir
+    from odoo_instance_sdk.internal.repo_key import repo_key
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    data_dir = tmp_path / "odoo-data"
+    data_dir.mkdir()
+    source_config = project_manifest / "odoo.conf"
+    source_config.write_text(
+        source_config.read_text(encoding="utf-8").replace(
+            "data_dir = /tmp/odoo_data", f"data_dir = {data_dir}"
+        ),
+        encoding="utf-8",
+    )
+    instance = _copy_instance(target_exists=target_exists)
+    instance.config.db_host = "localhost"
+    instance.config.db_port = 5432
+    instance.config.db_user = "odoo"
+    instance.databases.exists.side_effect = lambda name: (
+        name == "source_db" or (target_exists and name == "failed_target")
+    )
+    instance.databases._psql_probe_for.side_effect = lambda _name, step_id: PreparedStep(
+        step_id=step_id, argv=("true",), read_only=True
+    )
+    source = _checkout_copy(
+        env_client, project_manifest, fake_python, "feat/rm-failed-copy-source", instance
+    )
+    catalog = env_client.get_catalog()
+    project_id = f"project_{repo_key(project_manifest, Path(source.git_common_dir))}"
+    catalog._register_project(project_id, project_manifest, Path(source.git_common_dir))
+    catalog.update_environment(
+        str(source.id), {"target_db_name": "source_db", "project_id": project_id}
+    )
+    catalog.update_environment(
+        str(source.id),
+        {
+            "checkout_repository_root": source.worktree_path,
+            "checkout_git_common_dir": source.git_common_dir,
+            "code_ownership": EnvironmentCodeOwnership.CALLER_OWNED.value,
+            "adoption_input_fingerprint": "validated-source-test-fingerprint",
+        },
+    )
+    catalog.upsert_copy_journal(
+        str(source.id),
+        target_database="source_db",
+        db_host="localhost",
+        db_port=5432,
+        db_user="odoo",
+        backup_id=str(source.backup_id),
+        stage=CopyJournalStage.RESTORED,
+    )
+    catalog.record_restore("localhost", 5432, "source_db", str(source.backup_id))
+
+    caller_checkout = tmp_path / "adopted-target-checkout"
+    subprocess.run(
+        ["git", "clone", "--shared", str(project_manifest), str(caller_checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    failed_id = uuid.uuid4()
+    caller_common = rev_parse_git_common_dir(caller_checkout)
+    failed_root = (
+        tmp_path
+        / "data"
+        / "environments"
+        / repo_key(project_manifest, caller_common)
+        / str(failed_id)
+    )
+    failed_root.mkdir(parents=True)
+    source_row = catalog.get_environment(str(source.id))
+    assert source_row is not None
+    failed_row = dict(source_row)
+    failed_row.update(
+        {
+            "id": str(failed_id),
+            "name": "failed-adopted-copy",
+            "branch": f"failed/{failed_id.hex}",
+            "git_common_dir": str(caller_common),
+            "worktree_path": str(caller_checkout),
+            "generated_config_path": str(failed_root / "odoo.conf"),
+            "dependency_lock_path": str(failed_root / "requirements.lock"),
+            "python_environment_owned": 0,
+            "db_mode": EnvironmentDatabaseMode.COPY.value,
+            "source_db_name": "source_db",
+            "target_db_name": "failed_target",
+            "backup_id": None,
+            "state": EnvironmentState.FAILED.value,
+            "removed_at": None,
+            "last_error": "Backup response was not an archive",
+            "checkout_repository_root": str(caller_checkout),
+            "checkout_git_common_dir": str(caller_common),
+            "code_ownership": EnvironmentCodeOwnership.CALLER_OWNED.value,
+            "artifact_root": str(failed_root),
+            "adoption_input_fingerprint": "validated-test-fingerprint",
+        }
+    )
+    catalog.create_environment(failed_row)
+    cluster = MagicMock()
+    cluster.endpoint_host = "localhost"
+    cluster.endpoint_port = 5432
+    cluster._project_id = project_id.removeprefix("project_")
+    cluster._repository_root = project_manifest
+    monkeypatch.setattr(PostgresCluster, "from_project", lambda _root: cluster)
+    return source, failed_id, instance, data_dir
+
+
+def _remove_failed_adopted_copy(
+    env_client: OdooClient, failed_id: uuid.UUID, *, target_exists: bool = False
+) -> None:
+    def result_for(step: Any) -> ProcessResult:
+        exists = step.step_id.endswith("exists-before") or target_exists
+        return ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=b"1\n" if exists else b"",
+            stderr=b"",
+            duration=0,
+            cwd=step.cwd,
+            environment=step.environment,
+        )
+
+    command = env_client.environments.remove_command(
+        str(failed_id), executor=RecordingExecutor(result_factory=result_for)
+    )
+    command.run()
 
 
 @pytest.fixture
@@ -763,6 +900,113 @@ class TestCopyRemoveRecovery:
         assert journal is not None and journal["stage"] == "restored"
         assert env_client.get_catalog().get_by_id(str(env.backup_id)) is not None
         assert Path(env.worktree_path).is_dir()
+
+    def test_failed_adopted_copy_without_config_releases_only_verified_absent_target(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.pg.drop_types import catalog_database_in_use
+
+        source, failed_id, _instance, data_dir = _failed_adopted_copy_case(
+            env_client, project_manifest, fake_python, tmp_path, monkeypatch
+        )
+        catalog = env_client.get_catalog()
+        failed_row = catalog.get_environment(str(failed_id))
+        assert failed_row is not None
+        caller_checkout = Path(str(failed_row["worktree_path"]))
+
+        assert catalog_database_in_use(catalog, "source_db", allow_environment_id=str(source.id))
+        _remove_failed_adopted_copy(env_client, failed_id)
+
+        assert env_client.environments.get(str(failed_id)).state is EnvironmentState.REMOVED
+        assert (caller_checkout / "README.md").is_file()
+        assert catalog.get_environment(str(source.id))["state"] == EnvironmentState.READY.value  # type: ignore[index]
+        assert not catalog_database_in_use(
+            catalog, "source_db", allow_environment_id=str(source.id)
+        )
+        assert not (data_dir / "filestore" / "failed_target").exists()
+
+    def test_failed_adopted_copy_with_existing_target_fails_closed(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _source, failed_id, _instance, _data_dir = _failed_adopted_copy_case(
+            env_client,
+            project_manifest,
+            fake_python,
+            tmp_path,
+            monkeypatch,
+            target_exists=True,
+        )
+        catalog = env_client.get_catalog()
+
+        with pytest.raises(EnvironmentConflictError, match="target database still exists"):
+            _remove_failed_adopted_copy(env_client, failed_id, target_exists=True)
+
+        assert catalog.get_copy_journal(str(failed_id)) is None
+        failed = catalog.get_environment(str(failed_id))
+        assert failed is not None and failed["state"] == EnvironmentState.FAILED.value
+        assert (Path(str(failed["worktree_path"])) / "README.md").is_file()
+
+    def test_failed_adopted_copy_with_mismatched_checkout_proof_fails_closed(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.exceptions import ConfigError
+
+        _source, failed_id, _instance, _data_dir = _failed_adopted_copy_case(
+            env_client, project_manifest, fake_python, tmp_path, monkeypatch
+        )
+        env_client.get_catalog().update_environment(
+            str(failed_id), {"checkout_repository_root": str(tmp_path / "other-checkout")}
+        )
+
+        with pytest.raises(ConfigError, match="adoption ownership evidence"):
+            _remove_failed_adopted_copy(env_client, failed_id)
+
+        failed = env_client.get_catalog().get_environment(str(failed_id))
+        assert failed is not None and failed["state"] == EnvironmentState.FAILED.value
+        assert (Path(str(failed["worktree_path"])) / "README.md").is_file()
+
+    def test_failed_adopted_copy_without_restored_source_evidence_fails_closed(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source, failed_id, _instance, _data_dir = _failed_adopted_copy_case(
+            env_client, project_manifest, fake_python, tmp_path, monkeypatch
+        )
+        env_client.get_catalog().upsert_copy_journal(
+            str(source.id),
+            target_database="source_db",
+            db_host="localhost",
+            db_port=5432,
+            db_user="odoo",
+            backup_id=str(source.backup_id),
+            stage=CopyJournalStage.RESTORE_PENDING,
+        )
+
+        with pytest.raises(EnvironmentConflictError, match="source restore evidence is incomplete"):
+            _remove_failed_adopted_copy(env_client, failed_id)
+
+        failed = env_client.get_catalog().get_environment(str(failed_id))
+        assert failed is not None and failed["state"] == EnvironmentState.FAILED.value
+        assert (Path(str(failed["worktree_path"])) / "README.md").is_file()
 
     def test_dropped_missing_config_deletes_backup_then_files(
         self,

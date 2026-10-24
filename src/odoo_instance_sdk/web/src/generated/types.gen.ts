@@ -5,6 +5,20 @@ export type ClientOptions = {
 };
 
 /**
+ * BackupFreshnessSnapshot
+ *
+ * Proven source-backup age for one displayed database.
+ *
+ * Both fields are null when the current database provenance is unknown.  A
+ * known timestamp always carries its non-negative age from the snapshot
+ * generation time; this keeps clock skew visible without inventing a date.
+ */
+export type BackupFreshnessSnapshot = {
+    age_seconds?: number | null;
+    downloaded_at?: string | null;
+};
+
+/**
  * ClusterContainer
  */
 export type ClusterContainer = {
@@ -79,6 +93,7 @@ export type EnvironmentArtifacts = {
 export type EnvironmentSnapshot = {
     allocated_http_port: number | null;
     artifacts: EnvironmentArtifacts;
+    backup_freshness?: BackupFreshnessSnapshot;
     branch: string;
     database: string | null;
     db_mode: 'copy' | 'shared';
@@ -274,6 +289,7 @@ export type PostgresServerInfo = {
  * ProjectSummary
  */
 export type ProjectSummary = {
+    backup_freshness?: BackupFreshnessSnapshot;
     cluster: null | ClusterSnapshot;
     display_hint: string;
     environment_count: number;

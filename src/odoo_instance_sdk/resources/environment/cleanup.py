@@ -48,7 +48,12 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     T,
     _validate_retained_removal_evidence,
 )
-from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize_db_host
+from odoo_instance_sdk.resources.environment.failed_copy_recovery import (
+    failed_copy_absence_probe_steps,
+    preflight_failed_copy_without_config,
+    validate_copy_journal_ownership,
+)
+from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -249,10 +254,14 @@ class _CleanupMixin:
                     mutating=True,
                 ),
             )
-        steps = (*preflight_steps, *publication_steps, *artifact_steps)
         copy_drop = self._remove_copy_database_command(
             env, executor=executor, force_connections=force_connections
         )
+        failed_copy_probes = failed_copy_absence_probe_steps(self, env)
+        # Existence checks are part of the preflight.  They must finish before
+        # publication or worktree cleanup can make a failed removal harder to
+        # recover.
+        steps = (*preflight_steps, *failed_copy_probes, *publication_steps, *artifact_steps)
         if copy_drop is not None:
             steps = (*steps, *copy_drop.steps)
         return self._action_command(
@@ -556,9 +565,12 @@ class _CleanupMixin:
                 backup_ownership=copy_plan.backup_ownership,
             )
         else:
-            cat.add_environment_event(
-                str(env.id), "remove", "succeeded", message="shared mode: source DB not dropped"
+            message = (
+                "failed copy target is absent; source database was not dropped"
+                if env.db_mode is EnvironmentDatabaseMode.COPY
+                else "shared mode: source DB not dropped"
             )
+            cat.add_environment_event(str(env.id), "remove", "succeeded", message=message)
 
         if copy_plan is not None and copy_plan.stage is not CopyJournalStage.BACKUP_DELETED:
             cleanup_failed = self._delete_copy_backup(copy_plan, failures) or cleanup_failed
@@ -717,7 +729,7 @@ class _CleanupMixin:
 
     def _preflight_copy_remove(  # noqa: C901
         self, catalog: BackupCatalog, env: DevelopmentEnvironment
-    ) -> CopyCleanupPlan:
+    ) -> CopyCleanupPlan | None:
         if catalog.get_environment_runtime(str(env.id)) is not None:
             raise EnvironmentConflictError(
                 "runtime_active",
@@ -729,6 +741,12 @@ class _CleanupMixin:
             )
         config_path = Path(env.generated_config_path)
         journal = catalog.get_copy_journal(str(env.id))
+        if (
+            journal is None
+            and not config_path.is_file()
+            and preflight_failed_copy_without_config(self, catalog, env)
+        ):
+            return None
         # The durable journal is authoritative after a crash; never let the
         # mere presence of a generated config downgrade a terminal stage.
         if (
@@ -869,7 +887,7 @@ class _CleanupMixin:
                     rollback_filestore=rollback_filestore,
                 )
         if journal is not None:
-            self._validate_copy_journal_ownership(env, journal, instance)
+            validate_copy_journal_ownership(env, journal, instance)
             stage = CopyJournalStage(str(journal["stage"]))
             if stage in (
                 CopyJournalStage.PREPARED,
@@ -936,27 +954,6 @@ class _CleanupMixin:
             stage=CopyJournalStage.RESTORED,
             backup_ownership="unknown",
         )
-
-    def _validate_copy_journal_ownership(
-        self, env: DevelopmentEnvironment, journal: sqlite3.Row, instance: OdooInstance
-    ) -> None:
-        """Fail closed unless config, environment row and durable journal agree."""
-        expected_backup = str(env.backup_id) if env.backup_id is not None else None
-        values_match = (
-            str(journal["environment_id"]) == str(env.id)
-            and str(journal["target_database"]) == str(env.target_db_name)
-            and (str(journal["backup_id"]) if journal["backup_id"] is not None else None)
-            == expected_backup
-            and str(journal["db_host"]) == normalize_db_host(instance.config.db_host)
-            and int(journal["db_port"]) == (instance.config.db_port or 5432)
-            and (str(journal["db_user"]) if journal["db_user"] is not None else None)
-            == instance.config.db_user
-        )
-        if not values_match:
-            raise EnvironmentConflictError(
-                "copy_cluster_mismatch",
-                "copy journal, environment ownership, and generated config disagree",
-            )
 
     def _drop_copy_target(
         self,

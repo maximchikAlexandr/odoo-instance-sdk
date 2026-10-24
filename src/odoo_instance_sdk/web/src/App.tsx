@@ -5,6 +5,7 @@ import {
   startRuntime,
   stopRuntime,
   type RuntimeActionRequest,
+  type BackupFreshnessSnapshot,
   type PublicationSnapshot,
   type RuntimeMetrics,
   type Snapshot,
@@ -95,6 +96,7 @@ export default function App() {
           </span>
           <span className="monitor-brand">odcli</span>
           <span className="monitor-app-name">Monitor</span>
+          <a className="monitor-admin-link" href="/admin">Admin</a>
         </div>
       </header>
 
@@ -139,6 +141,7 @@ export default function App() {
                 branch={project.runtime?.branch}
                 runtime={project.runtime}
                 publication={project.publication}
+                backupFreshness={project.backup_freshness}
                 database={project.runtime?.database_name}
                 testId="project-card"
                 actionTestId="open-project-odoo"
@@ -154,6 +157,7 @@ export default function App() {
                 branch={env.branch}
                 runtime={env.runtime}
                 publication={env.publication}
+                backupFreshness={env.backup_freshness}
                 database={env.database}
                 lifecycleState={env.lifecycle_state}
                 testId="environment-card"
@@ -175,6 +179,7 @@ function RuntimeCard({
   refresh,
   runtime,
   publication,
+  backupFreshness,
   database,
   lifecycleState,
   testId,
@@ -187,6 +192,7 @@ function RuntimeCard({
   refresh: () => Promise<void>;
   runtime: RuntimeMetrics | null;
   publication?: PublicationSnapshot;
+  backupFreshness?: BackupFreshnessSnapshot;
   database: string | null | undefined;
   lifecycleState?: string;
   testId: string;
@@ -256,6 +262,15 @@ function RuntimeCard({
           <dt>Local endpoint</dt>
           <dd title={runtime?.http_url ?? undefined}>{runtime?.http_url ?? "Not running"}</dd>
         </div>
+        <div className="instance-freshness">
+          <dt>Backup download</dt>
+          {backupFreshness?.downloaded_at && backupFreshness.age_seconds != null ? (
+            <dd>
+              <time dateTime={backupFreshness.downloaded_at}>{backupFreshness.downloaded_at}</time>
+              <span className="instance-freshness-age"> ({formatAge(backupFreshness.age_seconds)} old)</span>
+            </dd>
+          ) : <dd>Backup download date unknown</dd>}
+        </div>
       </dl>
 
       <div className="instance-footer">
@@ -297,6 +312,16 @@ function RuntimeCard({
       </div>
     </Card>
   );
+}
+
+function formatAge(seconds: number): string {
+  if (seconds < 60) return `${Math.floor(seconds)} seconds`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} minutes`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hours`;
+  const days = Math.floor(hours / 24);
+  return `${days} days`;
 }
 
 function runtimeStatus(state: string | undefined): { label: string; color: string } {

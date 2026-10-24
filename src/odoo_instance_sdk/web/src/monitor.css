@@ -37,6 +37,13 @@ body {
   border-left: 1px solid rgba(255, 255, 255, 0.25);
   font-size: 15px;
 }
+.monitor-admin-link {
+  margin-left: auto;
+  color: white;
+  font-size: 13px;
+  text-decoration: none;
+}
+.monitor-admin-link:hover { text-decoration: underline; }
 
 .monitor-content { max-width: 1440px; margin: auto; padding: 0 24px 32px; }
 .monitor-control-panel {
@@ -82,6 +89,8 @@ body {
 .instance-fields > div { min-width: 0; }
 .instance-fields dt { color: var(--odoo-muted); font-size: 12px; margin-bottom: 3px; }
 .instance-fields dd { margin: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-freshness dd { font-size: 12px; }
+.instance-freshness-age { color: var(--odoo-muted); }
 .instance-footer { margin-top: auto; display: flex; flex-direction: column; align-items: flex-start; gap: 15px; }
 .instance-metrics { min-height: 20px; }
 .instance-metrics p { font-size: 12px; font-weight: 500; color: #495057; }

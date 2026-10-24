@@ -177,7 +177,7 @@ def _dashboard_runtime(tool_dir: Path, *, env: dict[str, str]) -> dict[str, bool
     """Inspect only fixed booleans from the installed interpreter."""
     python = tool_dir / "odoo-instance-sdk" / "bin" / "python"
     if not python.is_file():
-        return {"imports": False, "assets": False}
+        return {"imports": False, "admin_imports": False, "assets": False}
     probe = subprocess.run(
         [
             str(python),
@@ -185,13 +185,20 @@ def _dashboard_runtime(tool_dir: Path, *, env: dict[str, str]) -> dict[str, bool
             (
                 "import json\n"
                 "from pathlib import Path\n"
+                "result = {'imports': False, 'admin_imports': False, 'assets': False}\n"
                 "try:\n"
                 " import fastapi, starlette, uvicorn, odoo_instance_sdk\n"
                 " root = Path(odoo_instance_sdk.__file__).resolve().parent / 'web' / 'dist'\n"
-                " print(json.dumps({'imports': True, 'assets': (root / 'index.html').is_file() and "
-                "(root / 'assets').is_dir() and any((root / 'assets').iterdir())}))\n"
+                " result.update({'imports': True, 'assets': (root / 'index.html').is_file() and "
+                "(root / 'assets').is_dir() and any((root / 'assets').iterdir())})\n"
                 "except ImportError:\n"
-                " print(json.dumps({'imports': False, 'assets': False}))\n"
+                " pass\n"
+                "try:\n"
+                " import pwdlib, sqlcipher3, starlette_admin\n"
+                " result['admin_imports'] = True\n"
+                "except ImportError:\n"
+                " pass\n"
+                "print(json.dumps(result))\n"
             ),
         ],
         env=env,
@@ -200,13 +207,14 @@ def _dashboard_runtime(tool_dir: Path, *, env: dict[str, str]) -> dict[str, bool
         check=False,
     )
     if probe.returncode != 0:
-        return {"imports": False, "assets": False}
+        return {"imports": False, "admin_imports": False, "assets": False}
     try:
         payload = json.loads(probe.stdout)
     except json.JSONDecodeError:
-        return {"imports": False, "assets": False}
+        return {"imports": False, "admin_imports": False, "assets": False}
     return {
         "imports": payload.get("imports") is True,
+        "admin_imports": payload.get("admin_imports") is True,
         "assets": payload.get("assets") is True,
     }
 
