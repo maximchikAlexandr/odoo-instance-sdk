@@ -309,3 +309,24 @@ def test_delete_uses_revision_and_preserves_newer_value(store: SecretStore) -> N
     with pytest.raises(SecretStoreConflictError):
         store.delete_remote_odoo("https://odoo.example", revision=created.revision)
     assert store.lookup_remote_odoo("https://odoo.example").master_password == "new"  # type: ignore[union-attr]
+
+
+@pytest.mark.dashboard
+def test_admin_identity_is_canonical_host_qualified_and_secret_free(store: SecretStore) -> None:
+    from odoo_instance_sdk.internal.secret_store import decode_admin_id
+
+    member_id = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    first = store.create_gitlab_member(member_id, "https://gitlab.example/", "alice", "token-one")
+    second = store.create_gitlab_member(member_id, "https://gitlab.other/", "alice", "token-two")
+    decoded = decode_admin_id(first.admin_id)
+    assert decoded is not None
+    assert (decoded.kind, decoded.components, decoded.revision) == (
+        "gitlab-member",
+        (member_id, "gitlab.example"),
+        1,
+    )
+    assert first.admin_id != second.admin_id
+    assert "token" not in first.admin_id
+    assert decode_admin_id(first.admin_id + "=") is None
+    assert decode_admin_id("x" * 2049) is None
+    assert decode_admin_id("odcli1.W10sW10sMF0") is None

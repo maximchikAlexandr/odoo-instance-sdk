@@ -9,7 +9,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.env import checkout as env_commands
-from odoo_instance_sdk.models import ProjectSummary, RuntimeState
+from odoo_instance_sdk.models import ProjectStorageFootprint, ProjectSummary, RuntimeState
 from tests.unit.test_cli_env_list_grouping import (
     _env,
     _healthy_cluster,
@@ -119,6 +119,7 @@ def test_snapshot_selector_rejects_ambiguous_names() -> None:
 
 def _project() -> ProjectSummary:
     return ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",

@@ -15,6 +15,7 @@ from odoo_instance_sdk.models.footprint import (
     ClusterEndpoint,
     ClusterMetrics,
     EnvironmentArtifacts,
+    ProjectStorageFootprint,
     RuntimeMetrics,
     StorageFootprint,
 )
@@ -122,6 +123,7 @@ class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     environment_count: int
     cluster: ClusterSnapshot | None
     runtime: RuntimeMetrics | None
+    storage: ProjectStorageFootprint
     publication: PublicationSnapshot = _UNPUBLISHED
     backup_freshness: BackupFreshnessSnapshot = _UNKNOWN_BACKUP_FRESHNESS
 

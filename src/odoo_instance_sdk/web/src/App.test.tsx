@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MantineProvider } from "@mantine/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { formatLocalTimestamp } from "./format";
 import {
   getMonitorSnapshot,
   GitActivityState,
@@ -51,10 +52,14 @@ const snapshot: Snapshot = {
         metrics: { cpu_percent: 1, memory_usage_bytes: 1024, memory_limit_bytes: 2048, volume_usage_bytes: null, sampled_at: "2026-08-24T00:00:00Z" },
         unavailability_reason: null, sampled_at: "2026-08-24T00:00:00Z",
       },
-      runtime: null,
+      runtime: { state: RuntimeState.NOT_READY, root_pid: 21, child_pids: [], process_count: 1,
+        cpu_percent: null, memory_bytes: null, started_at: null, http_url: null,
+        http_port: null, database_name: null, commit_sha: null, branch: "main" },
+      storage: { total_bytes: 2048, complete: true },
       publication: { state: "unpublished", external_url: null, reason: null, route_identity: null },
     },
     { id: "project_b", name: "beta", display_hint: "b", repository_root: "/tmp/beta", environment_count: 1, cluster: null, runtime: null,
+      storage: { total_bytes: null, complete: false },
       publication: { state: "unpublished", external_url: null, reason: null, route_identity: null } },
     {
       id: "project_c", name: "gamma", display_hint: "c", repository_root: "/tmp/gamma", environment_count: 0,
@@ -65,6 +70,7 @@ const snapshot: Snapshot = {
       runtime: { state: RuntimeState.READY, root_pid: 31, child_pids: [], process_count: 1,
         cpu_percent: 2.5, memory_bytes: 4096, started_at: null, http_url: "http://127.0.0.1:8071",
         http_port: 8071, database_name: "project_c", commit_sha: "def", branch: "main" },
+      storage: { total_bytes: 1048576, complete: true },
       publication: { state: "available", external_url: "https://project-c.example.test", reason: null, route_identity: "route-c" },
     },
   ],
@@ -136,10 +142,11 @@ describe("App", () => {
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(fresh) as never);
     render(<MantineProvider><App /></MantineProvider>);
 
-    expect(await screen.findAllByText(downloadedAt)).toHaveLength(2);
+    expect(await screen.findAllByText(formatLocalTimestamp(downloadedAt))).toHaveLength(2);
+    expect(document.querySelectorAll(`time[datetime="${downloadedAt}"]`)).toHaveLength(2);
     expect(screen.getAllByText("(5 days old)")).toHaveLength(2);
     expect(screen.getAllByText("Backup download date unknown")).toHaveLength(3);
-    expect(screen.getByRole("link", { name: "Admin" }).getAttribute("href")).toBe("/admin");
+    expect(screen.getByRole("link", { name: "Admin" }).getAttribute("href")).toBe("/admin/");
   });
 
   it("renders a future download timestamp with a clamped zero age", async () => {
@@ -153,7 +160,7 @@ describe("App", () => {
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(future) as never);
     render(<MantineProvider><App /></MantineProvider>);
 
-    expect(await screen.findByText(downloadedAt)).toBeTruthy();
+    expect(await screen.findByText(formatLocalTimestamp(downloadedAt))).toBeTruthy();
     expect(screen.getByText("(0 seconds old)")).toBeTruthy();
   });
 
@@ -169,10 +176,13 @@ describe("App", () => {
     expect(environments).toHaveLength(2);
     expect(projects[2].textContent).toContain("Main checkout");
     expect(projects[2].textContent).toContain("project_c");
+    expect(projects[2].textContent).toContain("1.0 MiB");
     expect(projects[2].textContent).toContain("http://127.0.0.1:8071");
     expect(environments[0].textContent).toContain("Worktree");
+    expect(environments[0].textContent).toContain("Resources");
+    expect(screen.getByText("— (incomplete)")).toBeTruthy();
     expect(projects[2].querySelector(".instance-branch")?.textContent).toBe("Branch main");
-    expect(projects[0].querySelector(".instance-branch")?.textContent).toBe("Branch Not recorded");
+    expect(projects[0].querySelector(".instance-branch")?.textContent).toBe("Branch main");
     expect(environments[1].querySelector(".instance-branch")?.textContent).toBe("Branch main");
     for (const card of [...projects, ...environments]) {
       expect(card.className).toContain("instance-card");
@@ -196,6 +206,26 @@ describe("App", () => {
     expect(screen.getAllByTestId("project-card")).toHaveLength(1);
     expect(screen.getByText("beta (b)")).toBeTruthy();
     expect(getMonitorSnapshot).toHaveBeenCalledWith(expect.objectContaining({ throwOnError: true }));
+  });
+
+  it("composes the running filter with project selection without another snapshot request", async () => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
+    render(<MantineProvider><App /></MantineProvider>);
+    await screen.findByText("ready-env");
+    fireEvent.click(screen.getByRole("textbox", { name: "Project" }));
+    fireEvent.click(await screen.findByText("alpha (a)"));
+    fireEvent.click(screen.getByRole("textbox", { name: "Instances" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Running" }));
+    await waitFor(() => expect(screen.getByText("alpha · 2 instances")).toBeTruthy());
+    expect(screen.getAllByTestId("project-card")).toHaveLength(1);
+    expect(screen.getAllByTestId("environment-card")).toHaveLength(1);
+    expect(getMonitorSnapshot).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("textbox", { name: "Project" }));
+    fireEvent.click(await screen.findByText("beta (b)"));
+    await waitFor(() => expect(screen.getByText("No running instances in this selection.")).toBeTruthy());
+    expect(screen.queryAllByTestId("environment-card")).toHaveLength(0);
+    expect(getMonitorSnapshot).toHaveBeenCalledTimes(1);
   });
 
   it.each(Object.values(PgAdminEligibilityState))("hides pgAdmin for eligibility %s", async (state) => {

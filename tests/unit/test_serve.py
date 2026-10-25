@@ -25,6 +25,7 @@ from odoo_instance_sdk.models import (
     PgAdminEligibilityState,
     PidScope,
     PostgresClusterState,
+    ProjectStorageFootprint,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -373,6 +374,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                 generated_at=datetime(2026, 8, 24, tzinfo=UTC),
                 projects=(
                     ProjectSummary(
+                        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
                         id="project_x",
                         name="x",
                         display_hint="x",
@@ -482,6 +484,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                 "repository_root": "/tmp/x",
                 "environment_count": 1,
                 "runtime": None,
+                "storage": {"total_bytes": None, "complete": False},
                 "cluster": {
                     "mode": "compose",
                     "owned": True,

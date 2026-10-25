@@ -21,6 +21,7 @@ from odoo_instance_sdk.models import (
     GitDiff,
     PgAdminEligibility,
     PgAdminEligibilityState,
+    ProjectStorageFootprint,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -78,6 +79,7 @@ def _project(
     repository_root: str = "/repo/demo",
 ) -> ProjectSummary:
     return ProjectSummary(
+        storage=ProjectStorageFootprint(total_bytes=None, complete=False),
         id=project_id,
         name="demo",
         display_hint="demo",

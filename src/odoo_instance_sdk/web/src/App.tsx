@@ -11,7 +11,7 @@ import {
   type Snapshot,
 } from "./generated";
 import client from "./client-config";
-import { formatBytes, formatPercent } from "./format";
+import { formatBytes, formatLocalTimestamp, formatPercent } from "./format";
 
 const POLL_MS = 2000;
 
@@ -20,6 +20,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [instanceFilter, setInstanceFilter] = useState<string | null>("all");
   const pendingLoad = useRef<Promise<void> | null>(null);
 
   const load = useCallback(() => {
@@ -75,12 +76,21 @@ export default function App() {
     { value: "", label: "All projects" },
     ...projects.map((p) => ({ value: p.id, label: `${p.name} (${p.display_hint})` })),
   ];
-  const filteredEnvs = selectedProjectId
+  const scopedEnvs = selectedProjectId
     ? environments.filter((e) => e.project_id === selectedProjectId)
     : environments;
-  const displayedProjects = selectedProjectId
+  const scopedProjects = selectedProjectId
     ? projects.filter((p) => p.id === selectedProjectId)
     : projects;
+  const isRunning = (runtime: RuntimeMetrics | null) =>
+    runtime?.state === "ready" || runtime?.state === "not_ready";
+  const displayedProjects = instanceFilter === "running"
+    ? scopedProjects.filter((project) => isRunning(project.runtime))
+    : scopedProjects;
+  const filteredEnvs = instanceFilter === "running"
+    ? scopedEnvs.filter((environment) => isRunning(environment.runtime))
+    : scopedEnvs;
+  const hasInstances = displayedProjects.length + filteredEnvs.length > 0;
 
   return (
     <div className="monitor-shell">
@@ -96,7 +106,7 @@ export default function App() {
           </span>
           <span className="monitor-brand">odcli</span>
           <span className="monitor-app-name">Monitor</span>
-          <a className="monitor-admin-link" href="/admin">Admin</a>
+          <a className="monitor-admin-link" href="/admin/">Admin</a>
         </div>
       </header>
 
@@ -105,7 +115,7 @@ export default function App() {
           <div>
             <Title order={1} className="monitor-title">Instances</Title>
             <Text className="monitor-subtitle">
-              {selectedProjectId ? displayedProjects[0]?.name : "All projects"}
+              {selectedProjectId ? projects.find((p) => p.id === selectedProjectId)?.name : "All projects"}
               {snapshot ? ` · ${displayedProjects.length + filteredEnvs.length} instances` : ""}
             </Text>
           </div>
@@ -118,6 +128,13 @@ export default function App() {
             onChange={(v) => setSelectedProjectId(v ?? null)}
             placeholder="All projects"
           />
+          <Select
+            className="monitor-instance-select"
+            aria-label="Instances"
+            data={[{ value: "all", label: "All instances" }, { value: "running", label: "Running" }]}
+            value={instanceFilter ?? "all"}
+            onChange={setInstanceFilter}
+          />
         </div>
 
         {loading && !snapshot ? (
@@ -129,6 +146,8 @@ export default function App() {
           </Stack>
         ) : projects.length === 0 ? (
           <div className="monitor-message">No projects or environments found.</div>
+        ) : !hasInstances ? (
+          <div className="monitor-message">No running instances in this selection.</div>
         ) : (
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" className="instance-grid">
             {displayedProjects.map((project) => (
@@ -142,6 +161,7 @@ export default function App() {
                 runtime={project.runtime}
                 publication={project.publication}
                 backupFreshness={project.backup_freshness}
+                storage={project.storage}
                 database={project.runtime?.database_name}
                 testId="project-card"
                 actionTestId="open-project-odoo"
@@ -158,6 +178,7 @@ export default function App() {
                 runtime={env.runtime}
                 publication={env.publication}
                 backupFreshness={env.backup_freshness}
+                storage={env.storage}
                 database={env.database}
                 lifecycleState={env.lifecycle_state}
                 testId="environment-card"
@@ -180,6 +201,7 @@ function RuntimeCard({
   runtime,
   publication,
   backupFreshness,
+  storage,
   database,
   lifecycleState,
   testId,
@@ -193,6 +215,7 @@ function RuntimeCard({
   runtime: RuntimeMetrics | null;
   publication?: PublicationSnapshot;
   backupFreshness?: BackupFreshnessSnapshot;
+  storage: { total_bytes: number | null; complete: boolean };
   database: string | null | undefined;
   lifecycleState?: string;
   testId: string;
@@ -266,10 +289,14 @@ function RuntimeCard({
           <dt>Backup download</dt>
           {backupFreshness?.downloaded_at && backupFreshness.age_seconds != null ? (
             <dd>
-              <time dateTime={backupFreshness.downloaded_at}>{backupFreshness.downloaded_at}</time>
+              <time dateTime={backupFreshness.downloaded_at}>{formatLocalTimestamp(backupFreshness.downloaded_at)}</time>
               <span className="instance-freshness-age"> ({formatAge(backupFreshness.age_seconds)} old)</span>
             </dd>
           ) : <dd>Backup download date unknown</dd>}
+        </div>
+        <div>
+          <dt>Resources</dt>
+          <dd>{formatBytes(storage.total_bytes)}{storage.complete ? "" : " (incomplete)"}</dd>
         </div>
       </dl>
 

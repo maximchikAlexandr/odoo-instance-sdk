@@ -7,9 +7,11 @@ resolvers call the methods on :class:`SecretStore` directly.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime as dt
 import importlib
+import json
 import os
 import secrets
 import stat
@@ -17,9 +19,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from odoo_instance_sdk.exceptions import (
+    GitLabCredentialError,
+    InvalidBaseUrlError,
     SecretStoreBusyError,
     SecretStoreConflictError,
     SecretStoreCorruptError,
@@ -45,6 +49,8 @@ _BUSY_TIMEOUT_MS = 5000
 _SCHEMA_VERSION = 1
 _TOKEN_KEY_PREFIX = "ODCLI_GITLAB_TOKEN_"
 _PRIVATE_BITS = stat.S_IRWXG | stat.S_IRWXO
+_ADMIN_ID_PREFIX = "odcli1."
+_ADMIN_ID_MAX_LENGTH = 2048
 
 type _SqlValue = str | int | float | bytes | None
 type _SqlRow = tuple[_SqlValue, ...]
@@ -70,6 +76,74 @@ class _Driver(Protocol):
     def connect(self, filename: str, *, timeout: float = ...) -> _Connection: ...
 
 
+@dataclass(frozen=True, slots=True)
+class AdminSecretIdentity:
+    kind: Literal["remote-odoo", "gitlab-member"]
+    components: tuple[str, ...]
+    revision: int
+
+
+def _encode_admin_id(
+    kind: Literal["remote-odoo", "gitlab-member"], components: tuple[str, ...], revision: int
+) -> str:
+    if revision < 1:
+        raise ValueError("Admin identity revision must be positive")
+    raw = json.dumps([kind, components, revision], separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{_ADMIN_ID_PREFIX}{encoded}"
+
+
+def decode_admin_id(value: str) -> AdminSecretIdentity | None:
+    """Decode one canonical, bounded Admin identity without consulting secrets."""
+    if (
+        not isinstance(value, str)
+        or len(value) > _ADMIN_ID_MAX_LENGTH
+        or not value.startswith(_ADMIN_ID_PREFIX)
+    ):
+        return None
+    encoded = value[len(_ADMIN_ID_PREFIX) :]
+    if not encoded or any(
+        char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+        for char in encoded
+    ):
+        return None
+    try:
+        raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+        payload = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list) or len(payload) != 3:
+        return None
+    kind, raw_components, revision = payload
+    if not isinstance(kind, str) or kind not in {"remote-odoo", "gitlab-member"}:
+        return None
+    kind = cast("Literal['remote-odoo', 'gitlab-member']", kind)
+    expected_count = {"remote-odoo": 1, "gitlab-member": 2}[kind]
+    if (
+        expected_count is None
+        or not isinstance(raw_components, list)
+        or len(raw_components) != expected_count
+        or any(not isinstance(component, str) or not component for component in raw_components)
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+    ):
+        return None
+    components = tuple(raw_components)
+    try:
+        normalized = (
+            (normalize_base_url(components[0]),)
+            if kind == "remote-odoo"
+            else (normalize_member_id(components[0]), normalize_gitlab_host(components[1]))
+        )
+    except (GitLabCredentialError, InvalidBaseUrlError, TypeError, ValueError):
+        return None
+    identity = AdminSecretIdentity(kind, components, revision)
+    if normalized != components or _encode_admin_id(kind, components, revision) != value:
+        return None
+    return identity
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RemoteOdooSecret:
     """Safe Admin projection of one remote Odoo record."""
@@ -78,6 +152,10 @@ class RemoteOdooSecret:
     revision: int
     created_at: str
     updated_at: str
+
+    @property
+    def admin_id(self) -> str:
+        return _encode_admin_id("remote-odoo", (self.base_url,), self.revision)
 
     def __repr__(self) -> str:
         return (
@@ -96,6 +174,10 @@ class GitLabMemberSecret:
     revision: int
     created_at: str
     updated_at: str
+
+    @property
+    def admin_id(self) -> str:
+        return _encode_admin_id("gitlab-member", (self.member_id, self.host), self.revision)
 
     def __repr__(self) -> str:
         return (

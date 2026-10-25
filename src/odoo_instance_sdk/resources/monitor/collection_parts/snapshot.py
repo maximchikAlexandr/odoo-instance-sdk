@@ -45,6 +45,7 @@ from odoo_instance_sdk.models import (
     PgAdminEligibilityState,
     PortObservation,
     PostgresClusterState,
+    ProjectStorageFootprint,
     ProjectSummary,
     PublicationSnapshot,
     PythonEnvFootprint,
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
 class _SnapshotMixin:
     if TYPE_CHECKING:
         _storage_cache: dict[str, tuple[float, StorageFootprint]]
+        _project_storage_cache: dict[str, tuple[float, ProjectStorageFootprint]]
         _git_cache: dict[tuple[Path, str, str | None, str], tuple[float, GitActivity]]
         _cluster_status_cache: dict[str, tuple[float, PostgresClusterState]]
         _cluster_resource_cache: dict[str, tuple[float, ClusterResourceSnapshot]]
@@ -93,6 +95,13 @@ class _SnapshotMixin:
         def snapshot(
             self, project_id: str | None = None, *, include_removed: bool = False
         ) -> Snapshot: ...
+
+        def _collect_project_storage(
+            self,
+            plan: _ProjectPlan,
+            sections: frozenset[SnapshotSection],
+            probe_results: dict[str, ProcessResult] | None = None,
+        ) -> ProjectStorageFootprint: ...
 
     def _collect_snapshot_rows(
         self,
@@ -146,6 +155,7 @@ class _SnapshotMixin:
                         else None
                     ),
                     runtime=project_runtime if "runtime" in selected else None,
+                    storage=self._collect_project_storage(plan, selected, probe_results),
                     publication=self._publication_snapshot(
                         "project",
                         plan.project_id,
@@ -232,6 +242,7 @@ class _SnapshotMixin:
 
     def _prune_caches(
         self,
+        project_ids: set[str],
         environment_ids: set[str],
         worktrees: set[Path],
         clusters: set[str],
@@ -241,6 +252,8 @@ class _SnapshotMixin:
         """Bound monitor memory to the catalog entries seen in the current pass."""
         for key in set(self._storage_cache) - environment_ids:
             del self._storage_cache[key]
+        for key in set(self._project_storage_cache) - project_ids:
+            del self._project_storage_cache[key]
         for cache_key in tuple(self._git_cache):
             if cache_key[0] not in worktrees:
                 del self._git_cache[cache_key]

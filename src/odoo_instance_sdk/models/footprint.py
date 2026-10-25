@@ -31,6 +31,13 @@ class StorageFootprint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, 
     other_files_bytes: int | None
 
 
+class ProjectStorageFootprint(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    total_bytes: int | None
+    complete: bool
+
+
 class EnvironmentArtifacts(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     worktree_exists: bool
     worktree_registered: bool

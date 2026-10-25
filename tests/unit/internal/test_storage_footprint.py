@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TypedDict, cast
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from odoo_instance_sdk.internal.proc.run import _run_pump as _run_pump_impl
 from odoo_instance_sdk.internal.storage_footprint import (
     DatabaseStorageInput,
     _directory_size,
+    _walk_size,
     collect_storage_footprint,
 )
 
@@ -183,6 +185,90 @@ def test_walk_fallback_skips_symlink_targets(tmp_path: Path) -> None:
         size = _directory_size(worktree)
     assert size is not None
     assert size == 5
+
+
+def test_walk_fallback_deduplicates_repeated_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _make_worktree(tmp_path)
+    monkeypatch.setattr(
+        os, "walk", lambda *_args, **_kwargs: iter([(str(path), [], ["same", "same"])])
+    )
+    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
+    monkeypatch.setattr(Path, "is_symlink", lambda _path: False)
+    monkeypatch.setattr(Path, "resolve", lambda self: self)
+    monkeypatch.setattr(Path, "stat", lambda _path: SimpleNamespace(st_size=7))
+
+    assert _walk_size(path, monotonic=lambda: 0.0) == 7
+
+
+def test_walk_fallback_discards_total_on_walk_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
+    monkeypatch.setattr(
+        os,
+        "walk",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+
+    assert _walk_size(tmp_path, monotonic=lambda: 0.0) is None
+
+
+@pytest.mark.parametrize("failure", [OSError("du missing"), "timeout"])
+def test_directory_size_falls_back_after_du_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: OSError | str
+) -> None:
+    from odoo_instance_sdk.internal.proc.run import ProcessTimeoutError
+
+    worktree = _make_worktree(tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.storage_footprint.shutil.which", lambda _name: "du"
+    )
+    error: BaseException = (
+        ProcessTimeoutError(("du",), 10.0, duration=10.0)
+        if failure == "timeout"
+        else OSError("du missing")
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.proc.run_captured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.storage_footprint._walk_size", lambda _path: None
+    )
+
+    assert _directory_size(worktree) is None
+
+
+@pytest.mark.parametrize(
+    ("file_count", "expected"),
+    [(99_998, 99_998), (99_999, None)],
+    ids=["below-entry-budget", "at-entry-budget"],
+)
+def test_walk_fallback_counts_every_entry_before_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_count: int, expected: int | None
+) -> None:
+    path = tmp_path / "synthetic"
+    filenames = [f"f{index}" for index in range(file_count)]
+    monkeypatch.setattr(os, "walk", lambda *_args, **_kwargs: iter([(str(path), [], filenames)]))
+    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
+    monkeypatch.setattr(Path, "is_symlink", lambda _path: False)
+    monkeypatch.setattr(Path, "resolve", lambda self: self)
+    monkeypatch.setattr(Path, "stat", lambda _path: SimpleNamespace(st_size=1))
+
+    assert _walk_size(path, monotonic=lambda: 0.0) == expected
+
+
+def test_walk_fallback_stops_at_monotonic_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "synthetic"
+    monkeypatch.setattr(os, "walk", lambda *_args, **_kwargs: iter([(str(path), [], ["file"])]))
+    monkeypatch.setattr(Path, "is_dir", lambda _path: True)
+    clock = iter((0.0, 0.0, 10.0))
+
+    assert _walk_size(path, monotonic=lambda: next(clock)) is None
 
 
 def test_du_path_uses_du(tmp_path: Path) -> None:

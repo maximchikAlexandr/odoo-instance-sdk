@@ -10,11 +10,13 @@ from odoo_instance_sdk.models import (
     ClusterResourceSnapshot,
     GitActivity,
     PostgresClusterState,
+    ProjectStorageFootprint,
     StorageFootprint,
 )
 from odoo_instance_sdk.resources.monitor.collection_parts.collect import _CollectMixin
 from odoo_instance_sdk.resources.monitor.collection_parts.planning import _SnapshotPlanningMixin
 from odoo_instance_sdk.resources.monitor.collection_parts.snapshot import _SnapshotMixin
+from odoo_instance_sdk.resources.monitor.collection_parts.storage import _StorageMixin
 from odoo_instance_sdk.resources.monitor.planning import (
     _default_monitor_executor,
     _DockerProvider,
@@ -24,7 +26,7 @@ from odoo_instance_sdk.resources.monitor.planning import (
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class EnvironmentMonitor(_CollectMixin, _SnapshotPlanningMixin, _SnapshotMixin):
+class EnvironmentMonitor(_CollectMixin, _SnapshotPlanningMixin, _SnapshotMixin, _StorageMixin):
     """Read-only collector that assembles a typed ``Snapshot`` from the catalog.
 
     Construction is cheap (no catalog open). ``snapshot()``
@@ -49,6 +51,9 @@ class EnvironmentMonitor(_CollectMixin, _SnapshotPlanningMixin, _SnapshotMixin):
         default_factory=dict, repr=False, hash=False, compare=False
     )
     _storage_cache: dict[str, tuple[float, StorageFootprint]] = field(
+        default_factory=dict, repr=False, hash=False, compare=False
+    )
+    _project_storage_cache: dict[str, tuple[float, ProjectStorageFootprint]] = field(
         default_factory=dict, repr=False, hash=False, compare=False
     )
     _cluster_resource_cache: dict[str, tuple[float, ClusterResourceSnapshot]] = field(
