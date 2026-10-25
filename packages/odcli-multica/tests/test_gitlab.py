@@ -21,9 +21,17 @@ from odcli_multica.gitlab import (
 from odcli_multica.models import (
     GitLabCredentialContext,
     GitLabCredentialIdentity,
+    MergeRequestPublicationResult,
     MulticaCompatibility,
     VerifiedTaskContext,
 )
+
+from odoo_instance_sdk.internal.secret_store import SecretStore
+
+
+@pytest.fixture(autouse=True)
+def _empty_encrypted_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
 
 
 def _credential() -> GitLabCredentialContext:
@@ -257,7 +265,7 @@ def _mr_context(checkout_path: str = "/task/checkout") -> VerifiedTaskContext:
         daemon_id="daemon",
         observed_at=datetime.now(UTC),
         root_issue_id="root",
-        root_creator_id="human-root",
+        root_creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     )
 
 
@@ -321,11 +329,12 @@ def _credential_project(tmp_path: Path) -> tuple[Path, Path]:
     project = tmp_path / "project"
     environment = project / ".odcli" / ".env"
     environment.parent.mkdir(parents=True)
+    environment.parent.chmod(0o700)
     environment.write_text("ODCLI_GITLAB_TOKEN_ROOT=secret-token\n", encoding="utf-8")
     environment.chmod(0o600)
     mapping = project / ".odcli" / "gitlab-credentials.toml"
     mapping.write_text(
-        '[[mappings]]\nuser_id = "human-root"\nhost = "gitlab.example"\n'
+        '[[mappings]]\nuser_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"\nhost = "gitlab.example"\n'
         'login = "root-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
         encoding="utf-8",
     )
@@ -339,7 +348,7 @@ def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Pat
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     project, mapping = _credential_project(tmp_path)
@@ -388,13 +397,112 @@ def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Pat
     assert sync_git.sync_calls[0]["secret_values"] == ("secret-token",)
 
 
+def test_encrypted_only_credential_reaches_private_git_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.secret_store import GitLabMemberCredential
+
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    token = "encrypted-test-token"
+    encrypted = GitLabMemberCredential(
+        member_id=member_id,
+        host="gitlab.example",
+        login="root-login",
+        token=token,
+        token_key="ODCLI_GITLAB_TOKEN_ROOT",
+    )
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: encrypted)
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id=member_id,
+        creator_type="member",
+    )
+    project = tmp_path / "empty-project"
+    project.mkdir()
+    checkout = _git_repo(tmp_path / "checkout-encrypted", "https://gitlab.example/team/repo.git")
+    git = _CapturedGit()
+
+    command = _mr_client(root).git_command(
+        _git_context(checkout),
+        ("fetch", "origin"),
+        git_resource=git,
+        project_root=project,
+    )
+    command.run()
+
+    environment = git.passthrough_calls[0][1]["environment"]
+    assert environment["GITLAB_LOGIN"] == "root-login"
+    assert "GITLAB_TOKEN" not in environment
+    assert git.passthrough_calls[0][1]["secret_values"] == (token,)
+    assert token not in repr(command.plan)
+
+
+def test_encrypted_only_credential_reaches_private_merge_request_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.secret_store import GitLabMemberCredential
+
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    token = "encrypted-mr-test-token"
+    monkeypatch.setattr(
+        SecretStore,
+        "lookup_gitlab_member",
+        lambda *_args: GitLabMemberCredential(
+            member_id=member_id,
+            host="gitlab.example",
+            login="root-login",
+            token=token,
+            token_key="ODCLI_GITLAB_TOKEN_ROOT",
+        ),
+    )
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=member_id, creator_type="member"
+    )
+    project = tmp_path / "empty-project"
+    project.mkdir()
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+    captured: list[GitLabCredentialContext] = []
+    monkeypatch.setattr(
+        "odcli_multica.gitlab.publish_merge_request",
+        lambda **kwargs: (
+            captured.append(kwargs["credential"])
+            or MergeRequestPublicationResult(
+                merge_request_id=7,
+                web_url="https://gitlab.example/team/repo/-/merge_requests/7",
+                source_branch="feature",
+                target_branch="main",
+                outcome="created",
+            )
+        ),
+    )
+    command = _mr_client(root).publish_merge_request_command(
+        _mr_context(),
+        project_root=project,
+        source_branch="feature",
+        target_branch="main",
+        title="Private credential path",
+        description_file=description,
+    )
+
+    result = command.run()
+
+    assert result.merge_request_id == 7
+    assert captured[0]._token == token
+    assert token not in repr(command.plan)
+    assert token not in repr(result)
+
+
 def test_git_https_ambiguous_host_fails_before_child_process(tmp_path: Path) -> None:
     root = Issue(
         "root",
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     project, mapping = _credential_project(tmp_path)
@@ -423,7 +531,7 @@ def test_ssh_raw_passthrough_does_not_request_https_credentials(tmp_path: Path) 
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     ).git_command(
@@ -444,7 +552,7 @@ def test_credentialed_git_rejects_changed_origin_before_credentials(tmp_path: Pa
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     )
@@ -470,7 +578,7 @@ def test_credentialed_git_rechecks_origin_at_execution(tmp_path: Path) -> None:
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     )
@@ -517,7 +625,7 @@ def test_credentialed_git_uses_hermetic_environment_and_disables_hooks(
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     ).git_command(
@@ -557,7 +665,7 @@ def test_credentialed_git_rejects_custom_submodule_update_before_child(
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     )
@@ -592,7 +700,7 @@ def test_never_run_credentialed_command_does_not_create_channel(
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     ).git_command(
@@ -639,7 +747,7 @@ def test_credential_channel_is_removed_when_child_construction_fails(
                 "Root",
                 "todo",
                 project_id="project",
-                creator_id="human-root",
+                creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 creator_type="member",
             )
         ).git_command(
@@ -667,7 +775,7 @@ def test_credentialed_git_rejects_repository_credential_helper_before_credential
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     )
@@ -698,7 +806,7 @@ def test_credentialed_git_rejects_foreign_submodule_authority_before_credentials
             "Root",
             "todo",
             project_id="project",
-            creator_id="human-root",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             creator_type="member",
         )
     )
@@ -723,7 +831,7 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -760,7 +868,7 @@ def test_mr_rejects_unverified_issue_url_even_when_https(tmp_path: Path) -> None
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -785,7 +893,7 @@ def test_mr_accepts_explicit_public_issue_url_for_loopback_daemon(tmp_path: Path
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -813,7 +921,7 @@ def test_mr_rejects_hostless_explicit_url_for_loopback_daemon(tmp_path: Path) ->
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -842,7 +950,7 @@ def test_mr_rejects_hostless_configured_server_url_during_construction(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -882,7 +990,7 @@ def test_mr_rejects_invalid_explicit_url_for_loopback_daemon(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -911,7 +1019,7 @@ def test_mr_execution_revalidates_stale_context_and_current_branch(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     replacement = Issue(

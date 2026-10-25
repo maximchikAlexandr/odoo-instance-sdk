@@ -21,7 +21,6 @@ from odcli_multica.client_policies import (
     canonical_checkout as _canonical_checkout,
     current_branch as _current_branch,
     default_mapping_path as _default_mapping_path,
-    gitlab_host as _gitlab_host,
     https_host as _https_host,
     optional_root_creator as _optional_root_creator,
     read_gitlab_credential_mappings,
@@ -47,7 +46,6 @@ from odcli_multica.models import (
     ContextRequest,
     ContextVerificationError,
     GitLabCredentialContext,
-    GitLabCredentialIdentity,
     MergeRequestPublicationResult,
     MulticaCompatibility,
     PreparationRequest,
@@ -63,7 +61,9 @@ from odoo_instance_sdk import (
     ProjectConfig,
 )
 from odoo_instance_sdk.commands.output import action_command
+from odoo_instance_sdk.exceptions import GitLabCredentialError
 from odoo_instance_sdk.execution import ExecutionPlan
+from odoo_instance_sdk.internal.gitlab_credentials import resolve_gitlab_credential
 from odoo_instance_sdk.internal.proc import RunContext
 from odoo_instance_sdk.models import CommandResult, GitSyncResult
 
@@ -679,49 +679,19 @@ class MulticaOdooClient:
     ) -> GitLabCredentialContext:
         root = self._resolve_root_creator(context)
         try:
-            normalized_host = _gitlab_host(host)
-        except ValueError as exc:
-            raise ContextVerificationError("GitLab host is invalid") from exc
-        mappings = read_gitlab_credential_mappings(
-            Path(mapping_path)
-            if mapping_path is not None
-            else _default_mapping_path(Path(project_root))
-        )
-        matches = tuple(
-            item
-            for item in mappings
-            if item.user_id == root.root_creator_id and item.host == normalized_host
-        )
-        if not matches:
-            raise ContextVerificationError("GitLab credential mapping is unavailable")
-        if len(matches) != 1:
-            raise ContextVerificationError("GitLab credential mapping is ambiguous")
-        mapping = matches[0]
-        try:
-            from odoo_instance_sdk.internal.project_env import (
-                effective_project_environment,
-                load_project_environment,
+            return resolve_gitlab_credential(
+                root.root_creator_id,
+                host,
+                mapping_path=(
+                    Path(mapping_path)
+                    if mapping_path is not None
+                    else _default_mapping_path(Path(project_root))
+                ),
+                environment_path=Path(project_root) / ".odcli" / ".env",
+                process_environment=process_environment,
             )
-
-            file_values = load_project_environment(project_root)
-            effective = effective_project_environment(file_values, process_environment)
-        except Exception as exc:
-            raise ContextVerificationError("project credential environment is unavailable") from exc
-        token = effective.get(mapping.token_key, "")
-        if not token:
-            raise ContextVerificationError(
-                f"GitLab credential token key {mapping.token_key} is unavailable"
-            )
-        identity = GitLabCredentialIdentity(
-            user_id=mapping.user_id,
-            host=mapping.host,
-            login=mapping.login,
-            token_key=mapping.token_key,
-            workspace_id=root.workspace_id,
-            issue_id=root.issue_id,
-            root_issue_id=root.root_issue_id,
-        )
-        return GitLabCredentialContext(identity=identity, _token=token)
+        except GitLabCredentialError as exc:
+            raise ContextVerificationError("GitLab credentials are unavailable") from exc
 
 
 def _observe_compatibility(multica: MulticaClient) -> MulticaCompatibility:

@@ -81,6 +81,10 @@ class _SnapshotPlanningMixin:
         rows = snapshot_rows.environments
         registered_projects = snapshot_rows.projects
         project_runtimes = snapshot_rows.project_runtimes
+        backups_by_project: dict[str, list[sqlite3.Row]] = {}
+        for backup in snapshot_rows.backups:
+            if backup["project_id"] is not None:
+                backups_by_project.setdefault(str(backup["project_id"]), []).append(backup)
         groups: dict[str, list[_EnvironmentPlan]] = {}
         project_details: dict[str, Path] = {
             str(row["project_id"]): Path(str(row["repository_root"])).resolve()
@@ -170,6 +174,7 @@ class _SnapshotPlanningMixin:
                     tuple(environments_with_provenance),
                     project_runtime=project_runtime,
                     backup_provenance=project_provenance,
+                    backups=tuple(backups_by_project.get(resolved_project_id, ())),
                 )
             )
         for resolved_project_id, repo_root in project_details.items():
@@ -207,6 +212,7 @@ class _SnapshotPlanningMixin:
                     (),
                     project_runtime=project_runtime,
                     backup_provenance=project_provenance,
+                    backups=tuple(backups_by_project.get(resolved_project_id, ())),
                 )
             )
         return _SnapshotPlan(

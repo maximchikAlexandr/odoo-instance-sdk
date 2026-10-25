@@ -29,6 +29,9 @@ from odoo_instance_sdk.models import (
     Snapshot,
     SnapshotRequest,
 )
+from odoo_instance_sdk.resources.monitor.collection_parts.storage import (
+    _project_runtime_storage_step,
+)
 from odoo_instance_sdk.resources.monitor.planning import (
     _PROBE_TIMEOUT_SECONDS,
     _SCHEMA_VERSION,
@@ -172,10 +175,7 @@ class _CollectMixin:
     ) -> Command[CheckoutInventory]:
         """Capture one ``CheckoutInventory`` projection from a single snapshot.
 
-        The captured command runs ``snapshot_command`` exactly once and projects
-        the result plus Git facts of the main checkout into the frozen
-        ``CheckoutInventory`` model. The action is read-only and never spawns a
-        process outside the bounded Git facts collector.
+        Project the single snapshot and bounded Git facts into ``CheckoutInventory``.
         """
         from odoo_instance_sdk.execution import Command as _Command, ExecutionPlan
         from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
@@ -603,6 +603,12 @@ class _CollectMixin:
         steps: list[PreparedStep] = []
         projects: set[tuple[Path, str]] = set()
         repositories: set[tuple[Path, str]] = set()
+        measured_databases: set[tuple[str, int, str]] = set()
+        measured_filestores: set[Path] = set()
+        project_roots = {
+            str(project["project_id"]): Path(str(project["repository_root"]))
+            for project in registered_projects
+        }
         for row, _runtime in rows:
             worktree = Path(str(row["worktree_path"])).resolve()
             env_id = str(row["id"])
@@ -735,14 +741,15 @@ class _CollectMixin:
                             text=True,
                         )
                     )
-            if (
-                "storage" in selected
-                and "postgresql" in selected
-                and str(row["db_mode"]) == "copy"
-                and row["target_db_name"]
-            ):
-                database_name = str(row["target_db_name"]).replace("'", "''")
-                if row["target_db_name"] is not None:
+            if "storage" in selected and "postgresql" in selected and database:
+                database_name = str(database).replace("'", "''")
+                database_identity = (
+                    (db_config.db_host or "localhost") if db_config is not None else "localhost",
+                    (db_config.db_port or 5432) if db_config is not None else 5432,
+                    str(database),
+                )
+                if database_identity not in measured_databases:
+                    measured_databases.add(database_identity)
                     from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 
                     steps.append(
@@ -752,7 +759,7 @@ class _CollectMixin:
                             port=db_config.db_port or 5432 if db_config is not None else 5432,
                             user=db_config.db_user if db_config is not None else None,
                             password=db_config.db_password if db_config is not None else None,
-                            database=str(row["target_db_name"]),
+                            database=str(database),
                             args=(
                                 "-w",
                                 "-c",
@@ -770,13 +777,14 @@ class _CollectMixin:
                     cfg = StartConfig.from_odoo_config(str(row["generated_config_path"]))
                     data_dir = Path(cfg.data_dir) if cfg.data_dir is not None else None
                     filestore = (
-                        validate_filestore_containment(data_dir, str(row["target_db_name"]))
+                        validate_filestore_containment(data_dir, str(database))
                         if data_dir is not None
                         else None
                     )
                 except Exception:
                     filestore = None
-                if filestore is not None:
+                if filestore is not None and filestore.resolve() not in measured_filestores:
+                    measured_filestores.add(filestore.resolve())
                     steps.append(
                         PreparedStep(
                             step_id=f"monitor.{env_id}.storage.filestore",
@@ -801,6 +809,26 @@ class _CollectMixin:
             projects.add((repository, resolved_project))
             if (repository / ".git").exists():
                 repositories.add((repository, resolved_project))
+
+        if "storage" in selected and "postgresql" in selected:
+            for runtime in catalog_rows.project_runtimes:
+                project_name = str(runtime["owner_id"])
+                runtime_repository = project_roots.get(project_name)
+                if runtime_repository is None or not runtime["database_name"]:
+                    continue
+                if project_id is not None and project_name != project_id:
+                    continue
+                if (
+                    request is not None
+                    and request.project_ids
+                    and project_name not in request.project_ids
+                ):
+                    continue
+                step = _project_runtime_storage_step(
+                    runtime, runtime_repository, measured_databases
+                )
+                if step is not None:
+                    steps.append(step)
 
         for project in registered_projects:
             repository = Path(str(project["repository_root"])).resolve()

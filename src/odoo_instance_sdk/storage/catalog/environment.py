@@ -788,6 +788,10 @@ class _EnvironmentMixin:
                     "WHERE r.owner_kind = 'project' AND p.registration_state = 'registered' "
                     "ORDER BY r.owner_id"
                 ).fetchall()
+                backups = self._conn.execute(
+                    "SELECT b.* FROM backups b JOIN projects p ON p.project_id = b.project_id "
+                    "WHERE p.registration_state = 'registered' ORDER BY b.project_id, b.id"
+                ).fetchall()
             else:
                 environment_ids = [str(row["id"]) for row in environments]
                 if environment_ids:
@@ -810,6 +814,9 @@ class _EnvironmentMixin:
                     "AND p.registration_state = 'registered'",
                     (project_id,),
                 ).fetchall()
+                backups = self._conn.execute(
+                    "SELECT * FROM backups WHERE project_id = ? ORDER BY id", (project_id,)
+                ).fetchall()
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
@@ -819,6 +826,7 @@ class _EnvironmentMixin:
             environments=tuple((row, by_environment.get(str(row["id"]))) for row in environments),
             projects=tuple(projects),
             project_runtimes=tuple(project_runtimes),
+            backups=tuple(backups),
         )
 
     @_translate_sqlite_error

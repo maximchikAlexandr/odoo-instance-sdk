@@ -36,6 +36,7 @@ class ProjectStorageFootprint(
 ):
     total_bytes: int | None
     complete: bool
+    backup_bytes: int | None = None
 
 
 class EnvironmentArtifacts(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

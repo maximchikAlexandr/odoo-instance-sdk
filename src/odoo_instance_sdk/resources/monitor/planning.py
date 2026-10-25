@@ -78,6 +78,7 @@ class _ProjectPlan:
     environments: tuple[_EnvironmentPlan, ...]
     project_runtime: sqlite3.Row | None = None
     backup_provenance: CurrentBackupProvenance | None = None
+    backups: tuple[sqlite3.Row, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

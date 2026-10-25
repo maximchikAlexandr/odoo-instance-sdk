@@ -72,6 +72,7 @@ class MonitorCatalogSnapshot:
     environments: tuple[tuple[sqlite3.Row, sqlite3.Row | None], ...]
     projects: tuple[sqlite3.Row, ...]
     project_runtimes: tuple[sqlite3.Row, ...]
+    backups: tuple[sqlite3.Row, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

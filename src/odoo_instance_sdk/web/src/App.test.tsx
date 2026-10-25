@@ -55,7 +55,7 @@ const snapshot: Snapshot = {
       runtime: { state: RuntimeState.NOT_READY, root_pid: 21, child_pids: [], process_count: 1,
         cpu_percent: null, memory_bytes: null, started_at: null, http_url: null,
         http_port: null, database_name: null, commit_sha: null, branch: "main" },
-      storage: { total_bytes: 2048, complete: true },
+      storage: { total_bytes: 2048, complete: true, backup_bytes: 1024 },
       publication: { state: "unpublished", external_url: null, reason: null, route_identity: null },
     },
     { id: "project_b", name: "beta", display_hint: "b", repository_root: "/tmp/beta", environment_count: 1, cluster: null, runtime: null,
@@ -70,7 +70,7 @@ const snapshot: Snapshot = {
       runtime: { state: RuntimeState.READY, root_pid: 31, child_pids: [], process_count: 1,
         cpu_percent: 2.5, memory_bytes: 4096, started_at: null, http_url: "http://127.0.0.1:8071",
         http_port: 8071, database_name: "project_c", commit_sha: "def", branch: "main" },
-      storage: { total_bytes: 1048576, complete: true },
+      storage: { total_bytes: 1048576, complete: true, backup_bytes: 235520 },
       publication: { state: "available", external_url: "https://project-c.example.test", reason: null, route_identity: "route-c" },
     },
   ],
@@ -177,10 +177,14 @@ describe("App", () => {
     expect(projects[2].textContent).toContain("Main checkout");
     expect(projects[2].textContent).toContain("project_c");
     expect(projects[2].textContent).toContain("1.0 MiB");
+    expect(projects[2].textContent).toContain("230 KiB backups, project total");
+    expect(projects[2].textContent).toContain("Disk");
     expect(projects[2].textContent).toContain("http://127.0.0.1:8071");
     expect(environments[0].textContent).toContain("Worktree");
-    expect(environments[0].textContent).toContain("Resources");
-    expect(screen.getByText("— (incomplete)")).toBeTruthy();
+    expect(environments[0].textContent).toContain("Disk");
+    expect(environments[0].textContent).not.toContain("Resources");
+    expect(projects[1].textContent).toContain("(incomplete)");
+    expect(projects[1].textContent).toContain("project total");
     expect(projects[2].querySelector(".instance-branch")?.textContent).toBe("Branch main");
     expect(projects[0].querySelector(".instance-branch")?.textContent).toBe("Branch main");
     expect(environments[1].querySelector(".instance-branch")?.textContent).toBe("Branch main");
@@ -285,6 +289,7 @@ describe("App", () => {
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(stopped) as never);
     finish({ data: { state: "stopped" } });
     await waitFor(() => expect(button.textContent).toBe("Start"));
+    expect(card.textContent).toContain("Disk");
     expect(button.disabled).toBe(false);
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(running) as never);
     fireEvent.click(button);

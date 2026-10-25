@@ -18,6 +18,12 @@ from odcli_multica.models import (
 
 from odoo_instance_sdk import Command
 from odoo_instance_sdk.execution import ExecutionPlan
+from odoo_instance_sdk.internal.secret_store import SecretStore
+
+
+@pytest.fixture(autouse=True)
+def _empty_encrypted_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
 
 
 class _Issues:
@@ -80,7 +86,7 @@ def test_root_creator_traversal_is_finite_and_workspace_bound() -> None:
         "Root",
         "in_progress",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     child = Issue("child", "Child", "in_progress", project_id="project", parent_id="root")
@@ -88,7 +94,7 @@ def test_root_creator_traversal_is_finite_and_workspace_bound() -> None:
     result = _client(child, root).root_creator(_context())
 
     assert result.root_issue_id == "root"
-    assert result.root_creator_id == "human-root"
+    assert result.root_creator_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     assert result.workspace_id == "workspace"
 
 
@@ -98,7 +104,7 @@ def test_root_creator_accepts_parent_in_another_project_of_same_workspace() -> N
         "Root",
         "in_progress",
         project_id="other",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     child = Issue("child", "Child", "in_progress", project_id="project", parent_id="root")
@@ -106,7 +112,7 @@ def test_root_creator_accepts_parent_in_another_project_of_same_workspace() -> N
     result = _client(child, root, other_workspace="workspace").root_creator(_context())
 
     assert result.root_issue_id == "root"
-    assert result.root_creator_id == "human-root"
+    assert result.root_creator_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def _project_commit_case() -> tuple[
@@ -117,7 +123,7 @@ def _project_commit_case() -> tuple[
         "Root",
         "in_progress",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     child = Issue("child", "Child", "in_progress", project_id="project", parent_id="root")
@@ -135,7 +141,7 @@ def _project_commit_case() -> tuple[
     client = _client(child, root)
 
     command = client.project_commit_command(
-        _context(root_creator_id="human-root"),
+        _context(root_creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         git_resource=git,
         description="change",
         ticket="PROJ-1",
@@ -146,7 +152,7 @@ def _project_commit_case() -> tuple[
             "description": "change",
             "ticket": "PROJ-1",
             "tag": "DOC",
-            "member_id": "human-root",
+            "member_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         }
     ]
     return client, command, executions, captured
@@ -159,7 +165,7 @@ def test_project_commit_uses_only_verified_root_human_identity() -> None:
 
     assert result == "committed"
     assert executions == ["commit"]
-    assert captured[0]["member_id"] == "human-root"
+    assert captured[0]["member_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     assert captured[0]["description"] == "change"
     assert captured[0]["ticket"] == "PROJ-1"
     assert captured[0]["tag"] == "DOC"
@@ -306,22 +312,24 @@ def test_root_creator_rejects_invalid_lineage(issues: tuple[Issue, ...], message
 
 
 def test_credential_mapping_uses_process_precedence_and_redacts_token(tmp_path: Path) -> None:
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     root = Issue(
         "root",
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id=member_id,
         creator_type="member",
     )
     project = tmp_path / "project"
     dotenv = project / ".odcli" / ".env"
     dotenv.parent.mkdir(parents=True)
+    dotenv.parent.chmod(0o700)
     dotenv.write_text("ODCLI_GITLAB_TOKEN_ROOT=file-token\n", encoding="utf-8")
     dotenv.chmod(0o600)
     mapping = project / ".odcli" / "gitlab-credentials.toml"
     mapping.write_text(
-        '[[mappings]]\nuser_id = "human-root"\nhost = "https://GitLab.Example/"\n'
+        f'[[mappings]]\nuser_id = "{member_id}"\nhost = "https://GitLab.Example/"\n'
         'login = "root-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
         encoding="utf-8",
     )
@@ -336,7 +344,7 @@ def test_credential_mapping_uses_process_precedence_and_redacts_token(tmp_path: 
         process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "process-token"},
     )
 
-    assert credential.identity.user_id == "human-root"
+    assert credential.identity.user_id == member_id
     assert credential.identity.host == "gitlab.example"
     assert credential.child_environment()["GITLAB_TOKEN"] == "process-token"
     assert "process-token" not in repr(credential)
@@ -345,6 +353,8 @@ def test_credential_mapping_uses_process_precedence_and_redacts_token(tmp_path: 
 
 def test_mapping_reader_rejects_duplicate_host_and_bad_token_key(tmp_path: Path) -> None:
     mapping = tmp_path / "mapping.toml"
+    credential_dir = tmp_path / ".odcli"
+    credential_dir.mkdir(mode=0o700)
     mapping.write_text(
         '[[mappings]]\nuser_id = "u"\nhost = "gitlab.example"\nlogin = "one"\n'
         'token_key = "ODCLI_GITLAB_TOKEN_ONE"\n\n'
@@ -359,9 +369,12 @@ def test_mapping_reader_rejects_duplicate_host_and_bad_token_key(tmp_path: Path)
 
 
 def test_credentials_fail_closed_for_an_unmapped_host(tmp_path: Path) -> None:
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     mapping = tmp_path / "mapping.toml"
+    credential_dir = tmp_path / ".odcli"
+    credential_dir.mkdir(mode=0o700)
     mapping.write_text(
-        '[[mappings]]\nuser_id = "human-root"\nhost = "gitlab.example"\n'
+        f'[[mappings]]\nuser_id = "{member_id}"\nhost = "gitlab.example"\n'
         'login = "root-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
         encoding="utf-8",
     )
@@ -371,11 +384,11 @@ def test_credentials_fail_closed_for_an_unmapped_host(tmp_path: Path) -> None:
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id=member_id,
         creator_type="member",
     )
 
-    with pytest.raises(ContextVerificationError, match="mapping is unavailable"):
+    with pytest.raises(ContextVerificationError, match="credentials are unavailable"):
         _client(root)._resolve_credentials(
             _context("root"),
             host="other.example",
@@ -386,11 +399,18 @@ def test_credentials_fail_closed_for_an_unmapped_host(tmp_path: Path) -> None:
 
 
 def test_two_root_creators_keep_private_tokens_isolated(tmp_path: Path) -> None:
+    member_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    member_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     mapping = tmp_path / "mapping.toml"
+    credential_dir = tmp_path / ".odcli"
+    credential_dir.mkdir(mode=0o700)
+    environment_file = credential_dir / ".env"
+    environment_file.write_text("", encoding="utf-8")
+    environment_file.chmod(0o600)
     mapping.write_text(
-        '[[mappings]]\nuser_id = "user-a"\nhost = "gitlab.example"\nlogin = "a"\n'
+        f'[[mappings]]\nuser_id = "{member_a}"\nhost = "gitlab.example"\nlogin = "a"\n'
         'token_key = "ODCLI_GITLAB_TOKEN_A"\n\n'
-        '[[mappings]]\nuser_id = "user-b"\nhost = "gitlab.example"\nlogin = "b"\n'
+        f'[[mappings]]\nuser_id = "{member_b}"\nhost = "gitlab.example"\nlogin = "b"\n'
         'token_key = "ODCLI_GITLAB_TOKEN_B"\n',
         encoding="utf-8",
     )
@@ -400,7 +420,7 @@ def test_two_root_creators_keep_private_tokens_isolated(tmp_path: Path) -> None:
         "Root A",
         "todo",
         project_id="project",
-        creator_id="user-a",
+        creator_id=member_a,
         creator_type="member",
     )
     root_b = Issue(
@@ -408,7 +428,7 @@ def test_two_root_creators_keep_private_tokens_isolated(tmp_path: Path) -> None:
         "Root B",
         "todo",
         project_id="project",
-        creator_id="user-b",
+        creator_id=member_b,
         creator_type="member",
     )
     client = _client(root_a, root_b)
@@ -437,3 +457,86 @@ def test_two_root_creators_keep_private_tokens_isolated(tmp_path: Path) -> None:
     assert credential_a.child_environment()["GITLAB_TOKEN"] == "token-a"
     assert credential_b.child_environment()["GITLAB_TOKEN"] == "token-b"
     assert credential_a.identity.login != credential_b.identity.login
+
+
+def test_encrypted_credential_resolves_without_legacy_files_and_wins_conflicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.secret_store import GitLabMemberCredential, SecretStore
+
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    encrypted = GitLabMemberCredential(
+        member_id=member_id,
+        host="gitlab.example",
+        login="encrypted-login",
+        token="encrypted-token",
+        token_key="ODCLI_GITLAB_TOKEN_ENCRYPTED",
+    )
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: encrypted)
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=member_id, creator_type="member"
+    )
+    project = tmp_path / "project"
+    (project / ".odcli").mkdir(parents=True)
+    mapping = project / ".odcli" / "gitlab-credentials.toml"
+    mapping.write_text(
+        f'[[mappings]]\nuser_id = "{member_id}"\nhost = "gitlab.example"\n'
+        'login = "legacy-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_LEGACY"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+
+    credential = _client(root)._resolve_credentials(
+        _context("root"),
+        host="https://GITLAB.EXAMPLE/",
+        project_root=project,
+        mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_LEGACY": "legacy-token"},
+    )
+
+    assert credential.identity.login == "encrypted-login"
+    assert credential.child_environment()["GITLAB_TOKEN"] == "encrypted-token"
+    assert "encrypted-token" not in repr(credential)
+    assert "encrypted-token" not in repr(credential.identity)
+
+
+def test_broken_encrypted_store_does_not_fall_back_to_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.exceptions import SecretStoreCorruptError
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    project = tmp_path / "project"
+    dotenv = project / ".odcli" / ".env"
+    dotenv.parent.mkdir(parents=True)
+    dotenv.write_text("ODCLI_GITLAB_TOKEN_LEGACY=legacy-token\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+    mapping = project / ".odcli" / "gitlab-credentials.toml"
+    mapping.write_text(
+        f'[[mappings]]\nuser_id = "{member_id}"\nhost = "gitlab.example"\n'
+        'login = "legacy-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_LEGACY"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    monkeypatch.setattr(
+        SecretStore,
+        "lookup_gitlab_member",
+        lambda *_args: (_ for _ in ()).throw(SecretStoreCorruptError("secret-store corrupt")),
+    )
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=member_id, creator_type="member"
+    )
+
+    with pytest.raises(
+        ContextVerificationError, match="GitLab credentials are unavailable"
+    ) as error:
+        _client(root)._resolve_credentials(
+            _context("root"),
+            host="gitlab.example",
+            project_root=project,
+            mapping_path=mapping,
+            process_environment={},
+        )
+
+    assert "secret-store corrupt" not in str(error.value)
