@@ -33,7 +33,7 @@ from odoo_instance_sdk.exceptions import (
     SecretStoreRecordError,
     StalePlanError,
 )
-from odoo_instance_sdk.execution import Command, JsonValue
+from odoo_instance_sdk.execution import Command, JsonValue, ProcessStep
 from odoo_instance_sdk.internal.applied_settings import (
     LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     decode_applied_settings,
@@ -749,6 +749,43 @@ class TestCheckoutPreflight:
         self._assert_auxiliary_plan_steps(step_ids)
         assert "database.backup.transfer" in step_ids
         assert "database.backup.wait" in step_ids
+
+    def test_copy_helper_reserves_checkout_http_port(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.address import AddressState
+
+        _add_named_remote_config(project_manifest)
+        monkeypatch.setattr("odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_START", 8000)
+        monkeypatch.setattr("odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_END", 8002)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.port_allocation.probe_address",
+            lambda _host, _port: AddressState.FREE,
+        )
+        local = _copy_instance(env_client)
+        monkeypatch.setattr(InstanceFactory, "from_config", MagicMock(return_value=local))
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/auxiliary-port",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                remote_name="staging",
+                target_database="port_copy",
+                http_port=8000,
+            ),
+        )
+        projection = command.plan
+        helper = next(
+            step for step in projection.steps if step.step_id == "database.restore.auxiliary.start"
+        )
+        assert isinstance(helper, ProcessStep)
+        helper_port = int(helper.argv[helper.argv.index("--http-port") + 1])
+        assert helper_port == 8001
 
     def test_retained_backup_copy_plan_keeps_local_auxiliary_lifecycle(
         self,
