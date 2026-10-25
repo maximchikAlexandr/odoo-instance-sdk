@@ -215,7 +215,7 @@ function RuntimeCard({
   runtime: RuntimeMetrics | null;
   publication?: PublicationSnapshot;
   backupFreshness?: BackupFreshnessSnapshot;
-  storage: { total_bytes: number | null; complete: boolean };
+  storage: { total_bytes: number | null; complete: boolean; backup_bytes?: number | null };
   database: string | null | undefined;
   lifecycleState?: string;
   testId: string;
@@ -294,14 +294,17 @@ function RuntimeCard({
             </dd>
           ) : <dd>Backup download date unknown</dd>}
         </div>
-        <div>
-          <dt>Resources</dt>
-          <dd>{formatBytes(storage.total_bytes)}{storage.complete ? "" : " (incomplete)"}</dd>
-        </div>
       </dl>
 
       <div className="instance-footer">
         <Group gap="lg" className="instance-metrics">
+          <Text>
+            <span>Disk</span> {formatBytes(storage.total_bytes)}
+            {kind === "Main checkout" ? (
+              <> ({formatBytes(storage.backup_bytes)} backups, project total)</>
+            ) : null}
+            {storage.complete ? "" : " (incomplete)"}
+          </Text>
           {live && runtime?.cpu_percent != null ? (
             <Text><span>CPU</span> {formatPercent(runtime.cpu_percent)}</Text>
           ) : null}

@@ -786,6 +786,17 @@
       "ProjectStorageFootprint": {
         "additionalProperties": false,
         "properties": {
+          "backup_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "complete": {
             "type": "boolean"
           },

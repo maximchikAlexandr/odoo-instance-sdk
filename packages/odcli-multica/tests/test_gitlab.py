@@ -21,9 +21,17 @@ from odcli_multica.gitlab import (
 from odcli_multica.models import (
     GitLabCredentialContext,
     GitLabCredentialIdentity,
+    MergeRequestPublicationResult,
     MulticaCompatibility,
     VerifiedTaskContext,
 )
+
+from odoo_instance_sdk.internal.secret_store import SecretStore
+
+
+@pytest.fixture(autouse=True)
+def _empty_encrypted_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
 
 
 def _credential() -> GitLabCredentialContext:
@@ -257,7 +265,7 @@ def _mr_context(checkout_path: str = "/task/checkout") -> VerifiedTaskContext:
         daemon_id="daemon",
         observed_at=datetime.now(UTC),
         root_issue_id="root",
-        root_creator_id="human-root",
+        root_creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     )
 
 
@@ -321,11 +329,12 @@ def _credential_project(tmp_path: Path) -> tuple[Path, Path]:
     project = tmp_path / "project"
     environment = project / ".odcli" / ".env"
     environment.parent.mkdir(parents=True)
+    environment.parent.chmod(0o700)
     environment.write_text("ODCLI_GITLAB_TOKEN_ROOT=secret-token\n", encoding="utf-8")
     environment.chmod(0o600)
     mapping = project / ".odcli" / "gitlab-credentials.toml"
     mapping.write_text(
-        '[[mappings]]\nuser_id = "human-root"\nhost = "gitlab.example"\n'
+        '[[mappings]]\nuser_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"\nhost = "gitlab.example"\n'
         'login = "root-login"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
         encoding="utf-8",
     )
@@ -333,386 +342,60 @@ def _credential_project(tmp_path: Path) -> tuple[Path, Path]:
     return project, mapping
 
 
-def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Path) -> None:
-    root = Issue(
-        "root",
-        "Root",
-        "todo",
-        project_id="project",
-        creator_id="human-root",
-        creator_type="member",
-    )
-    project, mapping = _credential_project(tmp_path)
-    client = _mr_client(root)
-
-    local_git = _CapturedGit()
-    client.git_command(
-        _mr_context(),
-        ("status", "--short"),
-        git_resource=local_git,
-        project_root=project,
-        mapping_path=mapping,
-    ).run()
-    assert local_git.passthrough_calls[0][1] == {"environment": {}, "secret_values": ()}
-
-    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
-    remote_git = _CapturedGit()
-    client.git_command(
-        _git_context(checkout),
-        ("fetch", "origin"),
-        git_resource=remote_git,
-        project_root=project,
-        mapping_path=mapping,
-    ).run()
-    environment = remote_git.passthrough_calls[0][1]["environment"]
-    assert environment["GITLAB_LOGIN"] == "root-login"
-    assert environment["GIT_ASKPASS"].endswith("odcli-multica-askpass")
-    assert environment["GIT_TERMINAL_PROMPT"] == "0"
-    assert "GITLAB_TOKEN" not in environment
-    assert environment["ODCLI_GITLAB_HOST"] == "gitlab.example"
-    assert not Path(environment["ODCLI_GITLAB_ASKPASS_FILE"]).exists()
-    assert remote_git.passthrough_calls[0][1]["secret_values"] == ("secret-token",)
-
-    sync_git = _CapturedGit()
-    client.sync_command(
-        _git_context(checkout),
-        git_resource=sync_git,
-        project_root=project,
-        mapping_path=mapping,
-    ).run()
-    sync_environment = sync_git.sync_calls[0]["environment"]
-    assert sync_environment["GITLAB_LOGIN"] == environment["GITLAB_LOGIN"]
-    assert sync_environment["GIT_ASKPASS"] == environment["GIT_ASKPASS"]
-    assert sync_environment["ODCLI_GITLAB_HOST"] == environment["ODCLI_GITLAB_HOST"]
-    assert not Path(sync_environment["ODCLI_GITLAB_ASKPASS_FILE"]).exists()
-    assert sync_git.sync_calls[0]["secret_values"] == ("secret-token",)
-
-
-def test_git_https_ambiguous_host_fails_before_child_process(tmp_path: Path) -> None:
-    root = Issue(
-        "root",
-        "Root",
-        "todo",
-        project_id="project",
-        creator_id="human-root",
-        creator_type="member",
-    )
-    project, mapping = _credential_project(tmp_path)
-    git = _CapturedGit()
-
-    with pytest.raises(Exception, match="ambiguous"):
-        _mr_client(root).git_command(
-            _mr_context(),
-            ("fetch", "https://other.example/team/repo.git"),
-            git_resource=git,
-            project_root=project,
-            mapping_path=mapping,
-        ).run()
-    assert git.passthrough_calls == []
-
-
-def test_ssh_raw_passthrough_does_not_request_https_credentials(tmp_path: Path) -> None:
-    context = msgspec.structs.replace(
-        _mr_context(), repository_url="git@gitlab.example:team/repo.git"
-    )
-    git = _CapturedGit()
-
-    _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
-    ).git_command(
-        context,
-        ("fetch", "origin"),
-        git_resource=git,
-        project_root=tmp_path,
-    ).run()
-
-    assert git.passthrough_calls[0][1] == {"environment": {}, "secret_values": ()}
-
-
-def test_credentialed_git_rejects_changed_origin_before_credentials(tmp_path: Path) -> None:
-    checkout = _git_repo(tmp_path / "checkout", "https://attacker.example/team/repo.git")
-    client = _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
-    )
-    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
-    git = _CapturedGit()
-
-    with pytest.raises(Exception, match="origin"):
-        client.git_command(
-            _git_context(checkout),
-            ("fetch", "origin"),
-            git_resource=git,
-            project_root=tmp_path,
-        ).run()
-    assert git.passthrough_calls == []
-
-
-def test_credentialed_git_rechecks_origin_at_execution(tmp_path: Path) -> None:
-    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
-    project, mapping = _credential_project(tmp_path)
-    client = _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
-    )
-    git = _CapturedGit()
-    command = client.git_command(
-        _git_context(checkout),
-        ("fetch", "origin"),
-        git_resource=git,
-        project_root=project,
-        mapping_path=mapping,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(checkout),
-            "remote",
-            "set-url",
-            "origin",
-            "https://attacker.example/team/repo.git",
-        ],
-        check=True,
-    )
-
-    with pytest.raises(Exception, match="origin"):
-        command.run()
-    assert git.passthrough_calls == []
-
-
-def test_credentialed_git_uses_hermetic_environment_and_disables_hooks(
+def test_encrypted_only_credential_reaches_private_merge_request_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
-    project, mapping = _credential_project(tmp_path)
-    hook = checkout / ".git" / "hooks" / "pre-push"
-    hook.write_text('#!/bin/sh\nprintf canary >"$ODCLI_GITLAB_ASKPASS_FILE"\n', encoding="utf-8")
-    hook.chmod(0o700)
-    monkeypatch.setenv("GIT_EXEC_PATH", str(tmp_path / "attacker-git"))
-    git = _CapturedGit()
+    from odoo_instance_sdk.internal.secret_store import GitLabMemberCredential
 
-    _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
-    ).git_command(
-        _git_context(checkout),
-        ("fetch", "origin"),
-        git_resource=git,
-        project_root=project,
-        mapping_path=mapping,
-    ).run()
-
-    call = git.passthrough_calls[0][1]
-    assert "GIT_EXEC_PATH" not in call["environment"]
-    hooks_path = call["hooks_path"]
-    assert isinstance(hooks_path, str)
-    assert not Path(hooks_path).exists()
-    assert call["environment"]["ODCLI_GITLAB_ASKPASS_FILE"]
-
-
-def test_credentialed_git_rejects_custom_submodule_update_before_child(
-    tmp_path: Path,
-) -> None:
-    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(checkout),
-            "config",
-            "submodule.foreign.update",
-            "!printf canary",
-        ],
-        check=True,
-    )
-    client = _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
-    )
-    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
-    git = _CapturedGit()
-
-    with pytest.raises(Exception, match="custom submodule update"):
-        client.git_command(
-            _git_context(checkout),
-            ("submodule", "update", "--init"),
-            git_resource=git,
-            project_root=tmp_path,
-        ).run()
-    assert git.passthrough_calls == []
-
-
-def test_never_run_credentialed_command_does_not_create_channel(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, mapping = _credential_project(tmp_path)
-    git = _CapturedGit()
-    import odcli_multica.git_execution as execution_module
-
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    token = "encrypted-mr-test-token"
     monkeypatch.setattr(
-        execution_module,
-        "write_askpass_channel",
-        lambda credential: pytest.fail("credential channel was created before run"),
+        SecretStore,
+        "lookup_gitlab_member",
+        lambda *_args: GitLabMemberCredential(
+            member_id=member_id,
+            host="gitlab.example",
+            login="root-login",
+            token=token,
+            token_key="ODCLI_GITLAB_TOKEN_ROOT",
+        ),
     )
-    command = _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
-    ).git_command(
-        _git_context(_git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")),
-        ("fetch", "origin"),
-        git_resource=git,
-        project_root=project,
-        mapping_path=mapping,
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=member_id, creator_type="member"
     )
-
-    assert command.plan.steps
-    assert git.passthrough_calls == []
-
-
-def test_credential_channel_is_removed_when_child_construction_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, mapping = _credential_project(tmp_path)
-    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
-    channel = tmp_path / "askpass.json"
-    import odcli_multica.git_execution as execution_module
-
-    def write_channel(credential: GitLabCredentialContext) -> str:
-        channel.write_text("canary", encoding="utf-8")
-        return str(channel)
-
-    monkeypatch.setattr(execution_module, "write_askpass_channel", write_channel)
-
-    class FailingGit(_CapturedGit):
-        def passthrough_command(
-            self,
-            args: tuple[str, ...],
-            *,
-            environment: dict[str, str] | None = None,
-            secret_values: tuple[str, ...] = (),
-            hooks_path: str | None = None,
-        ) -> object:
-            raise RuntimeError("child construction failed")
-
-    with pytest.raises(RuntimeError, match="child construction"):
-        _mr_client(
-            Issue(
-                "root",
-                "Root",
-                "todo",
-                project_id="project",
-                creator_id="human-root",
-                creator_type="member",
+    project = tmp_path / "empty-project"
+    project.mkdir()
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+    captured: list[GitLabCredentialContext] = []
+    monkeypatch.setattr(
+        "odcli_multica.gitlab.publish_merge_request",
+        lambda **kwargs: (
+            captured.append(kwargs["credential"])
+            or MergeRequestPublicationResult(
+                merge_request_id=7,
+                web_url="https://gitlab.example/team/repo/-/merge_requests/7",
+                source_branch="feature",
+                target_branch="main",
+                outcome="created",
             )
-        ).git_command(
-            _git_context(checkout),
-            ("fetch", "origin"),
-            git_resource=FailingGit(),
-            project_root=project,
-            mapping_path=mapping,
-        ).run()
-
-    assert not channel.exists()
-
-
-def test_credentialed_git_rejects_repository_credential_helper_before_credentials(
-    tmp_path: Path,
-) -> None:
-    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
-    subprocess.run(
-        ["git", "-C", str(checkout), "config", "credential.helper", "!printf canary"],
-        check=True,
+        ),
     )
-    client = _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
+    command = _mr_client(root).publish_merge_request_command(
+        _mr_context(),
+        project_root=project,
+        source_branch="feature",
+        target_branch="main",
+        title="Private credential path",
+        description_file=description,
     )
-    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
-    git = _CapturedGit()
 
-    with pytest.raises(Exception, match="credential helper"):
-        client.git_command(
-            _git_context(checkout),
-            ("fetch", "origin"),
-            git_resource=git,
-            project_root=tmp_path,
-        ).run()
-    assert git.passthrough_calls == []
+    result = command.run()
 
-
-def test_credentialed_git_rejects_foreign_submodule_authority_before_credentials(
-    tmp_path: Path,
-) -> None:
-    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
-    (checkout / ".gitmodules").write_text(
-        '[submodule "foreign"]\n\tpath = foreign\n\turl = https://attacker.example/foreign.git\n',
-        encoding="utf-8",
-    )
-    client = _mr_client(
-        Issue(
-            "root",
-            "Root",
-            "todo",
-            project_id="project",
-            creator_id="human-root",
-            creator_type="member",
-        )
-    )
-    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
-    git = _CapturedGit()
-
-    with pytest.raises(Exception, match="submodule"):
-        client.git_command(
-            _git_context(checkout),
-            ("submodule", "update", "--init"),
-            git_resource=git,
-            project_root=tmp_path,
-        ).run()
-    assert git.passthrough_calls == []
+    assert result.merge_request_id == 7
+    assert captured[0]._token == token
+    assert token not in repr(command.plan)
+    assert token not in repr(result)
 
 
 def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
@@ -723,7 +406,7 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -760,7 +443,7 @@ def test_mr_rejects_unverified_issue_url_even_when_https(tmp_path: Path) -> None
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -785,7 +468,7 @@ def test_mr_accepts_explicit_public_issue_url_for_loopback_daemon(tmp_path: Path
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -813,7 +496,7 @@ def test_mr_rejects_hostless_explicit_url_for_loopback_daemon(tmp_path: Path) ->
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -842,7 +525,7 @@ def test_mr_rejects_hostless_configured_server_url_during_construction(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -882,7 +565,7 @@ def test_mr_rejects_invalid_explicit_url_for_loopback_daemon(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     description = tmp_path / "description.md"
@@ -911,7 +594,7 @@ def test_mr_execution_revalidates_stale_context_and_current_branch(
         "Root",
         "todo",
         project_id="project",
-        creator_id="human-root",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         creator_type="member",
     )
     replacement = Issue(

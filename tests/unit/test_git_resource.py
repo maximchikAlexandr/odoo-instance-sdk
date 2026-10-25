@@ -128,6 +128,28 @@ def test_credentialed_passthrough_captures_output_instead_of_inheriting_stdio(
     assert "security-canary" not in repr(result)
 
 
+def test_credentialed_passthrough_forbids_ssh_and_ext_protocols(tmp_path: Path) -> None:
+    _repo(tmp_path)
+
+    command = GitResource(_instance(tmp_path)).passthrough_command(
+        ("fetch", "origin"),
+        environment={"ODCLI_GITLAB_TOKEN_FILE": str(tmp_path / "secret")},
+        secret_values=("secret",),
+    )
+
+    argv = command.plan.process_steps[0].argv
+    assert argv[1:9] == (
+        "-c",
+        "credential.helper=",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "protocol.ssh.allow=never",
+        "-c",
+        "protocol.ext.allow=never",
+    )
+
+
 def test_credentialed_sync_disables_repository_fsmonitor_before_status(
     tmp_path: Path,
 ) -> None:

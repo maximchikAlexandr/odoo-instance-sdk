@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
@@ -212,8 +212,11 @@ def repository_push_origin(root: Path | str) -> str:
     return _normalize_origin(values[0])[0]
 
 
-def _configured_values(root: Path, key_pattern: str, step_id: str) -> tuple[str, ...]:
-    result = _probe(root, ("config", "--local", "--get-regexp", key_pattern), step_id)
+def _configured_values(
+    root: Path, key_pattern: str, step_id: str, *, effective_repository: bool = False
+) -> tuple[str, ...]:
+    scope = ("--includes",) if effective_repository else ("--local",)
+    result = _probe(root, ("config", *scope, "--get-regexp", key_pattern), step_id)
     if result.returncode not in (0, 1) or not isinstance(result.stdout, str):
         raise GitRepositoryError("repository Git configuration is unavailable")
     return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
@@ -508,11 +511,30 @@ def validate_credentialed_transport_configuration(root: Path | str) -> None:
     checkout = Path(root).expanduser().resolve()
     dangerous = _configured_values(
         checkout,
-        r"^(credential\.helper|core\.hooksPath|core\.fsmonitor|protocol\..*|url\..*\.(insteadof|pushinsteadof)|http\..*|remote\..*\.(proxy|pushurl))$",
+        r"^(credential\.helper|core\.(hookspath|fsmonitor|sshcommand)|protocol\..*|url\..*\.(insteadof|pushinsteadof)|http\..*|remote\..*\.(proxy|pushurl|vcs))$",
         "git.credentialed-transport.policy",
+        effective_repository=True,
     )
     if dangerous:
         raise GitRepositoryError("repository-controlled credentialed transport is unsafe")
+
+
+def credentialed_git_args(
+    args: Sequence[str], environment: Mapping[str, str] | None, hooks_path: str | None = None
+) -> tuple[str, ...]:
+    """Disable repository-controlled credential helpers and unsafe protocols."""
+    controls: list[str] = []
+    if hooks_path is not None or (environment or {}).get("ODCLI_GITLAB_TOKEN_FILE"):
+        for key in (
+            "credential.helper=",
+            "core.fsmonitor=false",
+            "protocol.ssh.allow=never",
+            "protocol.ext.allow=never",
+        ):
+            controls.extend(("-c", key))
+    if hooks_path is not None:
+        controls.extend(("-c", f"core.hooksPath={hooks_path}"))
+    return (*controls, *tuple(args))
 
 
 def missing_submodules(root: Path | str) -> tuple[str, ...]:

@@ -72,6 +72,7 @@ it("preserves the exact generated enum values and required nullable boundaries",
   expectTypeOf<ProjectSummary["runtime"]>().toEqualTypeOf<RuntimeMetrics | null>();
   expectTypeOf<ProjectSummary["storage"]>().toEqualTypeOf<ProjectStorageFootprint>();
   expectTypeOf<ProjectStorageFootprint["total_bytes"]>().toEqualTypeOf<number | null>();
+  expectTypeOf<ProjectStorageFootprint["backup_bytes"]>().toEqualTypeOf<number | null | undefined>();
 });
 
 it("uses the generated client boundary without handwritten endpoint contracts", () => {

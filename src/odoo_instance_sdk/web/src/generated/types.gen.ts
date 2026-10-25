@@ -289,6 +289,7 @@ export type PostgresServerInfo = {
  * ProjectStorageFootprint
  */
 export type ProjectStorageFootprint = {
+    backup_bytes?: number | null;
     complete: boolean;
     total_bytes: number | null;
 };
