@@ -511,7 +511,7 @@ def validate_credentialed_transport_configuration(root: Path | str) -> None:
     checkout = Path(root).expanduser().resolve()
     dangerous = _configured_values(
         checkout,
-        r"^(credential\.helper|core\.(hookspath|fsmonitor|sshcommand)|protocol\..*|url\..*\.(insteadof|pushinsteadof)|http\..*|remote\..*\.(proxy|pushurl))$",
+        r"^(credential\.helper|core\.(hookspath|fsmonitor|sshcommand)|protocol\..*|url\..*\.(insteadof|pushinsteadof)|http\..*|remote\..*\.(proxy|pushurl|vcs))$",
         "git.credentialed-transport.policy",
         effective_repository=True,
     )
