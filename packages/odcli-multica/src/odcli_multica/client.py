@@ -678,6 +678,14 @@ class MulticaOdooClient:
         process_environment: Mapping[str, str] | None,
     ) -> GitLabCredentialContext:
         root = self._resolve_root_creator(context)
+        project_root_path = Path(project_root).expanduser().resolve()
+        project_legacy_directory = project_root_path / ".odcli"
+        selected_mapping_path = (
+            Path(mapping_path).expanduser().resolve()
+            if mapping_path is not None
+            else _default_mapping_path(project_root_path).resolve()
+        )
+        allow_project_legacy_directory = selected_mapping_path.parent == project_legacy_directory
         try:
             return resolve_gitlab_credential(
                 root.root_creator_id,
@@ -687,8 +695,9 @@ class MulticaOdooClient:
                     if mapping_path is not None
                     else _default_mapping_path(Path(project_root))
                 ),
-                environment_path=Path(project_root) / ".odcli" / ".env",
+                environment_path=project_legacy_directory / ".env",
                 process_environment=process_environment,
+                require_owner_only_legacy_directory=not allow_project_legacy_directory,
             )
         except GitLabCredentialError as exc:
             raise ContextVerificationError("GitLab credentials are unavailable") from exc

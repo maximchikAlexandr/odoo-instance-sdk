@@ -841,6 +841,114 @@ def test_credentialed_git_rejects_repo_transport_controls_before_channel_or_chil
     assert git.passthrough_calls == []
 
 
+@pytest.mark.parametrize(
+    ("source", "included_config"),
+    [
+        ("include.path", "[http]\n\tproxy = https://proxy.example\n"),
+        ("includeIf.gitdir", "[http]\n\tsslVerify = false\n"),
+        ("config.worktree", "[http]\n\tproxy = https://proxy.example\n"),
+    ],
+)
+def test_credentialed_git_rejects_included_transport_config_before_channel_or_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    included_config: str,
+) -> None:
+    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
+    included = tmp_path / "included.gitconfig"
+    included.write_text(included_config, encoding="utf-8")
+    config = checkout / ".git" / "config"
+    if source == "include.path":
+        with config.open("a", encoding="utf-8") as stream:
+            stream.write(f"\n[include]\n\tpath = {included}\n")
+    elif source == "includeIf.gitdir":
+        with config.open("a", encoding="utf-8") as stream:
+            stream.write(f'\n[includeIf "gitdir:{checkout}/"]\n\tpath = {included}\n')
+    else:
+        subprocess.run(
+            ["git", "-C", str(checkout), "config", "extensions.worktreeConfig", "true"],
+            check=True,
+        )
+        (checkout / ".git" / "config.worktree").write_text(included_config, encoding="utf-8")
+
+    client = _mr_client(
+        Issue(
+            "root",
+            "Root",
+            "todo",
+            project_id="project",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            creator_type="member",
+        )
+    )
+    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    git = _CapturedGit()
+    channel_calls: list[str] = []
+    monkeypatch.setattr(
+        "odcli_multica.git_execution.write_askpass_channel",
+        lambda _credential: channel_calls.append("created") or "unused",
+    )
+
+    error: Exception | None = None
+    try:
+        client.git_command(
+            _git_context(checkout),
+            ("fetch", "origin"),
+            git_resource=git,
+            project_root=tmp_path,
+        ).run()
+    except Exception as exc:
+        error = exc
+
+    assert channel_calls == []
+    assert git.passthrough_calls == []
+    assert error is not None
+    assert any(word in str(error).casefold() for word in ("unsafe", "transport", "configuration"))
+
+
+def test_project_legacy_credential_fallback_accepts_existing_0755_directory(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    credential_dir = project / ".odcli"
+    credential_dir.mkdir(parents=True)
+    credential_dir.chmod(0o755)
+    mapping = credential_dir / "gitlab-credentials.toml"
+    mapping.write_text(
+        '[[mappings]]\nuser_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"\n'
+        'host = "gitlab.example"\nlogin = "legacy-login"\n'
+        'token_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    environment = credential_dir / ".env"
+    environment.write_text("ODCLI_GITLAB_TOKEN_ROOT=legacy-token\n", encoding="utf-8")
+    environment.chmod(0o600)
+    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
+    git = _CapturedGit()
+
+    _mr_client(
+        Issue(
+            "root",
+            "Root",
+            "todo",
+            project_id="project",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            creator_type="member",
+        )
+    ).git_command(
+        _git_context(checkout),
+        ("fetch", "origin"),
+        git_resource=git,
+        project_root=project,
+    ).run()
+
+    assert credential_dir.stat().st_mode & 0o777 == 0o755
+    assert git.passthrough_calls[0][1]["secret_values"] == ("legacy-token",)
+    assert git.passthrough_calls[0][1]["environment"]["GITLAB_LOGIN"] == "legacy-login"
+
+
 def test_credentialed_git_rejects_foreign_submodule_authority_before_credentials(
     tmp_path: Path,
 ) -> None:

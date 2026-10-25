@@ -135,6 +135,34 @@ def test_global_credential_resolution_is_owner_only_and_process_precedence(
     assert "process-token" not in repr(credential.identity)
 
 
+def test_global_legacy_resolution_keeps_owner_only_directory_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
+    credential_dir = tmp_path / ".odcli"
+    credential_dir.mkdir()
+    credential_dir.chmod(0o755)
+    mapping = credential_dir / "gitlab-credentials.toml"
+    mapping.write_text(
+        f'[[mappings]]\nuser_id = "{MEMBER_A}"\nhost = "gitlab.example"\n'
+        'login = "alice"\ntoken_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    environment = credential_dir / ".env"
+    environment.write_text("ODCLI_GITLAB_TOKEN_ALICE=file-token\n", encoding="utf-8")
+    environment.chmod(0o600)
+
+    with pytest.raises(GitLabCredentialError, match="owner-only"):
+        resolve_gitlab_credential(
+            MEMBER_A,
+            "gitlab.example",
+            user_root=tmp_path,
+            mapping_path=mapping,
+            environment_path=environment,
+        )
+
+
 @pytest.mark.dashboard
 def test_encrypted_gitlab_credential_precedes_legacy_mapping(tmp_path: Path) -> None:
     store = SecretStore(user_root=tmp_path)

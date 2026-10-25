@@ -274,9 +274,11 @@ def read_gitlab_environment(
     path: Path | str | None = None,
     *,
     user_root: Path | str | None = None,
+    require_owner_only_directory: bool = True,
 ) -> Mapping[str, str]:
     env_path = credential_environment_path(user_root) if path is None else Path(path)
-    _owner_only_directory(env_path.parent)
+    if require_owner_only_directory:
+        _owner_only_directory(env_path.parent)
     return MappingProxyType(
         _dotenv(_owner_only_file(env_path, label="GitLab credential environment"))
     )
@@ -297,6 +299,7 @@ def resolve_gitlab_credential(
     mapping_path: Path | str | None = None,
     environment_path: Path | str | None = None,
     process_environment: Mapping[str, str] | None = None,
+    require_owner_only_legacy_directory: bool = True,
 ) -> GitLabCredentialContext:
     """Resolve one exact member/host pair without consulting Git credentials."""
     selected_member = normalize_member_id(member_id)
@@ -319,7 +322,11 @@ def resolve_gitlab_credential(
             ),
             _token=encrypted.token,
         )
-    mappings = read_gitlab_credential_mappings(mapping_path, user_root=user_root)
+    mappings = read_gitlab_credential_mappings(
+        mapping_path,
+        user_root=user_root,
+        require_owner_only_directory=require_owner_only_legacy_directory,
+    )
     matches = tuple(
         item
         for item in mappings
@@ -329,7 +336,11 @@ def resolve_gitlab_credential(
         reason = "unavailable" if not matches else "ambiguous"
         raise GitLabCredentialError(f"GitLab credential mapping is {reason}")
     mapping = matches[0]
-    file_values = read_gitlab_environment(environment_path, user_root=user_root)
+    file_values = read_gitlab_environment(
+        environment_path,
+        user_root=user_root,
+        require_owner_only_directory=require_owner_only_legacy_directory,
+    )
     source = os.environ if process_environment is None else process_environment
     token = (
         source[mapping.token_key]
