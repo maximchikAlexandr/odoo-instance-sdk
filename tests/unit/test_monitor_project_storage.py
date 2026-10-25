@@ -146,8 +146,12 @@ def test_project_storage_counts_shared_database_and_filestore_once(
     worktrees = (tmp_path / "one", tmp_path / "two")
     for worktree in worktrees:
         worktree.mkdir()
-    data_dir = tmp_path / "data"
+    data_dir = root / "data"
     (data_dir / "filestore" / "shared_db").mkdir(parents=True)
+    (root / ".odcli").mkdir()
+    (root / ".odcli" / "project.toml").write_text(
+        '[project]\nmanaged_filestore = "data"\n', encoding="utf-8"
+    )
     config = SimpleNamespace(
         db_host="localhost", db_port=5432, db_user="odoo", db_password=None, data_dir=data_dir
     )
@@ -178,7 +182,7 @@ def test_project_storage_counts_shared_database_and_filestore_once(
         cast("Any", results),
     )
 
-    assert result == ProjectStorageFootprint(total_bytes=159, complete=True, backup_bytes=0)
+    assert result == ProjectStorageFootprint(total_bytes=129, complete=True, backup_bytes=0)
 
     failed_results = {
         **results,
@@ -191,7 +195,7 @@ def test_project_storage_counts_shared_database_and_filestore_once(
         frozenset({"storage", "postgresql"}),
         cast("Any", failed_results),
     )
-    assert partial == ProjectStorageFootprint(total_bytes=139, complete=False, backup_bytes=0)
+    assert partial == ProjectStorageFootprint(total_bytes=109, complete=False, backup_bytes=0)
 
 
 def test_project_storage_keeps_known_total_when_available_backup_is_missing(
@@ -209,3 +213,104 @@ def test_project_storage_keeps_known_total_when_available_backup_is_missing(
     )
 
     assert result == ProjectStorageFootprint(total_bytes=100, complete=False, backup_bytes=None)
+
+
+def test_project_storage_unmeasured_checkout_and_missing_backup_have_no_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "_directory_size", lambda _path: None)
+    plan = _plan(tmp_path)
+    plan.backups = ({"state": "available", "path": str(tmp_path / "missing.zip")},)
+
+    result = _StorageMixin._collect_project_storage(
+        cast("Any", _monitor()), cast("Any", plan), frozenset({"storage"})
+    )
+
+    assert result == ProjectStorageFootprint(total_bytes=None, complete=False, backup_bytes=None)
+
+
+def test_project_runtime_main_only_counts_database_and_contained_filestore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    root = tmp_path / "project"
+    manifest_dir = root / ".odcli"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "project.toml").write_text(
+        '[project]\ndefault_source_database = "main_db"\nmanaged_filestore = ".odcli/filestore"\n',
+        encoding="utf-8",
+    )
+    filestore = manifest_dir / "filestore" / "filestore" / "main_db"
+    filestore.mkdir(parents=True)
+    (filestore / "blob").write_bytes(b"blob")
+    cluster = SimpleNamespace(endpoint_host="localhost", endpoint_port=5432, _user="odoo")
+    monkeypatch.setattr(
+        PostgresCluster,
+        "from_project",
+        classmethod(lambda _cls, _repository: cluster),
+    )
+
+    runtime = {"owner_id": "project-test", "database_name": "main_db"}
+    measured_databases: set[tuple[str, int, str]] = set()
+    measured_filestores: set[Path] = set()
+    steps = storage_module._project_runtime_storage_steps(
+        cast("Any", runtime),
+        root,
+        measured_databases,
+        measured_filestores,
+        du="du",
+        postgresql=True,
+    )
+
+    assert {step.step_id for step in steps} == {
+        "monitor.project-test.storage.postgres",
+        "monitor.project-test.storage.filestore",
+    }
+    assert filestore.resolve() in measured_filestores
+    assert (
+        storage_module._project_runtime_storage_steps(
+            cast("Any", runtime),
+            root,
+            measured_databases,
+            measured_filestores,
+            du="du",
+            postgresql=True,
+        )
+        == ()
+    )
+
+    environment_databases = {("localhost", 5432, "main_db")}
+    environment_filestores = {filestore.resolve()}
+    assert (
+        storage_module._project_runtime_storage_steps(
+            cast("Any", runtime),
+            root,
+            environment_databases,
+            environment_filestores,
+            du="du",
+            postgresql=True,
+        )
+        == ()
+    )
+
+    plan = _plan(root)
+    plan.project_runtime = runtime
+    plan.cluster = cluster
+    monkeypatch.setattr(storage_module, "_walk_size", lambda _path: None)
+    result = _StorageMixin._collect_project_storage(
+        cast("Any", _monitor()),
+        cast("Any", plan),
+        frozenset({"storage", "postgresql"}),
+        cast(
+            "Any",
+            {
+                "monitor.project-test.storage.postgres": SimpleNamespace(returncode=0, stdout="20"),
+                "monitor.project-test.storage.filestore": SimpleNamespace(
+                    returncode=0, stdout="30\tfilestore"
+                ),
+            },
+        ),
+    )
+
+    assert result == ProjectStorageFootprint(total_bytes=50, complete=False, backup_bytes=0)

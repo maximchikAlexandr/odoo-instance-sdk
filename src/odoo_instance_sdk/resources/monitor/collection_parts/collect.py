@@ -30,7 +30,8 @@ from odoo_instance_sdk.models import (
     SnapshotRequest,
 )
 from odoo_instance_sdk.resources.monitor.collection_parts.storage import (
-    _project_runtime_storage_step,
+    _catalog_project_runtime_storage_steps,
+    _database_identity,
 )
 from odoo_instance_sdk.resources.monitor.planning import (
     _PROBE_TIMEOUT_SECONDS,
@@ -605,6 +606,7 @@ class _CollectMixin:
         repositories: set[tuple[Path, str]] = set()
         measured_databases: set[tuple[str, int, str]] = set()
         measured_filestores: set[Path] = set()
+        du = shutil.which("du") or "du"
         project_roots = {
             str(project["project_id"]): Path(str(project["repository_root"]))
             for project in registered_projects
@@ -743,9 +745,9 @@ class _CollectMixin:
                     )
             if "storage" in selected and "postgresql" in selected and database:
                 database_name = str(database).replace("'", "''")
-                database_identity = (
-                    (db_config.db_host or "localhost") if db_config is not None else "localhost",
-                    (db_config.db_port or 5432) if db_config is not None else 5432,
+                database_identity = _database_identity(
+                    db_config.db_host if db_config is not None else None,
+                    db_config.db_port if db_config is not None else None,
                     str(database),
                 )
                 if database_identity not in measured_databases:
@@ -810,25 +812,18 @@ class _CollectMixin:
             if (repository / ".git").exists():
                 repositories.add((repository, resolved_project))
 
-        if "storage" in selected and "postgresql" in selected:
-            for runtime in catalog_rows.project_runtimes:
-                project_name = str(runtime["owner_id"])
-                runtime_repository = project_roots.get(project_name)
-                if runtime_repository is None or not runtime["database_name"]:
-                    continue
-                if project_id is not None and project_name != project_id:
-                    continue
-                if (
-                    request is not None
-                    and request.project_ids
-                    and project_name not in request.project_ids
-                ):
-                    continue
-                step = _project_runtime_storage_step(
-                    runtime, runtime_repository, measured_databases
-                )
-                if step is not None:
-                    steps.append(step)
+        steps.extend(
+            _catalog_project_runtime_storage_steps(
+                catalog_rows.project_runtimes,
+                project_roots,
+                measured_databases,
+                measured_filestores,
+                du=du,
+                sections=selected,
+                project_id=project_id,
+                request=request,
+            )
+        )
 
         for project in registered_projects:
             repository = Path(str(project["repository_root"])).resolve()

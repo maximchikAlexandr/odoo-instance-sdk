@@ -9,7 +9,7 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.db_name import validate_filestore_containment
 from odoo_instance_sdk.internal.pg.size import database_size_bytes
 from odoo_instance_sdk.internal.storage_footprint import _directory_size, _walk_size
-from odoo_instance_sdk.models import ProjectStorageFootprint, SnapshotSection
+from odoo_instance_sdk.models import ProjectStorageFootprint, SnapshotRequest, SnapshotSection
 from odoo_instance_sdk.resources.monitor.planning import (
     _EXPENSIVE_TTL,
     _PROBE_TIMEOUT_SECONDS,
@@ -20,40 +20,115 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult
 
 
-def _project_runtime_storage_step(
+def _database_identity(host: str | None, port: int | None, database: str) -> tuple[str, int, str]:
+    normalized_host = (host or "localhost").casefold()
+    if normalized_host in {"127.0.0.1", "::1"}:
+        normalized_host = "localhost"
+    return normalized_host, port or 5432, database
+
+
+def _project_runtime_storage_steps(
     runtime: sqlite3.Row,
     repository: Path,
     measured_databases: set[tuple[str, int, str]],
-) -> PreparedStep | None:
+    measured_filestores: set[Path],
+    *,
+    du: str,
+    postgresql: bool,
+) -> tuple[PreparedStep, ...]:
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
     database = runtime["database_name"]
     if not database:
-        return None
+        return ()
+    steps: list[PreparedStep] = []
+    try:
+        from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
+
+        project = ProjectConfig.load(repository)
+        data_dir = managed_filestore_path(project)
+        filestore = validate_filestore_containment(data_dir, str(database)).resolve()
+    except Exception:
+        filestore = None
+    if filestore is not None and filestore not in measured_filestores:
+        measured_filestores.add(filestore)
+        steps.append(
+            PreparedStep(
+                step_id=f"monitor.{runtime['owner_id']}.storage.filestore",
+                argv=(du, "-sb", str(filestore)),
+                cwd=str(filestore.parent),
+                timeout=_PROBE_TIMEOUT_SECONDS,
+                read_only=True,
+                text=True,
+            )
+        )
+    if not postgresql:
+        return tuple(steps)
     try:
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         cluster = PostgresCluster.from_project(repository)
     except Exception:
-        return None
-    identity = (cluster.endpoint_host.casefold(), cluster.endpoint_port, str(database))
+        return tuple(steps)
+    identity = _database_identity(cluster.endpoint_host, cluster.endpoint_port, str(database))
     if identity in measured_databases:
-        return None
+        return tuple(steps)
     measured_databases.add(identity)
     from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 
     escaped_database = str(database).replace("'", "''")
-    return build_psql_specification(
-        step_id=f"monitor.{runtime['owner_id']}.storage.postgres",
-        host=cluster.endpoint_host,
-        port=cluster.endpoint_port,
-        user=cluster._user,
-        password=None,
-        database=str(database),
-        args=("-w", "-c", f"SELECT pg_database_size('{escaped_database}')"),
-        _trusted_args=("-t", "-A"),
-        timeout=_PROBE_TIMEOUT_SECONDS,
-        _allow_missing_user=True,
-        _require_binary=False,
-    ).prepared_step
+    steps.append(
+        build_psql_specification(
+            step_id=f"monitor.{runtime['owner_id']}.storage.postgres",
+            host=cluster.endpoint_host,
+            port=cluster.endpoint_port,
+            user=cluster._user,
+            password=None,
+            database=str(database),
+            args=("-w", "-c", f"SELECT pg_database_size('{escaped_database}')"),
+            _trusted_args=("-t", "-A"),
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            _allow_missing_user=True,
+            _require_binary=False,
+        ).prepared_step
+    )
+    return tuple(steps)
+
+
+def _catalog_project_runtime_storage_steps(
+    runtimes: tuple[sqlite3.Row, ...],
+    repositories: dict[str, Path],
+    measured_databases: set[tuple[str, int, str]],
+    measured_filestores: set[Path],
+    *,
+    du: str,
+    sections: frozenset[SnapshotSection],
+    project_id: str | None,
+    request: SnapshotRequest | None,
+) -> tuple[PreparedStep, ...]:
+    if "storage" not in sections:
+        return ()
+    steps: list[PreparedStep] = []
+    for runtime in runtimes:
+        name = str(runtime["owner_id"])
+        repository = repositories.get(name)
+        if repository is None or not runtime["database_name"]:
+            continue
+        if project_id is not None and name != project_id:
+            continue
+        if request is not None and request.project_ids and name not in request.project_ids:
+            continue
+        steps.extend(
+            _project_runtime_storage_steps(
+                runtime,
+                repository,
+                measured_databases,
+                measured_filestores,
+                du=du,
+                postgresql="postgresql" in sections,
+            )
+        )
+    return tuple(steps)
 
 
 def _contains(parent: Path, child: Path) -> bool:
@@ -163,6 +238,7 @@ class _StorageMixin:
         backup_total_addition = 0
         seen_backups: set[Path] = set()
         backup_count = 0
+        backup_measured = False
         for backup in getattr(plan, "backups", ()):
             if str(backup["state"]) != "available":
                 continue
@@ -178,6 +254,7 @@ class _StorageMixin:
                     continue
                 seen_backups.add(path)
                 file_bytes = path.stat().st_size
+                backup_measured = True
                 if backup_bytes is not None:
                     backup_bytes += file_bytes
                 if not any(_contains(parent, path) for parent in measured_dirs):
@@ -185,7 +262,7 @@ class _StorageMixin:
             except OSError:
                 complete = False
                 backup_bytes = None
-        if backup_count:
+        if backup_count and backup_measured:
             known.append(backup_total_addition)
 
         seen_databases: set[tuple[str, int, str]] = set()
@@ -207,13 +284,9 @@ class _StorageMixin:
             except Exception:
                 complete = False
                 continue
-            identity = (
-                (
-                    plan.cluster.endpoint_host
-                    if plan.cluster is not None
-                    else config.db_host or "localhost"
-                ).casefold(),
-                plan.cluster.endpoint_port if plan.cluster is not None else config.db_port or 5432,
+            identity = _database_identity(
+                plan.cluster.endpoint_host if plan.cluster is not None else config.db_host,
+                plan.cluster.endpoint_port if plan.cluster is not None else config.db_port,
                 str(database),
             )
             if identity not in seen_databases:
@@ -244,7 +317,9 @@ class _StorageMixin:
                 except (ConfigError, OSError):
                     complete = False
                     continue
-                if filestore in seen_filestores:
+                if filestore in seen_filestores or any(
+                    _contains(parent, filestore) for parent in measured_dirs
+                ):
                     continue
                 seen_filestores.add(filestore)
                 filestore_bytes: int | None
@@ -270,10 +345,8 @@ class _StorageMixin:
             if cluster is None:
                 complete = False
             else:
-                identity = (
-                    cluster.endpoint_host.casefold(),
-                    cluster.endpoint_port,
-                    str(project_database),
+                identity = _database_identity(
+                    cluster.endpoint_host, cluster.endpoint_port, str(project_database)
                 )
                 if identity not in seen_databases:
                     seen_databases.add(identity)
@@ -295,7 +368,33 @@ class _StorageMixin:
                         complete = False
                     else:
                         known.append(db_bytes)
-                    complete = False
+            try:
+                from odoo_instance_sdk.project import ProjectConfig, managed_filestore_path
+
+                project = ProjectConfig.load(plan.repo_root)
+                data_dir = managed_filestore_path(project)
+                filestore = validate_filestore_containment(
+                    data_dir, str(project_database)
+                ).resolve()
+            except Exception:
+                complete = False
+            else:
+                if filestore not in seen_filestores and not any(
+                    _contains(parent, filestore) for parent in measured_dirs
+                ):
+                    seen_filestores.add(filestore)
+                    if probe_results is not None:
+                        filestore_bytes = _measured(
+                            probe_results.get(f"monitor.{plan.project_id}.storage.filestore")
+                        )
+                        if filestore_bytes is None and not filestore.exists():
+                            filestore_bytes = 0
+                    else:
+                        filestore_bytes = _directory_size(filestore) if filestore.exists() else 0
+                    if filestore_bytes is None:
+                        complete = False
+                    else:
+                        known.append(filestore_bytes)
 
         total = sum(known) if known else None
         footprint = ProjectStorageFootprint(

@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import msgspec
 import pytest
@@ -1109,7 +1109,7 @@ def test_snapshot_command_failed_git_and_docker_probes_are_not_retried(
     assert tuple(step.step_id for step in executor.executed) == process_ids
 
 
-def test_project_storage_du_timeout_uses_bounded_fallback_without_partial_total(
+def test_project_storage_du_timeout_preserves_measured_worktree_total(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog = _make_catalog(tmp_path)
@@ -1139,7 +1139,7 @@ def test_project_storage_du_timeout_uses_bounded_fallback_without_partial_total(
             raise ProcessTimeoutError(prepared.argv, 10.0, duration=10.0)
         return ProcessResult(
             argv=prepared.argv,
-            returncode=0,
+            returncode=1 if prepared.step_id.endswith(".storage.worktree") else 0,
             stdout="",
             stderr="",
             duration=0.0,
@@ -1169,9 +1169,193 @@ def test_project_storage_du_timeout_uses_bounded_fallback_without_partial_total(
     assert len(timed_out_steps) == 1
     assert timed_out_steps[0].step_id == project_step.step_id
     assert timed_out_steps[0].timeout == 10.0
-    assert fallback_paths == [repository]
-    assert snapshot.projects[0].storage.total_bytes is None
+    assert fallback_paths == [repository, worktree]
+    assert snapshot.projects[0].storage.total_bytes == 0
     assert snapshot.projects[0].storage.complete is False
+
+
+def test_snapshot_keeps_total_unavailable_when_checkout_and_available_backup_are_unmeasured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    repository = tmp_path / "repo"
+    common = repository / ".git"
+    common.mkdir(parents=True)
+    project_id = f"project_{repo_key(repository, common)}"
+    catalog._register_project(project_id, repository, common)
+    catalog.start_download(
+        "backup-test",
+        "https://example.invalid",
+        "main_db",
+        "zip",
+        False,
+        tmp_path / "missing.zip",
+        project_id=project_id,
+    )
+    catalog.success_download("backup-test", "missing.zip", 12, "a" * 64)
+    catalog.close()
+    monkeypatch.setattr(storage_module, "_walk_size", lambda _path: None)
+
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=1 if prepared.step_id.endswith(".storage.project") else 0,
+            stdout="",
+            stderr="measurement unavailable",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        _executor=RecordingExecutor(result_factory=result_factory),
+    )
+
+    storage = monitor.snapshot(project_id=project_id).projects[0].storage
+
+    assert storage.total_bytes is None
+    assert storage.backup_bytes is None
+    assert storage.complete is False
+
+
+def test_snapshot_counts_stopped_main_only_project_runtime_filestore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    repository = tmp_path / "repo"
+    common = repository / ".git"
+    common.mkdir(parents=True)
+    manifest_dir = repository / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        '[project]\ndefault_source_database = "main_db"\nmanaged_filestore = ".odcli/filestore"\n',
+        encoding="utf-8",
+    )
+    project_id = f"project_{repo_key(repository, common)}"
+    catalog._register_project(project_id, repository, common)
+    catalog._upsert_runtime(
+        "project",
+        project_id,
+        **cast("Any", _runtime_kwargs(database_name="main_db")),
+    )
+    catalog.close()
+    cluster = FakePostgresCluster()
+    setattr(cluster, "_user", "odoo")
+    _patch_from_project(monkeypatch, cluster)
+    monkeypatch.setattr(storage_module, "_walk_size", lambda _path: None)
+
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        output = (
+            "30\tfilestore"
+            if prepared.step_id.endswith(".storage.filestore")
+            else "20"
+            if prepared.step_id.endswith(".storage.postgres")
+            else ""
+        )
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=1 if prepared.step_id.endswith(".storage.project") else 0,
+            stdout=output,
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        _executor=RecordingExecutor(result_factory=result_factory),
+    )
+
+    project = monitor.snapshot(project_id=project_id).projects[0]
+
+    assert project.runtime is not None
+    assert project.runtime.state is RuntimeState.STOPPED
+    assert project.storage.total_bytes == 50
+    assert project.storage.complete is False
+
+
+def test_snapshot_deduplicates_project_runtime_storage_shared_with_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    repository = tmp_path / "repo"
+    common = repository / ".git"
+    common.mkdir(parents=True)
+    manifest_dir = repository / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        '[project]\ndefault_source_database = "main_db"\nmanaged_filestore = ".odcli/filestore"\n',
+        encoding="utf-8",
+    )
+    project_id = f"project_{repo_key(repository, common)}"
+    catalog._register_project(project_id, repository, common)
+    catalog._upsert_runtime(
+        "project",
+        project_id,
+        **cast("Any", _runtime_kwargs(database_name="main_db")),
+    )
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "odoo.conf").write_text(
+        f"[options]\ndata_dir = {manifest_dir / 'filestore'}\n", encoding="utf-8"
+    )
+    _seed_env(
+        catalog,
+        _make_env(
+            env_id,
+            repository_root=str(repository),
+            git_common_dir=str(common),
+            project_id=project_id,
+            worktree_path=str(worktree),
+            generated_config_path=str(worktree / "odoo.conf"),
+            db_mode="copy",
+            target_db_name="main_db",
+        ),
+    )
+    catalog.close()
+    filestore = manifest_dir / "filestore" / "filestore" / "main_db"
+    filestore.mkdir(parents=True)
+    _patch_from_project(monkeypatch, FakePostgresCluster())
+    monkeypatch.setattr(storage_module, "_walk_size", lambda _path: None)
+
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        output = (
+            "30\tfilestore"
+            if prepared.step_id.endswith(".storage.filestore")
+            else "20"
+            if prepared.step_id.endswith(".storage.postgres")
+            else "4\tworktree"
+            if prepared.step_id.endswith(".storage.worktree")
+            else ""
+        )
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=1 if prepared.step_id.endswith(".storage.project") else 0,
+            stdout=output,
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        _executor=executor,
+    )
+
+    storage = monitor.snapshot(project_id=project_id).projects[0].storage
+
+    assert storage.total_bytes == 54
+    assert storage.complete is False
+    assert sum(step.step_id.endswith(".storage.postgres") for step in executor.executed) == 1
+    assert sum(step.step_id.endswith(".storage.filestore") for step in executor.executed) == 1
 
 
 @pytest.mark.parametrize("base_ref", ["HEAD", "refs/tags/v1"])
