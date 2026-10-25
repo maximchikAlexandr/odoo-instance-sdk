@@ -399,7 +399,9 @@ def _runtime_owner(binding: _RuntimeBinding | None, environment_id: str | None) 
     return "environment", environment_id or ""
 
 
-def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartConfig, str | None]:
+def _auxiliary_start_step(
+    instance: OdooInstance, *, reserved_ports: Sequence[int] = ()
+) -> tuple[PreparedStep, StartConfig, str | None]:
     """Capture the exact private launch inputs for a restore helper."""
     config = instance.config.start_config
     if config is None:
@@ -412,7 +414,7 @@ def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartCo
     config.http_port = find_free_port(
         "http",
         None,
-        reserved_ports=(config.http_port,),
+        reserved_ports=(config.http_port, *reserved_ports),
     )
     config.http_interface = "127.0.0.1"
     cluster = instance._postgres_cluster
@@ -449,8 +451,12 @@ def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartCo
     return step, snapshot, secret_path
 
 
-def auxiliary_restore_session(instance: OdooInstance) -> AuxiliaryRestoreSession:
-    step, secret_config, secret_path = _auxiliary_start_step(instance)
+def auxiliary_restore_session(
+    instance: OdooInstance, *, reserved_ports: Sequence[int] = ()
+) -> AuxiliaryRestoreSession:
+    step, secret_config, secret_path = _auxiliary_start_step(
+        instance, reserved_ports=reserved_ports
+    )
     return AuxiliaryRestoreSession(
         instance=instance,
         auxiliary_instance=replace(

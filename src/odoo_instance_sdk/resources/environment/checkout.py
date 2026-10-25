@@ -735,7 +735,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
         )
         project_id = f"project_{repo_key(plan.repo_root, Path(plan.git_common_dir))}"
         instance._runtime_binding = _RuntimeBinding("project", project_id, project_id, plan.repo_root, git_common_dir(plan.repo_root))  # fmt: skip
-        return auxiliary_restore_session(instance)
+        return auxiliary_restore_session(instance, reserved_ports=(plan.http_port,))
 
     def _run_checkout_snapshot(  # noqa: C901 -- locked adoption retry and checkout lifecycle share one boundary
         self, context: RunContext[DevelopmentEnvironment], snapshot: _CheckoutSnapshot
