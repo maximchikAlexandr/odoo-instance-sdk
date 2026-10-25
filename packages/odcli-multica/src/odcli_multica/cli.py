@@ -200,13 +200,13 @@ def env() -> None:
     """Odoo environment preparation operations."""
 
 
-def _git_resource(client: MulticaOdooClient, project: Path) -> GitResourceLike:
-    """Resolve the core Git resource without adding a second core adapter."""
+def _git_resource(client: MulticaOdooClient, project: Path, checkout_path: str) -> GitResourceLike:
+    """Use core configuration for Git commands in the verified task checkout."""
     candidates = (project / "odoo.conf", project / ".odoo.conf", project / ".odcli" / "odoo.conf")
     for candidate in candidates:
         if candidate.is_file():
             instance = client.core.instance.from_config(candidate)
-            instance.config = replace(instance.config, default_cwd=project.resolve())
+            instance.config = replace(instance.config, default_cwd=Path(checkout_path).resolve())
             return instance.git
     raise click.UsageError("project has no readable odoo.conf for the core Git resource")
 
@@ -310,7 +310,7 @@ def git(
                 repository_url or "",
             )
         )
-        resource = _git_resource(client, project)
+        resource = _git_resource(client, project, context.checkout_path)
         command = client.git_command(
             context,
             native_args,
@@ -372,7 +372,7 @@ def git_sync(
         )
         command = client.sync_command(
             context,
-            git_resource=_git_resource(client, project),
+            git_resource=_git_resource(client, project, context.checkout_path),
             project_root=project,
             base=base,
             push=push,
@@ -455,7 +455,7 @@ def merge_request_publish(
         command = client.publish_merge_request_command(
             context,
             project_root=project,
-            git_resource=_git_resource(client, project),
+            git_resource=_git_resource(client, project, context.checkout_path),
             source_branch=source_branch,
             target_branch=target_branch,
             title=title,
