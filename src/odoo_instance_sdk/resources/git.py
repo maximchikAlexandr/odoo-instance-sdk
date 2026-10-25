@@ -79,21 +79,6 @@ def _cleanup_secret_channel(path: str | None) -> None:
             os.unlink(path)
 
 
-def _credentialed_args(
-    args: Sequence[str],
-    environment: Mapping[str, str] | None,
-    hooks_path: str | None = None,
-) -> tuple[str, ...]:
-    controls: list[str] = []
-    if hooks_path is not None or (
-        environment is not None and environment.get("ODCLI_GITLAB_TOKEN_FILE")
-    ):
-        controls.extend(("-c", "credential.helper=", "-c", "core.fsmonitor=false"))
-    if hooks_path is not None:
-        controls.extend(("-c", f"core.hooksPath={hooks_path}"))
-    return (*controls, *tuple(args))
-
-
 def _command_result(value: ProcessResult, step: PreparedStep) -> CommandResult:
     from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 
@@ -127,7 +112,12 @@ def _step(
 
     return PreparedStep(
         step_id=step_id,
-        argv=("git", "-C", str(root), *_credentialed_args(args, environment, hooks_path)),
+        argv=(
+            "git",
+            "-C",
+            str(root),
+            *git_repository.credentialed_git_args(args, environment, hooks_path),
+        ),
         cwd=str(root),
         read_only=not mutating,
         mutating=mutating,
@@ -405,7 +395,7 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
         from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
 
         root = _worktree(self._instance)
-        native_args = _credentialed_args(
+        native_args = git_repository.credentialed_git_args(
             tuple(str(value) for value in args), environment, hooks_path
         )
         credentialed = bool(secret_values)

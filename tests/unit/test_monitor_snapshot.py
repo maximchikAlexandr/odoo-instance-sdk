@@ -1220,6 +1220,53 @@ def test_snapshot_keeps_total_unavailable_when_checkout_and_available_backup_are
     assert storage.complete is False
 
 
+def test_snapshot_counts_hard_linked_backup_files_once(tmp_path: Path) -> None:
+    catalog = _make_catalog(tmp_path)
+    repository = tmp_path / "repo"
+    common = repository / ".git"
+    common.mkdir(parents=True)
+    project_id = f"project_{repo_key(repository, common)}"
+    catalog._register_project(project_id, repository, common)
+    first = tmp_path / "backup-a.zip"
+    first.write_bytes(b"backup-payload")
+    second = tmp_path / "backup-b.zip"
+    second.hardlink_to(first)
+    for backup_id, path in (("backup-a", first), ("backup-b", second)):
+        catalog.start_download(
+            backup_id,
+            "https://example.invalid",
+            "main_db",
+            "zip",
+            False,
+            path,
+            project_id=project_id,
+        )
+        catalog.success_download(backup_id, path.name, path.stat().st_size, "a" * 64)
+    catalog.close()
+
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=0,
+            stdout="100\troot" if prepared.step_id.endswith(".storage.project") else "",
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        _executor=RecordingExecutor(result_factory=result_factory),
+    )
+    storage = monitor.snapshot(project_id=project_id).projects[0].storage
+
+    assert storage.backup_bytes == len(b"backup-payload")
+    assert storage.total_bytes == 100 + len(b"backup-payload")
+    assert storage.complete is True
+
+
 def test_snapshot_counts_stopped_main_only_project_runtime_filestore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1278,8 +1325,19 @@ def test_snapshot_counts_stopped_main_only_project_runtime_filestore(
     assert project.storage.complete is False
 
 
-def test_snapshot_deduplicates_project_runtime_storage_shared_with_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("environment_db_host", "expected_database_probes", "expected_total"),
+    [
+        ("127.0.0.1", 1, 54),
+        ("db-other", 2, 84),
+    ],
+)
+def test_snapshot_uses_measurement_endpoint_for_database_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment_db_host: str,
+    expected_database_probes: int,
+    expected_total: int,
 ) -> None:
     catalog = _make_catalog(tmp_path)
     repository = tmp_path / "repo"
@@ -1302,7 +1360,8 @@ def test_snapshot_deduplicates_project_runtime_storage_shared_with_environment(
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     (worktree / "odoo.conf").write_text(
-        f"[options]\ndata_dir = {manifest_dir / 'filestore'}\n", encoding="utf-8"
+        f"[options]\ndb_host = {environment_db_host}\ndb_port = 5432\ndb_user = odoo\ndata_dir = {manifest_dir / 'filestore'}\n",
+        encoding="utf-8",
     )
     _seed_env(
         catalog,
@@ -1320,7 +1379,9 @@ def test_snapshot_deduplicates_project_runtime_storage_shared_with_environment(
     catalog.close()
     filestore = manifest_dir / "filestore" / "filestore" / "main_db"
     filestore.mkdir(parents=True)
-    _patch_from_project(monkeypatch, FakePostgresCluster())
+    cluster = FakePostgresCluster()
+    cast("Any", cluster)._user = "odoo"
+    _patch_from_project(monkeypatch, cluster)
     monkeypatch.setattr(storage_module, "_walk_size", lambda _path: None)
 
     def result_factory(step: PreparedProcess) -> ProcessResult:
@@ -1328,6 +1389,8 @@ def test_snapshot_deduplicates_project_runtime_storage_shared_with_environment(
         output = (
             "30\tfilestore"
             if prepared.step_id.endswith(".storage.filestore")
+            else "30"
+            if prepared.step_id == f"monitor.{project_id}.storage.postgres"
             else "20"
             if prepared.step_id.endswith(".storage.postgres")
             else "4\tworktree"
@@ -1352,9 +1415,12 @@ def test_snapshot_deduplicates_project_runtime_storage_shared_with_environment(
 
     storage = monitor.snapshot(project_id=project_id).projects[0].storage
 
-    assert storage.total_bytes == 54
+    assert storage.total_bytes == expected_total
     assert storage.complete is False
-    assert sum(step.step_id.endswith(".storage.postgres") for step in executor.executed) == 1
+    assert (
+        sum(step.step_id.endswith(".storage.postgres") for step in executor.executed)
+        == expected_database_probes
+    )
     assert sum(step.step_id.endswith(".storage.filestore") for step in executor.executed) == 1
 
 

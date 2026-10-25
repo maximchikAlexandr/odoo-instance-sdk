@@ -792,6 +792,55 @@ def test_credentialed_git_rejects_repository_credential_helper_before_credential
     assert git.passthrough_calls == []
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("http.proxy", "https://proxy.example"),
+        ("remote.origin.proxy", "https://proxy.example"),
+        ("remote.origin.pushurl", "https://attacker.example/team/repo.git"),
+        ("url.https://attacker.example/.insteadOf", "https://gitlab.example/"),
+        ("protocol.file.allow", "always"),
+        ("core.sshCommand", "printf canary"),
+    ],
+)
+def test_credentialed_git_rejects_repo_transport_controls_before_channel_or_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    value: str,
+) -> None:
+    checkout = _git_repo(tmp_path / "checkout", "https://gitlab.example/team/repo.git")
+    subprocess.run(["git", "-C", str(checkout), "config", key, value], check=True)
+    client = _mr_client(
+        Issue(
+            "root",
+            "Root",
+            "todo",
+            project_id="project",
+            creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            creator_type="member",
+        )
+    )
+    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    git = _CapturedGit()
+    channel_calls: list[str] = []
+    monkeypatch.setattr(
+        "odcli_multica.git_execution.write_askpass_channel",
+        lambda _credential: channel_calls.append("created") or "unused",
+    )
+
+    with pytest.raises(Exception, match=r"unsafe|transport|changed|ambiguous"):
+        client.git_command(
+            _git_context(checkout),
+            ("fetch", "origin"),
+            git_resource=git,
+            project_root=tmp_path,
+        ).run()
+
+    assert channel_calls == []
+    assert git.passthrough_calls == []
+
+
 def test_credentialed_git_rejects_foreign_submodule_authority_before_credentials(
     tmp_path: Path,
 ) -> None:

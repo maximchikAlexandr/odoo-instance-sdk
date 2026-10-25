@@ -27,6 +27,17 @@ def _database_identity(host: str | None, port: int | None, database: str) -> tup
     return normalized_host, port or 5432, database
 
 
+def _filestore_size(
+    path: Path,
+    probe_results: dict[str, ProcessResult] | None,
+    probe_id: str,
+) -> int | None:
+    if probe_results is None:
+        return _directory_size(path) if path.exists() else 0
+    size = _measured(probe_results.get(probe_id))
+    return 0 if size is None and not path.exists() else size
+
+
 def _project_runtime_storage_steps(
     runtime: sqlite3.Row,
     repository: Path,
@@ -236,7 +247,7 @@ class _StorageMixin:
 
         backup_bytes: int | None = 0
         backup_total_addition = 0
-        seen_backups: set[Path] = set()
+        seen_backups: set[tuple[int, int]] = set()
         backup_count = 0
         backup_measured = False
         for backup in getattr(plan, "backups", ()):
@@ -250,10 +261,12 @@ class _StorageMixin:
                     complete = False
                     backup_bytes = None
                     continue
-                if path in seen_backups:
+                metadata = path.stat()
+                backup_identity = (metadata.st_dev, metadata.st_ino)
+                if backup_identity in seen_backups:
                     continue
-                seen_backups.add(path)
-                file_bytes = path.stat().st_size
+                seen_backups.add(backup_identity)
+                file_bytes = metadata.st_size
                 backup_measured = True
                 if backup_bytes is not None:
                     backup_bytes += file_bytes
@@ -285,8 +298,8 @@ class _StorageMixin:
                 complete = False
                 continue
             identity = _database_identity(
-                plan.cluster.endpoint_host if plan.cluster is not None else config.db_host,
-                plan.cluster.endpoint_port if plan.cluster is not None else config.db_port,
+                config.db_host,
+                config.db_port,
                 str(database),
             )
             if identity not in seen_databases:
@@ -322,15 +335,9 @@ class _StorageMixin:
                 ):
                     continue
                 seen_filestores.add(filestore)
-                filestore_bytes: int | None
-                if probe_results is not None:
-                    filestore_bytes = _measured(
-                        probe_results.get(f"monitor.{env_id}.storage.filestore")
-                    )
-                    if filestore_bytes is None and not filestore.exists():
-                        filestore_bytes = 0
-                else:
-                    filestore_bytes = _directory_size(filestore) if filestore.exists() else 0
+                filestore_bytes = _filestore_size(
+                    filestore, probe_results, f"monitor.{env_id}.storage.filestore"
+                )
                 if filestore_bytes is None:
                     complete = False
                 else:
@@ -383,14 +390,11 @@ class _StorageMixin:
                     _contains(parent, filestore) for parent in measured_dirs
                 ):
                     seen_filestores.add(filestore)
-                    if probe_results is not None:
-                        filestore_bytes = _measured(
-                            probe_results.get(f"monitor.{plan.project_id}.storage.filestore")
-                        )
-                        if filestore_bytes is None and not filestore.exists():
-                            filestore_bytes = 0
-                    else:
-                        filestore_bytes = _directory_size(filestore) if filestore.exists() else 0
+                    filestore_bytes = _filestore_size(
+                        filestore,
+                        probe_results,
+                        f"monitor.{plan.project_id}.storage.filestore",
+                    )
                     if filestore_bytes is None:
                         complete = False
                     else:

@@ -19,6 +19,7 @@ from odcli_multica.models import (
     RootCreatorContext,
     VerifiedTaskContext,
 )
+from odoo_instance_sdk.internal.git_repository import validate_credentialed_transport_configuration
 from odoo_instance_sdk.internal.gitlab_credentials import (
     read_gitlab_credential_mappings as _read_core_gitlab_credential_mappings,
 )
@@ -534,6 +535,7 @@ def verify_git_transport(checkout: Path | str, args: Sequence[str], repository_u
     _verify_submodule_authorities(root, expected_host)
     _verify_submodule_update_commands(root)
     _verify_git_remotes(root, args, repository_url)
+    validate_credentialed_transport_configuration(root)
 
 
 def validated_project_path(override: str | None, inferred: str) -> str:
