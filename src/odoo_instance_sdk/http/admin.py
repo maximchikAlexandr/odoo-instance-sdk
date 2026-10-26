@@ -7,6 +7,7 @@ from typing import cast
 from .admin_auth import AdminSettings, _AdminAuth
 from .admin_catalog import BackupView, EnvironmentHistoryView, IncompleteOperationView
 from .admin_secrets import GitLabMemberSecretView, RemoteOdooSecretView
+from .admin_settings import CatalogSettingView
 from .admin_support import (
     BaseAdmin,
     Middleware,
@@ -38,6 +39,7 @@ def mount_admin(app: _DashboardApp, *, secure_cookie: bool = False) -> _Dashboar
         BackupView(),
         IncompleteOperationView(),
         EnvironmentHistoryView(),
+        CatalogSettingView(),
         RemoteOdooSecretView(),
         GitLabMemberSecretView(),
     ):
@@ -49,6 +51,7 @@ def mount_admin(app: _DashboardApp, *, secure_cookie: bool = False) -> _Dashboar
 __all__ = [
     "AdminSettings",
     "BackupView",
+    "CatalogSettingView",
     "EnvironmentHistoryView",
     "GitLabMemberSecretView",
     "IncompleteOperationView",
