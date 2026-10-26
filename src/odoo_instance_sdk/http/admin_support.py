@@ -38,6 +38,7 @@ class _PasswordHashFactory(Protocol):
 
 class _RequestAction(Protocol):
     CREATE: str
+    EDIT: str
 
 
 class _AdminUser:

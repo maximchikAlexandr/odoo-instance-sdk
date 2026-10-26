@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import (
@@ -49,6 +49,23 @@ def _request_revision(request: Request) -> int | None:
     return revision if revision > 0 else None
 
 
+def _secret_input_parser(
+    field_name: str,
+) -> dict[str, Callable[[Request, str | None], Awaitable[str]]]:
+    """Capture secret input before Starlette Admin logs parsed form data."""
+    actions = cast("_RequestAction", _dashboard_symbol("starlette_admin.types", "RequestAction"))
+
+    async def capture(request: Request, raw: str | None) -> str:
+        values = getattr(request.state, "odcli_secret_values", None)
+        if not isinstance(values, dict):
+            values = {}
+            setattr(request.state, "odcli_secret_values", values)
+        values[field_name] = raw if isinstance(raw, str) else ""
+        return ""
+
+    return {actions.CREATE: capture, actions.EDIT: capture}
+
+
 class _SecretView(_DashboardBaseModelView):
     key: str
 
@@ -64,7 +81,9 @@ class _SecretView(_DashboardBaseModelView):
     def can_import(self, request: Request) -> bool:
         return False
 
-    async def validate(self, request: Request, data: dict[str, _FormValue]) -> None:
+    async def validate(
+        self, request: Request, data: dict[str, _FormValue], *, secret: str | None = None
+    ) -> None:
         request_action = cast(
             "_RequestAction", _dashboard_symbol("starlette_admin.types", "RequestAction")
         )
@@ -72,7 +91,9 @@ class _SecretView(_DashboardBaseModelView):
         errors: dict[str | int, str] = {}
         if (
             request.state.action == request_action.CREATE
-            and not str(data.get(self.secret_field) or "").strip()
+            and not (
+                secret if secret is not None else self._submitted_secret(request, data)
+            ).strip()
         ):
             errors[self.secret_field] = "A nonblank secret is required."
         if self.key == "gitlab-member-secrets" and not str(data.get("login") or "").strip():
@@ -92,7 +113,16 @@ class _SecretView(_DashboardBaseModelView):
             except (GitLabCredentialError, TypeError, ValueError):
                 errors["host"] = "Enter a valid HTTPS GitLab host."
         if errors:
+            data[self.secret_field] = ""
             raise FormValidationError(errors)
+
+    def _submitted_secret(self, request: Request, data: dict[str, _FormValue]) -> str:
+        values = getattr(request.state, "odcli_secret_values", None)
+        value = values.get(self.secret_field) if isinstance(values, dict) else None
+        if not isinstance(value, str):
+            value = str(data.get(self.secret_field) or "")
+        data[self.secret_field] = ""
+        return value
 
 
 class RemoteOdooSecretView(_SecretView):
@@ -119,6 +149,7 @@ class RemoteOdooSecretView(_SecretView):
         PasswordField(
             "master_password",
             label="Master password",
+            parser=_secret_input_parser("master_password"),
             exclude_from_list=True,
             exclude_from_detail=True,
             exclude_from_export=True,
@@ -165,9 +196,14 @@ class RemoteOdooSecretView(_SecretView):
         return tuple(result)
 
     async def create(self, request: Request, data: dict[str, _FormValue]) -> RemoteOdooSecret:
-        return self._store().create_remote_odoo(
-            str(data["base_url"]), str(data.get("master_password") or "")
-        )
+        secret = self._submitted_secret(request, data)
+        await self.validate(request, data, secret=secret)
+        try:
+            return self._store().create_remote_odoo(str(data["base_url"]), secret)
+        except (InvalidBaseUrlError, TypeError, ValueError) as exc:
+            raise FormValidationError(
+                {"base_url": "Enter a valid HTTP or HTTPS base URL."}
+            ) from exc
 
     async def get_pk_value(self, request: Request, obj: RemoteOdooSecret) -> str:
         del request
@@ -176,15 +212,17 @@ class RemoteOdooSecretView(_SecretView):
     async def edit(
         self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
     ) -> RemoteOdooSecret:
-        identity = decode_admin_id(str(pk))
-        if identity is None or identity.kind != "remote-odoo":
-            raise _conflict()
+        secret = self._submitted_secret(request, data)
         try:
+            identity = decode_admin_id(str(pk))
+            if identity is None or identity.kind != "remote-odoo":
+                raise _conflict()
+            await self.validate(request, data, secret=secret)
             return self._store().update_remote_odoo(
                 identity.components[0],
                 revision=identity.revision,
                 new_base_url=str(data["base_url"]),
-                master_password=str(data.get("master_password") or ""),
+                master_password=secret,
             )
         except SecretStoreConflictError as exc:
             raise FormValidationError({"base_url": _conflict().msg}) from exc
@@ -240,6 +278,7 @@ class GitLabMemberSecretView(_SecretView):
         PasswordField(
             "token",
             label="Token",
+            parser=_secret_input_parser("token"),
             exclude_from_list=True,
             exclude_from_detail=True,
             exclude_from_export=True,
@@ -290,27 +329,31 @@ class GitLabMemberSecretView(_SecretView):
         return tuple(result)
 
     async def create(self, request: Request, data: dict[str, _FormValue]) -> GitLabMemberSecret:
-        return self._store().create_gitlab_member(
-            str(data["member_id"]),
-            str(data["host"]),
-            str(data["login"]),
-            str(data.get("token") or ""),
-        )
+        secret = self._submitted_secret(request, data)
+        await self.validate(request, data, secret=secret)
+        try:
+            return self._store().create_gitlab_member(
+                str(data["member_id"]), str(data["host"]), str(data["login"]), secret
+            )
+        except (GitLabCredentialError, TypeError, ValueError) as exc:
+            raise FormValidationError({"host": "Enter valid GitLab member credentials."}) from exc
 
     async def edit(
         self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
     ) -> GitLabMemberSecret:
+        secret = self._submitted_secret(request, data)
         identity = decode_admin_id(str(pk))
         if identity is None or identity.kind != "gitlab-member":
             raise _conflict()
         try:
+            await self.validate(request, data, secret=secret)
             return self._store().update_gitlab_member(
                 *identity.components,
                 revision=identity.revision,
                 new_member_id=str(data["member_id"]),
                 new_host=str(data["host"]),
                 login=str(data["login"]),
-                token=str(data.get("token") or ""),
+                token=secret,
             )
         except SecretStoreConflictError as exc:
             raise FormValidationError({"member_id": _conflict().msg}) from exc

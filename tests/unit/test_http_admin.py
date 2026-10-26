@@ -758,6 +758,28 @@ def test_secret_form_is_write_only_and_creates_direct_store_record(
     assert all(field.name != "admin_id" for field in RemoteOdooSecretView.fields)
 
 
+def test_authenticated_remote_secret_create_rejects_invalid_base_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root, store, _view = _remote_admin_context(tmp_path, monkeypatch)
+    _, client, csrf = _authenticated_client(root)
+
+    response = client.post(
+        "/admin/remote-odoo-secrets/create",
+        data={
+            "csrftoken": csrf,
+            "base_url": "file:///private/instance",
+            "master_password": "remote-secret",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 422
+    assert "base_url" in response.text
+    assert "remote-secret" not in response.text
+    assert store.list_remote_odoo() == ()
+
+
 def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1062,3 +1084,413 @@ def test_authenticated_gitlab_admin_edit_redirects_to_new_identity(
     assert parse_qs(location.query)["pk"] == [updated.admin_id]
     assert client.get(response.headers["location"]).status_code == 200
     assert client.get(edit_url).status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("member_id", "host", "login", "token", "error_field"),
+    [
+        ("d9428888-122b-11e1-b85c-61cd3cbb3210", "https://gitlab.example", "alice", "", "token"),
+        (
+            "d9428888-122b-11e1-b85c-61cd3cbb3210",
+            "https://gitlab.example",
+            " ",
+            "secret-token",
+            "login",
+        ),
+        ("not-a-member-id", "https://gitlab.example", "alice", "secret-token", "member_id"),
+        (
+            "d9428888-122b-11e1-b85c-61cd3cbb3210",
+            "http://gitlab.example",
+            "alice",
+            "secret-token",
+            "host",
+        ),
+    ],
+    ids=["blank-token", "blank-login", "invalid-member-id", "non-https-host"],
+)
+def test_authenticated_gitlab_secret_create_rejects_invalid_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    member_id: str,
+    host: str,
+    login: str,
+    token: str,
+    error_field: str,
+) -> None:
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    _, client, csrf = _authenticated_client(root)
+
+    response = client.post(
+        "/admin/gitlab-member-secrets/create",
+        data={
+            "csrftoken": csrf,
+            "member_id": member_id,
+            "host": host,
+            "login": login,
+            "token": token,
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 422
+    assert error_field in response.text
+    assert "secret-token" not in response.text
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    assert SecretStore().list_gitlab_members() == ()
+
+
+def test_authenticated_remote_secret_collision_does_not_echo_submitted_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A remote URL collision preserves stored credentials and redacts the form secret."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    original = store.create_remote_odoo("https://source.example", "prior-secret")
+    occupied = store.create_remote_odoo("https://occupied.example", "other-secret")
+    before = tuple(store.list_remote_odoo())
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    submitted = "remote-collision-sentinel"
+    response = client.post(
+        f"/admin/remote-odoo-secrets/edit?pk={original.admin_id}",
+        data={
+            "csrftoken": _csrf(client),
+            "base_url": occupied.base_url,
+            "master_password": submitted,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 422
+    assert submitted not in response.text
+    assert all(submitted not in str(record.msg) for record in caplog.records)
+    assert all(submitted not in repr(record.args) for record in caplog.records)
+    assert all(submitted not in record.getMessage() for record in caplog.records)
+    assert submitted not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    assert tuple(store.list_remote_odoo()) == before
+
+
+def test_authenticated_remote_secret_stale_edit_does_not_echo_submitted_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stale remote edit preserves the current credential and redacts the submitted one."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    original = store.create_remote_odoo("https://source.example", "prior-secret")
+    store.update_remote_odoo(
+        original.base_url,
+        revision=original.revision,
+        new_base_url=original.base_url,
+        master_password="concurrent-secret",
+    )
+    before = tuple(store.list_remote_odoo())
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    submitted = "remote-stale-sentinel"
+    response = client.post(
+        f"/admin/remote-odoo-secrets/edit?pk={original.admin_id}",
+        data={
+            "csrftoken": _csrf(client),
+            "base_url": original.base_url,
+            "master_password": submitted,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 422
+    assert submitted not in response.text
+    assert all(submitted not in str(record.msg) for record in caplog.records)
+    assert all(submitted not in repr(record.args) for record in caplog.records)
+    assert all(submitted not in record.getMessage() for record in caplog.records)
+    assert submitted not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    assert tuple(store.list_remote_odoo()) == before
+
+
+def test_authenticated_gitlab_secret_collision_does_not_echo_submitted_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A GitLab identity collision preserves stored credentials and redacts the token."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    member = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    collision_member = "a8098c1a-f86e-11da-bd1a-00112444be1e"
+    original = store.create_gitlab_member(
+        member, "https://gitlab.example", "operator", "prior-token"
+    )
+    occupied = store.create_gitlab_member(
+        collision_member, "https://gitlab.new", "other", "other-token"
+    )
+    before = tuple(store.list_gitlab_members())
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    submitted = "gitlab-collision-sentinel"
+    response = client.post(
+        f"/admin/gitlab-member-secrets/edit?pk={original.admin_id}",
+        data={
+            "csrftoken": _csrf(client),
+            "member_id": collision_member,
+            "host": occupied.host,
+            "login": "updated",
+            "token": submitted,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 422
+    assert submitted not in response.text
+    assert all(submitted not in str(record.msg) for record in caplog.records)
+    assert all(submitted not in repr(record.args) for record in caplog.records)
+    assert all(submitted not in record.getMessage() for record in caplog.records)
+    assert submitted not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    assert tuple(store.list_gitlab_members()) == before
+
+
+def test_authenticated_gitlab_secret_stale_edit_does_not_echo_submitted_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stale GitLab edit preserves the current token and redacts the submitted one."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    member = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    original = store.create_gitlab_member(
+        member, "https://gitlab.example", "operator", "prior-token"
+    )
+    store.update_gitlab_member(
+        member,
+        "https://gitlab.example",
+        revision=original.revision,
+        new_member_id=member,
+        new_host="https://gitlab.example",
+        login="operator",
+        token="concurrent-token",
+    )
+    before = tuple(store.list_gitlab_members())
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    submitted = "gitlab-stale-sentinel"
+    response = client.post(
+        f"/admin/gitlab-member-secrets/edit?pk={original.admin_id}",
+        data={
+            "csrftoken": _csrf(client),
+            "member_id": member,
+            "host": "https://gitlab.example",
+            "login": "updated",
+            "token": submitted,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 422
+    assert submitted not in response.text
+    assert all(submitted not in str(record.msg) for record in caplog.records)
+    assert all(submitted not in repr(record.args) for record in caplog.records)
+    assert all(submitted not in record.getMessage() for record in caplog.records)
+    assert submitted not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    assert tuple(store.list_gitlab_members()) == before
+
+
+def test_authenticated_remote_secret_create_is_absent_from_debug_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The public Remote Odoo create parser redacts its secret before logging the form."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    secret = "remote-create-debug-sentinel"
+    base_url = "https://created.example"
+    response = client.post(
+        "/admin/remote-odoo-secrets/create",
+        data={"csrftoken": _csrf(client), "base_url": base_url, "master_password": secret},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert secret not in response.text
+    assert all(secret not in str(record.msg) for record in caplog.records)
+    assert all(secret not in repr(record.args) for record in caplog.records)
+    assert all(secret not in record.getMessage() for record in caplog.records)
+    assert secret not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    saved = store.lookup_remote_odoo(base_url)
+    assert saved is not None
+    assert saved.master_password == secret
+
+
+def test_authenticated_remote_secret_edit_is_absent_from_debug_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The public Remote Odoo edit parser redacts its secret before logging the form."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    original = store.create_remote_odoo("https://old.example", "previous")
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    secret = "remote-edit-debug-sentinel"
+    base_url = "https://new.example"
+    response = client.post(
+        f"/admin/remote-odoo-secrets/edit?pk={original.admin_id}",
+        data={"csrftoken": _csrf(client), "base_url": base_url, "master_password": secret},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert secret not in response.text
+    assert all(secret not in str(record.msg) for record in caplog.records)
+    assert all(secret not in repr(record.args) for record in caplog.records)
+    assert all(secret not in record.getMessage() for record in caplog.records)
+    assert secret not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    saved = store.lookup_remote_odoo(base_url)
+    assert saved is not None
+    assert saved.master_password == secret
+
+
+def test_authenticated_gitlab_secret_create_is_absent_from_debug_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The public GitLab create parser redacts its token before logging the form."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    secret = "gitlab-create-debug-sentinel"
+    member = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    host = "https://gitlab-new.example"
+    response = client.post(
+        "/admin/gitlab-member-secrets/create",
+        data={
+            "csrftoken": _csrf(client),
+            "member_id": member,
+            "host": host,
+            "login": "operator-new",
+            "token": secret,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert secret not in response.text
+    assert all(secret not in str(record.msg) for record in caplog.records)
+    assert all(secret not in repr(record.args) for record in caplog.records)
+    assert all(secret not in record.getMessage() for record in caplog.records)
+    assert secret not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    saved = store.lookup_gitlab_member(member, host)
+    assert saved is not None
+    assert saved.token == secret
+
+
+def test_authenticated_gitlab_secret_edit_is_absent_from_debug_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The public GitLab edit parser redacts its token before logging the form."""
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    store = SecretStore()
+    member = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    original = store.create_gitlab_member(member, "https://gitlab.example", "operator", "previous")
+    _, client, _ = _authenticated_client(root)
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    secret = "gitlab-edit-debug-sentinel"
+    response = client.post(
+        f"/admin/gitlab-member-secrets/edit?pk={original.admin_id}",
+        data={
+            "csrftoken": _csrf(client),
+            "member_id": member,
+            "host": "https://gitlab.example",
+            "login": "operator-new",
+            "token": secret,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert secret not in response.text
+    assert all(secret not in str(record.msg) for record in caplog.records)
+    assert all(secret not in repr(record.args) for record in caplog.records)
+    assert all(secret not in record.getMessage() for record in caplog.records)
+    assert secret not in caplog.text
+    assert any("form values=" in str(record.msg) for record in caplog.records)
+    saved = store.lookup_gitlab_member(member, "https://gitlab.example")
+    assert saved is not None
+    assert saved.token == secret
+
+
+@pytest.mark.parametrize("kind", ["remote", "gitlab"])
+def test_authenticated_secret_create_validation_errors_keep_logs_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    kind: str,
+) -> None:
+    """Invalid normalized fields still produce useful logs without credential values."""
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    _, client, _ = _authenticated_client(root)
+    secret = f"{kind}-create-invalid-sentinel"
+    if kind == "remote":
+        path = "/admin/remote-odoo-secrets/create"
+        fields = {"base_url": "file:///private/instance", "master_password": secret}
+    else:
+        path = "/admin/gitlab-member-secrets/create"
+        fields = {
+            "member_id": "not-a-member-id",
+            "host": "http://gitlab.example",
+            "login": "operator",
+            "token": secret,
+        }
+
+    caplog.set_level("DEBUG", logger="starlette_admin.base")
+    response = client.post(
+        path,
+        data={"csrftoken": _csrf(client), **fields},
+        follow_redirects=False,
+    )
+    record_values = [
+        (str(record.msg), repr(record.args), record.getMessage()) for record in caplog.records
+    ]
+    leaked = any(secret in value for record in record_values for value in record)
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert not leaked
+    assert "form values=" in caplog.text
+    assert "validation failed" in caplog.text
