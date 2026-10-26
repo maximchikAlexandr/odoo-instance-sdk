@@ -10,11 +10,20 @@ from odoo_instance_sdk.storage.catalog.helpers import *  # noqa: F403
 from odoo_instance_sdk.storage.catalog.postgres_cluster import _PostgresClusterMixin
 from odoo_instance_sdk.storage.catalog.read import _BackupReadMixin
 from odoo_instance_sdk.storage.catalog.restore import _RestoreMixin
+from odoo_instance_sdk.storage.catalog.settings import (
+    CatalogSetting as CatalogSetting,
+    _SettingsMixin,
+)
 
 
 @dataclass(slots=True, kw_only=True)
 class BackupCatalog(
-    _BackupReadMixin, _BackupMixin, _RestoreMixin, _EnvironmentMixin, _PostgresClusterMixin
+    _BackupReadMixin,
+    _BackupMixin,
+    _RestoreMixin,
+    _EnvironmentMixin,
+    _PostgresClusterMixin,
+    _SettingsMixin,
 ):
     db_path: Path
     _conn: sqlite3.Connection = field(init=False, repr=False)

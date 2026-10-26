@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0014"
+CATALOG_REVISION = "0015"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -590,7 +590,7 @@ def _historical_ddl_fingerprint(
     }
     historical_tables = []
     for table, columns, keys, checks, collations, generated, options, _definition in tables:
-        if table not in _V16_TABLE_DEFINITIONS:
+        if table not in _V16_TABLE_DEFINITIONS or table == "settings":
             continue
         variant_omitted = variant_omissions.get(table, frozenset())
         omitted = _HISTORICAL_COMMON_OMISSIONS.get(table, frozenset()) | variant_omitted
@@ -658,6 +658,7 @@ def _historical_ddl_fingerprint(
             "backups_source_group_idx",
             "environments_project_checkout_idx",
             "project_database_bindings_identity_idx",
+            "settings",
         }
         and not (version == "v16" and name == "environments_one_active_branch")
     )
@@ -787,7 +788,7 @@ def _is_pre_project_ownership_schema(conn: sqlite3.Connection) -> bool:
         _reference_fingerprint()
     )
     expected_tables = tuple(
-        item for item in expected_tables if item[0] != "project_database_bindings"
+        item for item in expected_tables if item[0] not in {"project_database_bindings", "settings"}
     )
     legacy_indexes = expected_indexes - {
         "backups_source_group_idx",
