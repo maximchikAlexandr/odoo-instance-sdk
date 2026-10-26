@@ -60,6 +60,12 @@ def test_db_help_registers_both_commands_without_password_option() -> None:
     assert "--password" not in refresh_help.output
     assert "--show-command-output" in refresh_help.output
     assert "--password" not in reset_help.output
+    refresh_text = " ".join(refresh_help.output.replace("│", " ").split())
+    reset_text = " ".join(reset_help.output.replace("│", " ").split())
+    assert "ODCLI_ADMIN_PASSWORD" in refresh_text
+    assert "project .odcli/.env" in refresh_text
+    assert "<ODCLI_USER_ROOT>/.env" in refresh_text
+    assert "process, project .odcli/.env, then <ODCLI_USER_ROOT>/.env" in reset_text
     assert "[y/n]" not in refresh_help.output.lower()
     assert "[y/n]" not in reset_help.output.lower()
 
@@ -75,6 +81,8 @@ def test_restore_is_registered_with_exact_uuid_and_target_options() -> None:
     assert "--dry-run" in result.output
     assert "--yes" in result.output
     assert "--replace" in result.output
+    restore_text = " ".join(result.output.replace("│", " ").split())
+    assert "process, project .odcli/.env, then <ODCLI_USER_ROOT>/.env" in restore_text
 
 
 def _assert_catalogue_source(source: object) -> None:

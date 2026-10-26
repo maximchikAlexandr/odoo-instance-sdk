@@ -17,6 +17,27 @@ from odoo_instance_sdk.resources.instance import OdooInstance
 from tests.unit.test_git_resource import _git, _repo
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("git", "commit"),
+        ("git", "sync"),
+        ("git", "clone"),
+        ("git", "mr", "create"),
+    ],
+)
+def test_member_id_help_names_multica_account_user_id(command: tuple[str, ...]) -> None:
+    result = CliRunner().invoke(cli, [*command, "--help"])
+
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.replace("│", " ").replace("`", "").split())
+    assert "multica workspace member list --output json" in help_text
+    assert "user_id" in help_text
+    assert "membership-row" in help_text
+    assert "agent ID" in help_text
+    assert "squad ID" in help_text
+
+
 def _context(root: Path) -> SimpleNamespace:
     instance = SimpleNamespace(
         config=InstanceConfig(base_url="http://127.0.0.1:8069", default_cwd=root)

@@ -43,6 +43,18 @@ For `gitlab mr publish`, pass `--issue-url` with the exact HTTPS issue link when
 the Multica client profile has no `server_url`. Git operations use the verified
 checkout root and an installed `odcli-multica-askpass` executable for HTTPS.
 
+## Merge request assignee
+
+`gitlab mr publish` reads the optional catalog setting
+`gitlab.mr.default_assignee:https://<host>/<project>` for the exact normalized
+GitLab host and project. Its JSON value is a numeric GitLab user ID or exact
+username. A nonblank `--assignee` value takes precedence; with neither an
+override nor a setting, publication keeps the provider's existing default.
+Before creating or updating a merge request, the command verifies the selected
+user is active and is a member of that project. It sends `assignee_id`; this
+does not set or describe a reviewer. Results report the assignee ID, username,
+and whether it came from the explicit override or catalog default.
+
 ## Publication and external panel prerequisites
 
 Core `odcli publish` and `odcli unpublish` operate on the one OdCLI-owned Caddy

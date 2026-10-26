@@ -77,10 +77,14 @@ ignored by Git, must be owner-readable only (`0600` or another mode with no
 group/other bits), and uses a deliberately small grammar: `KEY=value`,
 literal single quotes, or double quotes with only `\\`, `\"`, `\n`, `\r`, and
 `\t` escapes. Blank/comment lines and empty values are supported; shell
-expansion, `export`, duplicate keys, and malformed quoting are rejected. The
-invoking process wins per key and `os.environ` is never changed. Ordinary
-values are scoped to Odoo children; Git, PostgreSQL, Docker, editors, package
-tools, and other children retain their purpose-built environments.
+expansion, `export`, duplicate keys, and malformed quoting are rejected.
+Secrets shared across projects belong in the owner-only user dotenv at
+`<ODCLI_USER_ROOT>/.env` (default `~/.odcli/.env`); project secrets stay in
+`.odcli/.env`. For `ODCLI_ADMIN_PASSWORD`, selection is process environment,
+then the selected project's `.odcli/.env`, then the user `.env`. The process
+environment is never changed. Ordinary project values are scoped to Odoo
+children; Git, PostgreSQL, Docker, editors, package tools, and other children
+retain their purpose-built environments.
 
 `ODCLI_TEST_MASTER_PASSWORD` is a restore-only secret input. It is consumed
 before child creation, removed from every child environment, and never written
@@ -88,12 +92,14 @@ to plans, logs, diagnostics, fingerprints, or structured output.
 `ODCLI_ADMIN_PASSWORD` is the administrator password for
 `db reset-admin-password`, restore with `--reset-admin-password`, and COPY
 replacement. Interactive Rich mode prompts twice with hidden input; JSON, TOON,
-and `--dry-run` never prompt. Non-interactive mode reads the process environment
-first, then `.odcli/.env`. The secret never appears in argv, shell history,
+and `--dry-run` never prompt. Non-interactive mode reads the process
+environment, then the selected project's `.odcli/.env`, then
+`<ODCLI_USER_ROOT>/.env`. The secret never appears in argv, shell history,
 manifest, catalog, plan, Rich/JSON/TOON output, logs, or exception text; the
 result reports only the fact and provenance (`prompt` or `environment`). A
-missing `.odcli/.env` is valid; unreadable, insecure, or malformed files fail
-before work and report only the path (and parser line where applicable).
+missing project or user `.env` is valid; unreadable, insecure, or malformed
+files fail before work and report only the path (and parser line where
+applicable).
 
 With `--postgres compose`, init also writes the effective project runtime config
 to `.odcli/odoo.conf` with owner-only permissions. It is derived from the
@@ -637,38 +643,47 @@ odcli translations export --module sale --language en_US --dry-run --format json
 
 Git operations are staged-only where applicable and use the shared immutable
 plan boundary. Project-aware `git commit` retains its Odoo policy and accepts a
-verified member identity without `--repo`; explicit `--repo`/`--member-id`
-selects the generic GitLab workflow without `odcli init`.
+verified member identity without `--repo`, including registered native
+checkouts that have no local manifest; use `--tag` to retain the explicit Odoo
+commit prefix. Explicit `--repo`/`--member-id` selects the generic GitLab
+workflow without `odcli init`. For every `--member-id` option, get the person's
+Multica account `user_id` from `multica workspace member list --output json`;
+the membership-row `id`, an agent ID, or a squad ID is not interchangeable.
 Generic commit subjects are repository-neutral, while `git sync` fetches and
 rebases before an optional same-name HTTPS publication. Use `--dry-run` before
 mutation; a stale remote lease or conflict fails without an automatic retry:
 
 ```bash
 odcli git commit "describe the staged change" --ticket PROJ-123 --dry-run
-odcli git commit "describe the staged change" --member-id 11111111-1111-4111-8111-111111111111 --dry-run
+multica workspace member list --output json  # copy the person's user_id as MEMBER_USER_ID
+odcli git commit "describe the staged change" --member-id MEMBER_USER_ID --tag IMP --dry-run
 odcli git check --base main --format json
 odcli git absorb --dry-run
 odcli git sync --base main --push --dry-run
 ```
 
 For a generic GitLab repository, credentials are selected by the exact member
-UUID and HTTPS host. Store the non-secret mapping at
-`~/.odcli/credentials/gitlab-credentials.toml` and the owner-only token values
-at `~/.odcli/credentials/.env` (or set `ODCLI_USER_ROOT`). Each TOML mapping
+`user_id` and HTTPS host. Store the non-secret mapping at
+`~/.odcli/credentials/gitlab-credentials.toml` and the owner-only token value
+in `<ODCLI_USER_ROOT>/.env` (default `~/.odcli/.env`). Each TOML mapping
 contains exactly `user_id`, `host`, `login`, and `token_key`; the token key must
-match an `ODCLI_GITLAB_TOKEN_*` entry. The command verifies `/api/v4/user`
+match an `ODCLI_GITLAB_TOKEN_*` entry. The former
+`~/.odcli/credentials/.env` token file is compatibility-only: OdCLI warns when
+the old file supplies the selected token (old-only or equal values) and rejects
+conflicting old and new values. Move token entries to the recommended user
+`.env`; do not keep duplicate secrets. The command verifies `/api/v4/user`
 before Git or GitLab mutation and never writes credentials into an origin URL.
 
 ```bash
 odcli git clone https://gitlab.example/group/repository ./repository \
   --branch dev --recurse-submodules \
-  --member-id 11111111-1111-4111-8111-111111111111 --yes
+  --member-id MEMBER_USER_ID --yes
 odcli git commit "describe the staged change" --repo ./repository \
-  --member-id 11111111-1111-4111-8111-111111111111 --yes
-odcli git sync --repo ./repository --member-id 11111111-1111-4111-8111-111111111111 \
+  --member-id MEMBER_USER_ID --yes
+odcli git sync --repo ./repository --member-id MEMBER_USER_ID \
   --base main --push --yes
 odcli git mr create --repo ./repository \
-  --member-id 11111111-1111-4111-8111-111111111111 --target main \
+  --member-id MEMBER_USER_ID --target main \
   --title "Review the change" --description-file ./description.md --yes
 ```
 
@@ -1047,6 +1062,11 @@ key is generated by OdCLI. A remote database name is never stored in a secret
 record. Concurrent edits use record revisions and stale updates are rejected;
 missing or corrupt key/store state fails closed. Only an absent encrypted record
 uses the existing environment/`.env` credential fallback.
+
+Both secret views allow edits to their business identity and connection fields;
+revision and storage metadata stay read-only. Leaving a password or token input
+blank retains the stored secret. Changing an identity redirects to its new
+record route, and the old revision-bound route is rejected.
 
 Database cards show backup download time and age only when the current database
 is proven to come from a completed catalogue restore with a surviving backup

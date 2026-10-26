@@ -83,7 +83,16 @@ def git_group() -> None:
     pass
 
 
-@git_group.command("commit", help="Create one staged Odoo commit.")
+_MEMBER_ID_HELP = (
+    "From `multica workspace member list --output json`, use the person's `user_id`, "
+    "not the membership-row `id`, agent ID, or squad ID."
+)
+
+
+@git_group.command(
+    "commit",
+    help="Create one staged Odoo commit; registered native checkouts need no local manifest, and --tag keeps the explicit Odoo prefix.",
+)
 @click.argument("description")
 @click.option("--ticket", default=None, help="Tracker-neutral Ticket key.")
 @click.option("--tag", default=None, help="Explicit uppercase commit prefix.")
@@ -91,7 +100,7 @@ def git_group() -> None:
 @click.option(
     "--member-id",
     default=None,
-    help="Verified Multica member UUID for project identity, or explicit GitLab mode with --repo.",
+    help=f"{_MEMBER_ID_HELP} Selects project identity, or GitLab mode with --repo.",
 )
 @click.option("--dry-run", is_flag=True, help="Plan only.")
 @click.option("--yes", is_flag=True, help="Skip confirmation.")
@@ -226,7 +235,7 @@ def git_absorb(
 @git_group.command("sync", help="Fetch, rebase, validate, and optionally publish a branch.")
 @click.option("--base", default=None)
 @click.option("--repo", default=None, type=click.Path(), help="Explicit Git repository root.")
-@click.option("--member-id", default=None, help="Selected GitLab member UUID.")
+@click.option("--member-id", default=None, help=_MEMBER_ID_HELP)
 @click.option("--push", is_flag=True, help="Publish to the same-name origin branch.")
 @click.option("--dry-run", is_flag=True, help="Plan only.")
 @click.option("--yes", is_flag=True, help="Skip confirmation.")
@@ -286,7 +295,7 @@ def git_sync(
 @git_group.command("clone", help="Clone an allowed GitLab repository safely.")
 @click.argument("url")
 @click.argument("destination", type=click.Path())
-@click.option("--member-id", required=True, help="Selected GitLab member UUID.")
+@click.option("--member-id", required=True, help=_MEMBER_ID_HELP)
 @click.option("--recurse-submodules", is_flag=True, help="Initialize validated missing submodules.")
 @click.option("--branch", help="Branch to check out before initializing submodules.")
 @click.option("--dry-run", is_flag=True, help="Plan only.")
@@ -343,7 +352,7 @@ def mr_group() -> None:
 
 @mr_group.command("create", help="Create or update one exact GitLab merge request.")
 @click.option("--repo", required=True, type=click.Path(), help="Explicit Git repository root.")
-@click.option("--member-id", required=True, help="Selected GitLab member UUID.")
+@click.option("--member-id", required=True, help=_MEMBER_ID_HELP)
 @click.option("--target", required=True, help="Target branch.")
 @click.option("--title", required=True, help="Merge-request title.")
 @click.option("--description-file", required=True, type=click.Path(dir_okay=False))
