@@ -66,6 +66,44 @@ def test_runtime_launch_identity_migration_is_idempotent_and_reversible(
     conn.close()
 
 
+def test_catalog_settings_migration_0014_to_0015_is_reversible_and_preserves_rows(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "catalog-settings-round-trip.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "0014")
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO backups "
+        "(id, source_base_url, database_name, format, filestore_requested, state, started_at) "
+        "VALUES ('existing-backup', 'https://example.test', 'existing', 'zip', 0, 'available', '2026-10-26T00:00:00+00:00')"
+    )
+    conn.commit()
+    before = tuple(conn.execute("SELECT * FROM backups"))
+    conn.close()
+
+    command.upgrade(config, "0015")
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO settings(key,value_json,revision,created_at,updated_at) "
+        "VALUES ('feature.enabled','true',1,'created','updated')"
+    )
+    conn.commit()
+    assert conn.execute("SELECT key,value_json FROM settings").fetchall() == [
+        ("feature.enabled", "true")
+    ]
+    conn.close()
+
+    command.downgrade(config, "0014")
+    conn = sqlite3.connect(str(db))
+    assert tuple(conn.execute("SELECT * FROM backups")) == before
+    assert "settings" not in {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert catalog_revision(conn) == "0014"
+    conn.close()
+
+
 def test_restore_state_migration_backfills_and_downgrades_to_legacy_shape(
     tmp_path: Path,
 ) -> None:
