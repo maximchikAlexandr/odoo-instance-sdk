@@ -789,6 +789,7 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
     stored = store.lookup_remote_odoo(original.base_url)
     assert stored is not None
     assert stored.master_password == "replacement-secret"
+    assert asyncio.run(view.find_by_pk(_request(), original.admin_id)) == replaced
     with pytest.raises(FormValidationError, match="Record changed"):
         asyncio.run(
             view.edit(
@@ -806,7 +807,7 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
     assert store.get_remote_odoo(original.base_url) is None
 
 
-def test_gitlab_admin_identity_keeps_hosts_separate_and_rejects_stale_revision(
+def test_gitlab_admin_identity_keeps_hosts_separate_and_rejects_stale_edits(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from starlette_admin.exceptions import FormValidationError
@@ -834,7 +835,9 @@ def test_gitlab_admin_identity_keeps_hosts_separate_and_rejects_stale_revision(
         ).revision
         == 2
     )
-    assert asyncio.run(view.find_by_pk(_request(), first.admin_id)) is None
+    assert asyncio.run(view.find_by_pk(_request(), first.admin_id)) == store.get_gitlab_member(
+        member_id, "https://gitlab.example"
+    )
     assert asyncio.run(view.find_by_pk(_request(), second.admin_id)) == second
     with pytest.raises(FormValidationError):
         asyncio.run(
