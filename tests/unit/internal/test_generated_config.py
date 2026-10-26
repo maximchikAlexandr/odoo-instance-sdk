@@ -3,8 +3,12 @@ from __future__ import annotations
 import configparser
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from odoo_instance_sdk.internal.generated_config import generate_config
+from odoo_instance_sdk.internal.generated_config import configured_admin_password, generate_config
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _write_source_config(path: Path, **options: str) -> None:
@@ -23,6 +27,30 @@ def _read_config(path: Path) -> dict[str, str]:
     if not cp.has_section("options"):
         return {}
     return dict(cp.items("options"))
+
+
+def test_configured_admin_password_uses_process_project_user_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    dotenv = project / ".odcli" / ".env"
+    dotenv.parent.mkdir(parents=True)
+    dotenv.write_text("ODCLI_ADMIN_PASSWORD=project-pass\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+    user = tmp_path / "user"
+    user.mkdir(mode=0o700)
+    user_dotenv = user / ".env"
+    user_dotenv.write_text("ODCLI_ADMIN_PASSWORD=user-pass\n", encoding="utf-8")
+    user_dotenv.chmod(0o600)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_user_root", lambda **_kwargs: user)
+    destination = project / ".odcli" / "odoo.conf"
+
+    monkeypatch.delenv("ODCLI_ADMIN_PASSWORD", raising=False)
+    assert configured_admin_password(None, destination) == "project-pass"
+    dotenv.unlink()
+    assert configured_admin_password(None, destination) == "user-pass"
+    monkeypatch.setenv("ODCLI_ADMIN_PASSWORD", "process-pass")
+    assert configured_admin_password(None, destination) == "process-pass"
 
 
 class TestGenerateConfig:

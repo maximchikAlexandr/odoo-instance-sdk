@@ -57,6 +57,7 @@ def explicit_commit_environment(member_id: str, host: str) -> dict[str, str]:
         user_root=None,
         mapping_path=None,
         environment_path=None,
+        project_root=Path.cwd(),
         process_environment=None,
         identity_transport=None,
     )
@@ -93,6 +94,7 @@ def explicit_sync_command(
         user_root=None,
         mapping_path=None,
         environment_path=None,
+        project_root=Path(snapshot.canonical_root),
         process_environment=None,
         identity_transport=None,
     )

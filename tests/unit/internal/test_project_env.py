@@ -20,6 +20,8 @@ from odoo_instance_sdk.internal.project_env import (
     ProjectEnvironmentError,
     effective_project_environment,
     load_project_environment,
+    load_user_environment,
+    user_environment_path,
 )
 from odoo_instance_sdk.internal.vscode_generate import build_launch_profile, launch_json
 from odoo_instance_sdk.models import StartConfig
@@ -126,6 +128,80 @@ def test_project_env_rejects_a_dotenv_symlink_outside_the_project(tmp_path: Path
     with pytest.raises(ProjectEnvironmentError, match="inside the resolved project") as error:
         load_project_environment(project)
     assert "must-not-load" not in str(error.value)
+
+
+def test_project_env_rejects_symlinked_dotenv_directory(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".env").write_text("TOKEN=private\n", encoding="utf-8")
+    (project / ".odcli").symlink_to(outside)
+
+    with pytest.raises(ProjectEnvironmentError, match="project dotenv") as error:
+        load_project_environment(project)
+    assert "TOKEN=private" not in str(error.value)
+
+
+def test_user_env_uses_exact_root_and_shared_grammar(tmp_path: Path) -> None:
+    root = tmp_path / "selected"
+    root.mkdir(mode=0o700)
+    (tmp_path / ".env").write_text("WRONG=ancestor\n", encoding="utf-8")
+    dotenv = root / ".env"
+    dotenv.write_text("ODCLI_ADMIN_PASSWORD=private\n", encoding="utf-8")
+    dotenv.chmod(0o600)
+
+    assert user_environment_path(root) == dotenv
+    values = load_user_environment(root)
+    assert values["ODCLI_ADMIN_PASSWORD"] == "private"
+    with pytest.raises(TypeError):
+        values["NEW"] = "value"  # type: ignore[index]
+
+
+def test_user_env_rejects_symlink_and_group_access(tmp_path: Path) -> None:
+    root = tmp_path / "user"
+    root.mkdir(mode=0o700)
+    secret = tmp_path / "outside"
+    secret.write_text("TOKEN=secret\n", encoding="utf-8")
+    (root / ".env").symlink_to(secret)
+    with pytest.raises(ProjectEnvironmentError, match="regular file"):
+        load_user_environment(root)
+
+    (root / ".env").unlink()
+    dotenv = root / ".env"
+    dotenv.write_text("TOKEN=secret\n", encoding="utf-8")
+    dotenv.chmod(0o640)
+    with pytest.raises(ProjectEnvironmentError, match="owner-only"):
+        load_user_environment(root)
+
+
+def test_user_secrets_are_not_added_to_generic_child_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "user"
+    root.mkdir(mode=0o700)
+    dotenv = root / ".env"
+    dotenv.write_text(
+        "ODCLI_ADMIN_PASSWORD=admin-secret\n"
+        "ODCLI_GITLAB_TOKEN_ALICE=gitlab-secret\n"
+        "UNRELATED_USER_VALUE=private-value\n",
+        encoding="utf-8",
+    )
+    dotenv.chmod(0o600)
+    for key in (
+        "ODCLI_ADMIN_PASSWORD",
+        "ODCLI_GITLAB_TOKEN_ALICE",
+        "UNRELATED_USER_VALUE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    assert len(load_user_environment(root)) == 3
+    child, _overrides = captured_child_environment()
+    assert {
+        "ODCLI_ADMIN_PASSWORD",
+        "ODCLI_GITLAB_TOKEN_ALICE",
+        "UNRELATED_USER_VALUE",
+    }.isdisjoint(dict(child))
 
 
 def test_project_env_process_precedence_is_immutable_and_does_not_mutate_process() -> None:
