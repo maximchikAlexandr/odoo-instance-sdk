@@ -87,6 +87,35 @@ def test_blank_edit_retains_secret_and_revision_is_cas(store: SecretStore) -> No
 
 
 @pytest.mark.dashboard
+def test_remote_identity_edit_moves_primary_key_atomically_and_rejects_collision(
+    store: SecretStore,
+) -> None:
+    original = store.create_remote_odoo("https://old.example", "password")
+    other = store.create_remote_odoo("https://taken.example", "other-password")
+
+    with pytest.raises(SecretStoreRecordError, match="identity already exists"):
+        store.update_remote_odoo(
+            original.base_url,
+            revision=original.revision,
+            new_base_url=other.base_url,
+            master_password="replacement",
+        )
+    assert store.get_remote_odoo(original.base_url) == original
+    assert store.get_remote_odoo(other.base_url) == other
+
+    updated = store.update_remote_odoo(
+        original.base_url,
+        revision=original.revision,
+        new_base_url="https://new.example/",
+    )
+    assert updated.base_url == "https://new.example"
+    assert updated.revision == original.revision + 1
+    assert updated.created_at == original.created_at
+    assert store.get_remote_odoo(original.base_url) is None
+    assert store.lookup_remote_odoo(updated.base_url).master_password == "password"  # type: ignore[union-attr]
+
+
+@pytest.mark.dashboard
 def test_gitlab_identity_generates_stable_key_and_is_host_scoped(store: SecretStore) -> None:
     first = store.create_gitlab_member(_MEMBER, "https://GitLab.Example/", "operator", "token-a")
     _second = store.create_gitlab_member(_MEMBER, "https://other.example", "operator", "token-b")
@@ -122,6 +151,34 @@ def test_gitlab_identity_generates_stable_key_and_is_host_scoped(store: SecretSt
     assert updated_private.login == "new-operator"
     assert updated_private.token_key == first_private.token_key
     assert updated_private.token == "token-a"
+
+
+@pytest.mark.dashboard
+def test_gitlab_identity_edit_moves_pair_and_retains_token_key_and_blank_token(
+    store: SecretStore,
+) -> None:
+    original = store.create_gitlab_member(_MEMBER, "https://old.example", "alice", "token")
+    private = store.lookup_gitlab_member(_MEMBER, "old.example")
+    assert private is not None
+
+    updated = store.update_gitlab_member(
+        _MEMBER,
+        "https://old.example",
+        revision=original.revision,
+        new_member_id="d9428888-122b-11e1-b85c-61cd3cbb3210",
+        new_host="https://new.example/",
+        login="alice-new",
+    )
+    assert updated.member_id == "d9428888-122b-11e1-b85c-61cd3cbb3210"
+    assert updated.host == "new.example"
+    assert updated.revision == original.revision + 1
+    assert updated.created_at == original.created_at
+    assert store.get_gitlab_member(_MEMBER, "old.example") is None
+    new_private = store.lookup_gitlab_member(updated.member_id, updated.host)
+    assert new_private is not None
+    assert new_private.login == "alice-new"
+    assert new_private.token == "token"
+    assert new_private.token_key == private.token_key
 
 
 @pytest.mark.dashboard

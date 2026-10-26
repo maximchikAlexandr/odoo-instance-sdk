@@ -28,6 +28,7 @@ from odoo_instance_sdk.exceptions import (
     SecretStoreConflictError,
     SecretStoreCorruptError,
     SecretStoreError,
+    SecretStoreIdentityConflictError,
     SecretStoreRecordError,
     SecretStoreUnavailableError,
 )
@@ -496,7 +497,7 @@ class SecretStore:
         if "locked" in message or "busy" in message:
             return SecretStoreBusyError("secret-store database is busy; retry")
         if "constraint" in message or "unique" in message:
-            return SecretStoreRecordError("secret-store identity already exists")
+            return SecretStoreIdentityConflictError("secret-store identity already exists")
         return SecretStoreCorruptError("secret-store operation failed")
 
     def get_remote_odoo(self, base_url: str) -> RemoteOdooSecret | None:
@@ -603,9 +604,11 @@ class SecretStore:
         base_url: str,
         *,
         revision: int,
+        new_base_url: str | None = None,
         master_password: str = "",
     ) -> RemoteOdooSecret:
         normalized = normalize_base_url(base_url)
+        proposed = normalize_base_url(new_base_url) if new_base_url is not None else normalized
         if revision < 1:
             raise SecretStoreConflictError("secret-store revision is stale")
         connection = self._ready(write=True)
@@ -613,7 +616,8 @@ class SecretStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT revision, created_at FROM remote_odoo_secret WHERE base_url = ?",
+                "SELECT revision, created_at, master_password FROM remote_odoo_secret "
+                "WHERE base_url = ?",
                 (normalized,),
             ).fetchone()
             if row is None:
@@ -624,22 +628,19 @@ class SecretStore:
                     "secret-store revision is stale; reload and retry"
                 )
             timestamp = _now()
-            if master_password.strip():
-                password = _required(master_password, label="master password")
-                connection.execute(
-                    "UPDATE remote_odoo_secret SET master_password = ?, revision = ?, updated_at = ? "
-                    "WHERE base_url = ? AND revision = ?",
-                    (password, current + 1, timestamp, normalized, current),
-                )
-            else:
-                connection.execute(
-                    "UPDATE remote_odoo_secret SET revision = ?, updated_at = ? "
-                    "WHERE base_url = ? AND revision = ?",
-                    (current + 1, timestamp, normalized, current),
-                )
+            password = (
+                _required(master_password, label="master password")
+                if master_password.strip()
+                else _text(row[2], label="master password")
+            )
+            connection.execute(
+                "UPDATE remote_odoo_secret SET base_url = ?, master_password = ?, "
+                "revision = ?, updated_at = ? WHERE base_url = ? AND revision = ?",
+                (proposed, password, current + 1, timestamp, normalized, current),
+            )
             connection.commit()
             return RemoteOdooSecret(
-                normalized,
+                proposed,
                 current + 1,
                 _text(row[1], label="created timestamp"),
                 timestamp,
@@ -775,11 +776,17 @@ class SecretStore:
         host: str,
         *,
         revision: int,
+        new_member_id: str | None = None,
+        new_host: str | None = None,
         login: str,
         token: str = "",
     ) -> GitLabMemberSecret:
         normalized_member = normalize_member_id(member_id)
         normalized_host = normalize_gitlab_host(host)
+        proposed_member = (
+            normalize_member_id(new_member_id) if new_member_id is not None else normalized_member
+        )
+        proposed_host = normalize_gitlab_host(new_host) if new_host is not None else normalized_host
         safe_login = _required(login, label="GitLab login")
         if revision < 1:
             raise SecretStoreConflictError("secret-store revision is stale")
@@ -788,7 +795,7 @@ class SecretStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT login, token_key, revision, created_at FROM gitlab_member_secret "
+                "SELECT login, token_key, revision, created_at, token FROM gitlab_member_secret "
                 "WHERE member_id = ? AND host = ?",
                 (normalized_member, normalized_host),
             ).fetchone()
@@ -800,38 +807,30 @@ class SecretStore:
                     "secret-store revision is stale; reload and retry"
                 )
             timestamp = _now()
-            if token.strip():
-                safe_token = _required(token, label="GitLab token")
-                connection.execute(
-                    "UPDATE gitlab_member_secret SET login = ?, token = ?, revision = ?, updated_at = ? "
-                    "WHERE member_id = ? AND host = ? AND revision = ?",
-                    (
-                        safe_login,
-                        safe_token,
-                        current + 1,
-                        timestamp,
-                        normalized_member,
-                        normalized_host,
-                        current,
-                    ),
-                )
-            else:
-                connection.execute(
-                    "UPDATE gitlab_member_secret SET login = ?, revision = ?, updated_at = ? "
-                    "WHERE member_id = ? AND host = ? AND revision = ?",
-                    (
-                        safe_login,
-                        current + 1,
-                        timestamp,
-                        normalized_member,
-                        normalized_host,
-                        current,
-                    ),
-                )
+            safe_token = (
+                _required(token, label="GitLab token")
+                if token.strip()
+                else _text(row[4], label="GitLab token")
+            )
+            connection.execute(
+                "UPDATE gitlab_member_secret SET member_id = ?, host = ?, login = ?, token = ?, "
+                "revision = ?, updated_at = ? WHERE member_id = ? AND host = ? AND revision = ?",
+                (
+                    proposed_member,
+                    proposed_host,
+                    safe_login,
+                    safe_token,
+                    current + 1,
+                    timestamp,
+                    normalized_member,
+                    normalized_host,
+                    current,
+                ),
+            )
             connection.commit()
             return GitLabMemberSecret(
-                member_id=normalized_member,
-                host=normalized_host,
+                member_id=proposed_member,
+                host=proposed_host,
                 login=safe_login,
                 revision=current + 1,
                 created_at=_text(row[3], label="created timestamp"),
