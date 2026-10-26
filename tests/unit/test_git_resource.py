@@ -6,9 +6,11 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 
+from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     GitAbsorbNotFoundError,
@@ -385,6 +387,147 @@ def test_commit_in_worktree_without_manifest_uses_project_ticket_settings(
         "-m",
         "[IMP] worktree: PROJ-123 change\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a",
     )
+
+
+def _registered_native_checkout(tmp_path: Path) -> tuple[OdooInstance, Path, Path]:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _repo(project_root)
+    _ticket_project(project_root)
+    _git(project_root, "add", ".odcli")
+    _git(project_root, "commit", "-qm", "project config")
+    _git(project_root, "remote", "add", "origin", "https://gitlab.example/team/repo.git")
+    worktree = tmp_path / "native"
+    parent = _git(project_root, "rev-parse", "HEAD^").strip()
+    _git(project_root, "worktree", "add", "-qb", "task/PROJ-123", str(worktree), parent)
+    (worktree / "addons" / "sale").mkdir(parents=True)
+    (worktree / "addons" / "sale" / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+    common = Path(_git(worktree, "rev-parse", "--git-common-dir").strip())
+    common = (worktree / common).resolve() if not common.is_absolute() else common.resolve()
+    instance = _bound_instance(worktree, project_root)
+    instance._environment_id = "environment_test"
+
+    class _Catalog:
+        def get_project(self, project_id: str) -> dict[str, str]:
+            assert project_id == "project_test"
+            return {
+                "registration_state": "registered",
+                "repository_root": str(project_root.resolve()),
+                "git_common_dir": str((project_root / ".git").resolve()),
+            }
+
+        def get_environment(self, environment_id: str) -> dict[str, str]:
+            assert environment_id == "environment_test"
+            return {
+                "project_id": "project_test",
+                "state": "active",
+                "branch": "task/PROJ-123",
+                "repository_root": str(project_root.resolve()),
+                "git_common_dir": str((project_root / ".git").resolve()),
+                "worktree_path": str(worktree.resolve()),
+                "checkout_git_common_dir": str(common),
+            }
+
+        def get_catalog(self) -> _Catalog:
+            return self
+
+    instance._client = cast("OdooClient", _Catalog())
+    return instance, project_root, worktree
+
+
+def test_registered_native_checkout_uses_project_policy_and_verified_identity(
+    tmp_path: Path,
+) -> None:
+    instance, _project, worktree = _registered_native_checkout(tmp_path)
+    module_file = worktree / "addons" / "sale" / "models.py"
+    module_file.write_text("value = 1\n", encoding="utf-8")
+    _git(worktree, "add", "addons/sale")
+    identity = {
+        "GIT_AUTHOR_NAME": "Selected Member",
+        "GIT_AUTHOR_EMAIL": "selected@example.test",
+        "GIT_COMMITTER_NAME": "Selected Member",
+        "GIT_COMMITTER_EMAIL": "selected@example.test",
+    }
+
+    with patch(
+        "odoo_instance_sdk.internal.git_explicit.explicit_commit_environment",
+        return_value=identity,
+    ):
+        command = GitResource(instance).commit_command(
+            description="change model",
+            ticket="PROJ-123",
+            tag="VIEW",
+            member_id="11111111-1111-4111-8111-111111111111",
+        )
+        commit_step = next(
+            step for step in command.plan.process_steps if step.step_id == "git.commit"
+        )
+        assert {
+            key: value for key, value in commit_step.environment_overrides if key in identity
+        } == identity
+        assert commit_step.argv[-1] == (
+            "[VIEW] sale: PROJ-123 change model\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a"
+        )
+        command.run()
+
+    assert not (worktree / ".odcli" / "project.toml").exists()
+    assert _git(worktree, "log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce%x00%s").strip() == (
+        "Selected Member\0selected@example.test\0Selected Member\0selected@example.test\0"
+        "[VIEW] sale: PROJ-123 change model"
+    )
+
+
+def test_registered_native_checkout_origin_drift_fails_before_commit(tmp_path: Path) -> None:
+    instance, project_root, worktree = _registered_native_checkout(tmp_path)
+    change = worktree / "addons" / "sale" / "models.py"
+    change.write_text("value = 2\n", encoding="utf-8")
+    _git(worktree, "add", "addons/sale")
+    head = _git(worktree, "rev-parse", "HEAD").strip()
+
+    with patch(
+        "odoo_instance_sdk.internal.git_explicit.explicit_commit_environment",
+        return_value={"GIT_AUTHOR_NAME": "Selected", "GIT_AUTHOR_EMAIL": "s@example.test"},
+    ):
+        command = GitResource(instance).commit_command(
+            description="change model",
+            member_id="11111111-1111-4111-8111-111111111111",
+        )
+    _git(project_root, "remote", "set-url", "origin", "https://gitlab.example/other/repo.git")
+
+    with pytest.raises(GitWorkflowError, match="identity changed"):
+        command.run()
+    assert _git(worktree, "rev-parse", "HEAD").strip() == head
+
+
+def test_registered_native_checkout_rejects_foreign_catalog_worktree(tmp_path: Path) -> None:
+    instance, _project_root, worktree = _registered_native_checkout(tmp_path)
+    change = worktree / "addons" / "sale" / "models.py"
+    change.write_text("value = 2\n", encoding="utf-8")
+    _git(worktree, "add", "addons/sale")
+    head = _git(worktree, "rev-parse", "HEAD").strip()
+    catalog = instance._client
+    original_get_environment = getattr(catalog, "get_environment")
+
+    def foreign_environment(environment_id: str) -> dict[str, str]:
+        row = cast("dict[str, str]", original_get_environment(environment_id))
+        row["worktree_path"] = str(tmp_path / "foreign")
+        return row
+
+    setattr(catalog, "get_environment", foreign_environment)
+
+    with (
+        patch(
+            "odoo_instance_sdk.internal.git_explicit.explicit_commit_environment",
+            return_value={"GIT_AUTHOR_NAME": "Selected", "GIT_AUTHOR_EMAIL": "s@example.test"},
+        ),
+        pytest.raises(GitWorkflowError, match="stale or foreign"),
+    ):
+        GitResource(instance).commit_command(
+            description="change model",
+            member_id="11111111-1111-4111-8111-111111111111",
+        )
+
+    assert _git(worktree, "rev-parse", "HEAD").strip() == head
 
 
 def test_commit_in_worktree_without_manifest_and_no_project_manifest_disables_link(
