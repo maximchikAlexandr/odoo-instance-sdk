@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, cast
 
-from odoo_instance_sdk.exceptions import SecretStoreConflictError
+from odoo_instance_sdk.exceptions import (
+    GitLabCredentialError,
+    InvalidBaseUrlError,
+    SecretStoreConflictError,
+    SecretStoreIdentityConflictError,
+    SecretStoreRecordError,
+)
+from odoo_instance_sdk.internal.gitlab_credentials import normalize_gitlab_host, normalize_member_id
 from odoo_instance_sdk.internal.secret_store import (
     GitLabMemberSecret,
     RemoteOdooSecret,
     SecretStore,
     decode_admin_id,
 )
+from odoo_instance_sdk.internal.urls import normalize_base_url
 
 from .admin_support import (
     FormValidationError,
-    IntegerField,
     PasswordField,
     StringField,
     _conflict,
@@ -40,13 +47,6 @@ def _request_revision(request: Request) -> int | None:
     except (TypeError, ValueError):
         return None
     return revision if revision > 0 else None
-
-
-def _form_revision(data: Mapping[str, _FormValue]) -> int:
-    value = data["revision"]
-    if value is None:
-        raise _conflict()
-    return int(value)
 
 
 class _SecretView(_DashboardBaseModelView):
@@ -77,6 +77,20 @@ class _SecretView(_DashboardBaseModelView):
             errors[self.secret_field] = "A nonblank secret is required."
         if self.key == "gitlab-member-secrets" and not str(data.get("login") or "").strip():
             errors["login"] = "A nonblank login is required."
+        if self.key == "remote-odoo-secrets":
+            try:
+                normalize_base_url(str(data.get("base_url") or ""))
+            except (InvalidBaseUrlError, TypeError, ValueError):
+                errors["base_url"] = "Enter a valid HTTP or HTTPS base URL."
+        elif self.key == "gitlab-member-secrets":
+            try:
+                normalize_member_id(str(data.get("member_id") or ""))
+            except (GitLabCredentialError, TypeError, ValueError):
+                errors["member_id"] = "Enter a valid Multica member user ID."
+            try:
+                normalize_gitlab_host(str(data.get("host") or ""))
+            except (GitLabCredentialError, TypeError, ValueError):
+                errors["host"] = "Enter a valid HTTPS GitLab host."
         if errors:
             raise FormValidationError(errors)
 
@@ -90,16 +104,18 @@ class RemoteOdooSecretView(_SecretView):
     show_pk_in_forms = False
     secret_field = "master_password"
     fields = (
-        StringField("base_url", exclude_from_edit=True),
-        IntegerField(
-            "revision",
-            read_only=False,
+        StringField("base_url"),
+        StringField("created_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
+        StringField("updated_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
+        StringField(
+            "_continue_editing",
+            input_type="hidden",
             exclude_from_list=True,
             exclude_from_detail=True,
             exclude_from_create=True,
+            exclude_from_export=True,
+            exclude_from_import=True,
         ),
-        StringField("created_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
-        StringField("updated_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
         PasswordField(
             "master_password",
             label="Master password",
@@ -162,20 +178,27 @@ class RemoteOdooSecretView(_SecretView):
         self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
     ) -> RemoteOdooSecret:
         identity = decode_admin_id(str(pk))
-        if (
-            identity is None
-            or identity.kind != "remote-odoo"
-            or _form_revision(data) != identity.revision
-        ):
+        if identity is None or identity.kind != "remote-odoo":
             raise _conflict()
         try:
             return self._store().update_remote_odoo(
                 identity.components[0],
                 revision=identity.revision,
+                new_base_url=str(data["base_url"]),
                 master_password=str(data.get("master_password") or ""),
             )
         except SecretStoreConflictError as exc:
-            raise FormValidationError({"revision": _conflict().msg}) from exc
+            raise FormValidationError({"base_url": _conflict().msg}) from exc
+        except SecretStoreIdentityConflictError as exc:
+            raise FormValidationError(
+                {"base_url": "A secret already exists for this URL."}
+            ) from exc
+        except SecretStoreRecordError as exc:
+            raise FormValidationError({"base_url": _conflict().msg}) from exc
+        except InvalidBaseUrlError as exc:
+            raise FormValidationError(
+                {"base_url": "Enter a valid HTTP or HTTPS base URL."}
+            ) from exc
 
     async def delete(self, request: Request, pks: list[_PrimaryKey]) -> int:
         for pk in pks:
@@ -201,18 +224,20 @@ class GitLabMemberSecretView(_SecretView):
     show_pk_in_forms = False
     secret_field = "token"
     fields = (
-        StringField("member_id", exclude_from_edit=True),
-        StringField("host", exclude_from_edit=True),
+        StringField("member_id"),
+        StringField("host"),
         StringField("login"),
-        IntegerField(
-            "revision",
-            read_only=False,
+        StringField("created_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
+        StringField("updated_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
+        StringField(
+            "_continue_editing",
+            input_type="hidden",
             exclude_from_list=True,
             exclude_from_detail=True,
             exclude_from_create=True,
+            exclude_from_export=True,
+            exclude_from_import=True,
         ),
-        StringField("created_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
-        StringField("updated_at", read_only=True, exclude_from_create=True, exclude_from_edit=True),
         PasswordField(
             "token",
             label="Token",
@@ -278,21 +303,31 @@ class GitLabMemberSecretView(_SecretView):
         self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
     ) -> GitLabMemberSecret:
         identity = decode_admin_id(str(pk))
-        if (
-            identity is None
-            or identity.kind != "gitlab-member"
-            or _form_revision(data) != identity.revision
-        ):
+        if identity is None or identity.kind != "gitlab-member":
             raise _conflict()
         try:
             return self._store().update_gitlab_member(
                 *identity.components,
                 revision=identity.revision,
+                new_member_id=str(data["member_id"]),
+                new_host=str(data["host"]),
                 login=str(data["login"]),
                 token=str(data.get("token") or ""),
             )
         except SecretStoreConflictError as exc:
-            raise FormValidationError({"revision": _conflict().msg}) from exc
+            raise FormValidationError({"member_id": _conflict().msg}) from exc
+        except SecretStoreIdentityConflictError as exc:
+            field = "member_id" if str(data["member_id"]) != identity.components[0] else "host"
+            raise FormValidationError(
+                {field: "A secret already exists for this member and host."}
+            ) from exc
+        except SecretStoreRecordError as exc:
+            raise FormValidationError({"member_id": _conflict().msg}) from exc
+        except GitLabCredentialError as exc:
+            field = "member_id" if str(data["member_id"]) != identity.components[0] else "host"
+            raise FormValidationError(
+                {field: "Enter a valid member ID and HTTPS GitLab host."}
+            ) from exc
 
     async def delete(self, request: Request, pks: list[_PrimaryKey]) -> int:
         for pk in pks:

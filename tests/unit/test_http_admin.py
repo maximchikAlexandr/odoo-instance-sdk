@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -769,9 +769,13 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
     store = SecretStore()
     original = store.create_remote_odoo("https://cas.example", "original-secret")
     view = RemoteOdooSecretView()
+    assert "base_url" in {field.name for field in view.fields}
+    assert "revision" not in {field.name for field in view.fields}
     empty_edit = asyncio.run(
         view.edit(
-            _request(), original.admin_id, {"revision": original.revision, "master_password": ""}
+            _request(),
+            original.admin_id,
+            {"base_url": original.base_url, "master_password": ""},
         )
     )
     assert empty_edit.revision == 2
@@ -783,7 +787,7 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
         view.edit(
             _request(),
             empty_edit.admin_id,
-            {"revision": empty_edit.revision, "master_password": "replacement-secret"},
+            {"base_url": empty_edit.base_url, "master_password": "replacement-secret"},
         )
     )
     stored = store.lookup_remote_odoo(original.base_url)
@@ -794,7 +798,7 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
             view.edit(
                 _request(),
                 original.admin_id,
-                {"revision": original.revision, "master_password": "stale"},
+                {"base_url": "https://stale.example", "master_password": "stale"},
             )
         )
 
@@ -804,6 +808,72 @@ def test_secret_edit_is_cas_safe_and_delete_uses_submitted_revision(
     assert store.get_remote_odoo(original.base_url) is not None
     assert asyncio.run(view.delete(_request(), [replaced.admin_id])) == 1
     assert store.get_remote_odoo(original.base_url) is None
+
+
+@pytest.mark.dashboard
+def test_remote_admin_edit_changes_identity_and_maps_collision_to_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from starlette_admin.exceptions import FormValidationError
+
+    root = _admin_root(tmp_path, monkeypatch)
+    _write_admin_config(root)
+    from odoo_instance_sdk.http.admin import RemoteOdooSecretView
+    from odoo_instance_sdk.internal.secret_store import SecretStore
+
+    store = SecretStore()
+    original = store.create_remote_odoo("https://old.example", "old-secret")
+    occupied = store.create_remote_odoo("https://occupied.example", "occupied-secret")
+    view = RemoteOdooSecretView()
+
+    with pytest.raises(FormValidationError) as collision:
+        asyncio.run(view.edit(_request(), original.admin_id, {"base_url": occupied.base_url}))
+    assert "base_url" in collision.value.errors
+    assert store.get_remote_odoo(original.base_url) == original
+    assert store.get_remote_odoo(occupied.base_url) == occupied
+
+    updated = asyncio.run(
+        view.edit(
+            _request(),
+            original.admin_id,
+            {"base_url": "https://new.example/", "master_password": ""},
+        )
+    )
+    assert updated.base_url == "https://new.example"
+    assert updated.revision == original.revision + 1
+    assert asyncio.run(view.find_by_pk(_request(), original.admin_id)) is None
+    assert asyncio.run(view.find_by_pk(_request(), updated.admin_id)) == updated
+    credential = store.lookup_remote_odoo(updated.base_url)
+    assert credential is not None
+    assert credential.master_password == "old-secret"
+
+    http_original = store.create_remote_odoo("https://http-old.example", "http-secret")
+    _, client, _ = _authenticated_client(root)
+    edit_url = f"/admin/remote-odoo-secrets/edit?pk={http_original.admin_id}"
+    form = client.get(edit_url)
+    assert form.status_code == 200
+    assert 'name="base_url"' in form.text
+    assert 'name="revision"' not in form.text
+    assert 'name="_continue_editing"' in form.text
+    assert "http-secret" not in form.text
+    response = client.post(
+        edit_url,
+        data={
+            "csrftoken": _csrf(client),
+            "_continue_editing": "",
+            "base_url": "https://http-new.example/",
+            "master_password": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    location = urlsplit(response.headers["location"])
+    assert location.path == "/admin/remote-odoo-secrets/edit"
+    http_updated = store.get_remote_odoo("https://http-new.example")
+    assert http_updated is not None
+    assert parse_qs(location.query)["pk"] == [http_updated.admin_id]
+    assert client.get(response.headers["location"]).status_code == 200
+    assert client.get(edit_url).status_code == 404
 
 
 def test_gitlab_admin_identity_keeps_hosts_separate_and_rejects_stale_revision(
@@ -820,29 +890,101 @@ def test_gitlab_admin_identity_keeps_hosts_separate_and_rejects_stale_revision(
     member_id = "d9428888-122b-11e1-b85c-61cd3cbb3210"
     first = store.create_gitlab_member(member_id, "https://gitlab.example/", "alice", "first-token")
     second = store.create_gitlab_member(member_id, "https://gitlab.other/", "alice", "second-token")
+    colliding_id = "a8098c1a-f86e-11da-bd1a-00112444be1e"
+    collision = store.create_gitlab_member(
+        colliding_id, "https://gitlab.new/", "other", "collision-token"
+    )
     view = GitLabMemberSecretView()
+    assert {"member_id", "host", "login", "token"}.issubset({field.name for field in view.fields})
+    assert "revision" not in {field.name for field in view.fields}
     assert view.pk_attr == "admin_id"
     assert asyncio.run(view.find_by_pk(_request(), first.admin_id)) == first
     assert asyncio.run(view.find_by_pk(_request(), second.admin_id)) == second
+    with pytest.raises(FormValidationError) as identity_collision:
+        asyncio.run(
+            view.edit(
+                _request(),
+                first.admin_id,
+                {
+                    "member_id": colliding_id,
+                    "host": "https://gitlab.new/",
+                    "login": "alice2",
+                    "token": "",
+                },
+            )
+        )
+    assert "member_id" in identity_collision.value.errors
+    assert store.get_gitlab_member(member_id, "https://gitlab.example") == first
+    assert store.get_gitlab_member(colliding_id, "https://gitlab.new") == collision
     assert (
         asyncio.run(
             view.edit(
                 _request(),
                 first.admin_id,
-                {"revision": first.revision, "login": "alice2", "token": ""},
+                {
+                    "member_id": "d9428888-122b-11e1-b85c-61cd3cbb3210",
+                    "host": "https://gitlab.new/",
+                    "login": "alice2",
+                    "token": "",
+                },
             )
         ).revision
         == 2
     )
     assert asyncio.run(view.find_by_pk(_request(), first.admin_id)) is None
+    updated = store.get_gitlab_member("d9428888-122b-11e1-b85c-61cd3cbb3210", "gitlab.new")
+    assert updated is not None
+    assert asyncio.run(view.find_by_pk(_request(), updated.admin_id)) == updated
+    credential = store.lookup_gitlab_member(updated.member_id, updated.host)
+    assert credential is not None
+    assert credential.token == "first-token"
     assert asyncio.run(view.find_by_pk(_request(), second.admin_id)) == second
     with pytest.raises(FormValidationError):
         asyncio.run(
             view.edit(
                 _request(),
                 first.admin_id,
-                {"revision": first.revision, "login": "stale", "token": ""},
+                {
+                    "member_id": member_id,
+                    "host": "https://gitlab.example/",
+                    "login": "stale",
+                    "token": "",
+                },
             )
         )
-    assert store.get_gitlab_member(member_id, "https://gitlab.example") is not None
+    assert store.get_gitlab_member(member_id, "https://gitlab.example") is None
+    assert store.get_gitlab_member(updated.member_id, updated.host) == updated
     assert store.get_gitlab_member(member_id, "https://gitlab.other") == second
+
+    http_original = store.create_gitlab_member(
+        member_id, "https://http-gitlab.example/", "operator", "http-token"
+    )
+    _, client, _ = _authenticated_client(root)
+    edit_url = f"/admin/gitlab-member-secrets/edit?pk={http_original.admin_id}"
+    form = client.get(edit_url)
+    assert form.status_code == 200
+    for name in ("member_id", "host", "login", "token", "_continue_editing"):
+        assert f'name="{name}"' in form.text
+    assert 'name="revision"' not in form.text
+    response = client.post(
+        edit_url,
+        data={
+            "csrftoken": _csrf(client),
+            "_continue_editing": "",
+            "member_id": "a8098c1a-f86e-11da-bd1a-00112444be1e",
+            "host": "https://http-gitlab-new.example/",
+            "login": "operator-new",
+            "token": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    location = urlsplit(response.headers["location"])
+    assert location.path == "/admin/gitlab-member-secrets/edit"
+    http_updated = store.get_gitlab_member(
+        "a8098c1a-f86e-11da-bd1a-00112444be1e", "http-gitlab-new.example"
+    )
+    assert http_updated is not None
+    assert parse_qs(location.query)["pk"] == [http_updated.admin_id]
+    assert client.get(response.headers["location"]).status_code == 200
+    assert client.get(edit_url).status_code == 404
