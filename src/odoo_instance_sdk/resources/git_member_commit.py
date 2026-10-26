@@ -34,7 +34,11 @@ def member_commit_environment(
     if native_binding is not None:
         from odoo_instance_sdk.internal.git_explicit import explicit_commit_environment
 
-        return explicit_commit_environment(member_id, native_binding.snapshot.host)
+        return explicit_commit_environment(
+            member_id,
+            native_binding.snapshot.host,
+            project_root=Path(native_binding.snapshot.canonical_root),
+        )
     from odoo_instance_sdk.resources.git_runtime import worktree as _worktree
 
     selected_root = Path(repository).expanduser() if repository is not None else _worktree(instance)
@@ -44,19 +48,25 @@ def member_commit_environment(
             _verify_registered_native_checkout(instance, snapshot)
             from odoo_instance_sdk.internal.git_explicit import explicit_commit_environment
 
-            return explicit_commit_environment(member_id, snapshot.host)
+            return explicit_commit_environment(
+                member_id, snapshot.host, project_root=Path(snapshot.canonical_root)
+            )
         binding = getattr(instance, "_runtime_binding", None)
         if binding is not None:
             _verify_registered_native_checkout(instance, snapshot)
             from odoo_instance_sdk.internal.git_explicit import explicit_commit_environment
 
-            return explicit_commit_environment(member_id, snapshot.host)
+            return explicit_commit_environment(
+                member_id, snapshot.host, project_root=Path(snapshot.canonical_root)
+            )
         return None
     if repository is not None and snapshot.canonical_root != str(_worktree(instance)):
         raise GitWorkflowError("initialized Odoo root is not the bound Git worktree")
     from odoo_instance_sdk.internal.git_explicit import explicit_commit_environment
 
-    return explicit_commit_environment(member_id, snapshot.host)
+    return explicit_commit_environment(
+        member_id, snapshot.host, project_root=Path(snapshot.canonical_root)
+    )
 
 
 def _verify_registered_native_checkout(

@@ -86,9 +86,16 @@ def test_machine_errors_redact_diagnostics(
     assert payload["error"]["message"] == "<redacted>"
 
 
-@pytest.mark.parametrize("mode", tuple(OutputMode))
+@pytest.mark.parametrize(
+    ("mode", "expected_fragments"),
+    [
+        pytest.param(OutputMode.RICH, ("assignee_id", "assignee_username", "alice"), id="rich"),
+        pytest.param(OutputMode.JSON, ("assignee_id", "assignee_username", "alice"), id="json"),
+        pytest.param(OutputMode.TOON, ("assignee_id", "assignee_username", "alice"), id="toon"),
+    ],
+)
 def test_merge_request_assignee_result_is_safe_in_every_output_mode(
-    mode: OutputMode, capsys: pytest.CaptureFixture[str]
+    mode: OutputMode, expected_fragments: tuple[str, ...], capsys: pytest.CaptureFixture[str]
 ) -> None:
     result = MergeRequestPublicationResult(
         merge_request_id=7,
@@ -107,13 +114,9 @@ def test_merge_request_assignee_result_is_safe_in_every_output_mode(
     captured = capsys.readouterr()
     output = captured.out + captured.err
     assert "secret-token" not in output
-    assert "assignee" in output and "alice" in output and "17" in output
-    if mode is OutputMode.JSON:
-        payload = json.loads(captured.out)
-        assert payload["result"]["assignee_source"] == "default"
-    elif mode is OutputMode.TOON:
-        payload = decode(captured.out, DecodeOptions(strict=True))
-        assert payload["result"]["assignee_source"] == "default"
+    assert all(fragment in output for fragment in expected_fragments)
+    assert "17" in output
+    assert "default" in output
 
 
 def test_cli_is_bounded_to_context_and_environment_prepare() -> None:

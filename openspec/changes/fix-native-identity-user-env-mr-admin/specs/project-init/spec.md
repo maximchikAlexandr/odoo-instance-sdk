@@ -18,4 +18,3 @@ OdCLI SHALL treat `<ODCLI_USER_ROOT>/.env` (default `~/.odcli/.env`) as the sing
 #### Scenario: Purpose-limited user secret
 - **WHEN** the user dotenv contains `ODCLI_ADMIN_PASSWORD`, a mapped legacy GitLab token, and unrelated values
 - **THEN** only the named resolver receives the selected secret and Git, PostgreSQL, Docker, package, editor, browser, generic, and unrelated Odoo children receive none of those user values
-

@@ -48,7 +48,7 @@ class _OdooCommandFactory(Protocol):
     ) -> Command[GitSyncResult]: ...
 
 
-def explicit_commit_environment(member_id: str, host: str) -> dict[str, str]:
+def explicit_commit_environment(member_id: str, host: str, *, project_root: Path) -> dict[str, str]:
     _selected, verified = resolve_credentials(
         member_id,
         host,
@@ -57,7 +57,7 @@ def explicit_commit_environment(member_id: str, host: str) -> dict[str, str]:
         user_root=None,
         mapping_path=None,
         environment_path=None,
-        project_root=Path.cwd(),
+        project_root=project_root,
         process_environment=None,
         identity_transport=None,
     )

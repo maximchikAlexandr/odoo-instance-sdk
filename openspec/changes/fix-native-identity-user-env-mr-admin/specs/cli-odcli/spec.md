@@ -19,4 +19,3 @@ CLI help and maintained documentation SHALL identify `<ODCLI_USER_ROOT>/.env` as
 #### Scenario: MR result reports assignee safely
 - **WHEN** `odcli-multica gitlab mr publish` applies an explicit or configured assignee
 - **THEN** Rich, JSON, and TOON output report the same ID, username, and selection source without calling that user a reviewer
-

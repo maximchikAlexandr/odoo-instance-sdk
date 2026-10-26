@@ -55,4 +55,3 @@ Project-aware commit SHALL accept a selected verified member UUID without requir
 #### Scenario: Unverified member or binding fails before commit
 - **WHEN** the catalog binding, canonical checkout, Git common directory, origin host, member mapping, token owner, commit name, or email cannot be verified or changes after planning
 - **THEN** execution fails before `git commit`, leaves `HEAD` unchanged, and does not fall back to ambient or machine Git identity
-

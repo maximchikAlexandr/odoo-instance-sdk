@@ -154,9 +154,67 @@ def test_publish_updates_the_unique_open_merge_request() -> None:
     assert methods[-1] == "PUT"
 
 
-@pytest.mark.parametrize(("existing", "assignee"), [(False, "alice"), (True, 17)])
+@pytest.mark.parametrize(
+    (
+        "assignee",
+        "lookup_path",
+        "lookup_params",
+        "lookup_response",
+        "existing_merge_requests",
+        "mutation_method",
+        "mutation_status",
+        "expected_outcome",
+        "expected_payload",
+    ),
+    [
+        pytest.param(
+            "alice",
+            "/api/v4/users",
+            {"username": "alice"},
+            [{"id": 17, "username": "alice", "state": "active"}],
+            [],
+            "POST",
+            201,
+            "created",
+            {
+                "assignee_id": 17,
+                "title": "title",
+                "description": "body\n\nRelated to https://multica.example/issues/1",
+                "source_branch": "feature",
+                "target_branch": "main",
+            },
+            id="username-create",
+        ),
+        pytest.param(
+            17,
+            "/api/v4/users/17",
+            {},
+            {"id": 17, "username": "alice", "state": "active"},
+            [{"iid": 7}],
+            "PUT",
+            200,
+            "updated",
+            {
+                "assignee_id": 17,
+                "title": "title",
+                "description": "body\n\nRelated to https://multica.example/issues/1",
+                "source_branch": "feature",
+                "target_branch": "main",
+            },
+            id="numeric-update",
+        ),
+    ],
+)
 def test_publish_preflights_member_and_verifies_assignee(
-    existing: bool, assignee: int | str
+    assignee: int | str,
+    lookup_path: str,
+    lookup_params: dict[str, str],
+    lookup_response: dict[str, object] | list[dict[str, object]],
+    existing_merge_requests: list[dict[str, int]],
+    mutation_method: str,
+    mutation_status: int,
+    expected_outcome: str,
+    expected_payload: dict[str, int],
 ) -> None:
     requests: list[httpx.Request] = []
 
@@ -164,20 +222,15 @@ def test_publish_preflights_member_and_verifies_assignee(
         requests.append(request)
         if str(request.url).endswith("/api/v4/projects/team%2Frepo"):
             return httpx.Response(200, json={"id": 42})
-        if request.url.path == "/api/v4/users" or request.url.path == "/api/v4/users/17":
-            return httpx.Response(
-                200,
-                json={"id": 17, "username": "alice", "state": "active"}
-                if isinstance(assignee, int)
-                else [{"id": 17, "username": "alice", "state": "active"}],
-            )
+        if request.url.path == lookup_path:
+            return httpx.Response(200, json=lookup_response)
         if request.url.path == "/api/v4/projects/42/members/all/17":
             return httpx.Response(200, json={"id": 17, "access_level": 30})
         if request.url.path == "/api/v4/projects/42/merge_requests":
             if request.method == "GET":
-                return httpx.Response(200, json=[{"iid": 7}] if existing else [])
+                return httpx.Response(200, json=existing_merge_requests)
             return httpx.Response(
-                200 if existing else 201,
+                mutation_status,
                 json={
                     "iid": 7,
                     "web_url": "https://gitlab.example/team/repo/-/merge_requests/7",
@@ -214,19 +267,16 @@ def test_publish_preflights_member_and_verifies_assignee(
     mutation = requests[-1]
     payload = json.loads(mutation.content)
     user_lookup = next(request for request in requests if "/users" in request.url.path)
-    assert mutation.method == ("PUT" if existing else "POST")
-    if isinstance(assignee, int):
-        assert user_lookup.url.path == "/api/v4/users/17"
-        assert "username" not in user_lookup.url.params
-    else:
-        assert user_lookup.url.path == "/api/v4/users"
-        assert user_lookup.url.params["username"] == "alice"
+    assert mutation.method == mutation_method
+    assert user_lookup.url.path == lookup_path
+    assert dict(user_lookup.url.params) == lookup_params
     assert any(request.url.path == "/api/v4/projects/42/members/all/17" for request in requests)
-    assert payload["assignee_id"] == 17
+    assert payload == expected_payload
     assert "reviewer_ids" not in payload
     assert result.assignee_id == 17
     assert result.assignee_username == "alice"
     assert result.assignee_source == "default"
+    assert result.outcome == expected_outcome
 
 
 @pytest.mark.parametrize(
@@ -611,13 +661,43 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
 
 
 @pytest.mark.parametrize(
-    ("configured", "override", "selected", "source"),
+    ("configured", "override", "selected", "source", "expected_catalog_keys"),
     [
-        ("exact-user", None, "exact-user", "default"),
-        (17, None, 17, "default"),
-        ("catalog-user", "explicit-user", "explicit-user", "override"),
-        ("catalog-user", "   ", "catalog-user", "default"),
-        (None, None, None, "none"),
+        pytest.param(
+            "exact-user",
+            None,
+            "exact-user",
+            "default",
+            ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"],
+            id="exact-default",
+        ),
+        pytest.param(
+            17,
+            None,
+            17,
+            "default",
+            ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"],
+            id="numeric-default",
+        ),
+        pytest.param(
+            "catalog-user", "explicit-user", "explicit-user", "override", [], id="override"
+        ),
+        pytest.param(
+            "catalog-user",
+            "   ",
+            "catalog-user",
+            "default",
+            ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"],
+            id="blank-override",
+        ),
+        pytest.param(
+            None,
+            None,
+            None,
+            "none",
+            ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"],
+            id="absent",
+        ),
     ],
 )
 def test_mr_uses_only_exact_scoped_setting_and_explicit_override(
@@ -627,6 +707,7 @@ def test_mr_uses_only_exact_scoped_setting_and_explicit_override(
     override: str | None,
     selected: object,
     source: str,
+    expected_catalog_keys: list[str],
 ) -> None:
     root = Issue(
         "root",
@@ -665,11 +746,7 @@ def test_mr_uses_only_exact_scoped_setting_and_explicit_override(
         assignee=override,
     ).run()
 
-    assert catalog.keys == (
-        []
-        if override is not None and override.strip()
-        else ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"]
-    )
+    assert catalog.keys == expected_catalog_keys
     assert observed[0]["assignee"] == selected
     assert observed[0]["assignee_source"] == source
 

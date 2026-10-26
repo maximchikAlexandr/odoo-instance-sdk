@@ -32,4 +32,3 @@ The default merge-request assignee SHALL use the exact key `gitlab.mr.default_as
 #### Scenario: Invalid assignee setting
 - **WHEN** Admin receives another JSON type, an empty/whitespace username, a display name, or a non-positive number for an MR assignee key
 - **THEN** it reports a value-field validation error and leaves the prior setting unchanged
-

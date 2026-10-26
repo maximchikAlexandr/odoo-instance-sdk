@@ -7,6 +7,8 @@ accepted here.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import re
 import stat
@@ -16,16 +18,12 @@ from types import MappingProxyType
 from typing import Final
 
 from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.internal.proc.redaction import is_secret_key_name
 
 PROJECT_ENV_FILENAME: Final = ".env"
 PROJECT_ENV_DIRECTORY: Final = ".odcli"
 MASTER_PASSWORD_KEY: Final = "ODCLI_TEST_MASTER_PASSWORD"
 _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_SECRET_KEY = re.compile(
-    r"(?:^|[-_])(?:password|passwd|pwd|secret|token|cookie|jwt|oauth|api[-_]?key|"
-    r"dsn|authorization|bearer|credential|private[-_]?key|access[-_]?key|auth)(?:$|[-_])",
-    re.IGNORECASE,
-)
 _HORIZONTAL = " \t"
 _DOUBLE_ESCAPES: Final = {
     "\\": "\\",
@@ -76,31 +74,13 @@ def load_project_environment(project_root: str | Path) -> Mapping[str, str]:
     denied child classes cannot accidentally inherit them.
     """
     path = project_environment_path(project_root)
-    try:
-        directory_metadata = path.parent.lstat()
-    except FileNotFoundError:
-        return MappingProxyType({})
-    except OSError as exc:
-        raise ProjectEnvironmentError(f"{path}: unable to read project dotenv directory") from exc
-    if stat.S_ISLNK(directory_metadata.st_mode) or not stat.S_ISDIR(directory_metadata.st_mode):
-        raise ProjectEnvironmentError(
-            f"{path}: project dotenv directory must be a regular directory"
-        )
     return _load_environment_file(path)
 
 
 def load_user_environment(user_root: str | Path) -> Mapping[str, str]:
     """Load ``<user_root>/.env`` with the shared strict dotenv contract."""
     path = user_environment_path(user_root)
-    if path.parent.exists():
-        metadata = path.parent.stat()
-        if os.name == "posix" and (
-            (metadata.st_mode & 0o077) or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
-        ):
-            raise ProjectEnvironmentError(
-                f"{path.parent}: user root requires owner-only permissions"
-            )
-    return _load_environment_file(path)
+    return _load_environment_file(path, require_owner_only_directory=True)
 
 
 def load_environment_file(path: str | Path) -> Mapping[str, str]:
@@ -108,28 +88,36 @@ def load_environment_file(path: str | Path) -> Mapping[str, str]:
     return _load_environment_file(Path(path))
 
 
-def _load_environment_file(path: Path) -> Mapping[str, str]:
+def _load_environment_file(
+    path: Path, *, require_owner_only_directory: bool = False
+) -> Mapping[str, str]:
+    directory_fd: int | None = None
     try:
-        metadata = path.lstat()
+        if os.open in getattr(os, "supports_dir_fd", ()):
+            directory_fd = _open_environment_directory(
+                path.parent, require_owner_only=require_owner_only_directory
+            )
+            if directory_fd is None:
+                return MappingProxyType({})
+            raw = _read_environment_descriptor(
+                path, directory_fd, require_owner_only_directory=require_owner_only_directory
+            )
+        else:
+            raw = _read_environment_descriptor(
+                path, None, require_owner_only_directory=require_owner_only_directory
+            )
     except FileNotFoundError:
         return MappingProxyType({})
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ProjectEnvironmentError(
+                f"{path}: dotenv path must be a regular file, not a symlink"
+            ) from exc
         raise ProjectEnvironmentError(f"{path}: unable to read dotenv file") from exc
-    mode = stat.S_IMODE(metadata.st_mode)
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ProjectEnvironmentError(f"{path}: dotenv path must be a regular file, not a symlink")
-    if os.name == "posix" and (
-        mode & 0o077
-        or not mode & stat.S_IRUSR
-        or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
-    ):
-        raise ProjectEnvironmentError(
-            f"{path}: dotenv file requires current-owner-only permissions"
-        )
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise ProjectEnvironmentError(f"{path}: unable to read project dotenv file") from exc
+    finally:
+        if directory_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(directory_fd)
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -137,6 +125,105 @@ def _load_environment_file(path: Path) -> Mapping[str, str]:
     if "\x00" in text:
         raise ProjectEnvironmentError(f"{path}:1: NUL is not allowed in project dotenv file")
     return MappingProxyType(_parse(text, path))
+
+
+def _read_environment_descriptor(
+    path: Path, directory_fd: int | None, *, require_owner_only_directory: bool
+) -> bytes:
+    parent_before = (
+        _validate_environment_directory(path.parent, require_owner_only_directory)
+        if directory_fd is None
+        else None
+    )
+    before = path.lstat() if directory_fd is None or not getattr(os, "O_NOFOLLOW", 0) else None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = (
+        os.open(path, flags)
+        if directory_fd is None
+        else os.open(path.name, flags, dir_fd=directory_fd)
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if before is not None and (metadata.st_dev, metadata.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise ProjectEnvironmentError(f"{path}: dotenv path changed while opening")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ProjectEnvironmentError(
+                f"{path}: dotenv path must be a regular file, not a symlink"
+            )
+        _validate_environment_file(path, metadata)
+        if parent_before is not None:
+            parent_after = _validate_environment_directory(
+                path.parent, require_owner_only_directory
+            )
+            if (parent_after.st_dev, parent_after.st_ino) != (
+                parent_before.st_dev,
+                parent_before.st_ino,
+            ):
+                raise ProjectEnvironmentError(f"{path}: dotenv directory changed while opening")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 64 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+
+
+def _validate_environment_file(path: Path, metadata: os.stat_result) -> None:
+    if os.name == "posix" and (
+        stat.S_IMODE(metadata.st_mode) & 0o077
+        or not metadata.st_mode & stat.S_IRUSR
+        or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+    ):
+        raise ProjectEnvironmentError(
+            f"{path}: dotenv file requires current-owner-only permissions"
+        )
+
+
+def _validate_environment_directory(path: Path, require_owner_only: bool) -> os.stat_result:
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ProjectEnvironmentError(f"{path}: dotenv directory must be a regular directory")
+    if (
+        os.name == "posix"
+        and require_owner_only
+        and (metadata.st_mode & 0o077 or (hasattr(os, "getuid") and metadata.st_uid != os.getuid()))
+    ):
+        raise ProjectEnvironmentError(f"{path}: user root requires owner-only permissions")
+    return metadata
+
+
+def _open_environment_directory(path: Path, *, require_owner_only: bool) -> int | None:
+    try:
+        before = path.lstat() if not getattr(os, "O_NOFOLLOW", 0) else None
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ProjectEnvironmentError(f"{path}: unable to read dotenv directory") from exc
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode) or (
+        before is not None and (metadata.st_dev, metadata.st_ino) != (before.st_dev, before.st_ino)
+    ):
+        os.close(descriptor)
+        raise ProjectEnvironmentError(f"{path}: dotenv directory must be a regular directory")
+    if (
+        os.name == "posix"
+        and require_owner_only
+        and (metadata.st_mode & 0o077 or (hasattr(os, "getuid") and metadata.st_uid != os.getuid()))
+    ):
+        os.close(descriptor)
+        raise ProjectEnvironmentError(f"{path}: user root requires owner-only permissions")
+    return descriptor
 
 
 def effective_project_environment(
@@ -160,7 +247,7 @@ def project_environment_secret_values(file_values: Mapping[str, str]) -> tuple[s
     return tuple(
         value
         for key, value in file_values.items()
-        if value and (key == MASTER_PASSWORD_KEY or _SECRET_KEY.search(key))
+        if value and (key == MASTER_PASSWORD_KEY or is_secret_key_name(key))
     )
 
 

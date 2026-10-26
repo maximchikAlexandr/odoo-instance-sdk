@@ -29,4 +29,3 @@ The former `get_user_root()/credentials/.env` SHALL be a compatibility-only sour
 #### Scenario: Ambient identity is available
 - **WHEN** no exact selected-member mapping exists but system or repository Git credentials are configured
 - **THEN** OdCLI rejects the operation without invoking those credentials
-

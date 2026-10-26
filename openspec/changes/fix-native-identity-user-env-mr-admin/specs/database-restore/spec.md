@@ -18,4 +18,3 @@ Every noninteractive administrator-password reset used by `db reset-admin-passwo
 #### Scenario: Dry-run and missing secret remain non-mutating
 - **WHEN** dry-run is requested or no source supplies a nonblank password
 - **THEN** no prompt or reset mutation occurs and the missing-secret path retains `admin_password_required`
-

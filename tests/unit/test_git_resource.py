@@ -22,7 +22,7 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.executables import OptionalExecutable
 from odoo_instance_sdk.internal.proc import ProcessResult
-from odoo_instance_sdk.models import StartConfig
+from odoo_instance_sdk.models import GitLabIdentity, StartConfig
 from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
@@ -467,7 +467,9 @@ def test_registered_native_checkout_uses_project_policy_and_verified_identity(
         } == identity
         assert "GITLAB_TOKEN" not in repr(command.plan)
         identity_lookup.assert_called_once_with(
-            "11111111-1111-4111-8111-111111111111", "gitlab.example"
+            "11111111-1111-4111-8111-111111111111",
+            "gitlab.example",
+            project_root=worktree,
         )
         assert commit_step.argv[-1] == (
             "[VIEW] sale: PROJ-123 change model\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a"
@@ -479,6 +481,85 @@ def test_registered_native_checkout_uses_project_policy_and_verified_identity(
         "Selected Member\0selected@example.test\0Selected Member\0selected@example.test\0"
         "[VIEW] sale: PROJ-123 change model"
     )
+
+
+@pytest.mark.parametrize(
+    ("process_token", "expected_token"),
+    [(None, "selected-project-token"), ("process-token", "process-token")],
+)
+def test_public_native_commit_uses_captured_project_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_token: str | None,
+    expected_token: str,
+) -> None:
+    instance, _project_root, worktree = _registered_native_checkout(tmp_path)
+    change = worktree / "addons" / "sale" / "models.py"
+    change.write_text("value = 2\n", encoding="utf-8")
+    _git(worktree, "add", "addons/sale")
+
+    user_root = tmp_path / "user"
+    user_root.mkdir(mode=0o700)
+    (user_root / "credentials").mkdir(mode=0o700)
+    mapping = user_root / "credentials" / "gitlab-credentials.toml"
+    mapping.write_text(
+        '[[mappings]]\nuser_id = "11111111-1111-4111-8111-111111111111"\n'
+        'host = "gitlab.example"\nlogin = "alice"\n'
+        'token_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    (user_root / ".env").write_text("ODCLI_GITLAB_TOKEN_ALICE=user-token\n", encoding="utf-8")
+    (user_root / ".env").chmod(0o600)
+    project_env = worktree / ".odcli"
+    project_env.mkdir()
+    (project_env / ".env").write_text(
+        "ODCLI_GITLAB_TOKEN_ALICE=selected-project-token\n", encoding="utf-8"
+    )
+    (project_env / ".env").chmod(0o600)
+    foreign = tmp_path / "foreign-project"
+    (foreign / ".odcli").mkdir(parents=True)
+    (foreign / ".odcli" / ".env").write_text(
+        "ODCLI_GITLAB_TOKEN_ALICE=foreign-cwd-token\n", encoding="utf-8"
+    )
+    (foreign / ".odcli" / ".env").chmod(0o600)
+    monkeypatch.setenv("ODCLI_USER_ROOT", str(user_root))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths._user_root",
+        lambda *, ensure_exists=True: user_root,
+    )
+    if process_token is None:
+        monkeypatch.delenv("ODCLI_GITLAB_TOKEN_ALICE", raising=False)
+    else:
+        monkeypatch.setenv("ODCLI_GITLAB_TOKEN_ALICE", process_token)
+    monkeypatch.chdir(foreign)
+    observed: list[str] = []
+
+    def verify(credential: object, *_args: object, **_kwargs: object) -> GitLabIdentity:
+        observed.append(getattr(credential, "_token"))
+        return GitLabIdentity(
+            user_id=17,
+            username="alice",
+            name="Alice Example",
+            email="alice@example.test",
+            host="gitlab.example",
+        )
+
+    head = _git(worktree, "rev-parse", "HEAD").strip()
+    with patch("odoo_instance_sdk.internal.git_frontier.verify_gitlab_identity", verify):
+        command = GitResource(instance).commit_command(
+            description="captured environment",
+            member_id="11111111-1111-4111-8111-111111111111",
+        )
+        commit_step = next(
+            step for step in command.plan.process_steps if step.step_id == "git.commit"
+        )
+        assert observed == [expected_token]
+        assert dict(commit_step.environment_overrides)["GIT_AUTHOR_EMAIL"] == "alice@example.test"
+        assert _git(worktree, "rev-parse", "HEAD").strip() == head
+        command.run()
+
+    assert _git(worktree, "rev-parse", "HEAD").strip() != head
 
 
 def test_registered_native_checkout_origin_drift_fails_before_commit(tmp_path: Path) -> None:

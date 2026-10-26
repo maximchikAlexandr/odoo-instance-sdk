@@ -24,4 +24,3 @@ Changing a normalized base URL or normalized member/host pair SHALL execute as o
 #### Scenario: Old route stops resolving
 - **WHEN** a successful edit changes a record identity
 - **THEN** Admin redirects to the new detail/edit route and the old identity/revision route refuses predictably
-

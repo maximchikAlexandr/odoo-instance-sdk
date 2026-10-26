@@ -33,4 +33,3 @@ After create or update with a selected assignee, OdCLI SHALL require the GitLab 
 #### Scenario: Provider returns another or no assignee
 - **WHEN** GitLab accepts the request but its response omits or changes the selected assignee
 - **THEN** publication reports a bounded consistency failure with the MR identity and performs no retry or reassignment
-

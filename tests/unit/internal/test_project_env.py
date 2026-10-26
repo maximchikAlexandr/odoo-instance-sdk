@@ -14,7 +14,12 @@ from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.internal.automation import verify_deps_command
 from odoo_instance_sdk.internal.database_preparation import _remote_password
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
-from odoo_instance_sdk.internal.proc import PreparedCommand, PreparedStep, prepared_step
+from odoo_instance_sdk.internal.proc import (
+    PreparedCommand,
+    PreparedStep,
+    ProcessResult,
+    prepared_step,
+)
 from odoo_instance_sdk.internal.process_env import captured_child_environment
 from odoo_instance_sdk.internal.project_env import (
     ProjectEnvironmentError,
@@ -25,6 +30,7 @@ from odoo_instance_sdk.internal.project_env import (
 )
 from odoo_instance_sdk.internal.vscode_generate import build_launch_profile, launch_json
 from odoo_instance_sdk.models import StartConfig
+from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.instance.auxiliary_restore import _build_shell_script_step
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -258,6 +264,45 @@ def test_project_env_values_are_only_merged_at_explicit_odoo_child_boundary(
     denied = prepared_step("git", ["status"])
     assert "ORDINARY" not in dict(denied.environment_snapshot)
     assert "ODCLI_TEST_MASTER_PASSWORD" not in dict(denied.environment_snapshot)
+
+
+def test_public_child_command_redacts_database_url_from_stdout_and_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "plain-database-endpoint-value"
+    instance = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            project_environment={"ODCLI_DATABASE_URL": sentinel},
+        ),
+        _client=OdooClient(config=OdooClientConfig(executable="python")),
+    )
+
+    class EchoExecutor:
+        def execute(self, step: object, **_kwargs: object) -> ProcessResult:
+            return ProcessResult(
+                argv=tuple(getattr(step, "argv")),
+                returncode=0,
+                stdout=f"stdout: {sentinel}",
+                stderr=f"stderr: {sentinel}",
+                duration=0.0,
+                cwd=getattr(step, "cwd"),
+                environment=(),
+            )
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor", EchoExecutor
+    )
+    command = instance.run_command(["-c", "print('run')"])
+    step = _prepared_steps(command)[0]
+
+    assert step.secret_values == (sentinel,)
+    result = command.run()
+
+    assert sentinel not in result.stdout
+    assert sentinel not in result.stderr
+    assert "<redacted>" in result.stdout
+    assert "<redacted>" in result.stderr
 
 
 def test_odoo_child_gets_file_values_but_psql_keeps_its_purpose_built_environment() -> None:

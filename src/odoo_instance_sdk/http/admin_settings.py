@@ -51,21 +51,24 @@ def _route_identity(pk: _PrimaryKey) -> tuple[str, int]:
         ) from exc
 
 
-def _json_form(value: _FormValue) -> object:
+def _json_form(value: _FormValue) -> JsonValue:
     if not isinstance(value, str) or len(value.encode("utf-8")) > 64 * 1024:
         raise ValueError
     try:
-        return json.loads(
-            value,
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
+        return cast(
+            "JsonValue",
+            json.loads(
+                value,
+                object_pairs_hook=_unique_object,
+                parse_constant=_reject_constant,
+            ),
         )
     except (ValueError, TypeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError from exc
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
+def _unique_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+    result: dict[str, JsonValue] = {}
     for key, value in pairs:
         if key in result:
             raise ValueError
@@ -73,7 +76,7 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _reject_constant(_value: str) -> object:
+def _reject_constant(_value: str) -> JsonValue:
     raise ValueError
 
 
@@ -180,7 +183,7 @@ class CatalogSettingView(_DashboardBaseModelView):
             if isinstance(key, str) and "key" not in errors:
                 from odoo_instance_sdk.storage.catalog.settings import _canonical_value
 
-                _canonical_value(key, cast("JsonValue", parsed))
+                _canonical_value(key, parsed)
         except (ValueError, BackupCatalogError):
             errors["value_json"] = "Enter valid canonical JSON for this setting."
         if errors:
@@ -192,7 +195,7 @@ class CatalogSettingView(_DashboardBaseModelView):
             value = _json_form(data.get("value_json"))
             catalog = BackupCatalog(db_path=get_catalog_path(ensure_exists=False))
             try:
-                return catalog.create_setting(str(data["key"]), cast("JsonValue", value))
+                return catalog.create_setting(str(data["key"]), value)
             finally:
                 catalog.close()
         except (KeyError, ValueError, BackupCatalogError) as exc:
@@ -214,7 +217,7 @@ class CatalogSettingView(_DashboardBaseModelView):
                     raise BackupCatalogError("setting key is invalid")
                 return catalog.update_setting(
                     old_key,
-                    cast("JsonValue", value),
+                    value,
                     expected_revision=revision,
                     new_key=new_key,
                 )

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 _MAX_KEY_BYTES = 512
 _MAX_VALUE_BYTES = 64 * 1024
 _ASSIGNEE_PREFIX = "gitlab.mr.default_assignee:"
+type _SettingRow = tuple[str, str, int, str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +137,7 @@ def _decode_value(raw: str) -> JsonValue:
         raise BackupCatalogError("catalogue setting JSON is invalid") from exc
 
 
-def _setting(row: tuple[object, ...]) -> CatalogSetting:
+def _setting(row: _SettingRow) -> CatalogSetting:
     key, raw, revision, created, updated = row
     if not (
         isinstance(key, str)
@@ -184,11 +185,11 @@ class _SettingsMixin:
         row = self._conn.execute(
             "SELECT key,value_json,revision,created_at,updated_at FROM settings WHERE key=?", (key,)
         ).fetchone()
-        return None if row is None else _setting(tuple(row))
+        return None if row is None else _setting(cast("_SettingRow", tuple(row)))
 
     def list_settings(self: _SettingsMixin) -> tuple[CatalogSetting, ...]:
         return tuple(
-            _setting(tuple(row))
+            _setting(cast("_SettingRow", tuple(row)))
             for row in self._conn.execute(
                 "SELECT key,value_json,revision,created_at,updated_at FROM settings ORDER BY key"
             )
