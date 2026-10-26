@@ -136,8 +136,7 @@ class RemoteOdooSecretView(_SecretView):
         identity = decode_admin_id(str(pk))
         if identity is None or identity.kind != "remote-odoo":
             return None
-        record = self._store().get_remote_odoo(identity.components[0])
-        return record if record is not None and record.revision == identity.revision else None
+        return self._store().get_remote_odoo(identity.components[0])
 
     async def find_by_pks(
         self, request: Request, pks: list[_PrimaryKey]
@@ -253,8 +252,7 @@ class GitLabMemberSecretView(_SecretView):
         identity = decode_admin_id(str(pk))
         if identity is None or identity.kind != "gitlab-member":
             return None
-        record = self._store().get_gitlab_member(*identity.components)
-        return record if record is not None and record.revision == identity.revision else None
+        return self._store().get_gitlab_member(*identity.components)
 
     async def find_by_pks(
         self, request: Request, pks: list[_PrimaryKey]
