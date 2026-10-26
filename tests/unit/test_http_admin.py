@@ -476,6 +476,7 @@ def test_catalogue_resources_are_exactly_three_read_only_views(
         "Backups",
         "Incomplete operations",
         "Environment history",
+        "Settings",
         "Remote Odoo secrets",
         "GitLab member secrets",
     }
