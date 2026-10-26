@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -153,6 +154,157 @@ def test_publish_updates_the_unique_open_merge_request() -> None:
     assert methods[-1] == "PUT"
 
 
+@pytest.mark.parametrize(("existing", "assignee"), [(False, "alice"), (True, 17)])
+def test_publish_preflights_member_and_verifies_assignee(
+    existing: bool, assignee: int | str
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if str(request.url).endswith("/api/v4/projects/team%2Frepo"):
+            return httpx.Response(200, json={"id": 42})
+        if request.url.path == "/api/v4/users" or request.url.path == "/api/v4/users/17":
+            return httpx.Response(
+                200,
+                json={"id": 17, "username": "alice", "state": "active"}
+                if isinstance(assignee, int)
+                else [{"id": 17, "username": "alice", "state": "active"}],
+            )
+        if request.url.path == "/api/v4/projects/42/members/all/17":
+            return httpx.Response(200, json={"id": 17, "access_level": 30})
+        if request.url.path == "/api/v4/projects/42/merge_requests":
+            if request.method == "GET":
+                return httpx.Response(200, json=[{"iid": 7}] if existing else [])
+            return httpx.Response(
+                200 if existing else 201,
+                json={
+                    "iid": 7,
+                    "web_url": "https://gitlab.example/team/repo/-/merge_requests/7",
+                    "assignee": {"id": 17, "username": "alice"},
+                },
+            )
+        if request.url.path == "/api/v4/projects/42/merge_requests/7":
+            return httpx.Response(
+                200,
+                json={
+                    "iid": 7,
+                    "web_url": "https://gitlab.example/team/repo/-/merge_requests/7",
+                    "assignee": {"id": 17, "username": "alice"},
+                },
+            )
+        raise AssertionError(request.url)
+
+    def factory(**kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    result = publish_merge_request(
+        credential=_credential(),
+        project_path="team/repo",
+        source_branch="feature",
+        target_branch="main",
+        title="title",
+        description="body",
+        issue_url="https://multica.example/issues/1",
+        assignee=assignee,
+        assignee_source="default",
+        client_factory=factory,
+    )
+
+    mutation = requests[-1]
+    payload = json.loads(mutation.content)
+    user_lookup = next(request for request in requests if "/users" in request.url.path)
+    assert mutation.method == ("PUT" if existing else "POST")
+    if isinstance(assignee, int):
+        assert user_lookup.url.path == "/api/v4/users/17"
+        assert "username" not in user_lookup.url.params
+    else:
+        assert user_lookup.url.path == "/api/v4/users"
+        assert user_lookup.url.params["username"] == "alice"
+    assert any(request.url.path == "/api/v4/projects/42/members/all/17" for request in requests)
+    assert payload["assignee_id"] == 17
+    assert "reviewer_ids" not in payload
+    assert result.assignee_id == 17
+    assert result.assignee_username == "alice"
+    assert result.assignee_source == "default"
+
+
+@pytest.mark.parametrize(
+    ("state", "member_status", "ambiguous"),
+    [("blocked", 200, False), ("active", 403, False), ("active", 404, False), ("active", 200, True)],
+)
+def test_publish_rejects_inactive_ambiguous_or_inaccessible_before_mutation(
+    state: str, member_status: int, ambiguous: bool
+) -> None:
+    mutations: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/api/v4/projects/team%2Frepo"):
+            return httpx.Response(200, json={"id": 42})
+        if request.url.path == "/api/v4/users":
+            user = {"id": 17, "username": "alice", "state": state}
+            return httpx.Response(200, json=[user, user] if ambiguous else [user])
+        if request.url.path == "/api/v4/projects/42/members/all/17":
+            return httpx.Response(member_status, json={"id": 17} if member_status == 200 else {})
+        mutations.append(request)
+        return httpx.Response(500)
+
+    def factory(**kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    with pytest.raises(GitLabPublicationError, match=r"failed|inactive|ambiguous"):
+        publish_merge_request(
+            credential=_credential(),
+            project_path="team/repo",
+            source_branch="feature",
+            target_branch="main",
+            title="title",
+            description="body",
+            issue_url="https://multica.example/issues/1",
+            assignee="alice",
+            client_factory=factory,
+        )
+    assert mutations == []
+
+
+def test_publish_rejects_mismatched_response_assignee_without_retry() -> None:
+    mutations: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/api/v4/projects/team%2Frepo"):
+            return httpx.Response(200, json={"id": 42})
+        if request.url.path == "/api/v4/users":
+            return httpx.Response(200, json=[{"id": 17, "username": "alice", "state": "active"}])
+        if request.url.path == "/api/v4/projects/42/members/all/17":
+            return httpx.Response(200, json={"id": 17, "access_level": 30})
+        if request.url.path == "/api/v4/projects/42/merge_requests":
+            if request.method == "GET":
+                return httpx.Response(200, json=[])
+            mutations.append(request)
+            return httpx.Response(
+                201,
+                json={"iid": 7, "web_url": "https://gitlab.example/mr/7", "assignee": None},
+            )
+        raise AssertionError(request.url)
+
+    def factory(**kwargs: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    with pytest.raises(GitLabPublicationError, match="inconsistent assignee"):
+        publish_merge_request(
+            credential=_credential(),
+            project_path="team/repo",
+            source_branch="feature",
+            target_branch="main",
+            title="title",
+            description="body",
+            issue_url="https://multica.example/issues/1",
+            assignee="alice",
+            client_factory=factory,
+        )
+    assert len(mutations) == 1
+
+
 def test_publish_provider_failure_is_bounded_and_redacted() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert b"secret-token" not in request.content
@@ -234,8 +386,21 @@ class _BranchResource:
         return SimpleNamespace(run=lambda: SimpleNamespace(returncode=0, stdout=f"{self.branch}\n"))
 
 
+class _SettingsCatalog:
+    def __init__(self, values: dict[str, object] | None = None) -> None:
+        self.values = values or {}
+        self.keys: list[str] = []
+
+    def get_setting(self, key: str) -> object | None:
+        self.keys.append(key)
+        value = self.values.get(key)
+        return None if value is None else SimpleNamespace(value=value)
+
+
 def _mr_client(root: Issue) -> MulticaOdooClient:
+    catalog = _SettingsCatalog()
     client = object.__new__(MulticaOdooClient)
+    client.core = SimpleNamespace(get_catalog=lambda: catalog)
     client.multica = SimpleNamespace(
         issues=_IssueStore(root),
         projects=SimpleNamespace(get=lambda _: pytest.fail("unexpected project lookup")),
@@ -435,6 +600,126 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
     assert "gitlab.mr.revalidate-branch" in plan_text
     assert "gitlab.mr.publish" in plan_text
     assert "https://multica.example/issues/root" in plan_text
+    assert "gitlab.mr.default_assignee:https://gitlab.example/team/repo" in plan_text
+    assert "catalog_default_or_absent" in plan_text
+    assert "deferred-until-execution" in plan_text
+
+
+@pytest.mark.parametrize(
+    ("configured", "override", "selected", "source"),
+    [
+        ("exact-user", None, "exact-user", "default"),
+        (17, None, 17, "default"),
+        ("catalog-user", "explicit-user", "explicit-user", "override"),
+        ("catalog-user", "   ", "catalog-user", "default"),
+        (None, None, None, "none"),
+    ],
+)
+def test_mr_uses_only_exact_scoped_setting_and_explicit_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: object,
+    override: str | None,
+    selected: object,
+    source: str,
+) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        creator_type="member",
+    )
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+    client = _mr_client(root)
+    catalog = client.core.get_catalog()
+    catalog.values["gitlab.mr.default_assignee:https://gitlab.example/team/repo"] = configured
+    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    observed: list[dict[str, object]] = []
+
+    def publish(**kwargs: object) -> MergeRequestPublicationResult:
+        observed.append(kwargs)
+        return MergeRequestPublicationResult(
+            merge_request_id=1,
+            web_url="https://gitlab.example/team/repo/-/merge_requests/1",
+            source_branch="feature",
+            target_branch="main",
+            outcome="created",
+        )
+
+    monkeypatch.setattr("odcli_multica.gitlab.publish_merge_request", publish)
+    client.publish_merge_request_command(
+        _mr_context(),
+        project_root=tmp_path,
+        source_branch="feature",
+        target_branch="main",
+        title="title",
+        description_file=description,
+        assignee=override,
+    ).run()
+
+    assert catalog.keys == (
+        []
+        if override is not None and override.strip()
+        else ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"]
+    )
+    assert observed[0]["assignee"] == selected
+    assert observed[0]["assignee_source"] == source
+
+
+def test_mr_setting_isolated_by_normalized_host_and_selected_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        creator_type="member",
+    )
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+    client = _mr_client(root)
+    catalog = client.core.get_catalog()
+    catalog.values.update(
+        {
+            "gitlab.mr.default_assignee:https://gitlab.example/other/repo": "wrong-project",
+            "gitlab.mr.default_assignee:https://other.example/team/repo": "wrong-host",
+        }
+    )
+    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    observed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "odcli_multica.gitlab.publish_merge_request",
+        lambda **kwargs: (
+            observed.append(kwargs)
+            or MergeRequestPublicationResult(
+                merge_request_id=1,
+                web_url="https://gitlab.example/other/repo/-/merge_requests/1",
+                source_branch="feature",
+                target_branch="main",
+                outcome="created",
+            )
+        ),
+    )
+    context = msgspec.structs.replace(
+        _mr_context(),
+        repository_url="https://GITLAB.EXAMPLE/team/repo.git",
+    )
+    client.publish_merge_request_command(
+        context,
+        project_root=tmp_path,
+        source_branch="feature",
+        target_branch="main",
+        title="title",
+        description_file=description,
+    ).run()
+
+    assert catalog.keys == ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"]
+    assert observed[0]["assignee"] is None
 
 
 def test_mr_rejects_unverified_issue_url_even_when_https(tmp_path: Path) -> None:

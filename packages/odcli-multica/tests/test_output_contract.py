@@ -5,12 +5,14 @@ import json
 import pytest
 from click.testing import CliRunner
 from odcli_multica.cli import cli
+from odcli_multica.models import MergeRequestPublicationResult
 from toon import DecodeOptions, decode
 
 from odoo_instance_sdk.commands.output import (
     OutputMode,
     emit,
     failure_document,
+    model_to_dict,
     success_document,
 )
 
@@ -71,6 +73,36 @@ def test_machine_errors_redact_diagnostics(
         else decode(output, DecodeOptions(strict=True))
     )
     assert payload["error"]["message"] == "<redacted>"
+
+
+@pytest.mark.parametrize("mode", tuple(OutputMode))
+def test_merge_request_assignee_result_is_safe_in_every_output_mode(
+    mode: OutputMode, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = MergeRequestPublicationResult(
+        merge_request_id=7,
+        web_url="https://gitlab.example/team/repo/-/merge_requests/7",
+        source_branch="feature",
+        target_branch="main",
+        outcome="created",
+        assignee_id=17,
+        assignee_username="alice",
+        assignee_source="default",
+    )
+    emit(
+        success_document(command="gitlab.mr.publish", result=model_to_dict(result)),
+        mode,
+    )
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "secret-token" not in output
+    assert "assignee" in output and "alice" in output and "17" in output
+    if mode is OutputMode.JSON:
+        payload = json.loads(captured.out)
+        assert payload["result"]["assignee_source"] == "default"
+    elif mode is OutputMode.TOON:
+        payload = decode(captured.out, DecodeOptions(strict=True))
+        assert payload["result"]["assignee_source"] == "default"
 
 
 def test_cli_is_bounded_to_context_and_environment_prepare() -> None:
