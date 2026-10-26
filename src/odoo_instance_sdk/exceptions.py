@@ -384,6 +384,12 @@ class SecretStoreRecordError(SecretStoreError):
     code = "secret_store_record_invalid"
 
 
+class SecretStoreIdentityConflictError(SecretStoreRecordError):
+    """A proposed secret identity is already owned by another record."""
+
+    code = "secret_store_identity_conflict"
+
+
 class SecretStoreConflictError(SecretStoreError):
     """A compare-and-swap mutation used a stale record revision."""
 
