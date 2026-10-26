@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,17 +10,13 @@ from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
+from odoo_instance_sdk.internal.proc.redaction import is_secret_key_name
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
 _MAX_KEY_BYTES = 512
 _MAX_VALUE_BYTES = 64 * 1024
-_SECRET_KEY = re.compile(
-    r"(?:^|[-_ .])(?:password|passwd|pwd|secret|token|cookie|jwt|oauth|api[-_ ]?key|"
-    r"private[-_ ]?key|credential|credentials)(?:$|[-_ .])",
-    re.IGNORECASE,
-)
 _ASSIGNEE_PREFIX = "gitlab.mr.default_assignee:"
 
 
@@ -211,16 +206,23 @@ class _SettingsMixin:
         normalized_new_key = _validate_key(new_key) if new_key is not None else normalized_key
         if expected_revision < 1:
             raise BackupCatalogError("setting revision is invalid")
-        serialized = _canonical_value(normalized_key, value)
+        serialized = _canonical_value(normalized_new_key, value)
         now = datetime.now(UTC).isoformat()
-        with self._conn:
-            cursor = self._conn.execute(
-                "UPDATE settings SET key=?,value_json=?,revision=revision+1,updated_at=? "
-                "WHERE key=? AND revision=?",
-                (normalized_new_key, serialized, now, normalized_key, expected_revision),
-            )
-            if cursor.rowcount != 1:
-                raise BackupCatalogError("setting changed; reload and retry")
+        try:
+            with self._conn:
+                cursor = self._conn.execute(
+                    "UPDATE settings SET key=?,value_json=?,revision=revision+1,updated_at=? "
+                    "WHERE key=? AND revision=?",
+                    (normalized_new_key, serialized, now, normalized_key, expected_revision),
+                )
+                if cursor.rowcount != 1:
+                    raise BackupCatalogError("setting changed; reload and retry")
+        except sqlite3.IntegrityError as exc:
+            raise BackupCatalogError(
+                "catalogue setting key conflicts with an existing row"
+            ) from exc
+        except sqlite3.Error as exc:
+            raise BackupCatalogError("catalogue setting could not be updated") from exc
         result = self.get_setting(normalized_new_key)
         if result is None:
             raise BackupCatalogError("catalogue setting disappeared after update")
@@ -242,7 +244,7 @@ class _SettingsMixin:
 def _validate_key(key: str) -> str:
     if not isinstance(key, str) or not key.strip() or len(key.encode("utf-8")) > _MAX_KEY_BYTES:
         raise BackupCatalogError("setting key must be non-empty and within the catalogue limit")
-    if key != key.strip() or _SECRET_KEY.search(key):
+    if key != key.strip() or is_secret_key_name(key):
         raise BackupCatalogError("setting key is invalid or classified as secret-bearing")
     _assignee_key(key)
     return key

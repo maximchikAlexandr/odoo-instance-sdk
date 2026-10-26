@@ -12,6 +12,7 @@ from odoo_instance_sdk.internal.resource_inventory import open_catalog_read_only
 from odoo_instance_sdk.storage.catalog import BackupCatalog, CatalogSetting
 
 from .admin_support import (
+    ActionFailed,
     DateTimeField,
     FormValidationError,
     IntegerField,
@@ -94,8 +95,8 @@ class CatalogSettingView(_DashboardBaseModelView):
     )
     exporters = ()
     importers = ()
-    actions = ()
-    row_actions = ()
+    actions = ("delete",)
+    row_actions = ("edit", "delete")
     page_size = 25
     page_size_options = (25, 50, 100)
 
@@ -179,7 +180,7 @@ class CatalogSettingView(_DashboardBaseModelView):
             raise FormValidationError(errors)
 
     async def create(self, request: Request, data: dict[str, _FormValue]) -> CatalogSetting:
-        del request
+        await self.validate(request, data)
         try:
             value = _json_form(data.get("value_json"))
             catalog = BackupCatalog(db_path=get_catalog_path(ensure_exists=False))
@@ -189,15 +190,15 @@ class CatalogSettingView(_DashboardBaseModelView):
                 catalog.close()
         except (KeyError, ValueError, BackupCatalogError) as exc:
             raise FormValidationError(
-                {"value_json": "Setting could not be saved; check its key and JSON."}
+                {"key": "A setting with this key already exists or could not be saved."}
             ) from exc
 
     async def edit(
         self, request: Request, pk: _PrimaryKey, data: dict[str, _FormValue]
     ) -> CatalogSetting:
-        del request
         old_key, revision = _route_identity(pk)
         new_key = data.get("key")
+        await self.validate(request, data)
         try:
             value = _json_form(data.get("value_json"))
             catalog = BackupCatalog(db_path=get_catalog_path(ensure_exists=False))
@@ -212,10 +213,18 @@ class CatalogSettingView(_DashboardBaseModelView):
                 )
             finally:
                 catalog.close()
-        except (ValueError, BackupCatalogError) as exc:
+        except ValueError as exc:
             raise FormValidationError(
-                {"revision": "Setting changed or is invalid; reload and retry."}
+                {"value_json": "Enter valid canonical JSON for this setting."}
             ) from exc
+        except BackupCatalogError as exc:
+            if "changed; reload and retry" in str(exc):
+                errors = {"revision": "Setting changed; reload and retry."}
+            elif "key conflicts" in str(exc):
+                errors = {"key": "A setting with this key already exists."}
+            else:
+                errors = {"key": "Setting key is invalid or could not be saved."}
+            raise FormValidationError(errors) from exc
 
     async def delete(self, request: Request, pks: list[_PrimaryKey]) -> int:
         del request
@@ -226,9 +235,7 @@ class CatalogSettingView(_DashboardBaseModelView):
                 try:
                     catalog.delete_setting(key, expected_revision=revision)
                 except BackupCatalogError as exc:
-                    raise FormValidationError(
-                        {"revision": "Setting changed; reload and retry."}
-                    ) from exc
+                    raise ActionFailed("Setting changed; reload and retry.") from exc
             return len(pks)
         finally:
             catalog.close()

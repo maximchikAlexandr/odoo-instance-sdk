@@ -1,27 +1,20 @@
 from __future__ import annotations
 
-import asyncio
-import os
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 
 import pytest
 
 pytestmark = pytest.mark.dashboard
 
-if TYPE_CHECKING:
-    from odoo_instance_sdk.http.admin_support import Request
 
-
-def test_authenticated_settings_admin_crud_and_stale_route(
+def test_authenticated_settings_admin_create_edit_delete_and_stale_rejection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from starlette_admin.exceptions import FormValidationError
 
     from odoo_instance_sdk.http.admin import mount_admin
-    from odoo_instance_sdk.http.admin_settings import CatalogSettingView
     from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.catalog import BackupCatalog
     from scripts.bootstrap_admin_config import write_admin_config
@@ -30,7 +23,6 @@ def test_authenticated_settings_admin_crud_and_stale_route(
     user_root.mkdir(mode=0o700)
     monkeypatch.setenv("ODCLI_USER_ROOT", str(user_root))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    os.chmod(tmp_path / "data", 0o700) if (tmp_path / "data").exists() else None
     write_admin_config("admin-password")
     catalog = BackupCatalog(db_path=get_catalog_path())
     catalog.close()
@@ -39,8 +31,6 @@ def test_authenticated_settings_admin_crud_and_stale_route(
     admin = mount_admin(app)
     client = TestClient(app)
     csrf_page = client.get("/admin/login")
-    import re
-
     token = re.search(r'name="csrftoken"[^>]*value="([^"]+)', csrf_page.text)
     assert token is not None
     response = client.post(
@@ -49,61 +39,102 @@ def test_authenticated_settings_admin_crud_and_stale_route(
         follow_redirects=False,
     )
     assert response.status_code == 303
+    csrf = token.group(1)
 
-    token_value = token.group(1)
+    mr_key = "gitlab.mr.default_assignee:https://example.test/group/project"
+    invalid_mr = client.post(
+        "/admin/settings/create",
+        data={"csrftoken": csrf, "key": mr_key, "value_json": "true"},
+        follow_redirects=False,
+    )
+    assert invalid_mr.status_code == 422
+    assert "value_json" in invalid_mr.text
+    assert "Setting changed; reload and retry." not in invalid_mr.text
+
     create = client.post(
         "/admin/settings/create",
-        data={
-            "csrftoken": token_value,
-            "key": "gitlab.mr.default_assignee:https://example.test/group/project",
-            "value_json": '"octocat"',
-        },
+        data={"csrftoken": csrf, "key": "feature.name", "value_json": "true"},
         follow_redirects=False,
     )
     assert create.status_code == 303
+    second_create = client.post(
+        "/admin/settings/create",
+        data={"csrftoken": csrf, "key": "feature.other", "value_json": '"existing"'},
+        follow_redirects=False,
+    )
+    assert second_create.status_code == 303
     listing = client.get("/admin/settings/list")
     assert listing.status_code == 200
-    assert "octocat" in listing.text
     assert {getattr(view, "menu_label") for view in admin._model_views} >= {"Settings"}
 
-    view = CatalogSettingView()
-    read_catalog = BackupCatalog(db_path=get_catalog_path())
+    catalog = BackupCatalog(db_path=get_catalog_path())
     try:
-        row = read_catalog.get_setting(
-            "gitlab.mr.default_assignee:https://example.test/group/project"
-        )
+        original = catalog.get_setting("feature.name")
     finally:
-        read_catalog.close()
-    assert row is not None
-    request = cast("Request", _request())
-    updated = asyncio.run(view.edit(request, row.route_id, {"key": row.key, "value_json": "42"}))
-    with pytest.raises(FormValidationError):
-        asyncio.run(view.delete(request, [row.route_id]))
-    assert updated.revision == 2
+        catalog.close()
+    assert original is not None
 
-    with pytest.raises(FormValidationError) as error:
-        asyncio.run(
-            view.validate(
-                request,
-                {"key": row.key, "value_json": "true"},
-            )
-        )
-    assert error.value.has("value_json")
+    invalid_rename = client.post(
+        f"/admin/settings/edit?pk={original.route_id}",
+        data={"csrftoken": csrf, "key": mr_key, "value_json": "true"},
+        follow_redirects=False,
+    )
+    assert invalid_rename.status_code == 422
+    assert "value_json" in invalid_rename.text
 
+    duplicate_rename = client.post(
+        f"/admin/settings/edit?pk={original.route_id}",
+        data={"csrftoken": csrf, "key": "feature.other", "value_json": '"conflict"'},
+        follow_redirects=False,
+    )
+    assert duplicate_rename.status_code == 422
+    assert "key" in duplicate_rename.text
+    assert "Setting changed; reload and retry." not in duplicate_rename.text
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        assert catalog.get_setting("feature.name") == original
+        assert catalog.get_setting("feature.other") is not None
+    finally:
+        catalog.close()
 
-class _Request:
-    query_params: object
-    session: dict[str, str]
-    state: object
+    edit = client.post(
+        f"/admin/settings/edit?pk={original.route_id}",
+        data={"csrftoken": csrf, "key": "feature.name", "value_json": '"saved-first"'},
+        follow_redirects=False,
+    )
+    assert edit.status_code == 303
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        saved = catalog.get_setting("feature.name")
+    finally:
+        catalog.close()
+    assert saved is not None
+    assert (saved.value, saved.revision) == ("saved-first", 2)
 
-    def __init__(self) -> None:
-        self.session = {}
+    stale_edit = client.post(
+        f"/admin/settings/edit?pk={original.route_id}",
+        data={"csrftoken": csrf, "key": "feature.name", "value_json": '"stale-edit"'},
+        follow_redirects=False,
+    )
+    assert stale_edit.status_code == 404
+    stale_delete = client.post(
+        f"/admin/_api/settings/row-action?name=delete&pk={original.route_id}",
+        data={"csrftoken": csrf},
+    )
+    assert stale_delete.status_code == 400
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        assert catalog.get_setting("feature.name") == saved
+    finally:
+        catalog.close()
 
-
-def _request() -> _Request:
-    from types import SimpleNamespace
-
-    request = _Request()
-    request.query_params = SimpleNamespace(get=lambda *_args: None, getlist=lambda *_args: [])
-    request.state = SimpleNamespace(action="edit")
-    return request
+    delete = client.post(
+        f"/admin/_api/settings/row-action?name=delete&pk={saved.route_id}",
+        data={"csrftoken": csrf},
+    )
+    assert delete.status_code == 200
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        assert catalog.get_setting("feature.name") is None
+    finally:
+        catalog.close()
