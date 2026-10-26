@@ -135,6 +135,108 @@ def test_global_credential_resolution_is_owner_only_and_process_precedence(
     assert "process-token" not in repr(credential.identity)
 
 
+def test_gitlab_unified_user_dotenv_and_project_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
+    credentials = ensure_credential_directory(tmp_path)
+    mapping = credentials / "gitlab-credentials.toml"
+    mapping.write_text(
+        f'[[mappings]]\nuser_id = "{MEMBER_A}"\nhost = "gitlab.example"\n'
+        'login = "alice"\ntoken_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    user_env = tmp_path / ".env"
+    user_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=user-token\n", encoding="utf-8")
+    user_env.chmod(0o600)
+    project = tmp_path / "project"
+    project_env = project / ".odcli" / ".env"
+    project_env.parent.mkdir(parents=True)
+    project_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=project-token\n", encoding="utf-8")
+    project_env.chmod(0o600)
+
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        project_root=project,
+        process_environment={},
+    )
+    assert credential.child_environment()["GITLAB_TOKEN"] == "project-token"
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        project_root=None,
+        process_environment={},
+    )
+    assert credential.child_environment()["GITLAB_TOKEN"] == "user-token"
+
+
+def test_gitlab_legacy_dotenv_transition_conflict_and_explicit_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
+    credentials = ensure_credential_directory(tmp_path)
+    mapping = credentials / "gitlab-credentials.toml"
+    mapping.write_text(
+        f'[[mappings]]\nuser_id = "{MEMBER_A}"\nhost = "gitlab.example"\n'
+        'login = "alice"\ntoken_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    old_env = credentials / ".env"
+    old_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=legacy-token\n", encoding="utf-8")
+    old_env.chmod(0o600)
+
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        project_root=tmp_path / "empty",
+        process_environment={},
+    )
+    assert "<ODCLI_USER_ROOT>/.env" in caplog.text
+    assert credential.child_environment()["GITLAB_TOKEN"] == "legacy-token"
+
+    user_env = tmp_path / ".env"
+    user_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=unified-token\n", encoding="utf-8")
+    user_env.chmod(0o600)
+    with pytest.raises(GitLabCredentialError, match="values conflict"):
+        resolve_gitlab_credential(
+            MEMBER_A,
+            "gitlab.example",
+            user_root=tmp_path,
+            project_root=tmp_path / "empty",
+            process_environment={},
+        )
+
+    old_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=unified-token\n", encoding="utf-8")
+    old_env.chmod(0o600)
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        project_root=tmp_path / "empty",
+        process_environment={},
+    )
+    assert credential.child_environment()["GITLAB_TOKEN"] == "unified-token"
+    assert "<ODCLI_USER_ROOT>/.env" in caplog.text
+
+    explicit = tmp_path / "explicit.env"
+    explicit.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
+    explicit.chmod(0o600)
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        environment_path=explicit,
+        process_environment={},
+    )
+    assert credential.child_environment()["GITLAB_TOKEN"] == "explicit-token"
+
+
 def test_global_legacy_resolution_keeps_owner_only_directory_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

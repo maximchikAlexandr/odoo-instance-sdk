@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Literal
 
 from odoo_instance_sdk.exceptions import AdminPasswordRequiredError
-from odoo_instance_sdk.internal.project_env import load_project_environment
+from odoo_instance_sdk.internal.paths import get_user_root
+from odoo_instance_sdk.internal.project_env import load_project_environment, load_user_environment
 
 ADMIN_PASSWORD_KEY = "ODCLI_ADMIN_PASSWORD"
 
@@ -31,8 +32,8 @@ def resolve_admin_password_secret(
 
     When ``prompt`` is true (RICH output, ``--no-input`` false, not dry-run),
     the secret is read twice with ``getpass`` and the two entries must match.
-    Otherwise the process environment ``ODCLI_ADMIN_PASSWORD`` is read first,
-    then the project ``.odcli/.env`` value.  A missing secret raises
+    Otherwise process, selected project, and user dotenv values are consulted
+    in that order. A missing secret raises
     :class:`AdminPasswordRequiredError` before any restore/drop mutation.
     """
     if prompt:
@@ -52,8 +53,12 @@ def resolve_admin_password_secret(
         file_value = file_values.get(ADMIN_PASSWORD_KEY)
         if file_value and file_value.strip():
             return file_value, "environment"
+    user_value = load_user_environment(get_user_root(ensure_exists=False)).get(ADMIN_PASSWORD_KEY)
+    if user_value and user_value.strip():
+        return user_value, "environment"
     raise AdminPasswordRequiredError(
-        "administrator password is required: set ODCLI_ADMIN_PASSWORD or .odcli/.env"
+        "administrator password is required: set ODCLI_ADMIN_PASSWORD, project .odcli/.env, "
+        "or user .env"
     )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import logging
 import os
 import re
 import stat
@@ -14,7 +15,6 @@ import tomllib
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from types import MappingProxyType
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -22,6 +22,12 @@ from odoo_instance_sdk.exceptions import GitLabCredentialError, SecretStoreError
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.paths import get_user_root
 from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, SubprocessExecutor
+from odoo_instance_sdk.internal.project_env import (
+    ProjectEnvironmentError,
+    load_environment_file,
+    load_project_environment,
+    load_user_environment,
+)
 from odoo_instance_sdk.models import (
     GitLabCredentialContext,
     GitLabCredentialIdentity,
@@ -279,9 +285,12 @@ def read_gitlab_environment(
     env_path = credential_environment_path(user_root) if path is None else Path(path)
     if require_owner_only_directory:
         _owner_only_directory(env_path.parent)
-    return MappingProxyType(
-        _dotenv(_owner_only_file(env_path, label="GitLab credential environment"))
-    )
+    try:
+        return load_environment_file(env_path)
+    except ProjectEnvironmentError as exc:
+        raise GitLabCredentialError(
+            "GitLab credential environment is malformed or unprotected"
+        ) from exc
 
 
 def normalize_member_id(value: str) -> str:
@@ -291,6 +300,79 @@ def normalize_member_id(value: str) -> str:
         raise GitLabCredentialError("member ID must be a UUID") from exc
 
 
+def _legacy_gitlab_token(
+    key: str,
+    unified: str,
+    root: Path,
+    *,
+    require_owner_only_directory: bool,
+) -> str:
+    legacy_path = credential_environment_path(root)
+    if not legacy_path.exists() and not legacy_path.is_symlink():
+        return unified
+    try:
+        if require_owner_only_directory:
+            _owner_only_directory(legacy_path.parent)
+        legacy_values = read_gitlab_environment(
+            legacy_path,
+            user_root=root,
+            require_owner_only_directory=False,
+        )
+    except (GitLabCredentialError, OSError) as exc:
+        raise GitLabCredentialError("legacy GitLab credential environment is invalid") from exc
+    legacy = legacy_values.get(key, "")
+    if unified and legacy and unified != legacy:
+        raise GitLabCredentialError(
+            "unified and legacy GitLab credential values conflict; remove the old value"
+        )
+    if legacy:
+        logging.getLogger(__name__).warning(
+            "legacy GitLab credentials/.env is deprecated; move the selected key to "
+            "<ODCLI_USER_ROOT>/.env"
+        )
+        return unified or legacy
+    return unified
+
+
+def _resolve_dotenv_gitlab_token(
+    key: str,
+    *,
+    source: Mapping[str, str],
+    environment_path: Path | str | None,
+    project_root: Path | str | None,
+    user_root: Path | str | None,
+    require_owner_only_directory: bool,
+) -> str:
+    process_value = source.get(key, "")
+    if process_value:
+        return process_value
+    if environment_path is not None:
+        return read_gitlab_environment(
+            environment_path,
+            user_root=user_root,
+            require_owner_only_directory=require_owner_only_directory,
+        ).get(key, "")
+    root = get_user_root(ensure_exists=False) if user_root is None else Path(user_root)
+    try:
+        project_values = load_project_environment(
+            Path.cwd() if project_root is None else project_root
+        )
+        user_values = load_user_environment(root)
+    except ProjectEnvironmentError as exc:
+        raise GitLabCredentialError(
+            "GitLab credential environment is malformed or unprotected"
+        ) from exc
+    project_value = project_values.get(key, "")
+    if project_value:
+        return project_value
+    return _legacy_gitlab_token(
+        key,
+        user_values.get(key, ""),
+        root,
+        require_owner_only_directory=require_owner_only_directory,
+    )
+
+
 def resolve_gitlab_credential(
     member_id: str,
     host: str,
@@ -298,6 +380,7 @@ def resolve_gitlab_credential(
     user_root: Path | str | None = None,
     mapping_path: Path | str | None = None,
     environment_path: Path | str | None = None,
+    project_root: Path | str | None = None,
     process_environment: Mapping[str, str] | None = None,
     require_owner_only_legacy_directory: bool = True,
 ) -> GitLabCredentialContext:
@@ -336,16 +419,14 @@ def resolve_gitlab_credential(
         reason = "unavailable" if not matches else "ambiguous"
         raise GitLabCredentialError(f"GitLab credential mapping is {reason}")
     mapping = matches[0]
-    file_values = read_gitlab_environment(
-        environment_path,
+    source = os.environ if process_environment is None else process_environment
+    token = _resolve_dotenv_gitlab_token(
+        mapping.token_key,
+        source=source,
+        environment_path=environment_path,
+        project_root=project_root,
         user_root=user_root,
         require_owner_only_directory=require_owner_only_legacy_directory,
-    )
-    source = os.environ if process_environment is None else process_environment
-    token = (
-        source[mapping.token_key]
-        if mapping.token_key in source
-        else file_values.get(mapping.token_key, "")
     )
     if not token:
         raise GitLabCredentialError(

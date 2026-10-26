@@ -247,6 +247,7 @@ class GenericGitMixin:
             user_root=user_root,
             mapping_path=mapping_path,
             environment_path=environment_path,
+            project_root=Path.cwd(),
             process_environment=process_environment,
             identity_transport=identity_transport,
         )
@@ -679,6 +680,7 @@ class GenericGitMixin:
             user_root=user_root,
             mapping_path=mapping_path,
             environment_path=environment_path,
+            project_root=root,
             process_environment=process_environment,
             identity_transport=identity_transport,
         )
@@ -810,6 +812,7 @@ class GenericGitMixin:
             user_root=user_root,
             mapping_path=mapping_path,
             environment_path=environment_path,
+            project_root=root,
             process_environment=process_environment,
             identity_transport=identity_transport,
         )

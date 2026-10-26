@@ -59,6 +59,14 @@ def project_environment_path(project_root: str | Path) -> Path:
     return path
 
 
+def user_environment_path(user_root: str | Path) -> Path:
+    """Return the one owner-level dotenv location below the selected user root."""
+    root = Path(user_root).expanduser()
+    if not root.is_absolute():
+        raise ProjectEnvironmentError("ODCLI_USER_ROOT must be an absolute path")
+    return root.resolve() / PROJECT_ENV_FILENAME
+
+
 def load_project_environment(project_root: str | Path) -> Mapping[str, str]:
     """Load the project-local file into an immutable file-values mapping.
 
@@ -68,16 +76,55 @@ def load_project_environment(project_root: str | Path) -> Mapping[str, str]:
     denied child classes cannot accidentally inherit them.
     """
     path = project_environment_path(project_root)
-    if not path.exists():
-        return MappingProxyType({})
     try:
-        metadata = path.stat()
+        directory_metadata = path.parent.lstat()
+    except FileNotFoundError:
+        return MappingProxyType({})
     except OSError as exc:
-        raise ProjectEnvironmentError(f"{path}: unable to read project dotenv file") from exc
-    mode = stat.S_IMODE(metadata.st_mode)
-    if os.name == "posix" and (mode & 0o077 or not mode & stat.S_IRUSR):
+        raise ProjectEnvironmentError(f"{path}: unable to read project dotenv directory") from exc
+    if stat.S_ISLNK(directory_metadata.st_mode) or not stat.S_ISDIR(directory_metadata.st_mode):
         raise ProjectEnvironmentError(
-            f"{path}: project dotenv file requires owner-only permissions"
+            f"{path}: project dotenv directory must be a regular directory"
+        )
+    return _load_environment_file(path)
+
+
+def load_user_environment(user_root: str | Path) -> Mapping[str, str]:
+    """Load ``<user_root>/.env`` with the shared strict dotenv contract."""
+    path = user_environment_path(user_root)
+    if path.parent.exists():
+        metadata = path.parent.stat()
+        if os.name == "posix" and (
+            (metadata.st_mode & 0o077) or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+        ):
+            raise ProjectEnvironmentError(
+                f"{path.parent}: user root requires owner-only permissions"
+            )
+    return _load_environment_file(path)
+
+
+def load_environment_file(path: str | Path) -> Mapping[str, str]:
+    """Load an explicitly selected owner-only dotenv with the shared grammar."""
+    return _load_environment_file(Path(path))
+
+
+def _load_environment_file(path: Path) -> Mapping[str, str]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return MappingProxyType({})
+    except OSError as exc:
+        raise ProjectEnvironmentError(f"{path}: unable to read dotenv file") from exc
+    mode = stat.S_IMODE(metadata.st_mode)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ProjectEnvironmentError(f"{path}: dotenv path must be a regular file, not a symlink")
+    if os.name == "posix" and (
+        mode & 0o077
+        or not mode & stat.S_IRUSR
+        or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+    ):
+        raise ProjectEnvironmentError(
+            f"{path}: dotenv file requires current-owner-only permissions"
         )
     try:
         raw = path.read_bytes()
@@ -194,7 +241,10 @@ __all__ = [
     "MASTER_PASSWORD_KEY",
     "ProjectEnvironmentError",
     "effective_project_environment",
+    "load_environment_file",
     "load_project_environment",
+    "load_user_environment",
     "project_environment_path",
     "project_environment_secret_values",
+    "user_environment_path",
 ]
