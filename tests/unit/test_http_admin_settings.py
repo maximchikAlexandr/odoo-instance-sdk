@@ -111,17 +111,22 @@ def test_authenticated_settings_admin_create_edit_delete_and_stale_rejection(
     assert saved is not None
     assert (saved.value, saved.revision) == ("saved-first", 2)
 
+    stale_get = client.get(f"/admin/settings/edit?pk={original.route_id}")
+    assert stale_get.status_code == 404
     stale_edit = client.post(
         f"/admin/settings/edit?pk={original.route_id}",
         data={"csrftoken": csrf, "key": "feature.name", "value_json": '"stale-edit"'},
         follow_redirects=False,
     )
-    assert stale_edit.status_code == 404
+    assert stale_edit.status_code == 409
+    assert "Setting changed; reload and retry." in stale_edit.text
+    assert "stale-edit" not in stale_edit.text
     stale_delete = client.post(
         f"/admin/_api/settings/row-action?name=delete&pk={original.route_id}",
         data={"csrftoken": csrf},
     )
     assert stale_delete.status_code == 400
+    assert "Setting changed; reload and retry." in stale_delete.text
     catalog = BackupCatalog(db_path=get_catalog_path())
     try:
         assert catalog.get_setting("feature.name") == saved

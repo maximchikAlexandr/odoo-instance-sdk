@@ -15,6 +15,7 @@ from .admin_support import (
     ActionFailed,
     DateTimeField,
     FormValidationError,
+    HTTPException,
     IntegerField,
     StringField,
     _DashboardBaseModelView,
@@ -133,14 +134,20 @@ class CatalogSettingView(_DashboardBaseModelView):
         return len(await self.find_all(request, skip=0, limit=1000, q=q, filters=filters))
 
     async def find_by_pk(self, request: Request, pk: _PrimaryKey) -> CatalogSetting | None:
-        del request
         key, revision = _route_identity(pk)
         catalog = open_catalog_read_only(get_catalog_path(ensure_exists=False))
         if catalog is None:
             return None
         try:
             setting = catalog.get_setting(key)
-            return setting if setting is not None and setting.revision == revision else None
+            if setting is None or setting.revision == revision:
+                return setting
+            action = getattr(request.state, "action", None)
+            is_edit_post = (
+                getattr(request, "method", "") == "POST"
+                and getattr(action, "name", "").lower() == "edit"
+            )
+            return setting if is_edit_post else None
         finally:
             catalog.close()
 
@@ -219,8 +226,10 @@ class CatalogSettingView(_DashboardBaseModelView):
             ) from exc
         except BackupCatalogError as exc:
             if "changed; reload and retry" in str(exc):
-                errors = {"revision": "Setting changed; reload and retry."}
-            elif "key conflicts" in str(exc):
+                raise HTTPException(
+                    status_code=409, detail="Setting changed; reload and retry."
+                ) from exc
+            if "key conflicts" in str(exc):
                 errors = {"key": "A setting with this key already exists."}
             else:
                 errors = {"key": "Setting key is invalid or could not be saved."}

@@ -17,6 +17,10 @@ class _AdminException(Exception):
     msg: str
 
 
+class _HTTPException(Exception):
+    def __init__(self, status_code: int, detail: str) -> None: ...
+
+
 class _FilterDataType(Protocol):
     STRING: str
     DATETIME: str
@@ -45,7 +49,9 @@ class _AdminUser:
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
-HTTPException = cast("type[Exception]", _dashboard_symbol("starlette.exceptions", "HTTPException"))
+HTTPException = cast(
+    "type[_HTTPException]", _dashboard_symbol("starlette.exceptions", "HTTPException")
+)
 Middleware = _dashboard_symbol("starlette.middleware", "Middleware")
 SessionMiddleware = _dashboard_symbol("starlette.middleware.sessions", "SessionMiddleware")
 BaseAdmin = _dashboard_symbol("starlette_admin", "BaseAdmin")
