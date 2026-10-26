@@ -452,7 +452,7 @@ def test_registered_native_checkout_uses_project_policy_and_verified_identity(
     with patch(
         "odoo_instance_sdk.internal.git_explicit.explicit_commit_environment",
         return_value=identity,
-    ):
+    ) as identity_lookup:
         command = GitResource(instance).commit_command(
             description="change model",
             ticket="PROJ-123",
@@ -465,6 +465,10 @@ def test_registered_native_checkout_uses_project_policy_and_verified_identity(
         assert {
             key: value for key, value in commit_step.environment_overrides if key in identity
         } == identity
+        assert "GITLAB_TOKEN" not in repr(command.plan)
+        identity_lookup.assert_called_once_with(
+            "11111111-1111-4111-8111-111111111111", "gitlab.example"
+        )
         assert commit_step.argv[-1] == (
             "[VIEW] sale: PROJ-123 change model\\x0a\\x0ahttps://tracker.test/PROJ-123\\x0a\\x0a"
         )
@@ -521,6 +525,28 @@ def test_registered_native_checkout_rejects_foreign_catalog_worktree(tmp_path: P
             return_value={"GIT_AUTHOR_NAME": "Selected", "GIT_AUTHOR_EMAIL": "s@example.test"},
         ),
         pytest.raises(GitWorkflowError, match="stale or foreign"),
+    ):
+        GitResource(instance).commit_command(
+            description="change model",
+            member_id="11111111-1111-4111-8111-111111111111",
+        )
+
+    assert _git(worktree, "rev-parse", "HEAD").strip() == head
+
+
+def test_registered_native_checkout_member_rejection_preserves_head(tmp_path: Path) -> None:
+    instance, _project_root, worktree = _registered_native_checkout(tmp_path)
+    change = worktree / "addons" / "sale" / "models.py"
+    change.write_text("value = 2\n", encoding="utf-8")
+    _git(worktree, "add", "addons/sale")
+    head = _git(worktree, "rev-parse", "HEAD").strip()
+
+    with (
+        patch(
+            "odoo_instance_sdk.internal.git_explicit.explicit_commit_environment",
+            side_effect=GitWorkflowError("selected member identity is unavailable"),
+        ),
+        pytest.raises(GitWorkflowError, match="selected member identity"),
     ):
         GitResource(instance).commit_command(
             description="change model",
