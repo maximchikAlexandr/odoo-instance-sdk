@@ -121,7 +121,11 @@ def publish_merge_request(  # noqa: C901
                     operation="assignee lookup",
                     secrets=secrets,
                 )
-                if not isinstance(users, list) or len(users) != 1 or not isinstance(users[0], Mapping):
+                if (
+                    not isinstance(users, list)
+                    or len(users) != 1
+                    or not isinstance(users[0], Mapping)
+                ):
                     raise GitLabPublicationError("GitLab assignee is missing or ambiguous")
                 user = users[0]
                 if user.get("username") != assignee:

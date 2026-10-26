@@ -126,7 +126,7 @@ def db_group() -> None:
     "reset_admin_password",
     is_flag=True,
     default=False,
-    help="Reset base.user_admin after restoring.",
+    help="Reset base.user_admin using ODCLI_ADMIN_PASSWORD from process, project .odcli/.env, then <ODCLI_USER_ROOT>/.env.",
 )
 @click.option("--source-branch", default=None, help="Source Git branch provenance.")
 @click.option("--remote", "remote_name", default=None, help="Named remote source to refresh.")
@@ -286,7 +286,7 @@ def db_list(
     "reset_admin_password",
     is_flag=True,
     default=False,
-    help="Reset base.user_admin after restoring.",
+    help="Reset base.user_admin using ODCLI_ADMIN_PASSWORD from process, project .odcli/.env, then <ODCLI_USER_ROOT>/.env.",
 )
 @click.option("--yes", is_flag=True, default=False, help="Skip interactive confirmation.")
 @click.option(
@@ -499,7 +499,8 @@ def db_restore(  # noqa: C901
 
 
 @db_group.command(
-    "reset-admin-password", help="Reset the administrator on the ready environment database."
+    "reset-admin-password",
+    help="Reset the administrator using ODCLI_ADMIN_PASSWORD from process, project .odcli/.env, then <ODCLI_USER_ROOT>/.env.",
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")

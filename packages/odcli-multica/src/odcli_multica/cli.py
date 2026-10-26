@@ -415,7 +415,11 @@ def merge_request() -> None:
 @click.option("--title", required=True)
 @click.option("--description-file", required=True, type=click.Path(path_type=Path))
 @click.option("--issue-url", default=None)
-@click.option("--assignee", default=None)
+@click.option(
+    "--assignee",
+    default=None,
+    help="Numeric ID or exact username; overrides the exact-project gitlab.mr.default_assignee setting and sets assignee_id, not reviewers.",
+)
 @click.option("--project-path", default=None)
 @click.option("--profile", default=None)
 @click.option("--workspace-id", default=None)

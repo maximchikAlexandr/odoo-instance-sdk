@@ -231,7 +231,12 @@ def test_publish_preflights_member_and_verifies_assignee(
 
 @pytest.mark.parametrize(
     ("state", "member_status", "ambiguous"),
-    [("blocked", 200, False), ("active", 403, False), ("active", 404, False), ("active", 200, True)],
+    [
+        ("blocked", 200, False),
+        ("active", 403, False),
+        ("active", 404, False),
+        ("active", 200, True),
+    ],
 )
 def test_publish_rejects_inactive_ambiguous_or_inaccessible_before_mutation(
     state: str, member_status: int, ambiguous: bool

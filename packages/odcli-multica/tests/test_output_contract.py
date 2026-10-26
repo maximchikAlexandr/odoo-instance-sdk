@@ -17,6 +17,17 @@ from odoo_instance_sdk.commands.output import (
 )
 
 
+def test_merge_request_help_explains_configured_assignee_override() -> None:
+    result = CliRunner().invoke(cli, ["gitlab", "mr", "publish", "--help"])
+
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.replace("│", " ").split()).lower()
+    assert "gitlab.mr.default_assignee" in help_text
+    assert "numeric id or exact username" in help_text
+    assert "assignee_id" in help_text
+    assert "not reviewers" in help_text
+
+
 @pytest.mark.parametrize("mode", (OutputMode.JSON, OutputMode.TOON))
 def test_machine_output_is_one_sanitized_document(
     mode: OutputMode, capsys: pytest.CaptureFixture[str]
