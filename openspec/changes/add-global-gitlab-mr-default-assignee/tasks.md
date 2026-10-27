@@ -7,7 +7,7 @@
 
 - [ ] 2.1 Extend `publish_merge_request_command()` to short-circuit on a nonblank explicit override, otherwise read the exact-project key and then the global key only when the project row is absent, while failing closed on a present invalid selected value.
 - [ ] 2.2 Make the dry-run projection expose both candidate keys and their fixed precedence without reading runtime settings, while preserving the existing frozen publication result and `default` source value.
-- [ ] 2.3 Add focused client and output-contract regressions for explicit, project-specific, global, absent, blank-override, unrelated-project, and invalid-higher-priority cases; assert catalog lookup order and that no lower-priority value or provider mutation is used after failure.
+- [ ] 2.3 Add focused client and output-contract regressions for explicit, project-specific, global, absent, blank-override, unrelated-project, and invalid-higher-priority cases; prove exact-username defaults on both create and update, catalog lookup order, and that no lower-priority value or provider mutation is used after failure.
 
 ## 3. Documentation and verification
 

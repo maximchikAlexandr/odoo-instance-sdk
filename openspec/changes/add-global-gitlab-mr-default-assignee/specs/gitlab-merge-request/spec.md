@@ -15,6 +15,10 @@
 - **WHEN** the exact-project setting is absent, the global setting contains a valid user ID or exact username, and no nonblank explicit assignee is present
 - **THEN** publication resolves that global value and sends the verified project member's numeric `assignee_id`
 
+#### Scenario: Username default assigns create and update
+- **WHEN** the selected project-specific or global setting contains an unambiguous active project member username and no nonblank explicit assignee is present
+- **THEN** both new and existing matching MR payloads contain that member's numeric `assignee_id`
+
 #### Scenario: Explicit assignee wins over both defaults
 - **WHEN** `--assignee` supplies an exact username or numeric ID while project-specific and global settings exist
 - **THEN** publication applies only the explicit user and does not read or select either catalog setting
