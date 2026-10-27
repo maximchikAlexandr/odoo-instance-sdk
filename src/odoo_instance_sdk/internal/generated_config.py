@@ -37,6 +37,24 @@ def _rebase_path(entry: str, repo_root: Path, worktree: Path) -> str:
 
 def configured_admin_password(source: Path | None, destination: Path) -> str | None:
     from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+    from odoo_instance_sdk.internal.paths import get_user_root
+    from odoo_instance_sdk.internal.project_env import (
+        load_project_environment,
+        load_user_environment,
+    )
+
+    environment_value = os.environ.get("ODCLI_ADMIN_PASSWORD")
+    if environment_value and environment_value.strip():
+        return environment_value
+    project_root = destination.parent.parent
+    project_value = load_project_environment(project_root).get("ODCLI_ADMIN_PASSWORD")
+    if project_value and project_value.strip():
+        return project_value
+    user_value = load_user_environment(get_user_root(ensure_exists=False)).get(
+        "ODCLI_ADMIN_PASSWORD"
+    )
+    if user_value and user_value.strip():
+        return user_value
 
     for path in (source, destination):
         if path is not None and path.is_file():

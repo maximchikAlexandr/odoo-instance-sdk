@@ -19,7 +19,9 @@ def upgrade() -> None:
     """Create the complete current catalogue schema in one step."""
     bind = op.get_bind()
     assert isinstance(bind, Connection)
-    metadata.create_all(bind)
+    metadata.create_all(
+        bind, tables=[table for table in metadata.sorted_tables if table.name != "settings"]
+    )
     bind.exec_driver_sql(ENVIRONMENT_RUNTIME_VIEW_SQL)
 
 
@@ -28,4 +30,6 @@ def downgrade() -> None:
     bind = op.get_bind()
     assert isinstance(bind, Connection)
     bind.exec_driver_sql("DROP VIEW IF EXISTS environment_runtime")
-    metadata.drop_all(bind)
+    metadata.drop_all(
+        bind, tables=[table for table in metadata.sorted_tables if table.name != "settings"]
+    )

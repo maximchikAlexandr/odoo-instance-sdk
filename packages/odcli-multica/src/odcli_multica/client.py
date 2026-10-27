@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import urlsplit
 
 from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
@@ -61,7 +61,7 @@ from odoo_instance_sdk import (
     ProjectConfig,
 )
 from odoo_instance_sdk.commands.output import action_command
-from odoo_instance_sdk.exceptions import GitLabCredentialError
+from odoo_instance_sdk.exceptions import GitLabCredentialError, GitLabPublicationError
 from odoo_instance_sdk.execution import ExecutionPlan
 from odoo_instance_sdk.internal.gitlab_credentials import resolve_gitlab_credential
 from odoo_instance_sdk.internal.proc import RunContext
@@ -507,6 +507,15 @@ class MulticaOdooClient:
                 "description_file": str(Path(description_file).resolve()),
                 "issue_url": selected_issue_url,
                 "assignee": assignee,
+                "assignee_setting_key": (
+                    f"gitlab.mr.default_assignee:https://{host}/{selected_project}"
+                ),
+                "assignee_source": (
+                    "override"
+                    if assignee is not None and assignee.strip()
+                    else "catalog_default_or_absent"
+                ),
+                "assignee_resolution": "deferred-until-execution",
             },
         )
         prepared_steps = (context_step, branch_step, publish_step)
@@ -544,6 +553,29 @@ class MulticaOdooClient:
                 mapping_path=mapping_path,
                 process_environment=process_environment,
             )
+            setting_key = f"gitlab.mr.default_assignee:https://{host}/{selected_project}"
+            override = assignee if assignee is not None and assignee.strip() else None
+            setting = self.core.get_catalog().get_setting(setting_key) if override is None else None
+            selected_assignee: int | str | None = override
+            if override is None and setting is not None:
+                configured = setting.value
+                if isinstance(configured, bool) or not (
+                    (isinstance(configured, int) and configured > 0)
+                    or (
+                        isinstance(configured, str)
+                        and configured.strip()
+                        and not any(character.isspace() for character in configured)
+                    )
+                ):
+                    raise GitLabPublicationError("configured GitLab assignee is invalid")
+                selected_assignee = configured
+            assignee_source: Literal["none", "default", "override"] = (
+                "override"
+                if override is not None
+                else "default"
+                if selected_assignee is not None
+                else "none"
+            )
             result = publish_merge_request(
                 credential=credential,
                 project_path=selected_project,
@@ -552,7 +584,8 @@ class MulticaOdooClient:
                 title=title,
                 description=description,
                 issue_url=selected_issue_url,
-                assignee=assignee,
+                assignee=selected_assignee,
+                assignee_source=assignee_source,
             )
             run_context.complete_action(publish_step.step_id)
             return result

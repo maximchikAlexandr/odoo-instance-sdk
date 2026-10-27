@@ -99,6 +99,9 @@ class MergeRequestPublicationResult(msgspec.Struct, frozen=True, forbid_unknown_
     source_branch: str
     target_branch: str
     outcome: Literal["created", "updated"]
+    assignee_id: int | None = None
+    assignee_username: str | None = None
+    assignee_source: Literal["none", "default", "override"] = "none"
 
 
 TaskContext = VerifiedTaskContext

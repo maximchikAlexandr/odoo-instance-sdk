@@ -49,6 +49,7 @@ def credentials(
     user_root: Path | str | None,
     mapping_path: Path | str | None,
     environment_path: Path | str | None,
+    project_root: Path | str | None,
     process_environment: Mapping[str, str] | None,
     identity_transport: GitLabUserTransport | Callable[[str, str], Mapping[str, JsonValue]] | None,
 ) -> tuple[GitLabCredentialContext, GitLabIdentity]:
@@ -58,6 +59,7 @@ def credentials(
         user_root=user_root,
         mapping_path=mapping_path,
         environment_path=environment_path,
+        project_root=project_root,
         process_environment=process_environment,
     )
     verified = identity
@@ -195,6 +197,7 @@ def _credentials_for_hosts(
     user_root: Path | str | None,
     mapping_path: Path | str | None,
     environment_path: Path | str | None,
+    project_root: Path | str,
     process_environment: Mapping[str, str] | None,
     identity_transport: GitLabUserTransport | Callable[[str, str], Mapping[str, JsonValue]] | None,
 ) -> tuple[GitLabCredentialContext, ...]:
@@ -211,6 +214,7 @@ def _credentials_for_hosts(
             user_root=user_root,
             mapping_path=mapping_path,
             environment_path=environment_path,
+            project_root=project_root,
             process_environment=process_environment,
             identity_transport=identity_transport,
         )
@@ -229,6 +233,7 @@ def validated_frontier_credentials(
     environment_path: Path | str | None,
     process_environment: Mapping[str, str] | None,
     identity_transport: GitLabUserTransport | Callable[[str, str], Mapping[str, JsonValue]] | None,
+    project_root: Path | str | None = None,
 ) -> tuple[GitLabCredentialContext, ...]:
     """Validate one complete frontier and return its exact host-bound credentials."""
     hosts: set[str] = set()
@@ -247,6 +252,7 @@ def validated_frontier_credentials(
         user_root=user_root,
         mapping_path=mapping_path,
         environment_path=environment_path,
+        project_root=root if project_root is None else project_root,
         process_environment=process_environment,
         identity_transport=identity_transport,
     )
@@ -263,6 +269,7 @@ def validate_frontier(
     environment_path: Path | str | None,
     process_environment: Mapping[str, str] | None,
     identity_transport: GitLabUserTransport | Callable[[str, str], Mapping[str, JsonValue]] | None,
+    project_root: Path | str | None = None,
 ) -> tuple[str, ...]:
     credentials = validated_frontier_credentials(
         member_id,
@@ -272,6 +279,7 @@ def validate_frontier(
         user_root=user_root,
         mapping_path=mapping_path,
         environment_path=environment_path,
+        project_root=project_root,
         process_environment=process_environment,
         identity_transport=identity_transport,
     )

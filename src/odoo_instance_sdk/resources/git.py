@@ -38,8 +38,8 @@ from odoo_instance_sdk.models import (
     GitSyncResult,
 )
 from odoo_instance_sdk.project import ProjectConfig, effective_ticket_settings
+from odoo_instance_sdk.resources import git_member_commit
 from odoo_instance_sdk.resources.git_generic import GenericGitMixin
-from odoo_instance_sdk.resources.git_member_commit import member_commit_environment
 from odoo_instance_sdk.resources.git_runtime import worktree as _worktree
 from odoo_instance_sdk.resources.gitlab_mr import GitLabMergeRequestMixin
 
@@ -494,13 +494,18 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
         member_id: str | None = None,
     ) -> Command[CommandResult]:
         identity_environment: Mapping[str, str] | None = None
+        native_binding = None
         if repository is not None or member_id is not None:
-            identity_environment = member_commit_environment(
+            native_binding = git_member_commit.capture_member_binding(
+                self._instance, repository, member_id
+            )
+            identity_environment = git_member_commit.member_commit_environment(
                 self._instance,
                 context,
                 description,
                 repository,
                 member_id,
+                native_binding,
             )
             if identity_environment is None:
                 assert description is not None and repository is not None and member_id is not None
@@ -556,6 +561,7 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
         )
         all_steps = (
             *capture_steps,
+            *(native_binding.steps if native_binding is not None else ()),
             verify,
             verify_tree,
             commit_step,
@@ -608,6 +614,12 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
             ):
                 run.skip(commit_step.step_id)
                 raise GitWorkflowError("staged changes changed after commit planning")
+            if native_binding is not None:
+                try:
+                    native_binding.revalidate(self._instance, run.process)
+                except GitWorkflowError:
+                    run.skip(commit_step.step_id)
+                    raise
             result = cast("ProcessResult", run.process(commit_step.step_id))
             if result.returncode != 0:
                 raise GitWorkflowError(

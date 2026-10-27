@@ -74,7 +74,8 @@ def publish_merge_request(  # noqa: C901
     title: str,
     description: str,
     issue_url: str,
-    assignee: str | None = None,
+    assignee: int | str | None = None,
+    assignee_source: Literal["none", "default", "override"] = "none",
     client_factory: Callable[..., httpx.Client] = httpx.Client,
 ) -> MergeRequestPublicationResult:
     """Create or update exactly one open MR for one project/branch tuple."""
@@ -104,18 +105,51 @@ def publish_merge_request(  # noqa: C901
             raise GitLabPublicationError("GitLab project lookup returned an invalid id")
 
         assignee_id: int | None = None
+        assignee_username: str | None = None
         if assignee is not None:
-            users = _request_json(
-                lambda: client.get("/users", params={"username": assignee}),
-                operation="assignee lookup",
+            if isinstance(assignee, int) and not isinstance(assignee, bool):
+                user = _request_json(
+                    lambda: client.get(f"/users/{assignee}"),
+                    operation="assignee lookup",
+                    secrets=secrets,
+                )
+                if not isinstance(user, Mapping) or user.get("id") != assignee:
+                    raise GitLabPublicationError("GitLab assignee is missing or invalid")
+            else:
+                users = _request_json(
+                    lambda: client.get("/users", params={"username": assignee}),
+                    operation="assignee lookup",
+                    secrets=secrets,
+                )
+                if (
+                    not isinstance(users, list)
+                    or len(users) != 1
+                    or not isinstance(users[0], Mapping)
+                ):
+                    raise GitLabPublicationError("GitLab assignee is missing or ambiguous")
+                user = users[0]
+                if user.get("username") != assignee:
+                    raise GitLabPublicationError("GitLab assignee username did not match exactly")
+            raw_assignee_id = user.get("id")
+            username = user.get("username")
+            if (
+                not isinstance(raw_assignee_id, int)
+                or isinstance(raw_assignee_id, bool)
+                or raw_assignee_id < 1
+                or not isinstance(username, str)
+                or not username
+                or user.get("state") != "active"
+            ):
+                raise GitLabPublicationError("GitLab assignee is invalid or inactive")
+            membership = _request_json(
+                lambda: client.get(f"/projects/{project_id}/members/all/{raw_assignee_id}"),
+                operation="project membership lookup",
                 secrets=secrets,
             )
-            if not isinstance(users, list) or len(users) != 1 or not isinstance(users[0], Mapping):
-                raise GitLabPublicationError("GitLab assignee is missing or ambiguous")
-            raw_assignee_id = users[0].get("id")
-            if not isinstance(raw_assignee_id, int) or isinstance(raw_assignee_id, bool):
-                raise GitLabPublicationError("GitLab assignee is invalid")
+            if not isinstance(membership, Mapping) or membership.get("id") != raw_assignee_id:
+                raise GitLabPublicationError("GitLab assignee is not a member of the project")
             assignee_id = raw_assignee_id
+            assignee_username = username
 
         raw_matches = _request_json(
             lambda: client.get(
@@ -179,12 +213,25 @@ def publish_merge_request(  # noqa: C901
         if not isinstance(raw_id, int) or isinstance(raw_id, bool):
             raise GitLabPublicationError("GitLab merge-request returned an invalid iid")
         web_url = _required_text(result, "web_url", operation="merge-request")
+        if assignee_id is not None:
+            returned_assignee = result.get("assignee")
+            if (
+                not isinstance(returned_assignee, Mapping)
+                or returned_assignee.get("id") != assignee_id
+                or returned_assignee.get("username") != assignee_username
+            ):
+                raise GitLabPublicationError(
+                    f"GitLab merge-request {raw_id} returned an inconsistent assignee"
+                )
         return MergeRequestPublicationResult(
             merge_request_id=raw_id,
             web_url=web_url,
             source_branch=source_branch,
             target_branch=target_branch,
             outcome=outcome,
+            assignee_id=assignee_id,
+            assignee_username=assignee_username,
+            assignee_source=assignee_source,
         )
 
 

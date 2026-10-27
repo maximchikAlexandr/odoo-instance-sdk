@@ -390,6 +390,18 @@ runtime = Table(
     UniqueConstraint("owner_kind", "owner_id"),
 )
 
+settings = Table(
+    "settings",
+    metadata,
+    Column("key", Text, primary_key=True),
+    Column("value_json", Text, nullable=False),
+    Column("revision", Integer, CheckConstraint("revision > 0"), nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    CheckConstraint("length(trim(key)) > 0"),
+    CheckConstraint("json_valid(value_json)"),
+)
+
 CATALOG_TABLES = (
     "projects",
     "backups",
@@ -402,6 +414,7 @@ CATALOG_TABLES = (
     "environment_copy_journal",
     "postgres_clusters",
     "runtime",
+    "settings",
 )
 
 CATALOG_INDEXES = (

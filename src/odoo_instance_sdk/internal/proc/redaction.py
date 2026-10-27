@@ -37,6 +37,13 @@ _SECRET_KEY = re.compile(
     r"access[-_ ]?key|auth|refresh|client[-_ ]?secret)(?:$|[-_ .])",
     re.IGNORECASE,
 )
+
+
+def is_secret_key_name(name: str) -> bool:
+    """Return whether a structured field name matches the canonical redaction policy."""
+    return _SECRET_KEY.search(name) is not None
+
+
 _ASSIGNMENT_KEY = re.compile(r"[A-Za-z0-9_. -]+", re.IGNORECASE)
 # The optional token keeps the cheap batch prefilter's existing trigger set;
 # stream marks preserve its intentionally narrower matching semantics.
@@ -233,7 +240,7 @@ def redacted_environment(
             str(redacted_projection(value, secrets=known_secrets, field=str(key)))
             if (
                 (_SAFE_ENV_KEY.fullmatch(str(key)) or index in safe_git_config)
-                and not _SECRET_KEY.search(str(key))
+                and not is_secret_key_name(str(key))
             )
             else REDACTION_MARKER,
         )
@@ -729,7 +736,7 @@ def redacted_projection(
             name = str(key)
             projected[name] = (
                 REDACTION_MARKER
-                if _SECRET_KEY.search(name)
+                if is_secret_key_name(name)
                 else redacted_projection(item, secrets=known_secrets, field=name)
             )
         return projected

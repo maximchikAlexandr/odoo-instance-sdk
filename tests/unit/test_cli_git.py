@@ -17,6 +17,27 @@ from odoo_instance_sdk.resources.instance import OdooInstance
 from tests.unit.test_git_resource import _git, _repo
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("git", "commit"),
+        ("git", "sync"),
+        ("git", "clone"),
+        ("git", "mr", "create"),
+    ],
+)
+def test_member_id_help_names_multica_account_user_id(command: tuple[str, ...]) -> None:
+    result = CliRunner().invoke(cli, [*command, "--help"])
+
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.replace("│", " ").replace("`", "").split())
+    assert "multica workspace member list --output json" in help_text
+    assert "user_id" in help_text
+    assert "membership-row" in help_text
+    assert "agent ID" in help_text
+    assert "squad ID" in help_text
+
+
 def _context(root: Path) -> SimpleNamespace:
     instance = SimpleNamespace(
         config=InstanceConfig(base_url="http://127.0.0.1:8069", default_cwd=root)
@@ -223,7 +244,11 @@ def test_git_commit_project_member_does_not_require_repo(tmp_path: Path) -> None
     commit = next(step for step in payload["result"]["steps"] if step["step_id"] == "git.commit")
     assert dict(commit["environment_overrides"]) == identity
     assert commit["argv"][-2:] == ["-m", f"[DOC] {tmp_path.name}: change"]
-    capture.assert_called_once_with("11111111-1111-4111-8111-111111111111", "gitlab.example")
+    capture.assert_called_once_with(
+        "11111111-1111-4111-8111-111111111111",
+        "gitlab.example",
+        project_root=tmp_path,
+    )
 
 
 def test_git_sync_explicit_repo_passes_selected_member_to_dispatcher(tmp_path: Path) -> None:

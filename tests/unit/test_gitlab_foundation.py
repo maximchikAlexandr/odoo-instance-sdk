@@ -37,6 +37,7 @@ from odoo_instance_sdk.internal.proc import (
     prepared_step,
 )
 from odoo_instance_sdk.internal.proc.redaction import project_process_step
+from odoo_instance_sdk.internal.project_env import ProjectEnvironmentError, load_environment_file
 from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.internal.transport.gitlab import GitLabHttpClient
 from odoo_instance_sdk.models import GitLabCredentialContext, GitMergeRequestResult
@@ -133,6 +134,300 @@ def test_global_credential_resolution_is_owner_only_and_process_precedence(
     assert credential.child_environment()["GITLAB_TOKEN"] == "process-token"
     assert "process-token" not in repr(credential)
     assert "process-token" not in repr(credential.identity)
+
+
+def test_gitlab_unified_user_dotenv_and_project_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
+    credentials = ensure_credential_directory(tmp_path)
+    mapping = credentials / "gitlab-credentials.toml"
+    mapping.write_text(
+        f'[[mappings]]\nuser_id = "{MEMBER_A}"\nhost = "gitlab.example"\n'
+        'login = "alice"\ntoken_key = "ODCLI_GITLAB_TOKEN_ALICE"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    user_env = tmp_path / ".env"
+    user_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=user-token\n", encoding="utf-8")
+    user_env.chmod(0o600)
+    project = tmp_path / "project"
+    project_env = project / ".odcli" / ".env"
+    project_env.parent.mkdir(parents=True)
+    project_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=project-token\n", encoding="utf-8")
+    project_env.chmod(0o600)
+
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        project_root=project,
+        process_environment={},
+    )
+    assert credential.child_environment()["GITLAB_TOKEN"] == "project-token"
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        project_root=None,
+        process_environment={},
+    )
+    assert credential.child_environment()["GITLAB_TOKEN"] == "user-token"
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["project", "explicit-legacy"])
+def test_public_credential_resolver_rejects_dotenv_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
+    _credentials(tmp_path)
+    project = tmp_path / "project"
+    project_env = project / ".odcli" / ".env"
+    project_env.parent.mkdir(parents=True)
+    project_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=project-token\n", encoding="utf-8")
+    project_env.chmod(0o600)
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
+    explicit_env.chmod(0o600)
+    attacker = tmp_path / "attacker.env"
+    attacker.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+    attacker.chmod(0o600)
+    target = explicit_env if explicit else project_env
+    original_read_bytes = Path.read_bytes
+
+    def swap_before_pathname_read(path: Path) -> bytes:
+        if path == target:
+            path.unlink()
+            path.symlink_to(attacker)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", swap_before_pathname_read)
+    credential = resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=tmp_path,
+        project_root=project,
+        environment_path=explicit_env if explicit else None,
+        process_environment={},
+    )
+
+    assert credential.child_environment()["GITLAB_TOKEN"] == (
+        "explicit-token" if explicit else "project-token"
+    )
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["project", "explicit-legacy"])
+def test_public_credential_resolver_fails_closed_on_dotenv_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
+    _credentials(tmp_path)
+    project = tmp_path / "project"
+    project_env = project / ".odcli" / ".env"
+    project_env.parent.mkdir(parents=True)
+    project_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=project-token\n", encoding="utf-8")
+    project_env.chmod(0o600)
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
+    explicit_env.chmod(0o600)
+    attacker = tmp_path / "attacker.env"
+    attacker.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+    attacker.chmod(0o600)
+    target = explicit_env if explicit else project_env
+    original_open = os.open
+    swapped = False
+
+    def swap_before_descriptor_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == target.name and dir_fd is not None and not swapped:
+            target.unlink()
+            target.symlink_to(attacker)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_before_descriptor_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {swap_before_descriptor_open})
+    with pytest.raises(GitLabCredentialError) as failure:
+        resolve_gitlab_credential(
+            MEMBER_A,
+            "gitlab.example",
+            user_root=tmp_path,
+            project_root=project,
+            environment_path=explicit_env if explicit else None,
+            process_environment={},
+        )
+
+    assert swapped
+    assert "attacker-token" not in str(failure.value)
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["project", "explicit-legacy"])
+def test_dotenv_loader_detects_inode_swap_without_nofollow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    project = tmp_path / "project"
+    project_env = project / ".odcli" / ".env"
+    project_env.parent.mkdir(parents=True)
+    project_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=project-token\n", encoding="utf-8")
+    project_env.chmod(0o600)
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
+    explicit_env.chmod(0o600)
+    target = explicit_env if explicit else project_env
+    original_open = os.open
+    swapped = False
+
+    def replace_before_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if path == target and dir_fd is None and not swapped:
+            target.unlink()
+            target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+            target.chmod(0o600)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "O_NOFOLLOW", 0)
+    monkeypatch.setattr(os, "open", replace_before_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {original_open})
+    with pytest.raises(ProjectEnvironmentError) as failure:
+        load_environment_file(target)
+
+    assert swapped
+    assert "attacker-token" not in str(failure.value)
+
+
+def test_dotenv_loader_sanitizes_open_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=selected-token\n", encoding="utf-8")
+    explicit_env.chmod(0o600)
+    original_open = os.open
+
+    def fail_file_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if path == explicit_env.name and dir_fd is not None:
+            raise PermissionError("private diagnostic")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", fail_file_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {fail_file_open})
+    with pytest.raises(ProjectEnvironmentError) as failure:
+        load_environment_file(explicit_env)
+
+    assert "private diagnostic" not in str(failure.value)
+    assert "selected-token" not in str(failure.value)
+
+
+def test_dotenv_loader_rejects_nonregular_file(tmp_path: Path) -> None:
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.mkdir(mode=0o700)
+
+    with pytest.raises(ProjectEnvironmentError, match="regular file"):
+        load_environment_file(explicit_env)
+
+
+def test_dotenv_loader_reads_file_without_dir_fd_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit_env = tmp_path / "explicit.env"
+    explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=selected-token\n", encoding="utf-8")
+    explicit_env.chmod(0o600)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {os.open})
+
+    assert load_environment_file(explicit_env) == {"ODCLI_GITLAB_TOKEN_ALICE": "selected-token"}
+
+
+def _legacy_dotenv(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(SecretStore, "lookup_gitlab_member", lambda *_args: None)
+    credentials = ensure_credential_directory(root)
+    old_env = credentials / ".env"
+    old_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=legacy-token\n", encoding="utf-8")
+    old_env.chmod(0o600)
+    return old_env
+
+
+def _resolve_legacy(root: Path, *, environment_path: Path | None = None) -> GitLabCredentialContext:
+    return resolve_gitlab_credential(
+        MEMBER_A,
+        "gitlab.example",
+        user_root=root,
+        environment_path=environment_path,
+        project_root=root / "empty",
+        process_environment={},
+    )
+
+
+def test_gitlab_legacy_dotenv_fallback_logs_migration_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _credentials(tmp_path)
+    _legacy_dotenv(tmp_path, monkeypatch)
+    credential = _resolve_legacy(tmp_path)
+
+    assert "<ODCLI_USER_ROOT>/.env" in caplog.text
+    assert credential.child_environment()["GITLAB_TOKEN"] == "legacy-token"
+
+
+def test_gitlab_legacy_dotenv_conflict_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _credentials(tmp_path)
+    _legacy_dotenv(tmp_path, monkeypatch)
+    user_env = tmp_path / ".env"
+    user_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=unified-token\n", encoding="utf-8")
+    user_env.chmod(0o600)
+    with pytest.raises(GitLabCredentialError, match="values conflict"):
+        _resolve_legacy(tmp_path)
+
+
+def test_gitlab_legacy_dotenv_equal_values_are_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _credentials(tmp_path)
+    old_env = _legacy_dotenv(tmp_path, monkeypatch)
+    user_env = tmp_path / ".env"
+    user_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=unified-token\n", encoding="utf-8")
+    user_env.chmod(0o600)
+    old_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=unified-token\n", encoding="utf-8")
+    old_env.chmod(0o600)
+    credential = _resolve_legacy(tmp_path)
+
+    assert credential.child_environment()["GITLAB_TOKEN"] == "unified-token"
+    assert "<ODCLI_USER_ROOT>/.env" in caplog.text
+
+
+def test_gitlab_explicit_environment_path_overrides_legacy_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _credentials(tmp_path)
+    _legacy_dotenv(tmp_path, monkeypatch)
+    user_env = tmp_path / ".env"
+    user_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=conflicting-user-token\n", encoding="utf-8")
+    user_env.chmod(0o600)
+    explicit = tmp_path / "explicit.env"
+    explicit.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
+    explicit.chmod(0o600)
+    credential = _resolve_legacy(tmp_path, environment_path=explicit)
+
+    assert credential.child_environment()["GITLAB_TOKEN"] == "explicit-token"
 
 
 def test_global_legacy_resolution_keeps_owner_only_directory_policy(
