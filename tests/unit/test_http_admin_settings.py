@@ -82,6 +82,70 @@ def test_settings_admin_rejects_secret_classified_assignee_value(
     assert "Setting changed; reload and retry." not in invalid_mr.text
 
 
+@pytest.mark.parametrize("value_json, expected", [("17", 17), ('"alice"', "alice")])
+def test_settings_admin_accepts_global_mr_assignee(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    value_json: str,
+    expected: int | str,
+) -> None:
+    client, csrf, catalog_path = _settings_admin_session(monkeypatch, tmp_path)
+    response = client.post(
+        "/admin/settings/create",
+        data={
+            "csrftoken": csrf,
+            "key": "gitlab.mr.default_assignee",
+            "value_json": value_json,
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        setting = catalog.get_setting("gitlab.mr.default_assignee")
+        assert setting is not None
+        assert setting.value == expected
+        assert type(setting.value) is type(expected)
+    finally:
+        catalog.close()
+
+
+def test_settings_admin_rejects_invalid_global_mr_assignee_without_replacing_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client, csrf, catalog_path = _settings_admin_session(monkeypatch, tmp_path)
+    key = "gitlab.mr.default_assignee"
+    assert (
+        client.post(
+            "/admin/settings/create",
+            data={"csrftoken": csrf, "key": key, "value_json": '"alice"'},
+            follow_redirects=False,
+        ).status_code
+        == 303
+    )
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        original = catalog.get_setting(key)
+    finally:
+        catalog.close()
+    assert original is not None
+
+    response = client.post(
+        f"/admin/settings/edit?pk={original.route_id}",
+        data={"csrftoken": csrf, "key": key, "value_json": '"alice smith"'},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 422
+    assert "value_json" in response.text
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        assert catalog.get_setting(key) == original
+    finally:
+        catalog.close()
+
+
 def test_settings_admin_creates_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client, csrf, catalog_path = _settings_admin_session(monkeypatch, tmp_path)
     create = client.post(

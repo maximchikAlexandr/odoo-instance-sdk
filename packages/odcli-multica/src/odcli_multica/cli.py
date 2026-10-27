@@ -418,7 +418,7 @@ def merge_request() -> None:
 @click.option(
     "--assignee",
     default=None,
-    help="Numeric ID or exact username; overrides the exact-project gitlab.mr.default_assignee setting and sets assignee_id, not reviewers.",
+    help="Numeric ID or exact username as an explicit override; precedence is --assignee, project setting, then global gitlab.mr.default_assignee. Otherwise no assignee. Sets assignee_id, not reviewers.",
 )
 @click.option("--project-path", default=None)
 @click.option("--profile", default=None)

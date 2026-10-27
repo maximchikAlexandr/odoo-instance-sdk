@@ -46,6 +46,74 @@ def test_setting_route_id_and_json_properties_are_stable(tmp_path: Path) -> None
         catalog.close()
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("gitlab.mr.default_assignee", 17),
+        ("gitlab.mr.default_assignee", "alice"),
+        ("gitlab.mr.default_assignee:https://example.test/group/project", 17),
+        ("gitlab.mr.default_assignee:https://example.test/group/project", "alice"),
+    ],
+)
+def test_mr_assignee_settings_preserve_global_and_scoped_scalar_values(
+    tmp_path: Path, key: str, value: int | str
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    try:
+        setting = catalog.create_setting(key, value)
+
+        assert setting.value == value
+        assert type(setting.value) is type(value)
+    finally:
+        catalog.close()
+
+
+@pytest.mark.parametrize("value", [True, None, 0, "", "alice smith", [], {}])
+def test_global_mr_assignee_rejects_invalid_values(tmp_path: Path, value: object) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    try:
+        with pytest.raises(BackupCatalogError, match="value is invalid"):
+            catalog.create_setting("gitlab.mr.default_assignee", value)  # type: ignore[arg-type]
+        assert catalog.list_settings() == ()
+    finally:
+        catalog.close()
+
+
+@pytest.mark.parametrize(
+    ("deleted_key", "remaining_key"),
+    [
+        (
+            "gitlab.mr.default_assignee",
+            "gitlab.mr.default_assignee:https://example.test/group/project",
+        ),
+        (
+            "gitlab.mr.default_assignee:https://example.test/group/project",
+            "gitlab.mr.default_assignee",
+        ),
+    ],
+)
+def test_deleting_global_or_scoped_assignee_preserves_other_row(
+    tmp_path: Path, deleted_key: str, remaining_key: str
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    try:
+        deleted = catalog.create_setting("gitlab.mr.default_assignee", 17)
+        remaining = catalog.create_setting(
+            "gitlab.mr.default_assignee:https://example.test/group/project", "alice"
+        )
+        catalog.delete_setting(
+            deleted_key,
+            expected_revision=deleted.revision
+            if deleted.key == deleted_key
+            else remaining.revision,
+        )
+
+        assert catalog.get_setting(deleted_key) is None
+        assert catalog.get_setting(remaining_key) is not None
+    finally:
+        catalog.close()
+
+
 def test_rename_validates_the_proposed_key_and_value_atomically(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     try:

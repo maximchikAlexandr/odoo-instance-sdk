@@ -24,6 +24,10 @@ def test_merge_request_help_explains_configured_assignee_override() -> None:
     help_text = " ".join(result.output.replace("│", " ").split()).lower()
     assert "gitlab.mr.default_assignee" in help_text
     assert "numeric id or exact username" in help_text
+    assert "global" in help_text
+    assert "project setting" in help_text
+    assert "explicit" in help_text
+    assert "no assignee" in help_text
     assert "assignee_id" in help_text
     assert "not reviewers" in help_text
 
