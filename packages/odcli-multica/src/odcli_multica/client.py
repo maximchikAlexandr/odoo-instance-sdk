@@ -66,10 +66,19 @@ from odoo_instance_sdk.execution import ExecutionPlan
 from odoo_instance_sdk.internal.gitlab_credentials import resolve_gitlab_credential
 from odoo_instance_sdk.internal.proc import RunContext
 from odoo_instance_sdk.models import CommandResult, GitSyncResult
+from odoo_instance_sdk.storage.catalog import BackupCatalog, CatalogSetting
 
 if TYPE_CHECKING:
     from multica_py import Issue, MulticaClient, OperationOptions, Page, Project, TaskRun
     from multica_py.models.system import DaemonStatus, RepositoryCheckoutResult
+
+
+def _default_mr_assignee_setting(
+    catalog: BackupCatalog, project_setting_key: str
+) -> CatalogSetting | None:
+    return catalog.get_setting(project_setting_key) or catalog.get_setting(
+        "gitlab.mr.default_assignee"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,6 +519,8 @@ class MulticaOdooClient:
                 "assignee_setting_key": (
                     f"gitlab.mr.default_assignee:https://{host}/{selected_project}"
                 ),
+                "assignee_global_setting_key": "gitlab.mr.default_assignee",
+                "assignee_precedence": "explicit → project → global → none",
                 "assignee_source": (
                     "override"
                     if assignee is not None and assignee.strip()
@@ -555,7 +566,11 @@ class MulticaOdooClient:
             )
             setting_key = f"gitlab.mr.default_assignee:https://{host}/{selected_project}"
             override = assignee if assignee is not None and assignee.strip() else None
-            setting = self.core.get_catalog().get_setting(setting_key) if override is None else None
+            setting = (
+                _default_mr_assignee_setting(self.core.get_catalog(), setting_key)
+                if override is None
+                else None
+            )
             selected_assignee: int | str | None = override
             if override is None and setting is not None:
                 configured = setting.value
