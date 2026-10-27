@@ -103,8 +103,7 @@ def _verify_registered_native_checkout(
                 or str(environment["state"]) == "removed"
                 or Path(str(environment["repository_root"])).resolve()
                 != Path(binding.repository_root).resolve()
-                or Path(str(environment["git_common_dir"])).resolve()
-                != Path(binding.git_common_dir).resolve()
+                or Path(str(environment["git_common_dir"])).resolve() != common
                 or Path(str(environment["worktree_path"])).resolve() != root
                 or Path(str(environment["checkout_git_common_dir"])).resolve() != common
             ):
