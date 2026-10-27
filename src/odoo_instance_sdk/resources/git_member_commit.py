@@ -94,8 +94,6 @@ def _verify_registered_native_checkout(
         else:
             root = Path(snapshot.canonical_root)
             common = Path(snapshot.git_common_dir)
-            if common != Path(str(project["git_common_dir"])).resolve():
-                failure = "native checkout Git common directory is not registered"
             environment_id = getattr(instance, "_environment_id", None)
         if failure is None and environment_id:
             environment = catalog.get_environment(str(environment_id))
@@ -111,8 +109,11 @@ def _verify_registered_native_checkout(
                 or Path(str(environment["checkout_git_common_dir"])).resolve() != common
             ):
                 failure = "registered environment checkout binding is stale or foreign"
-        elif failure is None and root != Path(binding.repository_root).resolve():
-            failure = "manifest-free project commit is outside the registered project"
+        elif failure is None:
+            if root != Path(binding.repository_root).resolve():
+                failure = "manifest-free project commit is outside the registered project"
+            elif common != Path(binding.git_common_dir).resolve():
+                failure = "native checkout Git common directory is not registered"
     except (GitRepositoryError, KeyError, OSError, TypeError, ValueError) as exc:
         raise GitWorkflowError("registered checkout binding could not be verified") from exc
     if failure is not None:

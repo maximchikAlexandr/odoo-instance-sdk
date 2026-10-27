@@ -389,7 +389,9 @@ def test_commit_in_worktree_without_manifest_uses_project_ticket_settings(
     )
 
 
-def _registered_native_checkout(tmp_path: Path) -> tuple[OdooInstance, Path, Path]:
+def _registered_native_checkout(
+    tmp_path: Path, *, separate_git: bool = False
+) -> tuple[OdooInstance, Path, Path]:
     project_root = tmp_path / "project"
     project_root.mkdir()
     _repo(project_root)
@@ -398,8 +400,13 @@ def _registered_native_checkout(tmp_path: Path) -> tuple[OdooInstance, Path, Pat
     _git(project_root, "commit", "-qm", "project config")
     _git(project_root, "remote", "add", "origin", "https://gitlab.example/team/repo.git")
     worktree = tmp_path / "native"
-    parent = _git(project_root, "rev-parse", "HEAD^").strip()
-    _git(project_root, "worktree", "add", "-qb", "task/PROJ-123", str(worktree), parent)
+    if separate_git:
+        _git(project_root, "clone", "-q", str(project_root), str(worktree))
+        _git(worktree, "checkout", "-qb", "task/PROJ-123", "HEAD^")
+        _git(worktree, "remote", "set-url", "origin", "https://gitlab.example/team/repo.git")
+    else:
+        parent = _git(project_root, "rev-parse", "HEAD^").strip()
+        _git(project_root, "worktree", "add", "-qb", "task/PROJ-123", str(worktree), parent)
     (worktree / "addons" / "sale").mkdir(parents=True)
     (worktree / "addons" / "sale" / "__manifest__.py").write_text("{}\n", encoding="utf-8")
     common = Path(_git(worktree, "rev-parse", "--git-common-dir").strip())
@@ -435,10 +442,12 @@ def _registered_native_checkout(tmp_path: Path) -> tuple[OdooInstance, Path, Pat
     return instance, project_root, worktree
 
 
+@pytest.mark.parametrize("separate_git", [False, True], ids=["worktree", "separate-clone"])
 def test_registered_native_checkout_uses_project_policy_and_verified_identity(
     tmp_path: Path,
+    separate_git: bool,
 ) -> None:
-    instance, _project, worktree = _registered_native_checkout(tmp_path)
+    instance, _project, worktree = _registered_native_checkout(tmp_path, separate_git=separate_git)
     module_file = worktree / "addons" / "sale" / "models.py"
     module_file.write_text("value = 1\n", encoding="utf-8")
     _git(worktree, "add", "addons/sale")
