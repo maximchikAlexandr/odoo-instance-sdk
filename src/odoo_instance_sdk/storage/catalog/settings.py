@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 _MAX_KEY_BYTES = 512
 _MAX_VALUE_BYTES = 64 * 1024
+_GLOBAL_ASSIGNEE_KEY = "gitlab.mr.default_assignee"
 _ASSIGNEE_PREFIX = "gitlab.mr.default_assignee:"
 type _SettingRow = tuple[str, str, int, str, str]
 
@@ -60,6 +61,8 @@ def _object_no_duplicates(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonV
 
 
 def _assignee_key(key: str) -> bool:
+    if key == _GLOBAL_ASSIGNEE_KEY:
+        return True
     if not key.startswith(_ASSIGNEE_PREFIX):
         return False
     raw = key.removeprefix(_ASSIGNEE_PREFIX)

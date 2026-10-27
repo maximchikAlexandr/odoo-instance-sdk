@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import msgspec
@@ -27,6 +28,7 @@ from odcli_multica.models import (
     VerifiedTaskContext,
 )
 
+from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.internal.secret_store import SecretStore
 
 
@@ -184,6 +186,24 @@ def test_publish_updates_the_unique_open_merge_request() -> None:
                 "target_branch": "main",
             },
             id="username-create",
+        ),
+        pytest.param(
+            "alice",
+            "/api/v4/users",
+            {"username": "alice"},
+            [{"id": 17, "username": "alice", "state": "active"}],
+            [{"iid": 7}],
+            "PUT",
+            200,
+            "updated",
+            {
+                "assignee_id": 17,
+                "title": "title",
+                "description": "body\n\nRelated to https://multica.example/issues/1",
+                "source_branch": "feature",
+                "target_branch": "main",
+            },
+            id="username-update",
         ),
         pytest.param(
             17,
@@ -656,6 +676,10 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
     assert "gitlab.mr.publish" in plan_text
     assert "https://multica.example/issues/root" in plan_text
     assert "gitlab.mr.default_assignee:https://gitlab.example/team/repo" in plan_text
+    assert "explicit → project → global → none" in plan_text
+    publish_details = command.plan.steps[-1].details
+    assert isinstance(publish_details, dict)
+    assert publish_details["assignee_global_setting_key"] == "gitlab.mr.default_assignee"
     assert "catalog_default_or_absent" in plan_text
     assert "deferred-until-execution" in plan_text
 
@@ -695,7 +719,10 @@ def test_mr_dry_run_plan_is_non_secret_and_does_not_call_provider(
             None,
             None,
             "none",
-            ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"],
+            [
+                "gitlab.mr.default_assignee:https://gitlab.example/team/repo",
+                "gitlab.mr.default_assignee",
+            ],
             id="absent",
         ),
     ],
@@ -721,7 +748,10 @@ def test_mr_uses_only_exact_scoped_setting_and_explicit_override(
     description.write_text("body", encoding="utf-8")
     client = _mr_client(root)
     catalog = client.core.get_catalog()
-    catalog.values["gitlab.mr.default_assignee:https://gitlab.example/team/repo"] = configured
+    if configured is not None:
+        catalog.values["gitlab.mr.default_assignee:https://gitlab.example/team/repo"] = configured
+    if configured is not None or override is not None:
+        catalog.values["gitlab.mr.default_assignee"] = "lower-priority-user"
     client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
     observed: list[dict[str, object]] = []
 
@@ -749,6 +779,125 @@ def test_mr_uses_only_exact_scoped_setting_and_explicit_override(
     assert catalog.keys == expected_catalog_keys
     assert observed[0]["assignee"] == selected
     assert observed[0]["assignee_source"] == source
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_catalog_keys", "selected"),
+    [
+        pytest.param(
+            {"gitlab.mr.default_assignee": "global-user"},
+            [
+                "gitlab.mr.default_assignee:https://gitlab.example/team/repo",
+                "gitlab.mr.default_assignee",
+            ],
+            "global-user",
+            id="global-fallback",
+        ),
+        pytest.param(
+            {
+                "gitlab.mr.default_assignee:https://gitlab.example/team/repo": "project-user",
+                "gitlab.mr.default_assignee": "global-user",
+            },
+            ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"],
+            "project-user",
+            id="project-wins",
+        ),
+    ],
+)
+def test_mr_resolves_global_assignee_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, object],
+    expected_catalog_keys: list[str],
+    selected: str,
+) -> None:
+    command, catalog, observed = _mr_assignee_command(tmp_path, monkeypatch, settings)
+
+    command.run()
+
+    assert catalog.keys == expected_catalog_keys
+    assert observed[0]["assignee"] == selected
+    assert observed[0]["assignee_source"] == "default"
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_catalog_keys"),
+    [
+        pytest.param(
+            {
+                "gitlab.mr.default_assignee:https://gitlab.example/team/repo": True,
+                "gitlab.mr.default_assignee": "global-user",
+            },
+            ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"],
+            id="invalid-project-fails-closed",
+        ),
+        pytest.param(
+            {"gitlab.mr.default_assignee": True},
+            [
+                "gitlab.mr.default_assignee:https://gitlab.example/team/repo",
+                "gitlab.mr.default_assignee",
+            ],
+            id="invalid-global-fails-closed",
+        ),
+    ],
+)
+def test_mr_invalid_assignee_settings_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, object],
+    expected_catalog_keys: list[str],
+) -> None:
+    command, catalog, observed = _mr_assignee_command(tmp_path, monkeypatch, settings)
+
+    with pytest.raises(GitLabPublicationError, match="configured GitLab assignee is invalid"):
+        command.run()
+
+    assert catalog.keys == expected_catalog_keys
+    assert observed == []
+
+
+def _mr_assignee_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, object],
+) -> tuple[Command[MergeRequestPublicationResult], _SettingsCatalog, list[dict[str, object]]]:
+    root = Issue(
+        "root",
+        "Root",
+        "todo",
+        project_id="project",
+        creator_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        creator_type="member",
+    )
+    description = tmp_path / "description.md"
+    description.write_text("body", encoding="utf-8")
+    client = _mr_client(root)
+    catalog = cast("_SettingsCatalog", client.core.get_catalog())
+    catalog.values.update(settings)
+    client.credential_context = lambda *args, **kwargs: _credential()  # type: ignore[method-assign]
+    observed: list[dict[str, object]] = []
+
+    def publish(**kwargs: object) -> MergeRequestPublicationResult:
+        observed.append(kwargs)
+        return MergeRequestPublicationResult(
+            merge_request_id=1,
+            web_url="https://gitlab.example/team/repo/-/merge_requests/1",
+            source_branch="feature",
+            target_branch="main",
+            outcome="created",
+        )
+
+    monkeypatch.setattr("odcli_multica.gitlab.publish_merge_request", publish)
+    command = client.publish_merge_request_command(
+        _mr_context(),
+        project_root=tmp_path,
+        source_branch="feature",
+        target_branch="main",
+        title="title",
+        description_file=description,
+    )
+
+    return command, catalog, observed
 
 
 def test_mr_setting_isolated_by_normalized_host_and_selected_project(
@@ -800,7 +949,10 @@ def test_mr_setting_isolated_by_normalized_host_and_selected_project(
         description_file=description,
     ).run()
 
-    assert catalog.keys == ["gitlab.mr.default_assignee:https://gitlab.example/team/repo"]
+    assert catalog.keys == [
+        "gitlab.mr.default_assignee:https://gitlab.example/team/repo",
+        "gitlab.mr.default_assignee",
+    ]
     assert observed[0]["assignee"] is None
 
 
