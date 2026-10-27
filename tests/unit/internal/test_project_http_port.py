@@ -116,12 +116,13 @@ def test_stale_assigned_project_port_is_replaced_and_owned_config_reconciled(
     source_config.write_text("[options]\nhttp_port = 8069\ncustom_option = retained\n")
     original_source = source_config.read_bytes()
 
-    with socket.socket() as listener, socket.socket() as replacement_reserver:
+    with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
         stale_port = listener.getsockname()[1]
-        replacement_reserver.bind(("127.0.0.1", 0))
-        replacement_port = int(replacement_reserver.getsockname()[1])
+        with socket.socket() as replacement_reserver:
+            replacement_reserver.bind(("127.0.0.1", 0))
+            replacement_port = int(replacement_reserver.getsockname()[1])
         assert replacement_port != stale_port
 
         generated = root / ".odcli" / "odoo.conf"
