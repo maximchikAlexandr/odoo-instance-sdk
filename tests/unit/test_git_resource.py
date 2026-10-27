@@ -430,7 +430,7 @@ def _registered_native_checkout(
                 "state": "active",
                 "branch": "task/PROJ-123",
                 "repository_root": str(project_root.resolve()),
-                "git_common_dir": str((project_root / ".git").resolve()),
+                "git_common_dir": str(common),
                 "worktree_path": str(worktree.resolve()),
                 "checkout_git_common_dir": str(common),
             }
