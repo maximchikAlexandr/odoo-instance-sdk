@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +104,96 @@ def test_project_run_persists_fallback_and_reuses_assignment(
         None,
     )
     assert (root / ".odcli" / "project.toml").read_bytes() == manifest_after_assignment
+
+
+def test_stale_assigned_project_port_is_replaced_and_owned_config_reconciled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / ".git").mkdir()
+    source_config = root / "odoo.conf"
+    source_config.write_text("[options]\nhttp_port = 8069\ncustom_option = retained\n")
+    original_source = source_config.read_bytes()
+
+    with socket.socket() as listener, socket.socket() as replacement_reserver:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        stale_port = listener.getsockname()[1]
+        replacement_reserver.bind(("127.0.0.1", 0))
+        replacement_port = int(replacement_reserver.getsockname()[1])
+        assert replacement_port != stale_port
+
+        generated = root / ".odcli" / "odoo.conf"
+        generated.parent.mkdir()
+        generated.write_text(
+            f"[options]\nhttp_interface = 127.0.0.1\nhttp_port = {stale_port}\n"
+            "admin_passwd = test-admin\ndb_host = 127.0.0.1\ndb_port = 5468\n"
+            "db_user = odoo\ndb_password = test-password\n"
+        )
+        generated.chmod(0o600)
+        password_file = root / ".odcli" / "postgres-password"
+        password_file.write_text("test-password\n")
+        config = ProjectConfig(
+            repository_root=root,
+            odoo_bin=Path("/usr/bin/odoo"),
+            source_config=Path("odoo.conf"),
+            assigned_http_port=stale_port,
+            postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5468),
+        )
+        write_manifest(root, config)
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.project_init.project_lifecycle_lock",
+            lambda _root: nullcontext(),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.project_init.validate_generated_config_target",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(
+                lambda _root: SimpleNamespace(
+                    endpoint_host="127.0.0.1",
+                    endpoint_port=5468,
+                    password_file=password_file,
+                )
+            ),
+        )
+
+        def find_port(
+            _kind: str,
+            _catalog: object,
+            *,
+            requested: int | None = None,
+            reserved_ports: tuple[int, ...] = (),
+            **_kwargs: object,
+        ) -> int:
+            if requested == stale_port:
+                raise EnvironmentConflictError("port_in_use", "occupied")
+            assert requested is None
+            assert reserved_ports == (stale_port,)
+            return replacement_port
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.port_allocation.find_free_port", find_port)
+
+        selection = select_project_http_port(ProjectConfig.load(root), None)
+
+        assert (selection.port, selection.selection_kind, selection.fallback_reason) == (
+            replacement_port,
+            "automatic_fallback",
+            "occupied",
+        )
+        assert ProjectConfig.load(root).assigned_http_port == replacement_port
+        assert f"http_port = {replacement_port}" in generated.read_text()
+        assert f"http_port = {stale_port}" not in generated.read_text()
+        assert source_config.read_bytes() == original_source
+        assert listener.fileno() >= 0
+        assert listener.getsockname() == ("127.0.0.1", stale_port)
+        with socket.create_connection(("127.0.0.1", stale_port), timeout=1):
+            connection, _ = listener.accept()
+            connection.close()
 
 
 def test_explicit_project_pin_fails_closed_without_manifest_mutation(
