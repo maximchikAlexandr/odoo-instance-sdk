@@ -109,3 +109,6 @@ class DetachedLaunchResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tr
     owner_id: str
     http_endpoint: str
     log_path: str
+    http_port: int | None = None
+    http_port_selection: Literal["explicit", "automatic_reused", "automatic_fallback"] | None = None
+    http_port_fallback_reason: Literal["occupied", "unavailable"] | None = None

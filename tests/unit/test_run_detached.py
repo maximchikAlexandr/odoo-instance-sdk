@@ -277,13 +277,19 @@ def test_detached_launch_persists_identity_and_returns_promptly(
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
-        result = inst.run_detached()
+        result = inst.run_detached(
+            http_port_selection="automatic_fallback",
+            http_port_fallback_reason="occupied",
+        )
 
     assert isinstance(result, DetachedLaunchResult)
     assert result.pid == 4242
     assert result.owner_kind == owner_kind
     assert result.owner_id == (env_id if owner_kind == "environment" else f"project_{env_id}")
     assert result.http_endpoint == f"http://127.0.0.1:{http_port}"
+    assert result.http_port == http_port
+    assert result.http_port_selection == "automatic_fallback"
+    assert result.http_port_fallback_reason == "occupied"
     assert result.log_path == str(wt / "odoo.log")
     assert len(fake.upsert_calls) == 1
     assert isinstance(fake.upsert_calls[0][1]["launch_identity_json"], str)
@@ -1159,7 +1165,10 @@ def _cli_invoke(instance: object, args: list[str]) -> Result:
 
 
 @pytest.mark.unit
-def test_cli_run_detach_returns_typed_result(env_id: str, http_port: int, tmp_path: Path) -> None:
+@pytest.mark.parametrize("output_format", ["json", "toon"])
+def test_cli_run_detach_returns_typed_result(
+    env_id: str, http_port: int, tmp_path: Path, output_format: str
+) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     (wt / "odoo.log").write_text("")
@@ -1184,14 +1193,22 @@ def test_cli_run_detach_returns_typed_result(env_id: str, http_port: int, tmp_pa
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
-        result = _cli_invoke(inst, ["run", "-d", "--format", "json"])
+        result = _cli_invoke(inst, ["run", "-d", "--format", output_format])
 
     assert result.exit_code == 0, result.output
-    envelope = json.loads(result.stdout)
+    if output_format == "json":
+        envelope = json.loads(result.stdout)
+    else:
+        from toon import DecodeOptions, decode
+
+        envelope = decode(result.stdout, DecodeOptions(indent=2, strict=True))
     assert envelope["ok"] is True
     assert envelope["result"]["pid"] == 4242
     assert envelope["result"]["owner_kind"] == "environment"
     assert envelope["result"]["http_endpoint"] == f"http://127.0.0.1:{http_port}"
+    assert envelope["result"]["http_port"] == http_port
+    assert envelope["result"]["http_port_selection"] is None
+    assert envelope["result"]["http_port_fallback_reason"] is None
 
 
 @pytest.mark.unit

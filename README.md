@@ -275,8 +275,13 @@ Catalogue lists are project-scoped by default. Use `--all-projects` when a
 global result is intended, for example `odcli backup ls --all-projects` or
 `odcli resource ls --all-projects`; Rich tables format byte values for
 people while JSON/TOON retain exact integer bytes. Project HTTP endpoints use
-the same precedence everywhere: explicit override, `preferred_http_port`, the
-effective `odoo.conf`, then the default port.
+the same precedence everywhere: explicit override, `preferred_http_port`,
+OdCLI's persisted `assigned_http_port`, the effective `odoo.conf`, then port
+8069. A real main-project run reuses a free automatic assignment or selects a
+replacement when it is occupied; an occupied `preferred_http_port` fails
+without changing the pin. Preview does not persist an assignment. Older SDK
+versions with strict manifest parsing may require removing `assigned_http_port`
+before rollback.
 
 ## Common workflows
 

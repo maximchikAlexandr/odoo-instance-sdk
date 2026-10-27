@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 from collections.abc import Hashable, Mapping
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -73,6 +74,11 @@ from odoo_instance_sdk.internal.project_init import (
     register_initialized_project,
     validate_generated_config_target,
     write_project_generated_config,
+)
+from odoo_instance_sdk.internal.project_manifest import manifest_path
+from odoo_instance_sdk.internal.project_runtime import (
+    ProjectHttpPortSelection,
+    select_project_http_port,
 )
 from odoo_instance_sdk.internal.vscode_generate import (
     build_launch_profile,
@@ -441,6 +447,20 @@ def run(  # noqa: C901
         output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
         runtime_context = _ready_instance(ctx)
+        port_selection: ProjectHttpPortSelection | None = None
+        if (
+            not dry_run
+            and not runtime_context.is_environment
+            and manifest_path(runtime_context.project_root).is_file()
+        ):
+            port_selection = select_project_http_port(
+                cast("ProjectConfig", runtime_context.source), runtime_context.client.get_catalog()
+            )
+            runtime_context = replace(
+                runtime_context,
+                source=port_selection.project,
+                instance=runtime_context.client.instance.from_project(port_selection.project),
+            )
         pg_dump = shutil.which("pg_dump") if os.name != "nt" else None
         if pg_dump is not None:
             pg_dump = str(Path(pg_dump).resolve())
@@ -459,6 +479,12 @@ def run(  # noqa: C901
                 env=pg_dump_env,
                 wait_ready=wait_ready,
                 readiness_timeout=effective_readiness_timeout,
+                http_port_selection=(
+                    port_selection.selection_kind if port_selection is not None else None
+                ),
+                http_port_fallback_reason=(
+                    port_selection.fallback_reason if port_selection is not None else None
+                ),
             )
         else:
             if not dry_run:
@@ -485,7 +511,13 @@ def run(  # noqa: C901
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "run", e, dry_run=dry_run)
+        fail(
+            output_mode,
+            "run",
+            e,
+            dry_run=dry_run,
+            error_code=getattr(e, "error_code", getattr(e, "code", None)),
+        )
     if not dry_run and runtime_context.is_environment:
         runtime_context.client.environments.record_use(runtime_context.require_environment())
     if detach:
@@ -509,12 +541,21 @@ def run(  # noqa: C901
                 "run",
                 e,
                 dry_run=dry_run,
-                error_code=getattr(e, "error_code", None),
+                error_code=getattr(e, "error_code", getattr(e, "code", None)),
             )
         if not dry_run:
             sys.exit(status)
         return
     try:
+        if (
+            port_selection is not None
+            and port_selection.fallback_reason is not None
+            and output_mode == "rich"
+        ):
+            rich_print(
+                f"The current automatic HTTP port was occupied; using {port_selection.port} "
+                "(automatic fallback)."
+            )
         _status, exit_code = run_or_preview(
             lambda: foreground_command,
             command_name="run",
@@ -525,7 +566,13 @@ def run(  # noqa: C901
     except KeyboardInterrupt:
         exit_code = 130
     except Exception as e:
-        fail(output_mode, "run", e, dry_run=dry_run)
+        fail(
+            output_mode,
+            "run",
+            e,
+            dry_run=dry_run,
+            error_code=getattr(e, "error_code", getattr(e, "code", None)),
+        )
     if not dry_run:
         sys.exit(int(exit_code or 0))
     return
@@ -541,6 +588,9 @@ def _rich_detached_status(document: OutputDocument) -> str:
     for field, label in (
         ("pid", "PID"),
         ("http_endpoint", "Endpoint"),
+        ("http_port", "HTTP port"),
+        ("http_port_selection", "Port selection"),
+        ("http_port_fallback_reason", "Fallback reason"),
         ("owner_kind", "Owner kind"),
         ("owner_id", "Owner ID"),
         ("log_path", "Log path"),

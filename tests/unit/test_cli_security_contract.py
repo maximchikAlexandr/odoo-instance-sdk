@@ -15,8 +15,10 @@ from odoo_instance_sdk import OdooClient
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.cli_parts import callbacks
 from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
-from odoo_instance_sdk.exceptions import InstanceConfigurationError
+from odoo_instance_sdk.exceptions import EnvironmentConflictError, InstanceConfigurationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.internal.project_manifest import write_manifest
+from odoo_instance_sdk.internal.project_runtime import ProjectHttpPortSelection
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentState
 from odoo_instance_sdk.resources.instance import OdooInstance
@@ -67,7 +69,7 @@ def test_eval_json_failure_is_single_sanitized_envelope(diagnostic: str, secret:
     ):
         result = runner.invoke(cli, ["eval", "1", "--format", "json"])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 1, result.output
     assert result.stderr == ""
     assert result.output.count('"schema_version"') == 1
     envelope = json.loads(result.output)
@@ -237,6 +239,83 @@ def test_project_run_never_records_environment_use(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     instance.run_foreground_command.assert_called_once_with(args=("--dev=reload",), env=ANY)
     client.environments.record_use.assert_not_called()
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "real-run"])
+def test_project_run_allocates_only_for_real_run(tmp_path: Path, dry_run: bool) -> None:
+    project = ProjectConfig(repository_root=tmp_path)
+    write_manifest(tmp_path, project)
+    client = MagicMock()
+    original = MagicMock()
+    original.run_foreground_command.return_value = _stub_command(lambda: 0)
+    selected = MagicMock()
+    selected.run_foreground_command.return_value = _stub_command(lambda: 0)
+    selection = ProjectHttpPortSelection(
+        project=project,
+        port=8070,
+        selection_kind="automatic_fallback",
+        fallback_reason="occupied",
+    )
+    client.instance.from_project.return_value = selected
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=_resolved_context(client, project, original),
+        ),
+        patch(
+            "odoo_instance_sdk.commands.cli_parts.callbacks.select_project_http_port",
+            return_value=selection,
+        ) as allocate,
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
+    ):
+        args = ["run", "--", "--dev=reload"]
+        if dry_run:
+            args[1:1] = ["--dry-run", "--format", "json"]
+        result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert allocate.called is (not dry_run)
+    if dry_run:
+        original.run_foreground_command.assert_called_once_with(args=("--dev=reload",), env=ANY)
+        client.instance.from_project.assert_not_called()
+    else:
+        client.instance.from_project.assert_called_once_with(project)
+        selected.run_foreground_command.assert_called_once_with(args=("--dev=reload",), env=ANY)
+        assert "automatic fallback" in result.output
+
+
+def test_project_run_preserves_explicit_port_conflict_code(tmp_path: Path) -> None:
+    project = ProjectConfig(repository_root=tmp_path, preferred_http_port=8069)
+    write_manifest(tmp_path, project)
+    client = MagicMock()
+    instance = MagicMock()
+    conflict = EnvironmentConflictError(
+        "port_in_use",
+        "Explicit project HTTP endpoint 127.0.0.1:8069 is occupied; "
+        "free the port or update/remove preferred_http_port and retry.",
+        details={"host": "127.0.0.1", "port": 8069, "kind": "http"},
+    )
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=_resolved_context(client, project, instance),
+        ),
+        patch(
+            "odoo_instance_sdk.commands.cli_parts.callbacks.select_project_http_port",
+            side_effect=conflict,
+        ),
+    ):
+        result = CliRunner().invoke(
+            cli, ["run", "--detach", "--format", "json", "--", "--dev=reload"]
+        )
+
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "port_in_use"
+    assert "preferred_http_port" in error["message"]
+    client.instance.from_project.assert_not_called()
 
 
 def test_environment_owned_command_rejects_project_context(tmp_path: Path) -> None:
