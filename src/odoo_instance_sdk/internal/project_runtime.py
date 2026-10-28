@@ -6,21 +6,233 @@ import os
 import re
 import shutil
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
-from odoo_instance_sdk.exceptions import InstanceConfigurationError
+from odoo_instance_sdk.exceptions import EnvironmentConflictError, InstanceConfigurationError
+from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.project import ProjectConfig
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 _UV_PYTHON_SELECTOR = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 
 
 def resolve_project_http_port(
-    preferred_http_port: int | None, configured_http_port: int | None
+    preferred_http_port: int | None,
+    configured_http_port: int | None,
+    assigned_http_port: int | None = None,
 ) -> int:
     """Apply the shared project endpoint precedence for HTTP ports."""
     if preferred_http_port is not None:
         return preferred_http_port
+    if assigned_http_port is not None:
+        return assigned_http_port
     return configured_http_port if configured_http_port is not None else 8069
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectHttpPortSelection:
+    """Bounded explanation for the endpoint selected for a project run."""
+
+    project: ProjectConfig
+    port: int
+    selection_kind: Literal["explicit", "automatic_reused", "automatic_fallback"]
+    fallback_reason: Literal["occupied", "unavailable"] | None = None
+    source_project: ProjectConfig | None = None
+    requested_port: int | None = None
+
+
+def select_project_http_port(
+    project: ProjectConfig, catalog: BackupCatalog | None
+) -> ProjectHttpPortSelection:
+    """Capture the endpoint that a project run will use without changing project state."""
+    return _select_project_http_port(ProjectConfig.load(project.repository_root), catalog)
+
+
+def _select_project_http_port(
+    project: ProjectConfig, catalog: BackupCatalog | None
+) -> ProjectHttpPortSelection:
+    from msgspec.structs import replace
+
+    from odoo_instance_sdk.internal.port_allocation import find_free_port
+
+    root = project.repository_root.resolve()
+    current = project
+    _generated, _config_path, config = _effective_project_config(current)
+    http_interface = config.get("http_interface", "127.0.0.1")
+    if current.preferred_http_port is not None:
+        try:
+            selected = find_free_port(
+                "http",
+                catalog,
+                exclude_project=root,
+                host=http_interface,
+                requested=current.preferred_http_port,
+                project=current,
+            )
+        except EnvironmentConflictError as exc:
+            state = probe_address(http_interface, current.preferred_http_port)
+            status = "occupied" if state is AddressState.OCCUPIED else "occupied or reserved"
+            raise EnvironmentConflictError(
+                "port_in_use",
+                f"Explicit project HTTP endpoint {http_interface}:{current.preferred_http_port} "
+                f"is {status}; free the port or update/remove preferred_http_port and retry.",
+                details={
+                    "host": http_interface,
+                    "port": current.preferred_http_port,
+                    "kind": "http",
+                },
+            ) from exc
+        return ProjectHttpPortSelection(
+            current,
+            selected,
+            "explicit",
+            source_project=current,
+            requested_port=current.preferred_http_port,
+        )
+
+    raw = config.get("http_port")
+    try:
+        configured = int(raw) if raw else None
+    except ValueError:
+        configured = None
+    candidate = current.assigned_http_port or configured or 8069
+    state = probe_address(http_interface, candidate)
+    fallback_reason: Literal["occupied", "unavailable"] | None = None
+    try:
+        selected = find_free_port(
+            "http",
+            catalog,
+            exclude_project=root,
+            host=http_interface,
+            requested=candidate,
+            project=current,
+        )
+        selection_kind: Literal["explicit", "automatic_reused", "automatic_fallback"] = (
+            "automatic_reused"
+        )
+    except EnvironmentConflictError:
+        selected = find_free_port(
+            "http",
+            catalog,
+            exclude_project=root,
+            host=http_interface,
+            project=current,
+            reserved_ports=(candidate,),
+        )
+        selection_kind = "automatic_fallback"
+        fallback_reason = "occupied" if state is AddressState.OCCUPIED else "unavailable"
+
+    return ProjectHttpPortSelection(
+        replace(current, assigned_http_port=selected),
+        selected,
+        selection_kind,
+        fallback_reason,
+        current,
+        candidate,
+    )
+
+
+def prepare_project_http_port_selection(
+    project: ProjectConfig, catalog: BackupCatalog | None
+) -> ProjectHttpPortSelection:
+    """Select and persist a live run endpoint before its command is captured."""
+    from odoo_instance_sdk.internal.project_init import project_lifecycle_lock
+
+    root = project.repository_root.resolve()
+    with project_lifecycle_lock(root):
+        selection = _select_project_http_port(ProjectConfig.load(root), catalog)
+        return _apply_project_http_port_selection_locked(selection, catalog)
+
+
+def _effective_project_config(
+    current: ProjectConfig,
+) -> tuple[Path, Path | None, dict[str, str]]:
+    from odoo_instance_sdk.internal.generated_config import project_generated_config_path
+    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+    root = current.repository_root.resolve()
+    generated = project_generated_config_path(root)
+    config_path = (
+        generated
+        if current.postgres is not None
+        and current.postgres.mode == "compose"
+        and generated.is_file()
+        else (root / current.source_config).resolve()
+        if current.source_config is not None
+        else None
+    )
+    return generated, config_path, parse_odoo_config(config_path) if config_path else {}
+
+
+def apply_project_http_port_selection(
+    selection: ProjectHttpPortSelection, catalog: BackupCatalog | None
+) -> ProjectHttpPortSelection:
+    """Revalidate and persist the captured run endpoint under the project lock."""
+    from odoo_instance_sdk.internal.project_init import (
+        project_lifecycle_lock,
+    )
+
+    root = selection.project.repository_root.resolve()
+    with project_lifecycle_lock(root):
+        return _apply_project_http_port_selection_locked(selection, catalog)
+
+
+def _apply_project_http_port_selection_locked(
+    selection: ProjectHttpPortSelection, catalog: BackupCatalog | None
+) -> ProjectHttpPortSelection:
+    from msgspec.structs import replace
+
+    from odoo_instance_sdk.internal.port_allocation import find_free_port
+    from odoo_instance_sdk.internal.project_init import (
+        _rewrite_project_generated_database,
+        switch_project_default,
+    )
+
+    root = selection.project.repository_root.resolve()
+    current = ProjectConfig.load(root)
+    if selection.source_project is not None and current != selection.source_project:
+        raise EnvironmentConflictError(
+            "stale_project_config", "Project configuration changed after port preview"
+        )
+    generated, _config_path, config = _effective_project_config(current)
+    if selection.selection_kind == "explicit" and current.preferred_http_port != selection.port:
+        raise EnvironmentConflictError("stale_project_config", "Project port selection changed")
+    try:
+        find_free_port(
+            "http",
+            catalog,
+            exclude_project=root,
+            host=config.get("http_interface", "127.0.0.1"),
+            requested=selection.port,
+            project=current,
+        )
+    except EnvironmentConflictError as exc:
+        if selection.selection_kind != "explicit":
+            raise
+        raise EnvironmentConflictError(
+            "port_in_use",
+            f"Explicit project HTTP endpoint {config.get('http_interface', '127.0.0.1')}:{selection.port} "
+            "is no longer available; free the port or update/remove preferred_http_port and retry.",
+            details={"port": selection.port, "kind": "http"},
+        ) from exc
+    updated = (
+        replace(current, assigned_http_port=selection.port)
+        if selection.selection_kind != "explicit"
+        else current
+    )
+    has_owned_config = (
+        current.postgres is not None and current.postgres.mode == "compose" and generated.is_file()
+    )
+    if updated != current:
+        # This helper rolls the manifest back if generated-config repair fails.
+        switch_project_default(root, updated)
+    elif has_owned_config and config.get("http_port") != str(selection.port):
+        _rewrite_project_generated_database(root, current, generated)
+    return dataclass_replace(selection, project=updated, source_project=updated)
 
 
 @dataclass(frozen=True, slots=True)

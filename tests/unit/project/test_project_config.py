@@ -49,6 +49,33 @@ def test_load_existing_manifest(tmp_path: Path) -> None:
     assert cfg.repository_root == tmp_path.resolve()
 
 
+def test_assigned_http_port_is_optional_and_round_trips(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text("[project]\nodoo_bin = '/usr/bin/odoo'\n")
+
+    legacy = ProjectConfig.load(tmp_path)
+    assert legacy.assigned_http_port is None
+
+    assigned = ProjectConfig(
+        repository_root=tmp_path,
+        odoo_bin=Path("/usr/bin/odoo"),
+        preferred_http_port=8069,
+        assigned_http_port=8070,
+    )
+    write_manifest(tmp_path, assigned)
+    loaded = ProjectConfig.load(tmp_path)
+    assert loaded.assigned_http_port == 8070
+    assert loaded.preferred_http_port == 8069
+    assert ProjectConfig.load(tmp_path).to_manifest() == loaded.to_manifest()
+
+
+@pytest.mark.parametrize("port", [0, 65536, True])
+def test_project_http_ports_reject_invalid_values(tmp_path: Path, port: int) -> None:
+    with pytest.raises(ConfigError):
+        ProjectConfig(repository_root=tmp_path, assigned_http_port=port)
+
+
 def test_addon_roots_and_server_modules_roundtrip_in_order(tmp_path: Path) -> None:
     cfg = ProjectConfig(
         repository_root=tmp_path,
