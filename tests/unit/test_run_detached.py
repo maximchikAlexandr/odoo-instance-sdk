@@ -17,7 +17,7 @@ from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.client import OdooClient
-from odoo_instance_sdk.commands.cli_parts import callbacks
+from odoo_instance_sdk.commands.cli_parts import run as run_callbacks
 from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import (
@@ -277,13 +277,19 @@ def test_detached_launch_persists_identity_and_returns_promptly(
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
-        result = inst.run_detached()
+        result = inst.run_detached(
+            http_port_selection="automatic_fallback",
+            http_port_fallback_reason="occupied",
+        )
 
     assert isinstance(result, DetachedLaunchResult)
     assert result.pid == 4242
     assert result.owner_kind == owner_kind
     assert result.owner_id == (env_id if owner_kind == "environment" else f"project_{env_id}")
     assert result.http_endpoint == f"http://127.0.0.1:{http_port}"
+    assert result.http_port == http_port
+    assert result.http_port_selection == "automatic_fallback"
+    assert result.http_port_fallback_reason == "occupied"
     assert result.log_path == str(wt / "odoo.log")
     assert len(fake.upsert_calls) == 1
     assert isinstance(fake.upsert_calls[0][1]["launch_identity_json"], str)
@@ -1158,8 +1164,29 @@ def _cli_invoke(instance: object, args: list[str]) -> Result:
         return CliRunner().invoke(cli, args)
 
 
+def _decode_json_envelope(raw: str) -> JsonValue:
+    return cast("JsonValue", json.loads(raw))
+
+
+def _decode_toon_envelope(raw: str) -> JsonValue:
+    from toon import DecodeOptions, decode
+
+    return cast("JsonValue", decode(raw, DecodeOptions(indent=2, strict=True)))
+
+
 @pytest.mark.unit
-def test_cli_run_detach_returns_typed_result(env_id: str, http_port: int, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("output_format", "decode_envelope"),
+    [("json", _decode_json_envelope), ("toon", _decode_toon_envelope)],
+    ids=["json", "toon"],
+)
+def test_cli_run_detach_returns_typed_result(
+    env_id: str,
+    http_port: int,
+    tmp_path: Path,
+    output_format: str,
+    decode_envelope: Callable[[str], JsonValue],
+) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     (wt / "odoo.log").write_text("")
@@ -1184,14 +1211,20 @@ def test_cli_run_detach_returns_typed_result(env_id: str, http_port: int, tmp_pa
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
-        result = _cli_invoke(inst, ["run", "-d", "--format", "json"])
+        result = _cli_invoke(inst, ["run", "-d", "--format", output_format])
 
     assert result.exit_code == 0, result.output
-    envelope = json.loads(result.stdout)
+    envelope = decode_envelope(result.stdout)
+    assert isinstance(envelope, dict)
     assert envelope["ok"] is True
-    assert envelope["result"]["pid"] == 4242
-    assert envelope["result"]["owner_kind"] == "environment"
-    assert envelope["result"]["http_endpoint"] == f"http://127.0.0.1:{http_port}"
+    payload = envelope["result"]
+    assert isinstance(payload, dict)
+    assert payload["pid"] == 4242
+    assert payload["owner_kind"] == "environment"
+    assert payload["http_endpoint"] == f"http://127.0.0.1:{http_port}"
+    assert payload["http_port"] == http_port
+    assert payload["http_port_selection"] is None
+    assert payload["http_port_fallback_reason"] is None
 
 
 @pytest.mark.unit
@@ -1290,10 +1323,14 @@ def test_public_cli_run_wait_ready_accepts_registered_legacy_environment(
     assert catalog.clear_calls == []
 
 
-@pytest.mark.unit
-def test_cli_run_detach_dry_run_emits_plan_without_spawning(
-    env_id: str, http_port: int, tmp_path: Path
-) -> None:
+def _invoke_detached_dry_run(
+    env_id: str,
+    http_port: int,
+    tmp_path: Path,
+    *,
+    platform_name: str,
+    pg_dump_path: str | None,
+) -> tuple[Result, RecordingExecutor]:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     (wt / "odoo.log").write_text("")
@@ -1308,6 +1345,7 @@ def test_cli_run_detach_dry_run_emits_plan_without_spawning(
         logfile="odoo.log",
     )
     executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
+    platform_os = SimpleNamespace(name=platform_name, pathsep=os.pathsep, environ=os.environ)
     with (
         patch(
             "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
@@ -1315,23 +1353,80 @@ def test_cli_run_detach_dry_run_emits_plan_without_spawning(
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
         patch(
-            "odoo_instance_sdk.commands.cli_parts.callbacks.shutil.which",
-            return_value="/usr/bin/pg_dump",
+            "odoo_instance_sdk.commands.cli_parts.run.shutil.which",
+            return_value=pg_dump_path,
+        ),
+        patch(
+            "odoo_instance_sdk.commands.cli_parts.run.os",
+            platform_os,
         ),
     ):
         result = _cli_invoke(inst, ["run", "-d", "--dry-run", "--format", "json"])
+
+    return result, executor
+
+
+@pytest.mark.unit
+def test_cli_run_detach_dry_run_emits_plan_without_spawning(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    result, executor = _invoke_detached_dry_run(
+        env_id,
+        http_port,
+        tmp_path,
+        platform_name="posix",
+        pg_dump_path=None,
+    )
 
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.stdout)
     assert envelope["dry_run"] is True
     assert envelope["result"]["steps"]
+    assert executor.spawned == []
+
+
+@pytest.mark.unit
+def test_cli_run_detach_dry_run_redacts_posix_pg_dump_shim_overrides(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    result, executor = _invoke_detached_dry_run(
+        env_id,
+        http_port,
+        tmp_path,
+        platform_name="posix",
+        pg_dump_path="/usr/bin/pg_dump",
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
     run_step = next(
         step for step in envelope["result"]["steps"] if step["step_id"] == "instance.detached"
     )
-    overrides = dict(run_step["environment_overrides"])
-    if os.name != "nt":
-        assert overrides["ODCLI_REAL_PG_DUMP"] == "<redacted>"
-        assert overrides["PATH"] == "<redacted>"
+    assert dict(run_step["environment_overrides"]) == {
+        "ODCLI_REAL_PG_DUMP": "<redacted>",
+        "PATH": "<redacted>",
+    }
+    assert executor.spawned == []
+
+
+@pytest.mark.unit
+def test_cli_run_detach_dry_run_omits_posix_pg_dump_shim_on_windows(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    result, executor = _invoke_detached_dry_run(
+        env_id,
+        http_port,
+        tmp_path,
+        platform_name="nt",
+        pg_dump_path="C:/Program Files/PostgreSQL/bin/pg_dump.exe",
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    run_step = next(
+        step for step in envelope["result"]["steps"] if step["step_id"] == "instance.detached"
+    )
+    assert dict(run_step["environment_overrides"]) == {}
     assert executor.spawned == []
 
 
@@ -1344,7 +1439,7 @@ def test_pg_dump_shim_repairs_file_stdout_without_changing_pipe(
     real = tmp_path / "real-pg-dump"
     real.write_text("#!/bin/sh\nprintf ok\n", encoding="utf-8")
     real.chmod(0o755)
-    shim = Path(callbacks.__file__).resolve().parents[2] / "internal/pg_dump_compat/pg_dump"
+    shim = Path(run_callbacks.__file__).resolve().parents[2] / "internal/pg_dump_compat/pg_dump"
     environment = {**os.environ, "ODCLI_REAL_PG_DUMP": str(real)}
 
     with open(os.devnull) as read_only_stdout:

@@ -24,6 +24,7 @@ from rich import box
 from rich.console import Console, RenderableType
 from rich.table import Table
 
+from odoo_instance_sdk.execution import action_command
 from odoo_instance_sdk.internal.output_fields import (
     current_field_schema,
     current_field_selection,
@@ -47,8 +48,8 @@ if TYPE_CHECKING:
     from toon.types import Depth, JsonArray, ResolvedEncodeOptions
     from toon.writer import LineWriter
 
-    from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
-    from odoo_instance_sdk.internal.proc import PrivateJsonValue, StepEvent, StepObserver
+    from odoo_instance_sdk.execution import ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
 
 
 def __getattr__(name: str) -> TypeAliasType:
@@ -476,13 +477,15 @@ def _default_rich_projection(document: OutputDocument) -> str:
     """Return a human projection without owning a terminal or output mode."""
     if not document.ok and document.error is not None:
         return document.error.message
+    warning_text = "\n".join(document.warnings)
     if document.result in (None, {}):
-        return ""
+        return warning_text
     if isinstance(document.result, dict) and _contains_steps(document.result):
         return _rich_plan_projection(
             document.result, command=document.command, warnings=document.warnings
         )
-    return json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
+    rendered = json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
+    return f"{warning_text}\n{rendered}" if warning_text else rendered
 
 
 def emit(
@@ -711,55 +714,6 @@ def failure_document(
     )
 
 
-def action_command(
-    step_id: str,
-    operation: Callable[[], _ResultT],
-    *,
-    description: str | None = None,
-    mutating: bool = False,
-    details: JsonValue = None,
-) -> Command[_ResultT]:
-    """Capture a bounded domain operation behind one command-local action.
-
-    Process-backed SDK operations provide richer command siblings.  This
-    adapter is for bounded leaves whose domain operation is already the
-    canonical process boundary or a read-only computation; it still gives
-    preview and execution one immutable command object and one ledger entry.
-    """
-    from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
-
-    action = PreparedAction(
-        step_id=step_id,
-        action=step_id,
-        description=description or step_id,
-        details=cast("PrivateJsonValue", details),
-        mutating=mutating,
-    )
-
-    def callback(context: RunContext[_ResultT]) -> _ResultT:
-        context.action(step_id)
-        result = operation()
-        context.complete_action(step_id)
-        return result
-
-    return Command.create(
-        ExecutionPlan(
-            steps=(
-                ActionStep(
-                    step_id=step_id,
-                    action=step_id,
-                    description=description or step_id,
-                    details=details,
-                    mutating=mutating,
-                ),
-            )
-        ),
-        callback,
-        (action,),
-    )
-
-
 def run_or_preview(  # noqa: C901
     build_command: Callable[[], _InspectableCommand[_ResultT]],
     *,
@@ -769,6 +723,8 @@ def run_or_preview(  # noqa: C901
     result: Callable[[_ResultT | None], JsonObject] | None = None,
     context: JsonObject | None = None,
     provenance: JsonObject | None = None,
+    warnings: tuple[str, ...] = (),
+    warnings_before_execution: bool = False,
     confirm: Callable[[], None] | None = None,
     rich: Callable[[OutputDocument], str] | None = None,
     preview: Callable[[_InspectableCommand[_ResultT]], JsonObject] | None = None,
@@ -793,6 +749,7 @@ def run_or_preview(  # noqa: C901
                     context=context,
                     provenance=provenance,
                     dry_run=True,
+                    warnings=warnings,
                 ),
                 mode,
                 rich=rich,
@@ -801,6 +758,19 @@ def run_or_preview(  # noqa: C901
         )
     if confirm is not None:
         confirm()
+
+    if warnings and warnings_before_execution:
+        emit(
+            success_document(
+                command=command_name,
+                context=context,
+                provenance=provenance,
+                warnings=warnings,
+            ),
+            mode,
+            rich=rich,
+        )
+        warnings = ()
 
     def execute(active_observer: StepObserver | None) -> _ResultT:
         if active_observer is None:
@@ -828,6 +798,17 @@ def run_or_preview(  # noqa: C901
                 raise click.exceptions.Exit(130) from exc
             raise
     if not emit_normal:
+        if warnings:
+            emit(
+                success_document(
+                    command=command_name,
+                    context=context,
+                    provenance=provenance,
+                    warnings=warnings,
+                ),
+                mode,
+                rich=rich,
+            )
         return 0, value
     payload = result(value) if result is not None else {}
     status = emit(
@@ -836,6 +817,7 @@ def run_or_preview(  # noqa: C901
             result=payload,
             context=context,
             provenance=provenance,
+            warnings=warnings,
         ),
         mode,
         rich=rich,

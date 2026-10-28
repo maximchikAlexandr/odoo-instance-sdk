@@ -6,7 +6,7 @@ import sys
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from odoo_instance_sdk.exceptions import (
     DetachedLaunchCleanupError,
@@ -324,8 +324,20 @@ class _PlanningMixin:
         env: dict[str, str] | None = None,
         wait_ready: bool = False,
         readiness_timeout: float = 60.0,
+        http_port_selection: Literal["explicit", "automatic_reused", "automatic_fallback"]
+        | None = None,
+        http_port_fallback_reason: Literal["occupied", "unavailable"] | None = None,
     ) -> DetachedLaunchResult:
         if wait_ready or readiness_timeout != 60.0:
+            if http_port_selection is None and http_port_fallback_reason is None:
+                return self.run_detached_command(
+                    config,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    wait_ready=wait_ready,
+                    readiness_timeout=readiness_timeout,
+                ).run()
             return self.run_detached_command(
                 config,
                 args=args,
@@ -333,8 +345,19 @@ class _PlanningMixin:
                 env=env,
                 wait_ready=wait_ready,
                 readiness_timeout=readiness_timeout,
+                http_port_selection=http_port_selection,
+                http_port_fallback_reason=http_port_fallback_reason,
             ).run()
-        return self.run_detached_command(config, args=args, cwd=cwd, env=env).run()
+        if http_port_selection is None and http_port_fallback_reason is None:
+            return self.run_detached_command(config, args=args, cwd=cwd, env=env).run()
+        return self.run_detached_command(
+            config,
+            args=args,
+            cwd=cwd,
+            env=env,
+            http_port_selection=http_port_selection,
+            http_port_fallback_reason=http_port_fallback_reason,
+        ).run()
 
     def run_detached_command(  # noqa: C901
         self,
@@ -345,6 +368,9 @@ class _PlanningMixin:
         env: dict[str, str] | None = None,
         wait_ready: bool = False,
         readiness_timeout: float = 60.0,
+        http_port_selection: Literal["explicit", "automatic_reused", "automatic_fallback"]
+        | None = None,
+        http_port_fallback_reason: Literal["occupied", "unavailable"] | None = None,
     ) -> Command[DetachedLaunchResult]:
         if not wait_ready and readiness_timeout != 60.0:
             raise InstanceConfigurationError("readiness_timeout requires wait_ready=True")
@@ -520,6 +546,9 @@ class _PlanningMixin:
                         owner_id=owner_id,
                         http_endpoint=f"http://{config.http_interface}:{config.http_port}",
                         log_path=logfile_path,
+                        http_port=config.http_port,
+                        http_port_selection=http_port_selection,
+                        http_port_fallback_reason=http_port_fallback_reason,
                     )
                 except BaseException as error:
                     if handle is not None:

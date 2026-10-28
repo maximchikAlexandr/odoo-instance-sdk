@@ -345,7 +345,9 @@ def _restore_preflight(  # noqa: C901
         except ValueError:
             parsed_http_port = None
         local_cfg["http_port"] = str(
-            resolve_project_http_port(current.preferred_http_port, parsed_http_port)
+            resolve_project_http_port(
+                current.preferred_http_port, parsed_http_port, current.assigned_http_port
+            )
         )
         local_password = local_cfg.get("admin_passwd")
         if local_password is None or not local_password.strip():

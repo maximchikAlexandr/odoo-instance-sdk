@@ -9,9 +9,9 @@ from odoo_instance_sdk.commands import resource
 from odoo_instance_sdk.commands.cli_parts.callbacks import (
     _print_doctor,
     _rich_deps_projection,
-    _rich_detached_status,
     _rich_vscode_generate,
 )
+from odoo_instance_sdk.commands.cli_parts.run import _rich_detached_status
 from odoo_instance_sdk.commands.git import _rich as rich_git
 from odoo_instance_sdk.commands.module import (
     _rich_module_deps,
@@ -130,6 +130,9 @@ def test_detached_and_dependency_results_are_row_oriented() -> None:
                 "owner_kind": "environment",
                 "owner_id": "env-1",
                 "http_endpoint": "http://127.0.0.1:8069",
+                "http_port": 8069,
+                "http_port_selection": "automatic_fallback",
+                "http_port_fallback_reason": "occupied",
                 "log_path": "/tmp/odoo.log",
             },
             command="run",
@@ -145,7 +148,21 @@ def test_detached_and_dependency_results_are_row_oriented() -> None:
         )
     )
 
-    _assert_bordered(detached, "Field", "Value", "PID", "42", "Owner ID", "env-1")
+    _assert_bordered(
+        detached,
+        "Field",
+        "Value",
+        "PID",
+        "42",
+        "Owner ID",
+        "env-1",
+        "HTTP port",
+        "8069",
+        "Port selection",
+        "automatic_fallback",
+        "Fallback reason",
+        "occupied",
+    )
     _assert_bordered(deps, "Check", "Status", "missing import", "odoo")
 
 
