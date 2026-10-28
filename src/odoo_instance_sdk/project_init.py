@@ -562,7 +562,7 @@ def _compose_followup_steps(
     start_config = copy.deepcopy(source_start)
     start_config.config_path = str(generated)
     start_config.http_port = resolve_project_http_port(
-        config.preferred_http_port, source_start.http_port
+        config.preferred_http_port, source_start.http_port, config.assigned_http_port
     )
     start_config.db_name = config.default_source_database or source_start.db_name or ""
     start_config.db_host = cluster.endpoint_host

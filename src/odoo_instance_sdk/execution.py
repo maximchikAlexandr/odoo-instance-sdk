@@ -23,8 +23,10 @@ from odoo_instance_sdk.exceptions import (
     UnplannedStepError,
 )
 from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
     PreparedCommand,
     PreparedStep,
+    PrivateJsonValue,
     PrivateProjection,
     ProcessExecutor,
     ProcessResult,
@@ -174,6 +176,37 @@ def fingerprint_plan(plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> str
     """Hash only canonical redacted plan data, excluding ``fingerprint`` itself."""
 
     return hashlib.sha256(canonical_plan_bytes(plan, secrets=secrets)).hexdigest()
+
+
+def action_command(
+    step_id: str,
+    operation: Callable[[], T],
+    *,
+    description: str | None = None,
+    mutating: bool = False,
+    details: JsonValue = None,
+) -> Command[T]:
+    """Capture an in-process domain operation as one immutable action."""
+    action = PreparedAction(
+        step_id=step_id,
+        action=step_id,
+        description=description or step_id,
+        details=cast("PrivateJsonValue", details),
+        mutating=mutating,
+    )
+
+    def callback(context: RunContext[T]) -> T:
+        context.action(step_id)
+        result = operation()
+        context.complete_action(step_id)
+        return result
+
+    public_action = action.public_projection()
+    return Command.create(
+        ExecutionPlan(steps=(public_action,)).with_fingerprint(),
+        callback,
+        (action,),
+    )
 
 
 T = TypeVar("T")

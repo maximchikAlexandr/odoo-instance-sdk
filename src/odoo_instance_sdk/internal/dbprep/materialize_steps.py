@@ -230,7 +230,7 @@ def _preparation_process_steps(
         runtime = resolve_runtime_binding(initial, root)
         start_config = StartConfig.from_odoo_config(source_config)
         start_config.http_port = resolve_project_http_port(
-            initial.preferred_http_port, start_config.http_port
+            initial.preferred_http_port, start_config.http_port, initial.assigned_http_port
         )
         if restore_inputs is None:
             raise ConfigError("reset admin preparation inputs were not captured")

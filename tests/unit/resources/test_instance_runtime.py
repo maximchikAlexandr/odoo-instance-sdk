@@ -382,7 +382,7 @@ class TestInstancePrefix:
             python=Path("python"),
             odoo_bin=Path("odoo-bin"),
             source_config=None,
-            preferred_http_port=8077,
+            assigned_http_port=8078,
             default_source_database="tenant",
             managed_filestore=Path(".odcli/filestore"),
             postgres=PostgresProjectConfig(
@@ -394,11 +394,16 @@ class TestInstancePrefix:
             staticmethod(lambda _path: MagicMock(owned=False)),
         )
 
-        instance = _make_client().instance.from_project(project)
+        client = _make_client()
+        instance = client.instance.from_project(project)
 
         assert instance.config.start_config is not None
         assert instance.config.start_config.config_path == str(generated)
-        assert instance.config.base_url == "http://127.0.0.1:8077"
+        assert instance.config.base_url == "http://127.0.0.1:8078"
+        assert instance.config.start_config.http_port == 8078
+        assert "http_port = 8077" in generated.read_text()
+        publication_target = client.publication._target(instance)
+        assert publication_target.local_endpoint == "http://127.0.0.1:8078"
         assert instance.config.db_host == "127.0.0.1"
         assert instance.config.db_port == 5468
         assert instance.config.db_user == "odoo"
