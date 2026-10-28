@@ -275,8 +275,13 @@ Catalogue lists are project-scoped by default. Use `--all-projects` when a
 global result is intended, for example `odcli backup ls --all-projects` or
 `odcli resource ls --all-projects`; Rich tables format byte values for
 people while JSON/TOON retain exact integer bytes. Project HTTP endpoints use
-the same precedence everywhere: explicit override, `preferred_http_port`, the
-effective `odoo.conf`, then the default port.
+the same precedence everywhere: explicit override, `preferred_http_port`,
+OdCLI's persisted `assigned_http_port`, the effective `odoo.conf`, then port
+8069. A real main-project run reuses a free automatic assignment or selects a
+replacement when it is occupied; an occupied `preferred_http_port` fails
+without changing the pin. Preview does not persist an assignment. Older SDK
+versions with strict manifest parsing may require removing `assigned_http_port`
+before rollback.
 
 ## Common workflows
 
@@ -732,7 +737,13 @@ interactive rather than finite plan documents.
 
 `run -d` / `--detach` launches Odoo in the background through the same
 inspect-then-run boundary, then returns once the process is alive with its
-pid, endpoint, and log path. One shared resolver chooses the effective
+pid, endpoint, log path, and bounded HTTP-port provenance. The additive
+`DetachedLaunchResult` fields are `http_port` (the selected integer endpoint),
+`http_port_selection` (`null` or `explicit`, `automatic_reused`,
+`automatic_fallback`), and `http_port_fallback_reason` (`null`, `occupied`, or
+`unavailable`). `occupied` means the configured endpoint is listening;
+`unavailable` means it is reserved or otherwise unavailable. A foreground
+Rich run prints a notice when automatic selection falls back. One shared resolver chooses the effective
 logfile: an explicit non-empty `logfile` in effective `odoo.conf` wins;
 otherwise `odoo.log` next to the effective config is created before spawn and
 passed to Odoo through `--logfile` without editing the user's config. New
