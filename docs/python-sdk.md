@@ -473,7 +473,7 @@ Both are bounded read-only leaves (the CLI `odcli ps` spelling uses
 `instance.run_detached_command()` captures one detached Odoo launch plan and
 returns a `Command[DetachedLaunchResult]`. The preview is redacted and never
 spawns; `.run()` launches Odoo in the background and returns once it is alive
-with its pid, endpoint, and log path:
+with its pid, endpoint, log path, and bounded HTTP-port provenance:
 
 ```python
 from odoo_instance_sdk import OdooClient, OdooClientConfig
@@ -483,9 +483,17 @@ instance = client.instance.from_config("./odoo.conf")
 
 command = instance.run_detached_command(args=("--dev=reload",))
 print(command.plan)  # redacted detached argv
-result = command.run()  # DetachedLaunchResult: pid, endpoint, log_path
-print(result.pid, result.endpoint, result.log_path)
+result = command.run()  # DetachedLaunchResult
+print(result.pid, result.http_endpoint, result.log_path, result.http_port)
 ```
+
+`http_port` is the selected integer endpoint. `http_port_selection` is `null`
+for environment-owned runs, or one of `explicit`, `automatic_reused`, and
+`automatic_fallback` for main-project runs. `http_port_fallback_reason` is
+`null`, `occupied` (the configured endpoint is listening), or `unavailable`
+(the endpoint is reserved or otherwise unavailable). These fields contain no
+host paths or secrets. A foreground Rich run also prints a notice when it
+falls back to another port.
 
 `instance.run_detached()` is the convenience sibling that delegates once to
 `run_detached_command()` and runs it. The CLI spelling is `odcli run -d`.
