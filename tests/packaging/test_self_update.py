@@ -312,6 +312,8 @@ def test_coordinated_companion_update_installs_both_distributions_at_target(
     _require_uv()
     fixture, baseline, target = _create_coordinated_update_fixture(tmp_path)
     env = _isolated_home(tmp_path, source_repo=fixture)
+    env["UV_CACHE_DIR"] = str(tmp_path / "cold-uv-cache")
+    assert not Path(env["UV_CACHE_DIR"]).exists()
     core_install = _install_uv_tool_vcs(
         env,
         fixture,
