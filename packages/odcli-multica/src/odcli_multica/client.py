@@ -823,7 +823,6 @@ class MulticaOdooClient:
                 selected.member_id or selected.root_creator_id,
                 host,
                 mapping_path=Path(mapping_path) if mapping_path is not None else None,
-                project_root=project_root,
                 process_environment=process_environment,
                 include_implicit_project_root=False,
                 require_owner_only_legacy_directory=False,
