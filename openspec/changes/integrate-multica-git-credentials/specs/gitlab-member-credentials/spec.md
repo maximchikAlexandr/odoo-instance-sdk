@@ -1,87 +1,45 @@
 ## MODIFIED Requirements
 
-### Requirement: Protected pre-clone credential files
+### Requirement: GitLab credential identity is verified at use time
 
-OdCLI SHALL read non-secret GitLab mappings by default from `get_user_root()/credentials/gitlab-credentials.toml` and legacy token values from the unified owner-only `get_user_root()/.env`, both available without a project or repository and honoring `ODCLI_USER_ROOT`. A supplied `mapping_path` SHALL replace the default legacy mapping path, while a supplied `environment_path` SHALL replace all default legacy token files. Each mapping SHALL retain exactly one person's Multica account `user_id` from `multica workspace member list --output json`, normalized HTTPS GitLab host, login, and token environment-key name; it SHALL NOT gain a persisted provider user ID. The membership-row `id`, agent IDs, and squad IDs SHALL NOT be accepted as substitutes for that `user_id`. Every consulted directory/file SHALL be owned by and accessible only to the current user; malformed permissions, duplicate member/host mappings, missing values, or ambiguous entries SHALL fail closed. OdCLI SHALL NOT inspect or use ambient Git credential helpers, credential stores, URL userinfo, or another member's mapping.
+OdCLI SHALL continue to resolve the exact member and normalized HTTPS host through the existing encrypted-first resolver and SHALL verify the configured login at use time. For cache-read purpose only, it SHALL reuse that owner verification's runtime provider ID and compare it with one bounded personal-access-token self-information response. It SHALL NOT persist provider identity or change credential records, the secret-store schema, or the Admin model.
 
-Credential resolution SHALL select an exact encrypted member/host record first. Only exact encrypted-record absence SHALL continue to the legacy mapping selected above, then choose the token from the first applicable source in this order: supplied process environment, supplied `environment_path`, unified user dotenv, compatibility credential dotenv. A project `.odcli` mapping or dotenv SHALL have no implicit priority and SHALL be consulted only when its path is supplied explicitly. The former `get_user_root()/credentials/.env` SHALL be a compatibility-only source when the encrypted store and higher-precedence values do not resolve the selected token key. An old-only value SHALL be accepted with a non-secret deprecation diagnostic. When both default user files contain the selected key, equal nonblank values SHALL use the unified file with that diagnostic, while differing nonblank values SHALL fail without revealing either value. Explicit path overrides SHALL not combine with the corresponding default compatibility files.
+#### Scenario: Cache identity and token owner agree
 
-#### Scenario: Resolve one selected member before clone
+- **WHEN** the configured login authenticates to one runtime provider ID and the active token self-information reports that same ID with exactly the standard `read_repository` scope
+- **THEN** the helper returns that exact-host credential for cache clone/fetch
 
-- **WHEN** `--member-id` names a UUID with one valid mapping for the normalized host and its token key has a non-empty value at the highest applicable source
-- **THEN** OdCLI resolves one private credential snapshot without requiring a destination manifest, issue creator, runtime owner, current Git identity, or project-local credential copy
+#### Scenario: Cache identity cannot be proved
 
-#### Scenario: User-root-only credential resolves
+- **WHEN** login ownership, token ownership, active state, or the complete scope set is missing, incompatible, or mismatched
+- **THEN** the helper returns no credential and does not try another record or member
 
-- **WHEN** the encrypted store is exactly absent, mapping and token exist only below the effective `ODCLI_USER_ROOT`, and the selected project has no credential files
-- **THEN** OdCLI resolves the selected member and host through the user-root files
+### Requirement: Existing resolver precedence remains authoritative
 
-#### Scenario: Explicit paths replace legacy defaults
+The bridge SHALL call the existing resolver without synthesizing project-local mapping or dotenv defaults. Encrypted-first lookup, the effective user root including `ODCLI_USER_ROOT`, supplied process environment, explicit legacy paths, and existing compatibility/conflict behavior SHALL remain authoritative. Project-local credentials SHALL be read only when a caller passes their paths explicitly.
 
-- **WHEN** explicit mapping and environment paths are supplied and no encrypted record exists
-- **THEN** OdCLI reads only those legacy files plus the supplied process environment and does not merge project or default user credential files
+#### Scenario: Only user-root credentials exist
 
-#### Scenario: Encrypted record overrides legacy values
+- **WHEN** the selected member and host have valid credentials under the effective user root and no project `.odcli` credential copies exist
+- **THEN** the bridge resolves the credential through the existing resolver
 
-- **WHEN** a valid exact encrypted record and conflicting explicit or default legacy values exist
-- **THEN** OdCLI uses only the encrypted record
+#### Scenario: Explicit legacy path is supplied
 
-#### Scenario: Legacy token path transitions safely
-
-- **WHEN** only the former credential dotenv defines the selected token key
-- **THEN** OdCLI uses it for compatibility, emits path-only migration guidance to `<ODCLI_USER_ROOT>/.env`, and keeps the token secret
-
-#### Scenario: Legacy and unified token values conflict
-
-- **WHEN** fallback reaches the default user tier and the unified and former credential dotenv files contain different nonblank values for the selected key
-- **THEN** OdCLI fails before a Git child or GitLab request and does not choose either value
-
-#### Scenario: Credential files are not protected
-
-- **WHEN** any consulted mapping, dotenv file, or containing directory is writable or readable beyond the current owner
-- **THEN** OdCLI fails before a Git child or GitLab request starts and reports only the affected path and permission requirement
-
-#### Scenario: Ambient identity is available
-
-- **WHEN** no exact selected-member mapping exists but system or repository Git credentials are configured
-- **THEN** OdCLI rejects the operation without invoking those credentials
-
-### Requirement: GitLab token owner verification
-
-For ordinary credentialed commands, OdCLI SHALL call the selected host's authenticated GitLab `GET /api/v4/user` endpoint before the first Git invocation or mutating GitLab request, require the returned username to equal the configured login, and capture a stable GitLab user ID plus usable commit name/email identity. Native cache-read mode SHALL reuse or split that existing runtime owner check to require the configured login and capture the stable GitLab user ID without requiring commit name/email, then call `GET /api/v4/personal_access_tokens/self` and require an active token whose user ID equals that runtime owner ID and whose complete standard scope set is exactly `read_repository`. It SHALL NOT persist the provider ID or migrate credential/Admin records. Authentication, host, owner, identity, state, or scope mismatch SHALL fail before Git or mutation. Public plans/results/errors SHALL expose only non-secret member, host, login, runtime provider user identity, selection source, and cache-read validation state.
-
-#### Scenario: Token belongs to configured login
-
-- **WHEN** GitLab authenticates an ordinary task token and returns the configured login with usable commit identity
-- **THEN** the same immutable verified identity is used for that command's Git author/committer or GitLab request context
-
-#### Scenario: Cache token is read-only
-
-- **WHEN** runtime owner verification proves the configured login and provider user ID and token self-information reports that same ID, active state, and exact `read_repository` scope
-- **THEN** the helper may return that credential for native cache clone/fetch without collecting commit identity
-
-#### Scenario: Token belongs to another user
-
-- **WHEN** authenticated username differs from the configured login or token self-information user ID differs from the runtime owner-verification ID
-- **THEN** OdCLI exits non-zero before clone, fetch, commit, push, upload, or merge-request mutation
-
-#### Scenario: Token identity lacks commit fields
-
-- **WHEN** a commit is requested and the verified GitLab identity cannot supply a valid name and email or API-confirmed noreply address
-- **THEN** OdCLI rejects the commit before launching Git and does not fall back to machine Git configuration
+- **WHEN** encrypted lookup is absent and the caller supplies an explicit mapping or environment path
+- **THEN** the existing explicit-path precedence applies without merging an implicit project file
 
 ## ADDED Requirements
 
-### Requirement: Stable standard Git credential helper entrypoint
+### Requirement: Existing standard helper has a stable installed entrypoint
 
-The core package SHALL install `git-credential-odcli` as a thin executable over the existing standard Git credential-helper implementation. It SHALL accept only a bounded `get` request, require an exact HTTPS host and explicit member/purpose inputs, return only protocol username/password fields on success, write sanitized non-secret diagnostics only to stderr, and terminate. It SHALL NOT implement a second resolver, persist credentials, approve/reject/store credentials, or run as a service.
+The package SHALL expose `git-credential-odcli` as a thin installed entrypoint over the existing finite helper implementation if no equivalent installed entrypoint exists. It SHALL accept only bounded standard `get` input, require exact host/member/purpose in cache mode, emit only protocol fields on success, and emit only sanitized diagnostics on failure. It SHALL NOT implement another resolver, store/erase behavior, persistence, or a service.
 
-#### Scenario: Git invokes the packaged helper
+#### Scenario: Installed Git invokes the helper
 
-- **WHEN** Git requests credentials for the configured exact host through `credential.helper=odcli`
-- **THEN** the executable delegates to the shared resolver and writes one protocol response before exiting
+- **WHEN** Git invokes `credential.helper=odcli` for the configured exact HTTPS host
+- **THEN** the entrypoint delegates once to the existing helper/resolver and exits after one response
 
-#### Scenario: Unsupported helper operation
+#### Scenario: Helper request is unsupported
 
-- **WHEN** Git requests `store`, `erase`, an unknown action, a different host, or malformed input
-- **THEN** the helper returns no credential, exits non-zero, and emits no secret
+- **WHEN** the action, input, purpose, member, or host is absent, malformed, or different from configuration
+- **THEN** the helper exits non-zero without returning or logging a secret

@@ -1,32 +1,30 @@
 ## Why
 
-Native Multica cache fetches and task-checkout Git/GitLab operations do not yet share one explicit, verified credential-selection contract. This leaves cold-cache authentication, per-member overrides, and user-root-only legacy credentials either unsupported or dependent on manual wrappers and project-local files.
+The repository already has the member credential resolver, a standard Git credential helper, verified root-creator traversal, execution-time revalidation, and one credential snapshot shared by raw Git, sync, and merge-request publication. The remaining GitHub #168 gap is to connect those paths for native Multica cache reads and an optional explicit human member, without project-local credential copies or a second selection subsystem.
 
 ## What Changes
 
-- Publish the existing short-lived Git credential helper through a stable executable and define a fail-closed, host-scoped cache-read mode for native Multica clone/fetch, including cold caches and background fetches.
-- Select one explicitly configured cache credential whose runtime provider identity and permissions are verified as read-only, and document stop → validate → restart for replacing that daemon-generation credential.
-- Add one shared typed member-selection input to credential-dependent `odcli-multica` SDK operations and `--member-id` to native Git passthrough, `git sync`, and merge-request publication. An explicit member wins over automatic root-creator selection but never bypasses verified checkout, issue, workspace, repository, or host binding.
-- Make user-root credential storage the default for every `odcli-multica` credential path, including `ODCLI_USER_ROOT`, encrypted records, and legacy mapping/token files; retain explicit path/process overrides with one documented precedence.
-- Report the chosen non-secret identity and selection source in inspectable plans/results while preserving command-scoped secret delivery and redaction.
-- Add focused unit, integration, packaging, CI, and isolated live verification for cache routing, two-member concurrency, negative routing, user-root precedence, CLI/SDK parity, and secret absence.
+- Expose the existing short-lived helper through a stable executable if packaging does not already provide one, and add a cache-read purpose that validates the configured account and an active token whose complete standard scope set is exactly `read_repository`.
+- Configure native cache Git children through process-local daemon-generation environment; replacement uses the existing stop → validate → start lifecycle and introduces no hot-rotation product API.
+- Extend the existing `RootCreatorContext` and execution revalidation path minimally so raw Git, sync, and merge-request publication can select an optional explicit current human workspace member; omission preserves root-creator behavior.
+- Stop `odcli-multica` from synthesizing project `.odcli` credential defaults. Existing encrypted-first resolution, `ODCLI_USER_ROOT`, legacy conflict checks, and explicit overrides remain authoritative.
+- Add only focused tests and one extension of the existing live workflow for cache identity/scope, explicit override failures, user-root-only credentials, two-account isolation, and one integrated path.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `multica-git-cache-credentials`: Stable helper integration and read-only credential routing for native Multica shared-cache clone/fetch operations.
+- `multica-git-cache-credentials`: Process-local native-cache authentication through the existing helper and resolver.
 
 ### Modified Capabilities
 
-- `gitlab-member-credentials`: Define user-root defaults, explicit override precedence, read-only cache-token verification, stable helper packaging, and secret-safe identity observability.
-- `multica-user-credentials`: Add explicit verified member selection alongside automatic root-creator selection and require all bridge consumers to use the same shared selection/resolution path.
-- `multica-environment-binding`: Preserve verified checkout/task/repository binding when an explicit member is selected and expose the selection through typed SDK and CLI contracts.
-- `gitlab-merge-request`: Accept the shared explicit member selection for `odcli-multica` publication without changing assignee semantics or core `odcli git mr create`.
+- `gitlab-member-credentials`: Add cache-purpose validation and stable helper packaging while retaining existing storage and precedence.
+- `multica-user-credentials`: Add an optional explicit human member to the existing root-creator context and remove implicit project credential defaults from bridge calls.
+- `multica-environment-binding`: Thread the optional member through existing command builders and revalidation.
+- `gitlab-merge-request`: Let the existing publication path consume the selected member without changing MR semantics.
 
 ## Impact
 
-- Affected implementation: `src/odoo_instance_sdk/internal/git_credential_helper.py`, the existing runtime GitLab identity validation and packaging metadata, and `packages/odcli-multica` client, models, CLI, Git execution, tests, and documentation.
-- Affected public surface: additive typed `member_id` inputs, additive `--member-id` options, a stable helper executable, and safe identity fields in plans/results.
-- Native Multica integration uses process-local Git configuration and a quiescent daemon restart; it does not persist tokens in remotes, Git config, checkout bindings, or a new credential store.
-- No credential-record/Admin-model migration, database migration, rotation API/state machine, new dependency, OAuth service, long-running credential process, or global account switch is introduced.
+- Narrow changes in the existing core helper/identity modules and packaging, plus the existing `packages/odcli-multica` context, client, command, CLI, tests, and docs.
+- Additive `member_id`/`--member-id` inputs and a stable helper executable where missing.
+- No new credential store, provider-ID persistence, selector/result subsystem, Admin model, database migration, OAuth service, credential daemon, rotation state machine, or global account switch.

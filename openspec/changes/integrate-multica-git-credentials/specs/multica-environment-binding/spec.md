@@ -1,25 +1,20 @@
 ## ADDED Requirements
 
-### Requirement: Credential member override preserves verified task binding
+### Requirement: Optional member override preserves the existing verified binding
 
-Credential-dependent `MulticaOdooClient` command builders for native Git passthrough, Git synchronization/publication, and GitLab merge-request publication SHALL accept an optional typed `member_id`; their CLI leaves SHALL expose the same input as `--member-id`. The explicit member SHALL take precedence over root-creator credential selection only after `VerifiedTaskContext` has proved the exact checkout, issue, run, project, workspace, runtime, daemon, and repository. Execution SHALL revalidate the selected member and all existing context, origin, branch, and stale-plan safeguards before credential delivery or mutation. Context inspection and environment preparation SHALL remain credential-independent and SHALL NOT accept this option.
+Credential-dependent raw Git, synchronization, and merge-request command builders SHALL accept optional typed `member_id`, and their CLI leaves SHALL expose `--member-id`. The callbacks SHALL pass the value into the existing context/revalidation path. Every current checkout, issue, workspace, repository, origin, branch, stale-plan, subprocess, and host check SHALL still run before credential delivery or mutation. Credential-independent inspection and environment preparation SHALL not accept the option.
 
 #### Scenario: Raw Git uses an explicit member
 
-- **WHEN** raw Git is requested for a verified checkout with `--member-id` naming a valid human workspace member
-- **THEN** the frozen command selects that member while Git remains restricted to the verified checkout and exact remote host
+- **WHEN** raw Git receives a valid `--member-id` for a verified checkout
+- **THEN** the existing command plan selects that member while retaining the verified checkout and exact host
 
-#### Scenario: Sync uses automatic selection without the flag
+#### Scenario: Override cannot redirect an operation
 
-- **WHEN** `git sync` omits `--member-id`
-- **THEN** the existing verified root-creator behavior and all current sync/push safeguards remain unchanged
+- **WHEN** member evidence is valid but checkout, issue, workspace, repository, origin, branch, or host evidence conflicts or changes
+- **THEN** existing revalidation fails before credential delivery or mutation
 
-#### Scenario: Override cannot redirect the operation
-
-- **WHEN** an explicit member is valid but checkout, issue, workspace, repository, origin, branch, or host evidence is invalid or changes after planning
-- **THEN** the operation fails before credential delivery or mutation and does not reinterpret the member as authority for the conflicting resource
-
-#### Scenario: CLI and SDK inputs agree
+#### Scenario: CLI and SDK agree
 
 - **WHEN** a credential-dependent CLI leaf receives `--member-id`
-- **THEN** it passes the normalized value to the corresponding typed command builder and does not read helper environment variables or resolve credentials in the callback
+- **THEN** it passes the normalized value to the corresponding command builder without resolving credentials in the callback
