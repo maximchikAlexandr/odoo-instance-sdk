@@ -24,6 +24,7 @@ from tests.unit.test_cli_output_modes import PublicLeafCase
 
 from .archive import ArchiveIdentity
 from .cleanup import FailureEvidence, terminate_owned_process_group
+from .compose import _tcp_ready
 from .conftest import E2ERuntime
 from .failures import assert_secret_free
 from .focused_support import (
@@ -141,6 +142,10 @@ def _module_test(state: _State) -> tuple[Result, dict[str, Any]]:
 
 
 def _inspect_profile(state: _State) -> tuple[Result, dict[str, Any]]:
+    _assert_no_inspector_http_runtime(state)
+    sentinel_before = _inspection_fixture_sentinel(state)
+    assert sentinel_before == "ODCLI-E2E-RESTORED"
+
     checks = (
         (["inspect", "model", "odcli.e2e.probe"], "exists", True),
         (["inspect", "field", "odcli.e2e.probe", "marker"], "type", "char"),
@@ -182,7 +187,35 @@ def _inspect_profile(state: _State) -> tuple[Result, dict[str, Any]]:
     )
     assert profile["total_query_count"] == sum(entry["query_count"] for entry in profile["entries"])
     assert last is not None
+    sentinel_after = _inspection_fixture_sentinel(state)
+    assert sentinel_after == sentinel_before, "inspection changed the fixture sentinel"
+    _assert_no_inspector_http_runtime(state)
     return last, json.loads(last.stdout)
+
+
+def _inspection_fixture_sentinel(state: _State) -> str:
+    result = _invoke(
+        state,
+        [
+            "eval",
+            "env.ref('odcli_e2e_probe.probe_record').marker",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    assert document["ok"] is True
+    sentinel = document["result"]["result"]
+    assert isinstance(sentinel, str)
+    return sentinel
+
+
+def _assert_no_inspector_http_runtime(state: _State) -> None:
+    port = state.runtime.reservations[3].port
+    assert not _tcp_ready("127.0.0.1", port), (
+        f"inspection unexpectedly exposed an HTTP listener on port {port}"
+    )
 
 
 def _init_monitoring(state: _State) -> tuple[Result, dict[str, Any]]:

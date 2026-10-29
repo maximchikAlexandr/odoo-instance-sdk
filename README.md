@@ -937,6 +937,28 @@ for database in instance.databases.list():
     print(database.name, database.backup)
 ```
 
+The bounded inspector is available directly on the instance. It returns typed
+identity/metadata models and never exposes arbitrary record fields:
+
+```python
+from odoo_instance_sdk import OdooTestResult, OdooTestSpec
+from odoo_instance_sdk.resources.testing import run_odoo_tests_command
+
+model = instance.inspector.model("res.partner")
+field = instance.inspector.field("res.partner", "email")
+reference = instance.inspector.ref("base.user_admin")
+
+spec = OdooTestSpec(modules=("sale",), test_tags="/sale", profile=True)
+result: OdooTestResult = run_odoo_tests_command(instance, spec).run()
+if result.profile is not None:
+    print(result.profile.total_duration, result.profile.total_query_count)
+```
+
+Inspection is limited to one model, field, or XML ID and the documented
+bounded metadata. It does not return record values, execute SQL, write data,
+or traverse relations. SDK profiling is opt-in through `OdooTestSpec.profile`;
+the typed `OdooTestResult.profile` is `None` when profiling was not requested.
+
 Native runtime arguments are available through the same SDK instance. Pass a
 tuple (or another sequence) to freeze the exact argv in the captured command;
 the command's plan and execution use that same snapshot:
