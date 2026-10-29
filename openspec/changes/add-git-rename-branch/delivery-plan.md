@@ -9,7 +9,9 @@
 
 `e2e_required=true`.
 
-Repository-owned integration tests with disposable local/bare Git repositories are sufficient for allocation arithmetic, local/catalogue/origin collisions, races, detached HEAD, dirty/index preservation, upstream cleanup, and compensation. A focused independent Mac walkthrough remains required because the change introduces visible Rich terminal output and a public selector-to-SDK-to-real-Git path; lower-level assertions cannot produce the mandatory genuine before/after output evidence. No Odoo process, database, PostgreSQL cluster, or numbered `odcli-N` slot is required because the specified operation must not create or inspect those resources.
+Repository-owned integration tests with disposable local/bare Git repositories are sufficient for allocation arithmetic, local/catalogue/origin collisions, races, detached HEAD, dirty/index preservation, upstream cleanup, and compensation. A focused independent Mac walkthrough remains required because the change introduces visible Rich terminal output and a public selector-to-SDK-to-real-Git path; lower-level assertions cannot produce the mandatory genuine before/after output evidence.
+
+Baseline and candidate live execution SHALL each use a fresh Binta numbered binding created by `scripts/agent_checkout.py` with the numbered project profile, approved reference checkout, a unique HTTP port and target database, and an explicit complete `--sdk-sha` for the revision under test. Odoo and database behavior are not rename assertions, but the owned slot, checkout, database, port, environment, `odcli-N` launcher, and exact full SDK SHA are mandatory isolation and provenance. The walkthrough SHALL prove that rename changes none of those bindings or resources.
 
 ## Verification Matrix
 
@@ -18,7 +20,7 @@ Repository-owned integration tests with disposable local/bare Git repositories a
 | GRB-01 | Shared allocation: first/max/gaps and unavailable sources | Lower-level deterministic coverage is sufficient; no live stand | N/A | `uv run pytest -q -o addopts='' tests/unit/test_cli_ticket_checkout.py tests/unit/test_ticket_branch_allocation.py` | Inspect test fixtures and compare shared allocator use from checkout and rename; do not rerun as the manual check | Extend `offline-tests` through the named unit nodes | Exact unsuffixed/`_N` selection, maximum non-reuse, source failure is non-empty error, checkout parity | Pytest command/exit and candidate SHA in Multica only; no image |
 | GRB-02 | Safe rename: free/local/catalogue/origin/multiple/repeat/detached/race/state preservation | Disposable repository integration closes mutation/race gap without Odoo | N/A | `uv run pytest -q -o addopts='' tests/integration/test_git_rename_branch.py` | Independently inspect before/after refs, HEAD, index tree, porcelain status, untracked file, catalogue rows, and bare-origin refs for one passing fixture | Extend `offline-tests`; add focused integration node, no new framework | Non-force rename only; no switch/overwrite; repeated call no-op; stale plans fail; state bytes/refs unchanged except local branch/upstream | Command/exit, fixture hashes, and assertions in Multica only; no decorative image |
 | GRB-03 | Upstream-safe local-only behavior and compensation | Lower-level fault injection is sufficient for cleanup failure; real push is prohibited | N/A | Same integration node as GRB-02 plus focused `-k upstream` | Inspect the planned argv/action sequence and one injected cleanup failure; verify old branch/config restoration or explicit incomplete recovery | `offline-tests` | No fetch/push/remote ref/worktree/catalogue write; mismatched upstream absent after success; bounded non-overwriting compensation | Structured assertion summary in Multica only; no image |
-| GRB-04 | CLI leaf: selectors, dry-run, Rich/JSON/TOON, bounded failure, inventory/docs | Automated CLI contracts cover envelopes; live case required for real selector/origin and visible output | N/A | `uv run pytest -q -o addopts='' tests/unit/test_cli_git.py tests/unit/test_cli_output_modes.py tests/unit/test_cli_characterization.py tests/unit/test_git_architecture.py tests/unit/test_verification_assets.py` | On Mac, use isolated baseline/candidate SDK checkouts and a disposable clone of `<PROJECT_TEST_REPOSITORY_URL>` resolved from the Multica project description; create equivalent non-ticket starting branches, capture baseline command-not-present text at the approved base, then candidate dry-run and one successful rename using `odcli --project "$CHECKOUT" git rename-branch ICODE-596`; inspect refs/state and clean only the disposable checkout | Extend existing `offline-tests` and `compatibility` jobs; `PUBLIC_LEAF_CASES` disposition `not-applicable` for Real Odoo with rationale that this is isolated Git workflow evidence | Baseline and candidate revision recorded; dry-run leaves refs/config unchanged; success returns old/selected names and preserves HEAD/index/porcelain; origin unchanged; help/inventory/docs agree | `git-rename-branch-before.txt/.png`, `git-rename-branch-dry-run.txt/.png`, `git-rename-branch-after.txt/.png`; Multica attachments only |
+| GRB-04 | CLI leaf: selectors, dry-run, Rich/JSON/TOON, bounded failure, inventory/docs | Automated CLI contracts cover envelopes; live case required for exact-SHA numbered binding, real selector/origin, resource non-mutation, and visible output | N/A | `uv run pytest -q -o addopts='' tests/unit/test_cli_git.py tests/unit/test_cli_output_modes.py tests/unit/test_cli_characterization.py tests/unit/test_git_architecture.py tests/unit/test_verification_assets.py` | On Mac, create separate fresh baseline and candidate numbered installations through Binta `scripts/agent_checkout.py create`, always passing `--project ~/e2e/odcli/numbered-project-e2e`, `--reference-checkout ~/e2e/odcli/binta-e2e-reference`, unique `--http-port`/`--target-database`, and the explicit complete baseline or candidate `--sdk-sha`; inspect each allocated number before the attempt, invoke only its returned `odcli-N` executable against its owned checkout, capture baseline command-not-present text at the approved base, then candidate dry-run and successful rename; compare Git plus slot/environment/database/port bindings before and after | Extend existing `offline-tests` and `compatibility` jobs; `PUBLIC_LEAF_CASES` disposition `not-applicable` for Real Odoo with rationale that the live proof is an isolated numbered Git workflow rather than an Odoo lifecycle scenario | Baseline/candidate full SHA, numbered identity, launcher, checkout, environment, database, and port recorded; dry-run leaves all state unchanged; success returns old/selected names and preserves HEAD/index/porcelain, origin, catalogue count, and every non-Git resource binding; help/inventory/docs agree | `git-rename-branch-before.txt/.png`, `git-rename-branch-dry-run.txt/.png`, `git-rename-branch-after.txt/.png`, sanitized create/inspect/cleanup provenance; Multica attachments only |
 
 ## Implementer-Owned Verification Assets
 
@@ -31,22 +33,58 @@ Repository-owned integration tests with disposable local/bare Git repositories a
 
 ### Readiness gate
 
-Before a live attempt, the Tester SHALL record the candidate product SHA, approved baseline SHA, test-code SHA, clean SDK checkouts, exact private test-repository resource resolved from the project description, an isolated disposable checkout/branch, locale, terminal width, output mode, and passing focused deterministic tests. Private hostnames, credentials, user identity, and local absolute paths SHALL be sanitized from evidence.
+Before consuming a live attempt, the Tester SHALL record the candidate product SHA, approved baseline SHA, test-code SHA, locale, terminal width, output mode, and passing focused deterministic tests. The test repository URL SHALL be resolved from the Multica project description but SHALL NOT be copied into Git or public evidence.
+
+The Tester SHALL then create two fresh numbered bindings from the Binta reference wrapper, using distinct free ports and target databases:
+
+```sh
+cd ~/e2e/odcli/binta-e2e-reference
+python3 scripts/agent_checkout.py create \
+  --project ~/e2e/odcli/numbered-project-e2e \
+  --reference-checkout ~/e2e/odcli/binta-e2e-reference \
+  --http-port "$BASELINE_HTTP_PORT" \
+  --target-database "$BASELINE_DATABASE" \
+  --sdk-sha "$BASELINE_SHA"
+python3 scripts/agent_checkout.py inspect "$BASELINE_N"
+
+python3 scripts/agent_checkout.py create \
+  --project ~/e2e/odcli/numbered-project-e2e \
+  --reference-checkout ~/e2e/odcli/binta-e2e-reference \
+  --http-port "$CANDIDATE_HTTP_PORT" \
+  --target-database "$CANDIDATE_DATABASE" \
+  --sdk-sha "$CANDIDATE_SHA"
+python3 scripts/agent_checkout.py inspect "$CANDIDATE_N"
+```
+
+Create output supplies each allocated number and launcher; the plan variables SHALL be filled from that output rather than guessed. For both slots, `inspect` SHALL prove ownership, checkout linkage, environment identity, database, unique port, launcher/interpreter, and exact complete SDK SHA before any baseline/candidate command runs. The baseline SHA SHALL equal the approved base and the candidate SHA SHALL equal the exact published implementation revision. A missing/mismatched field, non-owned resource, occupied port/database, non-fresh checkout, global/unqualified `odcli`, or failed readiness check blocks the attempt rather than allowing substitution. Private hostnames, credentials, user identity, and local absolute paths SHALL be sanitized from published evidence.
 
 ### Walkthrough
 
-1. Capture baseline text for the exact command at the approved base, where the leaf is absent; do not invent a success baseline.
-2. At the candidate SHA, create an equivalent disposable starting branch with one committed file, one staged change, one unstaged change, and one untracked file. Record HEAD, index tree, porcelain status, current branch, upstream, and matching origin refs.
-3. Run candidate Rich dry-run and verify every recorded state item remains byte-for-byte equivalent.
-4. Run the candidate command once, verify returned old/selected names, unchanged HEAD/index/porcelain/untracked content, changed local current branch only, absence of mismatched upstream, unchanged origin refs, and unchanged catalogue row count.
-5. Invoke the same ticket again and verify a no-op result with no later suffix.
-6. Render genuine captured text with the bundled `openspec-e2e-testing/scripts/render_terminal.swift`. Preserve the tested output language; agent-authored captions and the final report remain English. ANSI/TTY/progress omissions SHALL be stated honestly when redirected output cannot preserve them.
+1. From the verified baseline `inspect` output, use only the baseline numbered launcher and its owned checkout: `"$BASELINE_ODCLI" --project "$BASELINE_CHECKOUT" git rename-branch ICODE-596`. Capture the genuine command-not-present text at the approved base; do not invent a success baseline or invoke global `odcli`.
+2. In the candidate numbered checkout, create an equivalent non-ticket starting branch with one committed file, one staged change, one unstaged change, and one untracked file. Record HEAD, index tree, porcelain status, current branch, upstream, matching origin refs, catalogue row count, and the candidate `inspect` resource projection.
+3. Run `"$CANDIDATE_ODCLI" --project "$CANDIDATE_CHECKOUT" git rename-branch ICODE-596 --dry-run` and verify every recorded Git and numbered-resource item remains equivalent.
+4. Run the same candidate numbered executable without `--dry-run`; verify returned old/selected names, unchanged HEAD/index/porcelain/untracked content, changed local current branch only, absence of mismatched upstream, unchanged origin refs and catalogue row count, and no change to owned environment/database/port/SDK/interpreter bindings.
+5. Invoke the same ticket again through the candidate numbered executable and verify a no-op result with no later suffix or resource mutation.
+6. Run `scripts/agent_checkout.py inspect "$CANDIDATE_N"` again and compare the owned checkout/environment/database/port/launcher/exact-SDK projection with readiness evidence, allowing only the expected checkout branch observation to differ. The slot and database remain isolation/provenance fixtures, not Odoo behavior assertions.
+7. Render genuine captured text with the bundled `openspec-e2e-testing/scripts/render_terminal.swift`. Preserve the tested output language; agent-authored captions and the final report remain English. ANSI/TTY/progress omissions SHALL be stated honestly when redirected output cannot preserve them.
 
 The live budget is two attempts: one planned attempt and one repair attempt only after publishing the first failure diagnostics and rerunning cheaper deterministic checks. A PASS on the same product/test revisions and fixtures is retained; a new product SHA requires an impact assessment and rerun of affected cases only.
 
 ### Evidence publication and cleanup
 
-The final Multica Tester comment SHALL include the candidate/baseline/test revisions, commands and exit codes, sanitized actual text, assertion results, before/dry-run/after PNG attachments with read-back, and links to the implementation PR/MR, commits, and changed test files. Logs, diagnostic JSON, hashes, provenance, screenshots, and assertion results SHALL remain in Multica and SHALL NOT be committed. No function-produced Git commit is expected from branch rename, so no separate test-repository result commit is required. Cleanup removes the disposable checkout and temporary local resources but SHALL NOT close/merge the evidence PR/MR or delete its branch without separate authority.
+The final Multica Tester comment SHALL include the candidate/baseline/test revisions, both numbered identities, exact-SHA `inspect`/ownership evidence, unique database/port bindings, commands and exit codes, sanitized actual text, resource non-mutation assertions, before/dry-run/after PNG attachments with read-back, cleanup outcomes, and links to the implementation PR/MR, commits, and changed test files. Logs, diagnostic JSON, hashes, provenance, screenshots, and assertion results SHALL remain in Multica and SHALL NOT be committed. No function-produced Git commit is expected from branch rename, so no separate test-repository result commit is required.
+
+After all evidence is durably published, the Tester SHALL remove each owned numbered installation with the same Binta wrapper and numbered project profile, never by deleting the checkout/database directly:
+
+```sh
+cd ~/e2e/odcli/binta-e2e-reference
+python3 scripts/agent_checkout.py remove "$BASELINE_N" \
+  --project ~/e2e/odcli/numbered-project-e2e
+python3 scripts/agent_checkout.py remove "$CANDIDATE_N" \
+  --project ~/e2e/odcli/numbered-project-e2e
+```
+
+Post-cleanup `list` evidence plus the expected bounded not-found result from `inspect` for each removed identity SHALL prove both owned identities and their checkout/environment/database/port resources are gone while the reference checkout, numbered project profile, dedicated PostgreSQL cluster, evidence MR/branch/commits, and unrelated slots remain untouched. Cleanup failure is published as incomplete evidence and blocks PASS; the Tester SHALL NOT stop Colima or the shared/dedicated cluster, close/merge the evidence MR, or delete its branch without separate authority.
 
 ## Delivery Topology
 
