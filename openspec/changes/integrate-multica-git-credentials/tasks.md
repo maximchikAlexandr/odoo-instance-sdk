@@ -1,7 +1,7 @@
 ## 1. Shared credential contracts
 
 - [ ] 1.1 Split/reuse the existing runtime GitLab owner verification so cache-read validation authenticates the configured login and obtains its stable provider user ID without changing stored mappings, encrypted records, the secret-store schema, or the Admin model.
-- [ ] 1.2 Refactor `resolve_gitlab_credential()` and bridge callers to implement encrypted-first, explicit-or-user-root legacy precedence with `ODCLI_USER_ROOT`, no implicit project `.odcli` credential paths, and fail-closed compatibility-file conflicts.
+- [ ] 1.2 Refactor `resolve_gitlab_credential()` to implement encrypted-first, explicit-or-user-root legacy precedence with `ODCLI_USER_ROOT` and fail-closed compatibility-file conflicts without changing bridge callers.
 - [ ] 1.3 Add focused core tests for encrypted records, user-root-only mapping/tokens, explicit path/process overrides, selected `ODCLI_USER_ROOT`, invalid permissions, conflicts, and absence of project-local copies.
 
 ## 2. Native cache helper integration
@@ -17,6 +17,7 @@
 - [ ] 3.2 Thread optional `member_id` through credential-dependent raw Git, sync/push, and merge-request command/convenience methods while preserving verified checkout/repository/host, stale-plan, branch/origin, subprocess, and HTTP boundaries.
 - [ ] 3.3 Add `--member-id` to the three credential-dependent `odcli-multica` CLI leaves, keep callbacks as typed pass-throughs, and include only the selected safe identity/source in dry-run and success documents.
 - [ ] 3.4 Add parameterized bridge tests for automatic and explicit selection, invalid/non-human/cross-workspace members, two checkouts selecting different members concurrently, execution-time drift, submodule host routing, cache-account non-fallback, and CLI/SDK parity.
+- [ ] 3.5 Adopt the WP-01 credential resolver/default precedence in every credential-dependent bridge caller, remove implicit project `.odcli` mapping/dotenv defaults, preserve explicit legacy paths, and add focused bridge regressions for user-root-only credentials and absent project-local copies.
 
 ## 4. Merge-request and secret-safety regressions
 

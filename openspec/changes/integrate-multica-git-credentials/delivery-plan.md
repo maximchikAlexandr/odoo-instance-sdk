@@ -2,6 +2,7 @@
 
 - Task key: `MYL-595`
 - Change: `integrate-multica-git-credentials`
+- Graph revision: `3`
 - Approved base: `f0918da2d36b59c35cf0a949efc58744d1efb7f9` (`origin/main`)
 - Planning source: GitHub issue `#168`, with the Multica issue instruction taking precedence over its obsolete deferral sentence.
 - Implementation ownership: Implementer owns product code, tests, fixtures, scripts, generated package metadata, and documentation. Tester performs independent verification and does not edit implementation or CI coverage.
@@ -71,11 +72,11 @@ Stage mapping: `WP-01 -> 1`, `WP-02 -> 2`, `WP-03 -> 2`, `WP-04 -> 3`.
 ### WP-01 — Shared credential foundation
 
 - **Task coverage:** 1.1, 1.2, 1.3.
-- **Deliverable:** The existing runtime owner verification is split/reused to expose stable provider identity without stored-record changes, and the single encrypted-first, explicit-or-user-root credential precedence is implemented and regression-tested independently of cache and bridge consumers.
+- **Deliverable:** The existing runtime owner verification is split/reused to expose stable provider identity without stored-record changes, and the core resolver's encrypted-first, explicit-or-user-root credential precedence is implemented and regression-tested independently of cache and bridge consumers.
 - **depends_on:** none.
 - **Owned responsibility scope:** Existing runtime identity verification, core credential resolver, and directly related core unit fixtures/tests. Critical shared files include `src/odoo_instance_sdk/internal/gitlab_identity.py`, `src/odoo_instance_sdk/internal/gitlab_credentials.py`, and `tests/unit/test_gitlab_foundation.py`.
-- **Contract surface:** Existing callers retain `GitLabCredentialContext`; the runtime verifier exposes owner identity for cache validation while mappings, encrypted records, secret-store schema, and Admin model stay unchanged; implicit project-local defaults are removed only for bridge callers after WP-03 adopts the foundation.
-- **DoD / evidence:** Focused runtime owner-ID, owner-only, encrypted, user-root, explicit override, compatibility/conflict, and `ODCLI_USER_ROOT` tests pass; lint/types for touched core modules pass; no product path selects ambient credentials and no credential migration is introduced.
+- **Contract surface:** Existing callers retain `GitLabCredentialContext`; the runtime verifier exposes owner identity for cache validation while mappings, encrypted records, secret-store schema, and Admin model stay unchanged; this WP does not edit bridge callers, whose adoption belongs to task 3.5 in WP-03.
+- **DoD / evidence:** Focused runtime owner-ID, owner-only, encrypted, user-root, explicit override, compatibility/conflict, and `ODCLI_USER_ROOT` core tests pass; lint/types for touched core modules pass; the core resolver does not select ambient credentials and no credential migration is introduced.
 - **Parallel safety:** Foundation is the only writer of shared resolver contracts and completes before both consumers begin.
 - **stage:** 1.
 
@@ -92,12 +93,12 @@ Stage mapping: `WP-01 -> 1`, `WP-02 -> 2`, `WP-03 -> 2`, `WP-04 -> 3`.
 
 ### WP-03 — Verified task-member bridge and MR publication
 
-- **Task coverage:** 3.1, 3.2, 3.3, 3.4, 4.1, 4.2.
-- **Deliverable:** Raw Git, sync/push, and MR publication share typed automatic/explicit member selection, revalidation, user-root credentials, safe output, and cache-account non-fallback.
+- **Task coverage:** 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2.
+- **Deliverable:** Raw Git, sync/push, and MR publication adopt the WP-01 resolver without implicit project `.odcli` defaults and share typed automatic/explicit member selection, revalidation, user-root credentials, safe output, and cache-account non-fallback.
 - **depends_on:** WP-01.
 - **Owned responsibility scope:** `packages/odcli-multica` models, policies, client, CLI, Git execution, package tests, and directly related bridge documentation needed to explain the API. Critical shared files include `client.py`, `client_policies.py`, `git_execution.py`, `models.py`, `cli.py`, and package tests.
-- **Contract surface:** Consumes WP-01 resolver and provider identity; adds optional typed `member_id`, CLI `--member-id`, and safe selection source; preserves verified context, origin/branch, assignee, issue-link, process, HTTP, and output contracts.
-- **DoD / evidence:** Automatic and explicit selection, membership/type failures, execution drift, two-member concurrency, submodule hosts, all three CLI leaves, MR create/update, no fallback, and full redaction matrices pass with lint/types.
+- **Contract surface:** Consumes WP-01 resolver and provider identity; bridge callers pass the effective user root and optional explicit legacy paths, never synthesize project `.odcli` defaults; adds optional typed `member_id`, CLI `--member-id`, and safe selection source; preserves verified context, origin/branch, assignee, issue-link, process, HTTP, and output contracts.
+- **DoD / evidence:** User-root-only and absent-project-copy bridge regressions, automatic and explicit selection, membership/type failures, execution drift, two-member concurrency, submodule hosts, all three CLI leaves, MR create/update, no fallback, and full redaction matrices pass with lint/types.
 - **Parallel safety:** After WP-01, writes remain under `packages/odcli-multica`; WP-02 owns core helper/packaging. It SHALL NOT revise WP-01 contracts or core helper files.
 - **stage:** 2.
 
@@ -114,7 +115,7 @@ Stage mapping: `WP-01 -> 1`, `WP-02 -> 2`, `WP-03 -> 2`, `WP-04 -> 3`.
 
 ## Coverage and Frontier Audit
 
-- Every OpenSpec task is assigned exactly once: WP-01 covers 1.1–1.3; WP-02 covers 2.1–2.4; WP-03 covers 3.1–4.2; WP-04 covers 5.1–5.4.
+- Every OpenSpec task is assigned exactly once: WP-01 covers 1.1–1.3; WP-02 covers 2.1–2.4; WP-03 covers 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, and 4.2; WP-04 covers 5.1–5.4.
 - Direct dependencies only: WP-02 and WP-03 depend on WP-01; WP-04 depends on both immediate stage-2 predecessors.
 - Executable frontiers: stage 1 `{WP-01}`; stage 2 `{WP-02, WP-03}` in parallel; stage 3 `{WP-04}`. The stage-2 siblings have distinct critical write zones and a frozen predecessor contract.
 - Related tests, fixtures, snapshots, docs, generated package metadata, and service files belong to the responsible WP unless explicitly owned by its active sibling; the listed paths are critical coordination points, not exhaustive allowlists.
