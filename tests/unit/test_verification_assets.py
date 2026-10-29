@@ -374,6 +374,39 @@ def test_update_workflow_retains_exact_revision_and_dashboard_probe(
 
 
 @pytest.mark.unit
+def test_build_backend_reuses_dashboard_assets_from_sdist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+    import types
+
+    monkeypatch.setitem(sys.modules, "uv_build", types.ModuleType("uv_build"))
+    build_backend = importlib.import_module("build_backend")
+
+    root = tmp_path / "sdist"
+    dist = root / "src" / "odoo_instance_sdk" / "web" / "dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    (root / "PKG-INFO").write_text("Name: odoo-instance-sdk\n", encoding="utf-8")
+    (dist / "index.html").write_text("packaged dashboard", encoding="utf-8")
+    (assets / "app.js").write_text("packaged asset", encoding="utf-8")
+    calls: list[tuple[Path, Path]] = []
+
+    monkeypatch.setattr(build_backend, "_ROOT", root)
+    monkeypatch.setattr(build_backend, "_WEB_ROOT", root / "src/odoo_instance_sdk/web")
+    monkeypatch.setattr(build_backend, "_DIST", dist)
+    monkeypatch.setattr(
+        build_backend,
+        "ensure_dashboard_assets",
+        lambda web_root, dashboard_dist: calls.append((web_root, dashboard_dist)),
+    )
+
+    build_backend._ensure_dashboard_assets()
+
+    assert calls == []
+
+
+@pytest.mark.unit
 def test_build_process_allowlists_platform_inputs_and_cleans_owned_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

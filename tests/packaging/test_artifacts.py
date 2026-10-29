@@ -103,7 +103,9 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
+    assert help_result.returncode == 0
     assert "Usage" in help_result.stdout
+    assert help_result.stderr == ""
     short_help_result = subprocess.run(
         [str(odcli), "-h"],
         cwd=empty,
@@ -112,7 +114,9 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
+    assert short_help_result.returncode == 0
     assert short_help_result.stdout == help_result.stdout
+    assert short_help_result.stderr == ""
     init_help_result = subprocess.run(
         [str(odcli), "init", "-h"],
         cwd=empty,
@@ -121,8 +125,10 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
+    assert init_help_result.returncode == 0
     assert "--venv" in init_help_result.stdout
     assert "prepare-venv" in init_help_result.stdout
+    assert init_help_result.stderr == ""
     startup_import = subprocess.run(
         [
             str(python),
