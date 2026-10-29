@@ -66,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             user_root=os.environ.get("ODCLI_GITLAB_USER_ROOT"),
             mapping_path=os.environ.get("ODCLI_GITLAB_MAPPING_PATH"),
             environment_path=os.environ.get("ODCLI_GITLAB_ENVIRONMENT_PATH"),
+            include_implicit_project_root=False,
         )
         verify_gitlab_cache_credential(credential, GitLabHttpClient())
     except (GitLabCredentialError, GitLabIdentityError, KeyError, OSError, ValueError):

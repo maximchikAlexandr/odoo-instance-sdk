@@ -87,11 +87,37 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", default=os.environ.get("TEST_MULTICA_PROFILE"))
     parser.add_argument("--helper-dir", type=Path, default=os.environ.get("TEST_GIT_HELPER_DIR"))
     parser.add_argument("--core-project", type=Path, default=os.environ.get("TEST_CORE_PROJECT"))
+    parser.add_argument("--sdk-sha", default=os.environ.get("TEST_SDK_SHA"))
     parser.add_argument("--multica-project", default=os.environ.get("TEST_MULTICA_PROJECT"))
     parser.add_argument("--workspace-id", default=os.environ.get("TEST_MULTICA_WORKSPACE"))
     parser.add_argument("--cache-member-id", default=os.environ.get("TEST_GITLAB_CACHE_MEMBER"))
+    parser.add_argument(
+        "--cache-owner-mismatch-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_OWNER_MISMATCH_MEMBER"),
+    )
+    parser.add_argument(
+        "--cache-inactive-member", default=os.environ.get("TEST_GITLAB_CACHE_INACTIVE_MEMBER")
+    )
+    parser.add_argument(
+        "--cache-broader-scope-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_BROADER_SCOPE_MEMBER"),
+    )
+    parser.add_argument(
+        "--cache-granular-scope-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_GRANULAR_SCOPE_MEMBER"),
+    )
+    parser.add_argument(
+        "--cache-incompatible-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_INCOMPATIBLE_MEMBER"),
+    )
     parser.add_argument("--member-b", default=os.environ.get("TEST_GITLAB_MEMBER_B"))
     parser.add_argument("--member-missing", default=os.environ.get("TEST_GITLAB_MEMBER_MISSING"))
+    parser.add_argument("--member-invalid", default=os.environ.get("TEST_MULTICA_MEMBER_INVALID"))
+    parser.add_argument("--member-nonhuman", default=os.environ.get("TEST_MULTICA_MEMBER_NONHUMAN"))
+    parser.add_argument(
+        "--member-cross-workspace", default=os.environ.get("TEST_MULTICA_MEMBER_CROSS_WORKSPACE")
+    )
+    parser.add_argument("--member-stale", default=os.environ.get("TEST_MULTICA_MEMBER_STALE"))
     parser.add_argument("--cache-host", default=os.environ.get("TEST_GITLAB_CACHE_HOST"))
     parser.add_argument("--issue-a", default=os.environ.get("TEST_MULTICA_ISSUE_A"))
     parser.add_argument("--run-a", default=os.environ.get("TEST_MULTICA_RUN_A"))
@@ -436,7 +462,10 @@ def _mr(
 
 
 def _profile_status(args: argparse.Namespace) -> dict[str, object]:
-    result = _run([args.multica, "--profile", args.profile, "daemon", "status", "--output", "json"])
+    result = _run(
+        [args.multica, "--profile", args.profile, "daemon", "status", "--output", "json"],
+        env=_daemon_profile_environment(),
+    )
     payload = json.loads(result.stdout)
     if not isinstance(payload, dict):
         raise TypeError("isolated daemon status is invalid")
@@ -444,7 +473,10 @@ def _profile_status(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _profile_start(args: argparse.Namespace, environment: dict[str, str]) -> dict[str, object]:
-    _run([args.multica, "--profile", args.profile, "daemon", "start"], env=environment)
+    _run(
+        [args.multica, "--profile", args.profile, "daemon", "start"],
+        env=_daemon_profile_environment(environment),
+    )
     status = _profile_status(args)
     if status.get("status") != "running" or status.get("profile") != args.profile:
         raise RuntimeError("isolated daemon did not become ready")
@@ -452,7 +484,17 @@ def _profile_start(args: argparse.Namespace, environment: dict[str, str]) -> dic
 
 
 def _profile_stop(args: argparse.Namespace) -> None:
-    _run([args.multica, "--profile", args.profile, "daemon", "stop"])
+    _run(
+        [args.multica, "--profile", args.profile, "daemon", "stop"],
+        env=_daemon_profile_environment(),
+    )
+
+
+def _daemon_profile_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
+    selected = os.environ.copy() if environment is None else environment.copy()
+    selected.pop("MULTICA_TOKEN", None)
+    selected.pop("MULTICA_DAEMON_PORT", None)
+    return selected
 
 
 def _daemon_environment(status: dict[str, object]) -> dict[str, str]:
@@ -514,28 +556,36 @@ def _multica_sync_command(
         args.workspace_id,
     ]
     if member_id is not None:
-        command.extend(("--member-id", normalize_member_id(member_id)))
+        command.extend(("--member-id", member_id))
     command.extend((str(checkout), "--format", "json"))
     if dry_run:
         command.append("--dry-run")
     return command
 
 
-def _integrated_multica_cache(  # noqa: C901 - this is the single integrated live acceptance path
+def _validate_integrated_cache_inputs(
     args: argparse.Namespace,
-    root: Path,
-    evidence: list[dict[str, str | int | bool]],
-) -> tuple[str, ...]:
+) -> tuple[str, str, str, tuple[Path, Path]]:
     required = (
         args.profile,
         args.helper_dir,
         args.core_project,
+        args.sdk_sha,
         args.multica_project,
         args.workspace_id,
         args.cache_member_id,
+        args.cache_owner_mismatch_member,
+        args.cache_inactive_member,
+        args.cache_broader_scope_member,
+        args.cache_granular_scope_member,
+        args.cache_incompatible_member,
         args.member_id,
         args.member_b,
         args.member_missing,
+        args.member_invalid,
+        args.member_nonhuman,
+        args.member_cross_workspace,
+        args.member_stale,
         args.cache_host,
         args.issue_a,
         args.run_a,
@@ -550,20 +600,9 @@ def _integrated_multica_cache(  # noqa: C901 - this is the single integrated liv
     cache_member = normalize_member_id(args.cache_member_id)
     member_a = normalize_member_id(args.member_id)
     member_b = normalize_member_id(args.member_b)
-    missing_member = normalize_member_id(args.member_missing)
     checkouts = (args.checkout_a.expanduser().resolve(), args.checkout_b.expanduser().resolve())
     if checkouts[0] == checkouts[1] or any(not path.is_dir() for path in checkouts):
         raise RuntimeError("two distinct existing task checkouts are required")
-    for checkout in checkouts:
-        if (checkout / ".odcli" / "gitlab-credentials.toml").exists() or (
-            checkout / ".odcli" / ".env"
-        ).exists():
-            raise RuntimeError("task checkouts must not contain project credential copies")
-        remote = _git(args.git, checkout, "remote", "get-url", "origin")
-        if _repository_identity(remote) != _repository_identity(args.repository_a):
-            raise RuntimeError("task checkout origin does not match the private test repository")
-        if _git(args.git, checkout, "status", "--porcelain=v1", "--untracked-files=all"):
-            raise RuntimeError("task checkouts must start clean")
     parsed = urlsplit(args.repository_a)
     if (
         parsed.scheme.casefold() != "https"
@@ -577,17 +616,35 @@ def _integrated_multica_cache(  # noqa: C901 - this is the single integrated liv
         expected_host = f"{expected_host}:{parsed.port}"
     if args.cache_host != expected_host:
         raise RuntimeError("cache host does not match the private repository authority")
-    initial_status = _profile_status(args)
-    if initial_status.get("profile") != args.profile:
-        raise RuntimeError("Multica returned a different profile")
-    if initial_status.get("status") == "running":
-        raise RuntimeError("the requested isolated Multica profile is already running")
+    if (
+        not _SHA.fullmatch(args.sdk_sha)
+        or _git(args.git, args.core_project.expanduser().resolve(), "rev-parse", "HEAD")
+        != args.sdk_sha
+    ):
+        raise RuntimeError("core project does not match the exact candidate SDK SHA")
+    return cache_member, member_a, member_b, checkouts
 
-    cache_secrets = _secret_corpus(cache_member)
-    secret_values = tuple(
-        dict.fromkeys((*cache_secrets, *_secret_corpus(member_a), *_secret_corpus(member_b)))
-    )
+
+def _validate_integrated_checkouts(args: argparse.Namespace, checkouts: tuple[Path, Path]) -> None:
+    for checkout in checkouts:
+        if (checkout / ".odcli" / "gitlab-credentials.toml").exists() or (
+            checkout / ".odcli" / ".env"
+        ).exists():
+            raise RuntimeError("task checkouts must not contain project credential copies")
+        remote = _git(args.git, checkout, "remote", "get-url", "origin")
+        if _repository_identity(remote) != _repository_identity(args.repository_a):
+            raise RuntimeError("task checkout origin does not match the private test repository")
+        if _git(args.git, checkout, "status", "--porcelain=v1", "--untracked-files=all"):
+            raise RuntimeError("task checkouts must start clean")
+
+
+def _integrated_cache_environments(
+    args: argparse.Namespace,
+    cache_member: str,
+) -> tuple[dict[str, str], dict[str, str]]:
     cache_environment = os.environ.copy()
+    cache_environment.pop("MULTICA_TOKEN", None)
+    cache_environment.pop("MULTICA_DAEMON_PORT", None)
     cache_environment["PATH"] = (
         str(args.helper_dir.expanduser().resolve()) + os.pathsep + cache_environment.get("PATH", "")
     )
@@ -618,10 +675,361 @@ def _integrated_multica_cache(  # noqa: C901 - this is the single integrated liv
         "ODCLI_GITLAB_SELECTED_HOST",
     ):
         prior_environment.pop(key, None)
+    return cache_environment, prior_environment
+
+
+def _integrated_cache_readiness(
+    args: argparse.Namespace,
+    root: Path,
+) -> tuple[str, str, str, tuple[Path, Path], tuple[str, ...], dict[str, str], dict[str, str]]:
+    if not os.environ.get("MULTICA_DAEMON_PORT") or not os.environ.get("MULTICA_TOKEN"):
+        raise RuntimeError("multica-cache requires an isolated daemon task context")
+    if not root.resolve().is_relative_to(Path.cwd().resolve()):
+        raise RuntimeError("multica-cache work root must be inside the isolated daemon task")
+    cache_member, member_a, member_b, checkouts = _validate_integrated_cache_inputs(args)
+    _validate_integrated_checkouts(args, checkouts)
+    cache_secrets = _secret_corpus(cache_member)
+    secret_values = tuple(
+        dict.fromkeys(
+            (
+                *cache_secrets,
+                *tuple(
+                    secret
+                    for member in (
+                        args.cache_owner_mismatch_member,
+                        args.cache_inactive_member,
+                        args.cache_broader_scope_member,
+                        args.cache_granular_scope_member,
+                        args.cache_incompatible_member,
+                    )
+                    for secret in _secret_corpus(member)
+                ),
+                *_secret_corpus(member_a),
+                *_secret_corpus(member_b),
+            )
+        )
+    )
+    cache_environment, prior_environment = _integrated_cache_environments(args, cache_member)
+    return (
+        cache_member,
+        member_a,
+        member_b,
+        checkouts,
+        secret_values,
+        cache_environment,
+        prior_environment,
+    )
+
+
+def _validate_cache_helper(
+    args: argparse.Namespace,
+    cache_environment: dict[str, str],
+    cache_member: str,
+    secret_values: tuple[str, ...],
+) -> None:
+    helper_path = shutil.which("git-credential-odcli", path=cache_environment.get("PATH"))
+    if helper_path is None:
+        raise RuntimeError("stable installed Git credential helper is unavailable")
+    helper = subprocess.run(
+        [args.git, "credential", "fill"],
+        input=f"protocol=https\nhost={args.cache_host}\n\n",
+        env=cache_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    helper_fields = dict(
+        line.partition("=")[::2] for line in helper.stdout.splitlines() if "=" in line
+    )
+    cache_mapping = next(
+        (
+            mapping
+            for mapping in read_gitlab_credential_mappings()
+            if mapping.user_id.casefold() == cache_member.casefold()
+            and mapping.host == args.cache_host
+        ),
+        None,
+    )
+    if (
+        helper.returncode != 0
+        or cache_mapping is None
+        or helper_fields.get("username") != cache_mapping.login
+        or helper_fields.get("password") not in secret_values
+    ):
+        raise RuntimeError("installed cache helper rejected the configured account")
+
+
+def _stop_and_validate_cache_generation(
+    args: argparse.Namespace,
+    environment: dict[str, str],
+    cache_member: str,
+    secret_values: tuple[str, ...],
+    *,
+    stop_running_generation: bool,
+) -> None:
+    if stop_running_generation:
+        _profile_stop(args)
+    _validate_cache_helper(args, environment, cache_member, secret_values)
+
+
+def _assert_cache_helper_refusal(
+    args: argparse.Namespace,
+    environment: dict[str, str],
+    secret_values: tuple[str, ...],
+    *,
+    host: str,
+    request: str,
+    purpose: bool = True,
+) -> None:
+    attempt_environment = environment.copy()
+    if not purpose:
+        attempt_environment.pop("ODCLI_GITLAB_PURPOSE", None)
+    attempt_environment["ODCLI_GITLAB_SELECTED_HOST"] = args.cache_host
+    result = subprocess.run(
+        [args.git, "credential", "fill"],
+        input=request.format(host=host),
+        env=attempt_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0 or any(
+        secret and secret in result.stdout for secret in secret_values
+    ):
+        raise RuntimeError("cache helper accepted an invalid request or exposed a secret")
+
+
+def _assert_cache_helper_negative_inputs(
+    args: argparse.Namespace,
+    environment: dict[str, str],
+    secret_values: tuple[str, ...],
+    evidence: list[dict[str, str | int | bool]],
+) -> None:
+    _assert_cache_helper_refusal(
+        args,
+        environment,
+        secret_values,
+        host="wrong.example",
+        request="protocol=https\nhost={host}\n\n",
+    )
+    _assert_cache_helper_refusal(
+        args,
+        environment,
+        secret_values,
+        host=args.cache_host,
+        request="protocol=https\nhost={host}\nhost=wrong.example\n\n",
+    )
+    _assert_cache_helper_refusal(
+        args,
+        environment,
+        secret_values,
+        host=args.cache_host,
+        request="protocol=https\nhost={host}\n\n",
+        purpose=False,
+    )
+    evidence.append({"case": "C1", "negative_inputs": 3, "ok": True})
+
+    for label, member in (
+        ("owner_mismatch", args.cache_owner_mismatch_member),
+        ("inactive_token", args.cache_inactive_member),
+        ("broader_scope", args.cache_broader_scope_member),
+        ("granular_scope", args.cache_granular_scope_member),
+        ("incompatible_response", args.cache_incompatible_member),
+    ):
+        attempt_environment = environment.copy()
+        attempt_environment["ODCLI_GITLAB_MEMBER_ID"] = member
+        result = subprocess.run(
+            [args.git, "credential", "fill"],
+            input=f"protocol=https\nhost={args.cache_host}\n\n",
+            env=attempt_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        response = result.stdout + result.stderr
+        if result.returncode == 0 or any(secret and secret in response for secret in secret_values):
+            raise RuntimeError(f"cache helper did not reject {label} fixture safely")
+        evidence.append({"case": "C1", "rejected_fixture": label, "ok": True})
+
+
+def _native_cache_checkout(
+    args: argparse.Namespace,
+    root: Path,
+    cache_environment: dict[str, str],
+    secret_values: tuple[str, ...],
+) -> None:
+    if not os.environ.get("MULTICA_DAEMON_PORT") or not os.environ.get("MULTICA_TOKEN"):
+        raise RuntimeError("native checkout requires the isolated daemon task context")
+    checkout = root / "native-cache-checkout"
+    if not checkout.resolve().is_relative_to(Path.cwd().resolve()):
+        raise RuntimeError("native checkout workspace must be inside the isolated daemon task")
+    checkout.mkdir(mode=0o700, parents=True)
+    _run(
+        [args.multica, "--profile", args.profile, "repo", "checkout", args.repository_a],
+        cwd=checkout,
+        env=os.environ.copy(),
+        secrets=secret_values,
+    )
+    if _repository_identity(_git(args.git, checkout, "remote", "get-url", "origin")) != (
+        _repository_identity(args.repository_a)
+    ):
+        raise RuntimeError("native Multica checkout origin does not match the private repository")
+
+
+def _run_integrated_member_operations(
+    args: argparse.Namespace,
+    checkouts: tuple[Path, Path],
+    member_a: str,
+    member_b: str,
+    prior_environment: dict[str, str],
+    secret_values: tuple[str, ...],
+    evidence: list[dict[str, str | int | bool]],
+) -> None:
+    for case, checkout, issue, run_id, selected, expected_id in (
+        ("C2", checkouts[0], args.issue_a, args.run_a, None, member_a),
+        ("C3", checkouts[1], args.issue_b, args.run_b, member_b, member_b),
+    ):
+        preview = _run(
+            _multica_sync_command(
+                args,
+                checkout=checkout,
+                issue=issue,
+                run_id=run_id,
+                member_id=selected,
+                dry_run=True,
+            ),
+            env=prior_environment,
+            secrets=secret_values,
+        )
+        observation = _member_observation(json.loads(preview.stdout))
+        expected_source = "root_creator" if selected is None else "explicit"
+        if observation != (expected_id, expected_source):
+            raise RuntimeError(f"{case} selected-member observation is incorrect")
+        _run(
+            _multica_sync_command(
+                args,
+                checkout=checkout,
+                issue=issue,
+                run_id=run_id,
+                member_id=selected,
+                dry_run=False,
+            ),
+            env=prior_environment,
+            secrets=secret_values,
+        )
+        evidence.append({"case": case, "sync": True, "ok": True})
+
+    failed = subprocess.run(
+        _multica_sync_command(
+            args,
+            checkout=checkouts[1],
+            issue=args.issue_b,
+            run_id=args.run_b,
+            member_id=normalize_member_id(args.member_missing),
+            dry_run=False,
+        ),
+        env=prior_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    failure_text = failed.stdout + failed.stderr
+    if failed.returncode == 0 or any(secret and secret in failure_text for secret in secret_values):
+        raise RuntimeError("missing selected credentials did not fail safely")
+    evidence.append({"case": "C3", "missing_member_failed": True, "ok": True})
+
+    for label, invalid_member in (
+        ("invalid", args.member_invalid),
+        ("nonhuman", args.member_nonhuman),
+        ("cross_workspace", args.member_cross_workspace),
+        ("stale", args.member_stale),
+    ):
+        _assert_public_member_refusal(
+            args,
+            checkout=checkouts[1],
+            member_id=invalid_member,
+            secret_values=secret_values,
+            prior_environment=prior_environment,
+        )
+        evidence.append({"case": "C2", "rejected_member": label, "ok": True})
+
+
+def _assert_public_member_refusal(
+    args: argparse.Namespace,
+    *,
+    checkout: Path,
+    member_id: str,
+    secret_values: tuple[str, ...],
+    prior_environment: dict[str, str],
+) -> None:
+    rejected = subprocess.run(
+        _multica_sync_command(
+            args,
+            checkout=checkout,
+            issue=args.issue_b,
+            run_id=args.run_b,
+            member_id=member_id,
+            dry_run=True,
+        ),
+        env=prior_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    rejection = rejected.stdout + rejected.stderr
+    if rejected.returncode == 0 or any(secret and secret in rejection for secret in secret_values):
+        raise RuntimeError("selected-member rejection was not fail-closed and secret-safe")
+
+
+def _rollback_cache_generation(
+    args: argparse.Namespace,
+    prior_environment: dict[str, str],
+    cache_environment: dict[str, str],
+) -> None:
+    _profile_stop(args)
+    status = _profile_start(args, prior_environment)
+    inherited = _daemon_environment(status)
+    replacement = (
+        "ODCLI_GITLAB_PURPOSE",
+        "ODCLI_GITLAB_MEMBER_ID",
+        "ODCLI_GITLAB_SELECTED_HOST",
+        "GIT_CONFIG_VALUE_1",
+    )
+    if any(inherited.get(key) == cache_environment.get(key) for key in replacement):
+        raise RuntimeError("rollback daemon inherited replacement cache settings")
+
+
+def _integrated_multica_cache(
+    args: argparse.Namespace,
+    root: Path,
+    evidence: list[dict[str, str | int | bool]],
+) -> tuple[str, ...]:
+    (
+        cache_member,
+        member_a,
+        member_b,
+        checkouts,
+        secret_values,
+        cache_environment,
+        prior_environment,
+    ) = _integrated_cache_readiness(args, root)
+    initial_status = _profile_status(args)
+    if initial_status.get("profile") != args.profile:
+        raise RuntimeError("Multica returned a different profile")
 
     candidate_started = False
     rollback_started = False
     try:
+        _stop_and_validate_cache_generation(
+            args,
+            cache_environment,
+            cache_member,
+            secret_values,
+            stop_running_generation=initial_status.get("status") == "running",
+        )
+        evidence.append({"case": "C1", "helper_exit": 0, "ok": True})
+        _assert_cache_helper_negative_inputs(args, cache_environment, secret_values, evidence)
+
         candidate_started = True
         candidate_status = _profile_start(args, cache_environment)
         candidate_process_environment = _daemon_environment(candidate_status)
@@ -635,116 +1043,17 @@ def _integrated_multica_cache(  # noqa: C901 - this is the single integrated liv
             )
         ):
             raise RuntimeError("candidate daemon did not inherit cache-read settings")
-        helper = subprocess.run(
-            [args.git, "credential", "fill"],
-            input=f"protocol=https\nhost={args.cache_host}\n\n",
-            env=cache_environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        helper_fields = dict(
-            line.partition("=")[::2] for line in helper.stdout.splitlines() if "=" in line
-        )
-        cache_mapping = next(
-            (
-                mapping
-                for mapping in read_gitlab_credential_mappings()
-                if mapping.user_id.casefold() == cache_member.casefold()
-                and mapping.host == args.cache_host
-            ),
-            None,
-        )
-        if (
-            helper.returncode != 0
-            or cache_mapping is None
-            or helper_fields.get("username") != cache_mapping.login
-            or helper_fields.get("password") not in cache_secrets
-        ):
-            raise RuntimeError("installed cache helper rejected the configured account")
-        evidence.append({"case": "C1", "helper_exit": 0, "ok": True})
+        _native_cache_checkout(args, root, cache_environment, secret_values)
+        evidence.append({"case": "C1", "native_cache_checkout": True, "ok": True})
 
-        _run(
-            [
-                args.git,
-                "clone",
-                "--no-checkout",
-                args.repository_a,
-                str(root / "native-cache-clone"),
-            ],
-            env=cache_environment,
-            secrets=secret_values,
+        _run_integrated_member_operations(
+            args, checkouts, member_a, member_b, prior_environment, secret_values, evidence
         )
-        evidence.append({"case": "C1", "cold_clone": True, "ok": True})
-
-        for case, checkout, issue, run_id, selected, expected_id in (
-            ("C2", checkouts[0], args.issue_a, args.run_a, None, member_a),
-            ("C3", checkouts[1], args.issue_b, args.run_b, member_b, member_b),
-        ):
-            preview = _run(
-                _multica_sync_command(
-                    args,
-                    checkout=checkout,
-                    issue=issue,
-                    run_id=run_id,
-                    member_id=selected,
-                    dry_run=True,
-                ),
-                env=prior_environment,
-                secrets=secret_values,
-            )
-            observation = _member_observation(json.loads(preview.stdout))
-            expected_source = "root_creator" if selected is None else "explicit"
-            if observation != (expected_id, expected_source):
-                raise RuntimeError(f"{case} selected-member observation is incorrect")
-            _run(
-                _multica_sync_command(
-                    args,
-                    checkout=checkout,
-                    issue=issue,
-                    run_id=run_id,
-                    member_id=selected,
-                    dry_run=False,
-                ),
-                env=prior_environment,
-                secrets=secret_values,
-            )
-            evidence.append({"case": case, "sync": True, "ok": True})
-
-        failed = subprocess.run(
-            _multica_sync_command(
-                args,
-                checkout=checkouts[1],
-                issue=args.issue_b,
-                run_id=args.run_b,
-                member_id=missing_member,
-                dry_run=False,
-            ),
-            env=prior_environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        failure_text = failed.stdout + failed.stderr
-        if failed.returncode == 0 or any(
-            secret and secret in failure_text for secret in secret_values
-        ):
-            raise RuntimeError("missing selected credentials did not fail safely")
-        evidence.append({"case": "C3", "missing_member_failed": True, "ok": True})
 
         _profile_stop(args)
         candidate_started = False
         rollback_started = True
-        status = _profile_start(args, prior_environment)
-        inherited = _daemon_environment(status)
-        replacement = (
-            "ODCLI_GITLAB_PURPOSE",
-            "ODCLI_GITLAB_MEMBER_ID",
-            "ODCLI_GITLAB_SELECTED_HOST",
-            "GIT_CONFIG_VALUE_1",
-        )
-        if any(inherited.get(key) == cache_environment.get(key) for key in replacement):
-            raise RuntimeError("rollback daemon inherited replacement cache settings")
+        _rollback_cache_generation(args, prior_environment, cache_environment)
         evidence.append({"case": "C4", "rollback_started": True, "ok": True})
     finally:
         if candidate_started or rollback_started:
@@ -758,7 +1067,12 @@ def main(argv: list[str] | None = None) -> int:
     root = (
         args.work_root.expanduser().resolve()
         if args.work_root
-        else Path(tempfile.mkdtemp(prefix="odcli-gitlab-e2e-"))
+        else Path(
+            tempfile.mkdtemp(
+                prefix="odcli-gitlab-e2e-",
+                dir=Path.cwd() if args.mode == "multica-cache" else None,
+            )
+        )
     )
     root.mkdir(parents=True, exist_ok=True)
     evidence: list[dict[str, str | int | bool]] = []

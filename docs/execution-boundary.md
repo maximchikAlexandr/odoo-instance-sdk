@@ -288,9 +288,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/internal/self_update.py:822-824` — maintenance child
   JSON stdout transport.
-- `src/odoo_instance_sdk/internal/git_credential_helper.py:31-32` — Git
-  credential protocol child transport.
-- `src/odoo_instance_sdk/internal/git_credential_helper.py:44-45` — Git
+- `src/odoo_instance_sdk/internal/git_credential_helper.py:74-75` — Git
   credential protocol child transport.
 - `src/odoo_instance_sdk/internal/git_askpass.py:72` — Git askpass child
   transport; the value is selected from the owner-only credential channel and
