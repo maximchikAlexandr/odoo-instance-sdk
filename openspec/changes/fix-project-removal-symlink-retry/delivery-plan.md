@@ -18,8 +18,10 @@ is an internal filesystem safety boundary and a removal-planning recovery path;
 both have deterministic, observable postconditions that focused unit/integration
 tests can prove without a live Odoo process. The one material platform-integration
 gap—an actual OdCLI-created venv layout on Unix—is covered by extending the
-existing source-backed `real-odoo-targeted` GitHub CI scenario rather than
-duplicating that stand locally.
+existing source-backed GitHub CI scenario and dispatching
+`.github/workflows/real-odoo-full.yml` on the published candidate branch with
+`operation=full` and `mode=project-removal`, rather than relying on its restricted
+push trigger or duplicating that stand locally.
 
 The project test-repository resource is therefore not consumed by this change.
 No private repository URL or hostname is stored in Git. If a later verified
@@ -34,11 +36,62 @@ fresh numbered `odcli-N` slot with its own checkout, database, port, and cleanup
 | V01 | `local-resource-lifecycle` / nested symlink in owned non-source directory | Lower-level check is sufficient: standard-library deletion and referent preservation are deterministic filesystem effects | Implementer: parameterized cases in `tests/unit/internal/test_project_filesystem_purge.py` | WP Verifier inspects the temporary tree before/after and confirms both external file and directory referents are byte-stable; this is distinct from rerunning the test | Existing `CI / offline-tests` through `make test` | Owned target absent; nested links absent; external referents present and unchanged; no traversal | Pytest command/exit code and relevant commit/file links in Multica; no image because output is unchanged/internal |
 | V02 | `local-resource-lifecycle` / top-level and source-root guards | Existing focused unit boundary is sufficient | Implementer: retain and parameterize guard cases in `tests/unit/internal/test_project_filesystem_purge.py` | WP Verifier manually reviews target classification and inspects that source/top-level targets remain after the attempted operation | Existing `CI / offline-tests` | Top-level symlink refused; nested source link refused; referents unchanged; containment/provenance guards remain | Command/exit code and commit/file links; no image |
 | V03 | `project-removal` / absent primary runtime retry and incomplete evidence | Integration seam is sufficient because the required observations, adapters, catalogue rows, and failure ordering are already injectable without a live Odoo process | Implementer: focused cases in `tests/integration/test_project_removal.py` | WP Verifier performs a fresh fixture walkthrough: remove the owned venv, capture by full id, inspect the plan, execute remaining fake-backed point operations, and inspect catalogue/filesystem postconditions without invoking the test function | Existing `CI / offline-tests`; no new job | No venv recreation or process execution; durable evidence produces the same projection path; remaining owned actions complete once; missing evidence mutates nothing and preserves registration | Sanitized commands, exit codes, assertions, and commit/file links in Multica; diagnostic JSON/logs are not committed |
-| V04 | `project-removal` / complete isolated purge with OdCLI venv symlinks | Existing source-backed CI E2E closes the real Unix venv-layout gap; no duplicate local stand | Implementer: extend `tests/integration/real_odoo/test_project_removal.py` in the existing targeted selection | WP Verifier reviews the CI fixture construction and exact referent-preservation assertions, then reports coverage findings; Tester does not edit the GitHub test | Extend `.github/workflows/real-odoo-tier.yml` `real-odoo-targeted` selected project-removal case; no new framework/job | Candidate SHA uses an OdCLI-created venv with nested interpreter link; confirmed purge succeeds; external canary survives unchanged; project reaches forgotten terminal state | GitHub run/job/test links and exact product SHA in Multica; no image because public output format/content is unchanged |
+| V04 | `project-removal` / complete isolated purge with OdCLI venv symlinks | Existing source-backed CI E2E closes the real Unix venv-layout gap; no duplicate local stand | Implementer: extend `tests/integration/real_odoo/test_project_removal.py` in the existing targeted selection | WP Verifier reviews the CI fixture construction, exact referent-preservation assertions, and completed run read-back, then reports coverage findings; Tester does not edit the GitHub test | Manager dispatches `.github/workflows/real-odoo-full.yml` on the published candidate branch with `operation=full`, `mode=project-removal`; the reusable job SHALL be `real-odoo-targeted / real-odoo-project-removal`; no new framework/job | Run `headSha` equals the reviewed candidate SHA; an OdCLI-created venv has a nested interpreter link; confirmed purge succeeds; external canary survives unchanged; project reaches forgotten terminal state | GitHub run/job/test and evidence-artifact links, dispatch command/exit code, and exact product SHA in Multica; no image because public output format/content is unchanged |
 
 There are no affected OpenAPI operations or schemas. V01–V04 cover every changed
 scenario; unchanged retention, output, and idempotence scenarios remain under the
 main-spec suites.
+
+### V04 Focused Dispatch Contract
+
+The Implementer owns task `3.1`, including the product test, fixture assertions,
+and any directly required reusable-workflow maintenance. After the candidate is
+integrated and published on the feature branch, the Manager owns exactly one
+focused dispatch for V04. The WP Verifier owns the independent run/job/SHA and
+assertion read-back. This operational split does not create another OpenSpec task
+or work package, and the E2E Tester is not invoked while
+`e2e_required=false`.
+
+Before dispatch, the Manager SHALL set `CANDIDATE_SHA` to the reviewed forty-hex
+product revision and SHALL prove that the remote feature branch resolves to that
+revision. From a clean product checkout with `origin` configured, the executable
+dispatch contract is:
+
+```bash
+CANDIDATE_BRANCH=feat/MYL-593-fix-project-removal-symlink-retry
+CANDIDATE_SHA=<reviewed-candidate-sha>
+REPOSITORY=maximchikAlexandr/odoo-instance-sdk
+test "$(git ls-remote origin "refs/heads/${CANDIDATE_BRANCH}" | cut -f1)" = "${CANDIDATE_SHA}"
+gh workflow run real-odoo-full.yml \
+  --repo "${REPOSITORY}" \
+  --ref "${CANDIDATE_BRANCH}" \
+  --raw-field operation=full \
+  --raw-field mode=project-removal
+```
+
+The Manager SHALL preserve the run URL or run id returned by the dispatch and
+publish the dispatch command and exit code. The run is not sufficient merely
+because it used the feature branch. Before V04 can pass, the WP Verifier SHALL
+read the completed run and assert the tested revision and focused job explicitly:
+
+```bash
+gh run view <run-id> \
+  --repo maximchikAlexandr/odoo-instance-sdk \
+  --json databaseId,url,event,headBranch,headSha,status,conclusion,jobs
+test "$(gh run view <run-id> \
+  --repo maximchikAlexandr/odoo-instance-sdk \
+  --json headSha --jq .headSha)" = "${CANDIDATE_SHA}"
+gh api \
+  repos/maximchikAlexandr/odoo-instance-sdk/actions/runs/<run-id>/artifacts \
+  --jq '.artifacts[] | select(.name == "real-odoo-project-removal-evidence") | {name,expired,size_in_bytes,archive_download_url}'
+```
+
+The read-back SHALL show `event=workflow_dispatch`, the expected feature branch,
+`headSha=${CANDIDATE_SHA}`, `status=completed`, `conclusion=success`, and a
+successful `real-odoo-targeted / real-odoo-project-removal` job. The evidence
+artifact SHALL exist and not be expired. A run on another SHA, an absent focused
+job, a skipped/failed/cancelled job, or a missing artifact leaves V04 unverified;
+it SHALL NOT be reported as PASS or replaced by the scheduled/full-tier result.
 
 ## Local Scripts, Images, and Evidence
 
@@ -56,10 +109,12 @@ honest ANSI/TTY/progress limitations.
 
 The final Multica verification comment SHALL include the product PR, commit and
 file links; tested product SHA; exact commands and exit codes; V01–V04 assertion
-results; CI links; and cleanup disposition. Runtime logs, diagnostic JSON,
-hashes, provenance, and any later images are Multica attachments/evidence only,
-not Git commits. The comment and attachment metadata SHALL be read back before
-verification is declared complete.
+results; the V04 dispatch command, run id/URL, run `headSha`, focused job name and
+URL/conclusion, evidence-artifact metadata/link; and cleanup disposition. Runtime
+logs, diagnostic JSON, hashes, provenance, and any later images are Multica
+attachments/evidence only, not Git commits. The WP Verifier SHALL read the posted
+comment and attachment/link metadata back before verification is declared
+complete.
 
 ## Cleanup
 
@@ -101,8 +156,11 @@ materialize exactly the one work package below.
   fail-closed boundary when evidence is incomplete.
 - **Owned responsibility scope:** Filesystem purge policy and focused tests;
   project removal observation construction and focused integration tests; the
-  existing source-backed project-removal CI case; directly related fixtures,
-  docs, snapshots, generated contract checks, and service files. Critical shared
+  existing source-backed project-removal CI case and its reusable workflow
+  contract; directly related fixtures, docs, snapshots, generated contract
+  checks, and service files. The Implementer owns product changes, the Manager
+  owns the exact candidate dispatch, and the WP Verifier owns independent
+  run/job/SHA/evidence read-back. Critical shared
   files include `src/odoo_instance_sdk/internal/project_filesystem_purge.py`,
   `src/odoo_instance_sdk/resources/project.py`,
   `src/odoo_instance_sdk/internal/project_removal_coordinator.py`,
@@ -116,10 +174,13 @@ materialize exactly the one work package below.
   are unlinked without traversal; recovery consumes durable evidence without
   recreating or executing the missing runtime.
 - **Definition of done/evidence:** All OpenSpec tasks complete; V01–V04 assertions
-  pass on the candidate revision; focused and repository checks pass within the
-  workspace test-time policy; strict OpenSpec validation remains clean; the PR,
-  exact SHA, CI links, commands/exit codes, manual inspection, and cleanup are
-  published and read back in Multica; no runtime evidence is committed.
+  pass on the candidate revision; the focused workflow dispatch resolves to that
+  exact candidate SHA and its named project-removal job and evidence artifact are
+  successful; focused and repository checks pass within the workspace test-time
+  policy; strict OpenSpec validation remains clean; the PR, exact SHA, dispatch
+  command, run/job/artifact links, commands/exit codes, manual inspection, and
+  cleanup are published and read back in Multica; no runtime evidence is
+  committed.
 - **Parallel-safety rationale:** The two code paths converge in one removal
   projection and share the same integration fixture and safety review boundary.
   Splitting them would create conflicting writes and duplicate the fail-closed
