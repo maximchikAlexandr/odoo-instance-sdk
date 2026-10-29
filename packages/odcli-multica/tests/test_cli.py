@@ -44,14 +44,17 @@ class _CliClient:
 class _GitCliClient:
     def __init__(self) -> None:
         self.raw_args: tuple[str, ...] | None = None
+        self.raw_member_id: str | None = None
         self.sync_options: dict[str, object] | None = None
         self.run_count = 0
 
     def context(self, request: ContextRequest) -> SimpleNamespace:
         return SimpleNamespace(checkout_path=request.checkout_path)
 
-    def git_command(self, _context: object, args: tuple[str, ...], **_kwargs: object) -> object:
+    def git_command(self, _context: object, args: tuple[str, ...], **kwargs: object) -> object:
         self.raw_args = args
+        member_id = kwargs.get("member_id")
+        self.raw_member_id = member_id if isinstance(member_id, str) else None
 
         def run() -> SimpleNamespace:
             self.run_count += 1
@@ -374,6 +377,8 @@ def test_git_raw_passthrough_routes_after_literal_delimiter(
         [
             "git",
             *_git_context_options(project),
+            "--member-id",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             str(checkout),
             "--",
             "status",
@@ -384,6 +389,7 @@ def test_git_raw_passthrough_routes_after_literal_delimiter(
     assert result.exit_code == 0
     assert json.loads(result.output)["command"] == "git"
     assert client.raw_args == ("status", "--short")
+    assert client.raw_member_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     assert client.run_count == 0
 
 
@@ -413,6 +419,7 @@ def test_git_sync_routes_named_leaf_and_preserves_dry_run_options(
     help_result = CliRunner().invoke(cli, ["git", "sync", "--help"])
     assert help_result.exit_code == 0
     assert "sync [OPTIONS]" in help_result.output
+    assert "--member-id" in help_result.output
     assert "CHECKOUT_PATH" in help_result.output
 
     module = importlib.import_module("odcli_multica.cli")
@@ -441,6 +448,8 @@ def test_git_sync_routes_named_leaf_and_preserves_dry_run_options(
             "--base",
             "origin/main",
             "--push",
+            "--member-id",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "--format",
             "json",
             "--dry-run",
@@ -452,6 +461,7 @@ def test_git_sync_routes_named_leaf_and_preserves_dry_run_options(
     assert client.sync_options is not None
     assert client.sync_options["base"] == "origin/main"
     assert client.sync_options["push"] is True
+    assert client.sync_options["member_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     assert client.run_count == 0
 
 

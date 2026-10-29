@@ -56,6 +56,29 @@ class GitLabHttpClient(BaseHttpClient):
             raise GitLabIdentityError("GitLab identity response is invalid")
         return cast("Mapping[str, JsonValue]", payload)
 
+    def get_personal_access_token(self, host: str, token: str) -> Mapping[str, JsonValue]:
+        """Read bounded token self-information without exposing the token."""
+        try:
+            client = self._ensure_client()
+            response = client.get(
+                f"https://{host}/api/v4/personal_access_tokens/self",
+                headers={"PRIVATE-TOKEN": token},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            from odoo_instance_sdk.exceptions import GitLabIdentityError
+
+            detail = redacted_projection(str(exc), secrets=(token,), field="error")
+            raise GitLabIdentityError(
+                f"GitLab cache token information is unavailable: {detail}"
+            ) from None
+        if not isinstance(payload, Mapping):
+            from odoo_instance_sdk.exceptions import GitLabIdentityError
+
+            raise GitLabIdentityError("GitLab cache token information is invalid")
+        return cast("Mapping[str, JsonValue]", payload)
+
     def _request_json(
         self,
         credential: GitLabCredentialContext,
