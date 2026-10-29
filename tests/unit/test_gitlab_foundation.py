@@ -280,6 +280,10 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
     explicit_env.chmod(0o600)
     target = explicit_env if explicit else project_env
+    replacement = target.with_name(f"{target.name}.replacement")
+    replacement.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+    replacement.chmod(0o600)
+    original_inode = target.stat().st_ino
     original_open = os.open
     swapped = False
 
@@ -292,9 +296,8 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     ) -> int:
         nonlocal swapped
         if path == target and dir_fd is None and not swapped:
-            target.unlink()
-            target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-            target.chmod(0o600)
+            replacement.replace(target)
+            assert target.stat().st_ino != original_inode
             swapped = True
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
