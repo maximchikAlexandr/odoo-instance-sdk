@@ -2,7 +2,7 @@
 
 ### Requirement: Native Multica cache uses one verified read-only credential
 
-Native Multica clone and fetch operations for the shared repository cache SHALL use one explicitly configured member/host credential inherited by the owning daemon, including cache creation before a task worktree exists and later background fetches. Before returning credentials, the helper SHALL authenticate `GET /api/v4/personal_access_tokens/self` on the exact requested GitLab host and require an active token owned by the configured GitLab user ID whose complete standard scope set is exactly `read_repository`; an unavailable self-information endpoint, granular scope, additional scope, write-capable scope, owner mismatch, inactive token, or unexpected response SHALL fail before Git authentication. The cache member SHALL NOT be inferred from a project lead, task, branch, path name, ambient helper, or another available account.
+Native Multica clone and fetch operations for the shared repository cache SHALL use one explicitly configured member/host credential inherited by the owning daemon, including cache creation before a task worktree exists and later background fetches. Before returning credentials, the helper SHALL reuse/split the existing runtime GitLab owner verification to authenticate the configured login and obtain its stable provider user ID, then authenticate `GET /api/v4/personal_access_tokens/self` on the exact requested GitLab host and require an active token whose user ID equals that runtime owner ID and whose complete standard scope set is exactly `read_repository`. It SHALL NOT require a stored provider ID. An unavailable owner/self-information endpoint, granular scope, additional scope, write-capable scope, owner mismatch, inactive token, or unexpected response SHALL fail before Git authentication. The cache member SHALL NOT be inferred from a project lead, task, branch, path name, ambient helper, or another available account.
 
 #### Scenario: Cold cache uses the configured read-only account
 
@@ -24,24 +24,24 @@ Native Multica clone and fetch operations for the shared repository cache SHALL 
 - **WHEN** the helper lacks explicit cache-read purpose or one normalized member/host pair, or the requested host differs
 - **THEN** it fails without reading another credential, invoking an ambient helper, or inferring a project
 
-### Requirement: Cache helper configuration is process-local and rotation is quiescent
+### Requirement: Cache helper configuration is process-local and replacement is generation-bound
 
-The Multica daemon launch contract SHALL clear inherited Git credential helpers and select the stable `git-credential-odcli` executable through process-local Git configuration together with the explicit cache member and cache-read purpose. It SHALL NOT write tokens, member IDs, or helper commands into repository, worktree, system, or global Git configuration. Changing the cache member or its credential SHALL require the owning daemon to be stopped with no active clone, fetch, or index-pack; the new credential SHALL be validated before restart, and hot rotation SHALL be rejected.
+The Multica daemon launch contract SHALL clear inherited Git credential helpers and select the stable `git-credential-odcli` executable through process-local Git configuration together with the explicit cache member and cache-read purpose. It SHALL NOT write tokens, member IDs, or helper commands into repository, worktree, system, or global Git configuration. One daemon generation SHALL keep its launch environment immutable. Replacing the cache member or credential SHALL use the existing `multica daemon stop`, one-shot `git credential fill` through `git-credential-odcli`, `multica daemon start`, and `multica daemon status --output json` interfaces: stop and wait for clone/fetch/index-pack children, validate the candidate, start one new generation with the replacement environment, then verify its identity/status. The product SHALL NOT add a hot-rotation API, mutable rotation state, refusal subsystem, or rotation lock.
 
 #### Scenario: Daemon starts with cache authentication
 
 - **WHEN** a daemon starts after the configured cache credential passes owner/scope validation
 - **THEN** all of that daemon generation's remote cache clone/fetch children inherit only the process-local OdCLI helper selection
 
-#### Scenario: Rotation overlaps active Git work
+#### Scenario: Replacement creates a distinct daemon generation
 
-- **WHEN** an operator attempts to change the cache member or credential while the daemon or one of its Git children remains active
-- **THEN** rotation is refused and neither the old nor new configuration is partially applied
+- **WHEN** an operator replaces the cache credential using stop → validate → restart
+- **THEN** the old daemon and its Git children have exited before validation, the candidate is validated before start, and only the new generation's children inherit the replacement environment
 
-#### Scenario: Daemon configuration is removed
+#### Scenario: Daemon configuration is rolled back
 
-- **WHEN** cache authentication is rolled back by stopping the daemon and removing its process-local helper inputs
-- **THEN** the next daemon generation does not invoke OdCLI cache credentials and no persisted Git configuration requires cleanup
+- **WHEN** cache authentication is rolled back by stopping the replacement generation and restoring or removing its process-local helper inputs before another start
+- **THEN** the rollback generation uses only the restored launch environment, does not retain the replacement credential, and no persisted Git configuration requires cleanup
 
 ### Requirement: Cache and task identities never substitute for each other
 
