@@ -148,6 +148,38 @@ def test_filesystem_adapter_refuses_symlink_escape(tmp_path: Path) -> None:
     assert outside.exists()
 
 
+@pytest.mark.parametrize("referent_kind", ("file", "directory"))
+def test_filesystem_adapter_unlinks_nested_symlink_without_following_it(
+    tmp_path: Path, referent_kind: str
+) -> None:
+    allowed_root = tmp_path / "owned"
+    target = allowed_root / ".venv"
+    target.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    if referent_kind == "file":
+        outside.write_bytes(b"external file remains unchanged\n")
+        expected = outside.read_bytes()
+    else:
+        outside.mkdir()
+        (outside / "sentinel").write_bytes(b"external directory remains unchanged\n")
+        expected = (outside / "sentinel").read_bytes()
+    (target / "nested-link").symlink_to(outside, target_is_directory=outside.is_dir())
+    identity = "python_environment:project"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", target, allowed_root),)
+    ).capture(_decision(identity, "python_environment"), project_id="project-1")
+
+    assert command is not None
+    command.run()
+
+    assert not target.exists()
+    assert not (target / "nested-link").is_symlink()
+    if referent_kind == "file":
+        assert outside.read_bytes() == expected
+    else:
+        assert (outside / "sentinel").read_bytes() == expected
+
+
 def test_source_adapter_retains_unknown_odcli_content(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / ".git").mkdir(parents=True)

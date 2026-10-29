@@ -77,7 +77,9 @@ def _assert_safe_directory(path: Path, *, source: bool) -> None:
     try:
         for directory, directories, files in os.walk(path, followlinks=False):
             directory_path = Path(directory)
-            if any((directory_path / name).is_symlink() for name in (*directories, *files)):
+            if source and any(
+                (directory_path / name).is_symlink() for name in (*directories, *files)
+            ):
                 raise ConfigError("nested symlink in project filesystem target")
             if source and directory_path == path / ".odcli":
                 unknown = set(directories).union(files) - unknown_odcli

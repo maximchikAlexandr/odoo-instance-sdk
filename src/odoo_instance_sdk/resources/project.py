@@ -6,15 +6,48 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.models.project_removal import (
     ProjectRemovalResult,
     ProjectResourceDecision,
     ProjectSelector,
 )
 
+
+def _primary_python_environment_absent(project: ProjectConfig, root: Path) -> bool:
+    """Return true only when a path-backed project Python lives in a missing .venv."""
+    python = getattr(project, "python", None)
+    venv = root / ".venv"
+    if python is None or venv.exists() or venv.is_symlink():
+        return False
+    value = Path(str(python))
+    if not (isinstance(python, Path) or "/" in str(python) or "\\" in str(python)):
+        return False
+    executable = value if value.is_absolute() else root / value
+    try:
+        executable.resolve(strict=False).relative_to(venv.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def _require_recovery_endpoint(endpoint: tuple[str, int] | None) -> tuple[str, int]:
+    if endpoint is None:
+        raise ConfigError("durable project removal evidence is incomplete")
+    return endpoint
+
+
+def _require_compose_postgres(project: ProjectConfig) -> PostgresProjectConfig:
+    postgres = project.postgres
+    if postgres is None or postgres.mode != "compose":
+        raise ConfigError("durable project removal evidence is incomplete")
+    return postgres
+
+
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 
 
 @dataclass(slots=True, kw_only=True)
@@ -35,12 +68,14 @@ class ProjectResource:
 
         from odoo_instance_sdk.config import InstanceConfig
         from odoo_instance_sdk.exceptions import (
-            ConfigError,
             InstanceConfigurationError,
             PostgresClusterError,
         )
+        from odoo_instance_sdk.internal.generated_config import project_generated_config_path
         from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
         from odoo_instance_sdk.internal.postgres_compose import (
+            compose_project_name,
+            compose_volume_name,
             container_id_matches_snapshot,
             inspect_container_identity,
             inspect_volume_identity,
@@ -181,6 +216,80 @@ class ProjectResource:
                     recovered_source = True
                 except (OSError, ValueError, PostgresClusterError):
                     instance = None
+        elif (
+            purge
+            and project_config is not None
+            and _primary_python_environment_absent(project_config, registration.repository_root)
+            and claim is not None
+            and claim.state == "active"
+        ):
+
+            def reject_evidence(condition: bool, reason: str) -> None:
+                if condition:
+                    raise ConfigError(reason)
+
+            try:
+                endpoint_row = catalog._conn.execute(
+                    """SELECT db_host, db_port FROM database_events
+                       WHERE cluster_id = ? AND event_type = 'bootstrapped'
+                       ORDER BY sequence DESC LIMIT 1""",
+                    (str(claim.cluster_id),),
+                ).fetchone()
+                recovery_endpoint = (
+                    (str(endpoint_row["db_host"]), int(endpoint_row["db_port"]))
+                    if endpoint_row is not None
+                    else None
+                )
+                recovery_endpoint = _require_recovery_endpoint(recovery_endpoint)
+                postgres = _require_compose_postgres(project_config)
+                generated_config = project_generated_config_path(registration.repository_root)
+                reject_evidence(
+                    claim.project_id != registration.project_id
+                    or claim.compose_project != compose_project_name(claim.project_id)
+                    or claim.volume_name != compose_volume_name(claim.project_id)
+                    or generated_config.is_symlink()
+                    or not generated_config.is_file(),
+                    "durable project removal evidence is incomplete",
+                )
+                recovery_cluster = PostgresCluster._from_config(
+                    project_config,
+                    repository_root=registration.repository_root,
+                    compose_runner=None,
+                    project_id=claim.project_id,
+                )
+                reject_evidence(
+                    not recovery_cluster.owned
+                    or recovery_cluster.compose_project_name != claim.compose_project
+                    or recovery_cluster.endpoint_host != recovery_endpoint[0]
+                    or recovery_cluster.endpoint_port != recovery_endpoint[1]
+                    or recovery_cluster.endpoint_port != postgres.port,
+                    "durable project cluster evidence changed",
+                )
+                recovery_user = postgres.user or "odoo"
+                recovery_password = read_owned_password_file(recovery_cluster.password_file)
+                start_config = StartConfig.from_odoo_config(generated_config)
+                reject_evidence(
+                    start_config.db_host != recovery_endpoint[0]
+                    or start_config.db_port != recovery_endpoint[1]
+                    or start_config.db_user != recovery_user,
+                    "generated project database identity changed",
+                )
+                start_config.db_password = recovery_password
+                instance = OdooInstance(
+                    config=InstanceConfig(
+                        base_url=(f"http://{start_config.http_interface}:{start_config.http_port}"),
+                        start_config=start_config,
+                        db_host=recovery_endpoint[0],
+                        db_port=recovery_endpoint[1],
+                        db_user=recovery_user,
+                        db_password=recovery_password,
+                    ),
+                    _client=client,
+                    _postgres_cluster=recovery_cluster,
+                )
+                recovered_source = True
+            except (ConfigError, OSError, ValueError, PostgresClusterError):
+                instance = None
         if purge and project_config is not None:
             if instance is None:
                 try:

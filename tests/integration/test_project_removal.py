@@ -25,7 +25,11 @@ import pytest
 import odoo_instance_sdk.internal.project_removal as project_removal
 import odoo_instance_sdk.internal.project_removal_coordinator as project_removal_coordinator
 import odoo_instance_sdk.resources.publication as publication_resource
-from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
+from odoo_instance_sdk.exceptions import (
+    InstanceConfigurationError,
+    LockConflictError,
+    ProjectRemovalError,
+)
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal import (
     locks as lock_paths,
@@ -2098,10 +2102,48 @@ def _capture_missing_source_purge(  # noqa: C901
     real_children: bool = False,
     observed_oids: Mapping[str, int] | None = None,
     recovery_password: str | None = None,
+    missing_primary_venv: bool = False,
+    runtime_probe_counter: list[bool] | None = None,
 ) -> tuple[BackupCatalog, Command[ProjectRemovalResult], RecordingExecutor, str]:
     root = tmp_path / "source"
     common = root / ".git"
-    common.mkdir(parents=True)
+    if missing_primary_venv:
+        root.mkdir(parents=True)
+        subprocess.run(("git", "init", str(root)), check=True, capture_output=True)
+        metadata = root / ".odcli"
+        metadata.mkdir()
+        (metadata / "project.toml").write_text(
+            '[project]\npython = ".venv/bin/python"\n'
+            'default_source_database = "owned_db"\n'
+            'managed_filestore = ".odcli/filestore"\n\n'
+            '[postgres]\nmode = "compose"\nimage = "pgvector/pgvector:pg16"\n'
+            'port = 15432\nuser = "odoo"\n',
+            encoding="utf-8",
+        )
+        (metadata / "odoo.conf").write_text(
+            "[options]\ndb_host = 127.0.0.1\ndb_port = 15432\ndb_user = odoo\ndb_name = owned_db\n",
+            encoding="utf-8",
+        )
+        (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        subprocess.run(("git", "-C", str(root), "add", "-A"), check=True)
+        subprocess.run(
+            (
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "baseline",
+            ),
+            check=True,
+            capture_output=True,
+        )
+    else:
+        common.mkdir(parents=True)
     project_id = f"project_{repo_key(root, common)}"
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     catalog._register_project(project_id, root, common)
@@ -2148,9 +2190,13 @@ def _capture_missing_source_purge(  # noqa: C901
             )
         else:
             publish_observed(catalog, claim, root)
-    shutil.rmtree(root)
-    assert not root.exists()
-    assert not common.exists()
+    if not missing_primary_venv:
+        shutil.rmtree(root)
+        assert not root.exists()
+        assert not common.exists()
+    else:
+        assert root.exists()
+        assert not (root / ".venv").exists()
     assert catalog._get_postgres_cluster_for_project(project_id, root, common) is not None
     full_container_id = "b" * 64
     compose_project = f"odcli_pg_{claim_project_id}"
@@ -2328,7 +2374,19 @@ def _capture_missing_source_purge(  # noqa: C901
     else:
         monkeypatch.setattr(DatabasePurgeAdapter, "capture", capture_child)
         monkeypatch.setattr(ComposeClusterPurgeAdapter, "capture", capture_child)
-    client = cast("OdooClient", SimpleNamespace(get_catalog=lambda: catalog))
+    runtime_probes = [] if runtime_probe_counter is None else runtime_probe_counter
+
+    def fail_runtime(_project: ProjectConfig) -> None:
+        runtime_probes.append(True)
+        raise InstanceConfigurationError("project interpreter missing")
+
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=fail_runtime),
+        ),
+    )
 
     command = ProjectResource(_client=client).remove_command(
         ProjectSelector.from_project_id(project_id),
@@ -2336,6 +2394,80 @@ def _capture_missing_source_purge(  # noqa: C901
         confirmation=f"{root.name}:{project_id}",
     )
     return catalog, command, executor, project_id
+
+
+def test_public_purge_retries_by_full_id_when_primary_venv_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_probes: list[bool] = []
+    catalog, command, _executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        f"project_{repo_key(tmp_path / 'source', tmp_path / 'source' / '.git')}",
+        ("owned_db",),
+        _seed_exact_restore,
+        real_children=True,
+        recovery_password="test-recovery-password",
+        missing_primary_venv=True,
+        runtime_probe_counter=runtime_probes,
+    )
+    root = tmp_path / "source"
+    assert not (root / ".venv").exists()
+    assert catalog._project_bound_database_records(
+        project_id,
+        catalog._get_postgres_cluster(project_id).cluster_id,  # type: ignore[union-attr]
+        "127.0.0.1",
+        15432,
+    ) == (("owned_db", 102),)
+
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert runtime_probes == []
+    completed_types = tuple(item.resource_type for item in result.completed)
+    assert completed_types[0] == "database"
+    assert "volume" in completed_types
+    assert completed_types[-1] == "project"
+    assert not root.exists()
+    assert not (root / ".venv").exists()
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+@pytest.mark.parametrize(
+    ("recovery_password", "observed_oids"),
+    ((None, None), ("test-recovery-password", {"owned_db": 202})),
+    ids=("missing-credential", "changed-database-identity"),
+)
+def test_public_purge_keeps_missing_venv_retry_inert_without_durable_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_password: str | None,
+    observed_oids: Mapping[str, int] | None,
+) -> None:
+    catalog, command, _executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        f"project_{repo_key(tmp_path / 'source', tmp_path / 'source' / '.git')}",
+        ("owned_db",),
+        _seed_exact_restore,
+        real_children=True,
+        observed_oids=observed_oids,
+        recovery_password=recovery_password,
+        missing_primary_venv=True,
+    )
+    root = tmp_path / "source"
+    manifest = root / ".odcli" / "project.toml"
+    before = manifest.read_bytes()
+
+    with pytest.raises(ProjectRemovalError, match="observation"):
+        command.run()
+
+    assert manifest.read_bytes() == before
+    assert not (root / ".venv").exists()
+    assert root.exists()
+    assert catalog.get_project(project_id)["registration_state"] == "registered"  # type: ignore[index]
+    catalog.close()
 
 
 def _seed_exact_restore(
