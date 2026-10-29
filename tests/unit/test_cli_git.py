@@ -40,10 +40,64 @@ def test_member_id_help_names_multica_account_user_id(command: tuple[str, ...]) 
 
 def _context(root: Path) -> SimpleNamespace:
     instance = SimpleNamespace(
-        config=InstanceConfig(base_url="http://127.0.0.1:8069", default_cwd=root)
+        config=InstanceConfig(base_url="http://127.0.0.1:8069", default_cwd=root),
+        _client=SimpleNamespace(
+            get_catalog=lambda: SimpleNamespace(list_environments=lambda **_: ())
+        ),
     )
     instance.git = GitResource(cast("OdooInstance", instance))
     return SimpleNamespace(instance=instance)
+
+
+def test_git_rename_branch_cli_dry_run_then_execute(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    bare = tmp_path.parent / f"{tmp_path.name}-origin.git"
+    import subprocess
+
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    _git(tmp_path, "remote", "add", "origin", str(bare))
+    _git(tmp_path, "push", "-qu", "origin", "main")
+    _git(tmp_path, "checkout", "-qb", "feature")
+
+    with patch(
+        "odoo_instance_sdk.commands.git.cli_context.ready_instance", return_value=_context(tmp_path)
+    ):
+        preview = CliRunner().invoke(
+            cli, ["git", "rename-branch", "ICODE-91", "--dry-run", "--format", "json"]
+        )
+        assert preview.exit_code == 0, preview.output
+        preview_payload = json.loads(preview.stdout)
+        assert preview_payload["dry_run"] is True
+        assert preview_payload["result"]["steps"][-1]["argv"][-3:] == ["branch", "-m", "ICODE-91"]
+        assert _git(tmp_path, "branch", "--show-current").strip() == "feature"
+
+        result = CliRunner().invoke(cli, ["git", "rename-branch", "ICODE-91", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["result"] == {
+        "previous_branch": "feature",
+        "selected_branch": "ICODE-91",
+        "renamed": True,
+    }
+    assert _git(tmp_path, "branch", "--show-current").strip() == "ICODE-91"
+
+
+def test_git_rename_branch_rejects_invalid_ticket_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def unexpected(*_: object, **__: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("invalid ticket reached instance resolution")
+
+    monkeypatch.setattr("odoo_instance_sdk.commands.git.cli_context.ready_instance", unexpected)
+    result = CliRunner().invoke(cli, ["git", "rename-branch", "bad-ticket"])
+
+    assert result.exit_code == 2
+    assert "expected ticket like PROJ-123" in result.stderr
+    assert called is False
 
 
 @pytest.mark.parametrize("tag", ["IMP", "VIEW", "DEMO", "DATA", "ACC", "UI"])

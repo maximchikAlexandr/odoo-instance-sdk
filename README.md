@@ -658,6 +658,7 @@ odcli git commit "describe the staged change" --ticket PROJ-123 --dry-run
 multica workspace member list --output json  # copy the person's user_id as MEMBER_USER_ID
 odcli git commit "describe the staged change" --member-id MEMBER_USER_ID --tag IMP --dry-run
 odcli git check --base main --format json
+odcli git rename-branch ICODE-91 --dry-run
 odcli git absorb --dry-run
 odcli git sync --base main --push --dry-run
 ```
@@ -854,6 +855,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli module context` — Show repository, Git, dependency, and installed-module context.
 - `odcli git commit` — Create one staged Odoo commit with a checked message.
 - `odcli git check` — Validate Odoo commit history and branch safety.
+- `odcli git rename-branch TICKET` — Rename the selected project/environment's current local branch to the next free ticket name; idempotent when already matching, collision-safe, and local-only. Supports `--dry-run`.
 - `odcli git absorb` — Absorb staged hunks with optional `git-absorb`.
 - `odcli git clone` — Clone or safely retry an authenticated GitLab repository.
 - `odcli git sync` — Fetch, rebase, validate, and optionally publish a branch.
