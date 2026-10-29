@@ -2,20 +2,20 @@
 
 - Task key: `MYL-615`.
 - OpenSpec change: `expose-dry-run-progress-help-restore-verification`.
-- Planning revision: `R2`; this revision replaces the R1 dependency and evidence topology without changing product scope or estimate authority.
+- Planning revision: `R3`; this revision replaces the R2 implementation topology after a fresh `ponytail full` audit against the current code without changing product scope.
 - Planning base: `origin/main` at the base revision recorded by the publication commit.
 - Estimate authority: the root planning issue custom properties `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours`. Numeric totals are intentionally not duplicated here.
 - Estimate basis: full remaining work for one experienced developer familiar with this Python/Click/Odoo stack, without AI acceleration. It includes implementation, required tests/fixtures/docs, normal review repair, and attended verification; unattended CI/provider waits and approval queues are excluded.
 - Confidence: medium. The existing plan, observer, output, command graph, restore, and real-Odoo seams are inspectable and reusable; uncertainty is concentrated in broad command-family adoption, stderr framing compatibility, Click help edge cases, and real attachment/filestore behavior.
 - Calibration: evidence-based but uncalibrated; no comparable historical implementation-time sample is asserted. Tests were not run to manufacture estimate evidence.
-- Delivery mode: `dag`. The authoritative estimate property is above the single-WP threshold and the stage-2 packages have independent deliverables and non-conflicting primary write zones after the shared contract lands.
-- Stage mapping: `WP-01 -> 1`; `WP-05 -> 1`; `WP-06 -> 1`; `WP-02 -> 2`; `WP-03 -> 2`; `WP-04 -> 2`; `WP-07 -> 3`.
-- Topological frontiers: stage 1 contains independent `WP-01`, `WP-05`, and `WP-06`; stage 2 contains independent `WP-02`, `WP-03`, and `WP-04`; stage 3 contains `WP-07`. WIP limits are operational and are not encoded as dependencies.
+- Delivery mode: `dag`. The authoritative estimate property is above the single-WP threshold and the stage-2 packages have independent deliverables and non-conflicting primary write zones after the shared output contract lands.
+- Stage mapping: `WP-01 -> 1`; `WP-05 -> 1`; `WP-02 -> 2`; `WP-03 -> 2`; `WP-04 -> 2`; `WP-06 -> 3`.
+- Topological frontiers: stage 1 contains independent `WP-01` and `WP-05`; stage 2 contains independent `WP-02`, `WP-03`, and `WP-04`; stage 3 contains `WP-06`. WIP limits are operational and are not encoded as dependencies.
 - Scope changes to effect vocabulary, progress framing, help source, restore outcome semantics, or WP dependency surfaces require a planning revision. Assignee/status movement does not.
 
 ## Ponytail Result
 
-`ponytail full` found four candidate subsystems. The design retains only the smallest required seams: a validated value inside existing `ActionStep.details`, an adapter over existing `StepEvent`, a projection of the live Click graph, and fields/checks on the existing restore path. No second planner, runner, command registry, progress scheduler, filesystem tracer, renderer hierarchy, restore service, dependency, or persistent schema is planned.
+`ponytail full` found four candidate subsystems and removed two R2 abstractions. The implementation reuses 109 existing `PreparedAction` construction sites across 36 files, the existing `StepEvent` elapsed/completed/total facts and `RunContext.progress` validation, the live Click graph, and the current restore stages/result path. New shared code is limited to a compact `file_effects` validator/projection, one machine stderr frame projection, one live-Click help projection, and restore outcome fields/query checks. There is no new progress field, restore adapter, planner, runner, command registry, scheduler, filesystem tracer, renderer hierarchy, restore service, dependency, or persistent schema. The evidence-based minimal complete diff is approximately 1,800–3,100 changed lines including tests/docs; the breadth comes from the required command/state matrix, not framework code.
 
 ## E2E Decision
 
@@ -78,17 +78,17 @@ Cleanup SHALL use the same Binta wrapper and `--project` value, remove only iden
 
 ## Work Packages
 
-### WP-01 — Shared filesystem-effect contract
+### WP-01 — Shared effect and machine-progress projection
 
 - Stage: `1`.
 - `depends_on`: none.
-- OpenSpec task coverage: `1.1`, `1.2`, `1.3` exactly once.
-- Deliverable: validated `ActionStep.details.file_effects`, shared Rich projection, canonical redaction/fingerprint/stale-target coverage, and no domain adoption.
-- Owned responsibility scope: `execution.py`, prepared-action public projection, `internal/output_rich.py`, narrowly related helpers and unit tests. Related fixtures/docs are included unless owned by an active sibling.
-- Critical shared files: schema/helper and Rich renderer become the stable predecessor contract; later WPs consume but do not redesign them.
-- Contract surface: effect vocabulary, ordering, normalization, conditional/unknown representation, redaction, and compatibility.
-- DoD/evidence: focused tests prove every action kind, malformed input, secrets, Rich/JSON/TOON parity, fingerprints, and dry-run inertness; no production command registry or second plan appears.
-- Parallel-safety rationale: this predecessor owns the only shared effect contract before domain siblings begin.
+- OpenSpec task coverage: `1.1`, `1.2`, `1.3`, `5.1` exactly once.
+- Deliverable: validated `ActionStep.details.file_effects`, shared Rich projection, and machine stderr framing derived from existing `StepEvent` facts, with no domain adoption or new progress model.
+- Owned responsibility scope: `execution.py`, prepared-action public projection, `internal/output_rich.py`, progress/output-only regions of `commands/output.py`, narrowly related helpers and unit tests. Related fixtures/docs are included unless owned by an active sibling.
+- Critical shared files: effect helper, Rich renderer, and machine frame projection become stable predecessor contracts; later WPs consume but do not redesign them.
+- Contract surface: effect vocabulary/order/normalization/conditional representation/redaction plus JSONL/RS-TOON framing, derived byte names/rate, stderr/stdout separation, interruption/failure sanitation, and compatibility.
+- DoD/evidence: focused tests prove every action kind, malformed input, secrets, Rich/JSON/TOON parity, fingerprints, existing-event framing, known/unknown totals, derived non-negative rate, one final stdout document, and no dry-run events; no new event field, adapter, registry, or second plan appears.
+- Parallel-safety rationale: this predecessor owns the only shared effect and output-projection surfaces before domain siblings begin; `WP-05` owns help-only registration/projection and does not edit these files.
 
 ### WP-02 — Project and environment file-effect adoption
 
@@ -100,17 +100,17 @@ Cleanup SHALL use the same Binta wrapper and `--project` value, remove only iden
 - Critical shared files: may consume effect helper and existing output functions; changes to shared schema require coordination through `WP-01`, not local divergence.
 - Contract surface: PO/POT publication, generated project files, draft metadata, worktree/config/lock/venv/backup/filestore ownership and rollback.
 - DoD/evidence: parametrized modes cover new/existing/no-op/uncertain/owned/reused/preserved/error-cleanup states and exact dry-run non-mutation.
-- Parallel-safety rationale: primary writes are project/environment domains and do not overlap progress/help/restore verification modules.
+- Parallel-safety rationale: primary writes are project/environment domains and do not overlap Git/runtime or database/restore domains after `WP-01`.
 
 ### WP-03 — Database, backup, and restore verification
 
 - Stage: `2`.
-- `depends_on`: `WP-01`, `WP-05`.
-- OpenSpec task coverage: `3.2`, `3.3`, `7.1`, `7.2`, `7.3`, `7.4`, `7.5` exactly once.
-- Deliverable: database/backup effects, restore consumption of the stable progress adapter, independent restore verification states/counts, and real-Odoo fixtures.
-- Owned responsibility scope: all database restore/refresh/drop implementation, backup deletion, restore result models, attachment/filestore validation, restore progress integration, and all related unit/integration/real-Odoo restore-domain tests.
-- Critical shared files: restore modules and restore-domain tests are exclusively mutable here. The package consumes `WP-01`'s effect vocabulary and `WP-05`'s stable restore-consumer adapter/event contract; it SHALL not redesign either predecessor contract.
-- Contract surface: prior-filestore move/compensation, provenance-bound deletion/retention, backup facts, neutralization state, safe unique attachment counts, and mapping of restore acquisition/import/filestore/verification/cleanup stages onto the progress adapter.
+- `depends_on`: `WP-01`.
+- OpenSpec task coverage: `3.2`, `3.3`, `5.3`, `7.1`, `7.2`, `7.3`, `7.4` exactly once.
+- Deliverable: database/backup effects, existing-event progress for download/restore, independent restore verification states/counts, and real-Odoo fixtures.
+- Owned responsibility scope: all database restore/refresh/drop implementation, backup deletion/download, restore result models, attachment/filestore validation, restore progress publication, and all related unit/integration/real-Odoo database-domain tests.
+- Critical shared files: database/backup/restore modules and their domain tests are exclusively mutable here. The package consumes `WP-01`'s effect and frame projections and SHALL not redesign them.
+- Contract surface: prior-filestore move/compensation, provenance-bound deletion/retention, backup facts, download bytes, existing restore stages/heartbeats, neutralization state, and safe unique attachment counts.
 - DoD/evidence: complete/incomplete/duplicate/unsafe/not-checked/query-failure matrices pass; publication/compensation stays truthful; focused real-Odoo coverage exists.
 - Parallel-safety rationale: after both predecessor contracts land, database/restore files and tests are exclusively owned here and are disjoint from the stage-2 project/environment and Git/runtime write zones.
 
@@ -118,42 +118,30 @@ Cleanup SHALL use the same Binta wrapper and `--project` value, remove only iden
 
 - Stage: `2`.
 - `depends_on`: `WP-01`.
-- OpenSpec task coverage: `4.1`, `4.2`, `4.3`, `4.4` exactly once.
-- Deliverable: bounded known consequences and explicit uncertainty across Git, arbitrary-code, and self-update flows.
-- Owned responsibility scope: Git planners/resources, run/shell/exec/eval/test/module planners, self-update planning, and their tests/docs.
+- OpenSpec task coverage: `4.1`, `4.2`, `4.3`, `4.4`, `5.2` exactly once.
+- Deliverable: bounded known consequences and explicit uncertainty across Git, arbitrary-code, and self-update flows, plus existing-observer progress for Git clone.
+- Owned responsibility scope: Git planners/resources including clone progress production, run/shell/exec/eval/test/module planners, self-update planning, and their tests/docs.
 - Critical shared files: consumes shared effect helper; does not edit help/progress framing or restore result models.
-- Contract surface: Git index/history/rebase/push scope, managed config/log/data roots, arbitrary-code/conflict limits, OdCLI recovery snapshot/migration wording.
+- Contract surface: Git index/history/rebase/push scope, clone stage/available byte facts, managed config/log/data roots, arbitrary-code/conflict limits, OdCLI recovery snapshot/migration wording.
 - DoD/evidence: parametrized plan/redaction/raw-stream/dry-run tests prove no fabricated file list and no mislabelled Odoo backup.
 - Parallel-safety rationale: domain modules do not overlap sibling primary write zones after `WP-01`.
 
-### WP-05 — Machine progress stream
-
-- Stage: `1`.
-- `depends_on`: none.
-- OpenSpec task coverage: `5.1`, `5.2`, `5.3`, `5.4` exactly once.
-- Deliverable: additive byte/rate events, JSONL/RS-TOON stderr framing for clone/download, and one stable restore-consumer adapter with one final stdout document.
-- Owned responsibility scope: `internal/proc` event/progress types, progress-only regions of `commands/output.py`, Git clone and backup-download producers, the restore-consumer adapter/contract, and their framing/stream tests. It SHALL NOT edit database restore modules or restore-domain tests.
-- Critical shared files: owns only progress transport/projection regions and adapter tests. `WP-06` owns help projection and SHALL avoid those regions; `WP-03` exclusively owns restore implementation, result/verification, and restore-domain tests.
-- Contract surface: event schema, monotonic units/rate, framing, stderr/stdout separation, interrupt/failure cleanup, redaction, and the callable/event mapping consumed later by restore.
-- DoD/evidence: controlled stream/fake-clock tests and integration cases parse every frame, prove early observability, no percentage for unknown totals, one stdout document, and secret absence.
-- Parallel-safety rationale: it can run with `WP-01` and `WP-06` because it neither consumes filesystem effects nor edits help projection; exact restore implementation/test ownership is deferred to dependent `WP-03`.
-
-### WP-06 — Machine-readable help
+### WP-05 — Machine-readable help
 
 - Stage: `1`.
 - `depends_on`: none.
 - OpenSpec task coverage: `6.1`, `6.2`, `6.3` exactly once.
 - Deliverable: versioned JSON/TOON root/subtree help projected directly from live Click objects with Rich compatibility.
 - Owned responsibility scope: shared Rich Click command/group classes or focused help module, help serialization, and Click/package tests.
-- Critical shared files: if CLI composition changes are needed, restrict them to help registration/projection; do not edit `commands/output.py` progress sections owned by `WP-05`.
+- Critical shared files: if CLI composition changes are needed, restrict them to help registration/projection; do not edit execution, Rich plan, or machine progress projection files owned by `WP-01`.
 - Contract surface: help schema, option ordering, safe defaults, aliases/hidden/deprecated metadata, no context/domain work, no second registry.
 - DoD/evidence: live graph equals machine help; JSON/TOON decode equally; unsafe defaults are not evaluated; root/leaf Rich help remains characterized.
-- Parallel-safety rationale: help metadata and tests consume neither filesystem-effect nor progress contracts and are independent of both other stage-1 write zones.
+- Parallel-safety rationale: help metadata and tests consume neither filesystem-effect nor progress contracts and are disjoint from `WP-01`'s stage-1 write zone.
 
-### WP-07 — Integrated characterization, CI, docs, and E2E handoff
+### WP-06 — Integrated characterization, CI, docs, and E2E handoff
 
 - Stage: `3`.
-- `depends_on`: `WP-02`, `WP-03`, `WP-04`, `WP-06`.
+- `depends_on`: `WP-02`, `WP-03`, `WP-04`, `WP-05`.
 - OpenSpec task coverage: `8.1`, `8.2`, `8.3`, `8.4` exactly once.
 - Deliverable: consolidated command inventory, CI/real-Odoo fixtures, user documentation, generated artifacts, and executable independent Tester handoff/evidence contract.
 - Owned responsibility scope: `PUBLIC_LEAF_CASES` characterization, generated command matrix, cross-domain integration fixtures, CI workflow adjustments, docs, and evidence coordination. It may make focused repair edits only after sibling integration findings and with ownership coordination.

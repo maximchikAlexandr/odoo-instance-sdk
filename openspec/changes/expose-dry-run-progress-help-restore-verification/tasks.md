@@ -27,10 +27,9 @@
 
 ## 5. Machine Progress Stream
 
-- [ ] 5.1 Extend existing `StepEvent`/`RunContext.progress` with additive byte unit/rate data and monotonic validation while preserving current Rich lifecycle semantics.
-- [ ] 5.2 Wire trustworthy stage/byte events into Git clone and backup download, and expose one stable restore-consumer adapter over the existing progress lifecycle without editing restore domain implementation.
-- [ ] 5.3 Emit compact JSON-lines or Record-Separator-framed TOON progress on stderr for normal machine execution while retaining exactly one final stdout document and no dry-run progress.
-- [ ] 5.4 Add parametrized known/unknown total, rate, framing, failure, interruption, stream separation, and secret-canary tests.
+- [ ] 5.1 Reuse existing `StepEvent` elapsed/completed/total units, add only a previous-value monotonicity check to `RunContext.progress`, and derive byte field names and measured rate in one JSON-lines/Record-Separator-TOON stderr projection while retaining current Rich behavior, exactly one final stdout document, no dry-run progress, and parametrized framing/failure/interruption/secret tests.
+- [ ] 5.2 Wire trustworthy existing observer events into Git clone, with known/unknown byte facts only when the Git transport exposes them and no fabricated percentage.
+- [ ] 5.3 Wire backup-download bytes and existing restore stage/heartbeat events through the same projection inside database/restore ownership.
 
 ## 6. Machine-Readable Help
 
@@ -44,7 +43,6 @@
 - [ ] 7.2 Query distinct safe attachment store identities through the bound database, verify them under the captured filestore root, and preserve restore compensation/publication rules on mismatch or query failure.
 - [ ] 7.3 Expose outcomes consistently in Rich, JSON, and TOON without allowing database existence or password reset to imply verification success.
 - [ ] 7.4 Add parametrized complete/incomplete/duplicate/unsafe/not-applicable/query-failure tests and focused real-Odoo restore coverage.
-- [ ] 7.5 Integrate the stable progress adapter into restore acquisition, import, filestore, verification, and cleanup stages while retaining restore implementation and restore-domain test ownership here.
 
 ## 8. Cross-Cutting Verification and Documentation
 

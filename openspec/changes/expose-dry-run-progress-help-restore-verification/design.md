@@ -26,10 +26,18 @@ The missing behavior is projection and domain data, not a new runner. The implem
 
 | Candidate subsystem | Necessity | Existing alternative | Decision |
 |---|---|---|---|
-| Filesystem-effect model | A stable action/path/condition vocabulary is required. | `ActionStep.details` is already immutable, JSON-safe, redacted, fingerprinted, and paired with execution. | Keep the existing field and standardize a compact `file_effects` value; do not add a planner or public top-level model. |
-| Machine progress transport | Machine clients need live events without contaminating final stdout. | `StepEvent`, `RunContext.progress`, the shared observer, and JSON/TOON encoders already exist. | Extend those values and add a small stderr framing adapter; do not add a bus, queue, or scheduler. |
+| Filesystem-effect model | A stable action/path/condition vocabulary is required. | `ActionStep.details` is already immutable, JSON-safe, redacted, fingerprinted, and paired with execution; the current tree has 109 `PreparedAction` construction sites across 36 files. | Keep the existing field and standardize a compact `file_effects` value; do not add a planner or public top-level model. |
+| Machine progress transport | Machine clients need live events without contaminating final stdout. | `StepEvent` already carries elapsed/completed/total units, `RunContext.progress` already validates numeric bounds, Rich already renders them, restore already has stage/heartbeat publication, and focused progress tests already exist. | Reuse those fields unchanged, add one previous-value comparison for monotonicity, derive byte names/rate only in projection, and add one stderr framing function; do not add event fields, a restore adapter, bus, queue, or scheduler. |
 | Machine help projection | Automation needs structured command metadata. | Rich Click/Click already owns one command tree and parameter metadata. | Traverse that graph at help time; do not add a registry or generated runtime manifest. |
 | Restore verification service | Results need explicit independent states and counts. | Restore validation and result construction already run before publication. | Extend the existing validation/result path; do not add a second restore verifier. |
+
+### R3 quantitative reuse audit
+
+The audit used the current implementation at `f0918da2d36b59c35cf0a949efc58744d1efb7f9`; it did not run product tests or prototype code. The existing tree contains 109 `PreparedAction` construction sites in 36 files, a 69-entry `PUBLIC_LEAF_CASES` inventory, 83 Click command/group decorator registrations, 82 focused process-boundary tests, nine restore-progress tests, and the complete restore stage publisher. These are reused behavior, not new subsystems.
+
+The smallest complete implementation is expected to change roughly 1,800–3,100 lines including tests and documentation: shared effect/progress projection 430–700; command-family effect annotations and parity tests 750–1,300; live Click help projection and tests 260–400; restore verification/result projection and tests 340–560; and CI/docs/generated inventory 80–140. These are changed-line ranges for review sizing, not time estimates or file allowlists. Most production work is domain data at existing construction sites; most volume is acceptance matrices for the many required command families and states.
+
+R3 removes the two avoidable abstractions found by the audit: additive progress fields and a restore-consumer adapter. It also removes a standalone progress WP. Shared framing belongs with the existing execution/output foundation; Git clone progress belongs with Git ownership; backup-download and restore progress belong with database/restore ownership.
 
 ## Decisions
 
@@ -64,7 +72,7 @@ Existing test-owned `PUBLIC_LEAF_CASES` remains the only exhaustive CLI characte
 
 ### D4: Machine progress is a framed stderr side stream
 
-`StepEvent` gains additive `unit` and `rate_per_second` fields. Clone, backup download, and restore report trustworthy byte counts through `RunContext.progress`; downloaded bytes are monotonic, total bytes is absent when unknown, rate is derived from monotonic deltas, and human MiB/GiB values are renderer-only. Lifecycle stage events remain identified by planned `step_id`, operation, and target.
+Existing `StepEvent.completed_units`, `StepEvent.total_units`, and `StepEvent.elapsed` remain the sole progress facts. `RunContext.progress` adds only a comparison against its already stored previous value to reject decreasing progress. Clone, backup download, and restore report trustworthy values through the existing observer/`RunContext.progress`; machine projection names byte values for byte-producing stages and derives a non-negative measured rate from monotonic completed-byte and elapsed deltas. Total bytes and percentage are absent when unknown, and human MiB/GiB values remain renderer-only. Lifecycle stage events remain identified by planned `step_id`, operation, and target.
 
 Normal `--format json` execution writes one compact progress-event JSON object per stderr line. Normal `--format toon` writes each complete TOON event to stderr preceded by ASCII Record Separator (`0x1e`) and followed by LF, so multiline TOON values remain frameable. Every event has `schema_version=1`, `kind="progress"`, command, step identity, stage state, elapsed time, optional byte fields, and no file contents or secrets. Stdout remains exactly one final envelope. Dry-run emits no runtime events. Diagnostics remain sanitized stderr records/text and are never interleaved inside a frame.
 
@@ -103,7 +111,7 @@ Repeated command/state/format cases use `pytest.mark.parametrize`. Unit tests pi
 
 1. Add and characterize the shared details schema, Rich projection, redaction, and stale-target checks without adopting commands.
 2. Adopt command families in parallel behind the same schema, preserving existing output fields and behavior.
-3. Add machine progress framing, machine help projection, and restore verification on their existing boundaries.
+3. Add machine progress framing and machine help projection on their existing boundaries; add Git progress in the Git domain and download/restore progress plus verification in the database domain.
 4. Extend parametrized unit/integration/real-Odoo tests and user documentation; regenerate only repository-owned derived inventories.
 5. Rollback is a normal code revert: no persistent schema or database migration is introduced. Consumers ignoring additive action details remain compatible; machine progress is confined to stderr.
 
