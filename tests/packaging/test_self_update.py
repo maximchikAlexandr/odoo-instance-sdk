@@ -99,6 +99,9 @@ def _isolated_home(tmp_path: Path, *, source_repo: Path | None = None) -> dict[s
     env["XDG_DATA_HOME"] = str(home / ".local" / "share")
     env["XDG_STATE_HOME"] = str(home / ".local" / "state")
     env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["UV_TOOL_DIR"] = str(home / ".local" / "share" / "uv" / "tools")
+    env["UV_TOOL_BIN_DIR"] = str(home / ".local" / "bin")
+    env["PATH"] = os.pathsep.join((env["UV_TOOL_BIN_DIR"], env.get("PATH", os.defpath)))
     for path in (
         env["XDG_CONFIG_HOME"],
         env["XDG_DATA_HOME"],
@@ -253,6 +256,32 @@ def _create_clean_vcs_fixture(tmp_path: Path) -> tuple[Path, str]:
     return fixture, head
 
 
+def _create_coordinated_update_fixture(tmp_path: Path) -> tuple[Path, str, str]:
+    """Create a fixed baseline and a descendant target in a disposable Git copy."""
+    fixture, baseline = _create_clean_vcs_fixture(tmp_path)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Multica packaging fixture",
+            "-c",
+            "user.email=packaging-fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "coordinated update target",
+        ],
+        cwd=fixture,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+    )
+    target = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=fixture, text=True).strip()
+    return fixture, baseline, target
+
+
 def _trace_odcli_launcher(
     executable: Path,
     launcher: Path,
@@ -271,6 +300,86 @@ def _trace_odcli_launcher(
     )
     launcher.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
     launcher.chmod(0o755)
+
+
+@pytest.mark.timeout(_FULL_UPDATE_TEST_TIMEOUT_SECONDS)
+def test_coordinated_companion_update_installs_both_distributions_at_target(
+    tmp_path: Path,
+) -> None:
+    """The public updater advances isolated core and companion tools together."""
+    _require_uv()
+    fixture, baseline, target = _create_coordinated_update_fixture(tmp_path)
+    env = _isolated_home(tmp_path, source_repo=fixture)
+    core_install = _install_uv_tool_vcs(env, fixture, baseline, source_url=_SOURCE_REPO_URL)
+    assert core_install.returncode == 0, core_install.stderr
+    companion_requirement = (
+        f"odcli-multica @ {_SOURCE_REPO_URL}@{baseline}#subdirectory=packages/odcli-multica"
+    )
+    sdk_requirement = f"odoo-instance-sdk @ {_SOURCE_REPO_URL}@{baseline}"
+    companion_install = subprocess.run(
+        ["uv", "tool", "install", "--force", companion_requirement, "--with", sdk_requirement],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_INSTALL_CHILD_TIMEOUT_SECONDS,
+    )
+    assert companion_install.returncode == 0, companion_install.stderr
+
+    odcli = Path(env["UV_TOOL_BIN_DIR"]) / "odcli"
+    update = subprocess.run(
+        [str(odcli), "update", "--ref", target, "--yes", "--format", "json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=_FULL_UPDATE_CHILD_TIMEOUT_SECONDS,
+    )
+    assert update.returncode == 0, update.stderr or update.stdout
+    result = json.loads(update.stdout)["result"]
+    assert result["outcome"] == "updated"
+    assert result["target_sha"] == target
+    assert result["final_sha"] == target
+    assert result["journal_state"] == result["snapshot_state"] == "cleared"
+
+    companion_launcher = Path(env["UV_TOOL_BIN_DIR"]) / "odcli-multica"
+    help_result = subprocess.run(
+        [str(companion_launcher), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_FULL_VERSION_CHILD_TIMEOUT_SECONDS,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    tool_python = Path(env["UV_TOOL_DIR"]) / "odcli-multica" / "bin" / "python"
+    metadata = subprocess.run(
+        [
+            str(tool_python),
+            "-c",
+            (
+                "import importlib.metadata as m, json; "
+                "print(json.dumps({n: json.loads(m.distribution(n).read_text('direct_url.json'))"
+                "['vcs_info']['commit_id'] for n in ('odcli-multica', 'odoo-instance-sdk')}))"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_FULL_VERSION_CHILD_TIMEOUT_SECONDS,
+    )
+    assert metadata.returncode == 0, metadata.stderr
+    assert json.loads(metadata.stdout) == {
+        "odcli-multica": target,
+        "odoo-instance-sdk": target,
+    }
+    user_root = Path(env["HOME"]) / ".odcli"
+    assert not (user_root / "update" / "journal.json").exists()
+    assert not (user_root / "update" / "snapshot").exists()
+    assert Path(env["UV_TOOL_DIR"]).is_relative_to(Path(env["HOME"]))
+    assert Path(env["UV_TOOL_BIN_DIR"]).is_relative_to(Path(env["HOME"]))
 
 
 @pytest.mark.timeout(_CURRENT_UPDATE_TEST_TIMEOUT_SECONDS)

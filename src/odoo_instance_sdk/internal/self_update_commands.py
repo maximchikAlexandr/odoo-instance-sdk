@@ -828,7 +828,7 @@ def _build_mutating_command(
     companion_version_step = (
         PreparedStep(
             step_id="update.verify.companion.version",
-            argv=(str(companion.launcher), "--version"),
+            argv=(str(companion.launcher), "--help"),
             read_only=True,
         )
         if companion is not None
