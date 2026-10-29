@@ -1,32 +1,18 @@
-## 1. Shared credential contracts
+## 1. Cache-read integration over the existing helper
 
-- [ ] 1.1 Split/reuse the existing runtime GitLab owner verification so cache-read validation authenticates the configured login and obtains its stable provider user ID without changing stored mappings, encrypted records, the secret-store schema, or the Admin model.
-- [ ] 1.2 Refactor `resolve_gitlab_credential()` to implement encrypted-first, explicit-or-user-root legacy precedence with `ODCLI_USER_ROOT` and fail-closed compatibility-file conflicts without changing bridge callers.
-- [ ] 1.3 Add focused core tests for encrypted records, user-root-only mapping/tokens, explicit path/process overrides, selected `ODCLI_USER_ROOT`, invalid permissions, conflicts, and absence of project-local copies.
+- [ ] 1.1 Reuse the owner portion of `verify_gitlab_identity()` and add bounded token self-information validation for cache-read purpose, requiring the same runtime provider ID, active state, and the exact standard scope set `read_repository` without changing credential records or persisting provider identity.
+- [ ] 1.2 Keep the existing helper/resolver path, add an install-stable `git-credential-odcli` entrypoint only where missing, enforce exact host/member/purpose and finite `get` parsing, and document process-local daemon stop → validate → start/rollback configuration.
+- [ ] 1.3 Add focused core and installed-artifact tests for owner/scope agreement, broader/granular/inactive/incompatible tokens, malformed or wrong-host requests, no fallback, no secret persistence, and wheel/sdist entrypoint presence.
 
-## 2. Native cache helper integration
+## 2. Minimal bridge adoption
 
-- [ ] 2.1 Add bounded GitLab token self-information validation for cache-read purpose, requiring its user ID to equal the runtime owner-verification ID plus active state and an exact standard scope set of `read_repository` before returning a credential.
-- [ ] 2.2 Harden the existing helper's standard-protocol parsing and purpose/host/member validation, keep all failures secret-safe on stderr, and install the stable `git-credential-odcli` entrypoint without duplicating the resolver.
-- [ ] 2.3 Add unit and integration tests for runtime owner/self-information agreement, cold-cache and repeated/background fetch routing, exact-host rejection, malformed/unsupported helper requests, read-only versus broader scopes, provider incompatibility, cache/task non-fallback, and concurrent isolation.
-- [ ] 2.4 Extend packaging and installed-artifact smoke coverage to prove the helper exists in wheel, sdist, and numbered installs and works through process-local Git configuration with no credential material in remote URLs or Git config.
+- [ ] 2.1 Extend the existing `RootCreatorContext` and execution-revalidation path with optional explicit current-human workspace member selection and safe source metadata; preserve automatic root-creator behavior and add no selector/result subsystem.
+- [ ] 2.2 Thread optional `member_id` and `--member-id` through the existing raw Git, sync, and merge-request command paths while preserving their single credential snapshot, checkout/repository/branch/origin checks, transports, assignee semantics, and redaction.
+- [ ] 2.3 Remove implicit project `.odcli` mapping/dotenv defaults from `_resolve_credentials()` and rely on the existing encrypted-first resolver, effective user root/`ODCLI_USER_ROOT`, process environment, explicit paths, and legacy conflict rules.
+- [ ] 2.4 Add focused bridge tests for explicit success and invalid/non-human/cross-workspace/drift failures, unchanged automatic selection, user-root-only resolution without project copies, two-account isolation, and only the changed MR/output observations.
 
-## 3. Explicit Multica member selection
+## 3. Delivery verification and documentation
 
-- [ ] 3.1 Add a frozen typed selection result and one shared selector that preserves automatic root-creator traversal, validates an explicit UUID as one current human in the verified workspace, records `root_creator` or `explicit`, and revalidates before effects.
-- [ ] 3.2 Thread optional `member_id` through credential-dependent raw Git, sync/push, and merge-request command/convenience methods while preserving verified checkout/repository/host, stale-plan, branch/origin, subprocess, and HTTP boundaries.
-- [ ] 3.3 Add `--member-id` to the three credential-dependent `odcli-multica` CLI leaves, keep callbacks as typed pass-throughs, and include only the selected safe identity/source in dry-run and success documents.
-- [ ] 3.4 Add parameterized bridge tests for automatic and explicit selection, invalid/non-human/cross-workspace members, two checkouts selecting different members concurrently, execution-time drift, submodule host routing, cache-account non-fallback, and CLI/SDK parity.
-- [ ] 3.5 Adopt the WP-01 credential resolver/default precedence in every credential-dependent bridge caller, remove implicit project `.odcli` mapping/dotenv defaults, preserve explicit legacy paths, and add focused bridge regressions for user-root-only credentials and absent project-local copies.
-
-## 4. Merge-request and secret-safety regressions
-
-- [ ] 4.1 Update merge-request publication to use the shared selected credential without altering issue-link, exact-project, unique-MR, assignee-precedence, or provider-consistency contracts.
-- [ ] 4.2 Extend Git transport, output, redaction, and MR tests to prove tokens and authorization data never enter argv, URLs, Git config, plans, results, logs, fingerprints, binding files, or diagnostics across both selection sources.
-
-## 5. CI, live verification support, and documentation
-
-- [ ] 5.1 Extend the existing offline and package CI coverage in `.github/workflows/ci.yml` only as needed so all new core, bridge, packaging, and platform-specific helper tests run in their existing jobs without a new test framework.
-- [ ] 5.2 Extend `scripts/e2e_gitlab_member_workflow.py` with isolated cache-read, daemon-generation replacement/rollback, automatic-root-creator, explicit-member, two-member concurrency, negative-routing, and cleanup phases for the project test repository; keep credentials owner-only and emit only bounded sanitized summaries.
-- [ ] 5.3 Document exact daemon process-local Git configuration, cache credential prerequisites, stop → validate → restart and rollback, user-root precedence, `--member-id` behavior, selected-identity output, GitLab compatibility, and the limitation that cached objects do not prove member authorization.
-- [ ] 5.4 Run the scoped lint, type, offline bridge/core, packaging, and strict OpenSpec gates on the consolidated revision, and preserve the exact commands and exit codes for review without committing runtime evidence.
+- [ ] 3.1 Extend existing CI jobs only as needed for the focused core, bridge, and packaging tests; do not add a framework or duplicate unchanged MR/redaction/context matrices.
+- [ ] 3.2 Extend `scripts/e2e_gitlab_member_workflow.py` with one integrated isolated path covering cache identity/scope, automatic and explicit members, user-root-only credentials, two-account isolation, failure non-fallback, daemon-generation rollback, and sanitized evidence/cleanup.
+- [ ] 3.3 Update operator and SDK/CLI documentation for helper installation, exact cache token constraints, process-local stop → validate → start/rollback, optional `--member-id`, user-root precedence, and unchanged security boundaries.

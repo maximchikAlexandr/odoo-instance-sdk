@@ -1,58 +1,43 @@
 ## ADDED Requirements
 
-### Requirement: Native Multica cache uses one verified read-only credential
+### Requirement: Native cache reads use one verified read-only credential
 
-Native Multica clone and fetch operations for the shared repository cache SHALL use one explicitly configured member/host credential inherited by the owning daemon, including cache creation before a task worktree exists and later background fetches. Before returning credentials, the helper SHALL reuse/split the existing runtime GitLab owner verification to authenticate the configured login and obtain its stable provider user ID, then authenticate `GET /api/v4/personal_access_tokens/self` on the exact requested GitLab host and require an active token whose user ID equals that runtime owner ID and whose complete standard scope set is exactly `read_repository`. It SHALL NOT require a stored provider ID. An unavailable owner/self-information endpoint, granular scope, additional scope, write-capable scope, owner mismatch, inactive token, or unexpected response SHALL fail before Git authentication. The cache member SHALL NOT be inferred from a project lead, task, branch, path name, ambient helper, or another available account.
+Native Multica shared-cache clone/fetch children SHALL inherit one explicitly configured member/host and cache-read purpose from the owning daemon generation. Before returning credentials, the existing helper/resolver path SHALL verify the configured login's runtime provider ID and require token self-information for the exact host to report the same ID, active state, and exactly the standard `read_repository` scope. It SHALL NOT infer identity from a task, project lead, branch, path, ambient helper, or another credential.
 
-#### Scenario: Cold cache uses the configured read-only account
+#### Scenario: Cold cache uses the configured account
 
-- **WHEN** the selected daemon has no cached repository and its configured cache member has one exact-host active token with only `read_repository`
-- **THEN** native clone obtains credentials through the short-lived helper, creates the cache, and leaves the remote URL and Git configuration free of credentials
+- **WHEN** a cold-cache clone requests the exact host and the configured token passes owner and scope checks
+- **THEN** the short-lived helper supplies that credential and leaves remote URLs and persisted Git configuration secret-free
 
-#### Scenario: Background fetch keeps the same cache owner
+#### Scenario: Scope or identity is unsafe
 
-- **WHEN** a later background fetch runs in the same daemon generation
-- **THEN** it resolves the same configured member/host pair without consulting any task checkout or changing global account state
+- **WHEN** token information is inactive, mismatched, unavailable, granular, broader, write-capable, or cannot prove the complete scope set
+- **THEN** the helper fails closed and does not try another member
 
-#### Scenario: Write-capable cache token is rejected
+### Requirement: Daemon-generation configuration is process-local
 
-- **WHEN** token self-information reports `api`, `write_repository`, another additional standard scope, a granular scope, or cannot prove the full scope set
-- **THEN** the helper returns no credential and native Git fails without trying another member
+The daemon launch contract SHALL clear inherited credential helpers and choose the existing OdCLI helper through process-local Git configuration/environment. One daemon generation SHALL keep that launch environment immutable. Credential replacement SHALL use the existing stop → one-shot validate → start → status interfaces after old Git children exit; rollback SHALL repeat the lifecycle with the prior environment. The product SHALL NOT add a hot-rotation API, mutable rotation state, refusal subsystem, or lock.
 
-#### Scenario: Cache context is absent or ambiguous
+#### Scenario: Replacement isolates generations
 
-- **WHEN** the helper lacks explicit cache-read purpose or one normalized member/host pair, or the requested host differs
-- **THEN** it fails without reading another credential, invoking an ambient helper, or inferring a project
+- **WHEN** an operator stops the old generation, validates a replacement, and starts a new generation
+- **THEN** only new children inherit the replacement and no persisted repository/global Git setting must be rewritten
 
-### Requirement: Cache helper configuration is process-local and replacement is generation-bound
+#### Scenario: Rollback restores the prior launch environment
 
-The Multica daemon launch contract SHALL clear inherited Git credential helpers and select the stable `git-credential-odcli` executable through process-local Git configuration together with the explicit cache member and cache-read purpose. It SHALL NOT write tokens, member IDs, or helper commands into repository, worktree, system, or global Git configuration. One daemon generation SHALL keep its launch environment immutable. Replacing the cache member or credential SHALL use the existing `multica daemon stop`, one-shot `git credential fill` through `git-credential-odcli`, `multica daemon start`, and `multica daemon status --output json` interfaces: stop and wait for clone/fetch/index-pack children, validate the candidate, start one new generation with the replacement environment, then verify its identity/status. The product SHALL NOT add a hot-rotation API, mutable rotation state, refusal subsystem, or rotation lock.
+- **WHEN** the replacement generation is stopped and the prior environment is used for another start
+- **THEN** the rollback generation does not inherit replacement inputs
 
-#### Scenario: Daemon starts with cache authentication
+### Requirement: Cache and task identities never substitute
 
-- **WHEN** a daemon starts after the configured cache credential passes owner/scope validation
-- **THEN** all of that daemon generation's remote cache clone/fetch children inherit only the process-local OdCLI helper selection
+The cache credential SHALL authorize only native shared-cache remote reads. Verified task operations SHALL use the task member selected by the existing bridge context and SHALL NOT consume or fall back to the cache credential. Cached objects SHALL NOT prove remote authorization for a task member.
 
-#### Scenario: Replacement creates a distinct daemon generation
+#### Scenario: Two task members share cached objects
 
-- **WHEN** an operator replaces the cache credential using stop → validate → restart
-- **THEN** the old daemon and its Git children have exited before validation, the candidate is validated before start, and only the new generation's children inherit the replacement environment
+- **WHEN** two task operations select different members after one cache account fetched the repository
+- **THEN** each task operation uses only its own credential and the cache generation remains unchanged
 
-#### Scenario: Daemon configuration is rolled back
+#### Scenario: Task member has no credential
 
-- **WHEN** cache authentication is rolled back by stopping the replacement generation and restoring or removing its process-local helper inputs before another start
-- **THEN** the rollback generation uses only the restored launch environment, does not retain the replacement credential, and no persisted Git configuration requires cleanup
-
-### Requirement: Cache and task identities never substitute for each other
-
-The cache credential SHALL authorize only remote operations performed for the native shared cache. Credential-dependent operations in a verified task checkout SHALL select a task member through the `odcli-multica` contract and SHALL NOT consume or fall back to the cache member. Existing cached objects SHALL NOT be represented as proof that the task member can read the remote repository.
-
-#### Scenario: Two task authors share one cached repository
-
-- **WHEN** two verified task checkouts for the same repository select different members after the shared cache was fetched by the cache account
-- **THEN** each task operation uses only its selected member credential and the shared cache member remains unchanged
-
-#### Scenario: Task credential is unavailable
-
-- **WHEN** a verified task operation cannot resolve its selected member for the exact host
-- **THEN** it fails without using the cache credential even when the requested objects already exist locally
+- **WHEN** the selected task member cannot resolve the exact-host credential
+- **THEN** the task operation fails even if the required objects are already cached
