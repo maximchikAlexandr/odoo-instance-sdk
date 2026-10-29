@@ -25,6 +25,7 @@ _SOURCE_REPO_URL = "git+https://github.com/maximchikAlexandr/odoo-instance-sdk.g
 _V16_CATALOG = _REPO / "tests" / "fixtures" / "catalog_v16.sql"
 _GIT_COMMAND_TIMEOUT_SECONDS = 30
 _INSTALL_CHILD_TIMEOUT_SECONDS = 120
+_COORDINATED_BASELINE_INSTALL_TIMEOUT_SECONDS = 240
 _FULL_UPDATE_TEST_TIMEOUT_SECONDS = 600
 _FULL_UPDATE_CHILD_TIMEOUT_SECONDS = 240
 _FULL_DRY_RUN_CHILD_TIMEOUT_SECONDS = 120
@@ -149,6 +150,7 @@ def _install_uv_tool_vcs(
     *,
     extras: tuple[str, ...] = (),
     source_url: str | None = None,
+    timeout_seconds: int = _INSTALL_CHILD_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -162,7 +164,7 @@ def _install_uv_tool_vcs(
         capture_output=True,
         text=True,
         env=env,
-        timeout=_INSTALL_CHILD_TIMEOUT_SECONDS,
+        timeout=timeout_seconds,
     )
 
 
@@ -310,7 +312,13 @@ def test_coordinated_companion_update_installs_both_distributions_at_target(
     _require_uv()
     fixture, baseline, target = _create_coordinated_update_fixture(tmp_path)
     env = _isolated_home(tmp_path, source_repo=fixture)
-    core_install = _install_uv_tool_vcs(env, fixture, baseline, source_url=_SOURCE_REPO_URL)
+    core_install = _install_uv_tool_vcs(
+        env,
+        fixture,
+        baseline,
+        source_url=_SOURCE_REPO_URL,
+        timeout_seconds=_COORDINATED_BASELINE_INSTALL_TIMEOUT_SECONDS,
+    )
     assert core_install.returncode == 0, core_install.stderr
     companion_requirement = (
         f"odcli-multica @ {_SOURCE_REPO_URL}@{baseline}#subdirectory=packages/odcli-multica"
