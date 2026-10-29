@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import msgspec
@@ -267,10 +268,37 @@ def test_public_credential_resolver_fails_closed_on_dotenv_symlink_swap(
     assert "attacker-token" not in str(failure.value)
 
 
-@pytest.mark.parametrize("explicit", [False, True], ids=["project", "explicit-legacy"])
-def test_dotenv_loader_detects_inode_swap_without_nofollow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
-) -> None:
+@dataclass(frozen=True)
+class _InodeSwapCase:
+    target: Path
+    swapped: list[bool]
+
+
+def _replace_inode_before_open(
+    target: Path,
+    replacement: Path,
+    original_open: Callable[..., int],
+    swapped: list[bool],
+) -> Callable[..., int]:
+    def replace_before_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if path == target and dir_fd is None and not swapped[0]:
+            os.replace(replacement, target)
+            swapped[0] = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    return replace_before_open
+
+
+@pytest.fixture(params=("project", "explicit-legacy"), ids=("project", "explicit-legacy"))
+def inode_swap_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> _InodeSwapCase:
     project = tmp_path / "project"
     project_env = project / ".odcli" / ".env"
     project_env.parent.mkdir(parents=True)
@@ -279,36 +307,33 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     explicit_env = tmp_path / "explicit.env"
     explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
     explicit_env.chmod(0o600)
-    target = explicit_env if explicit else project_env
-    attacker = tmp_path / "replacement.env"
-    attacker.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-    attacker.chmod(0o600)
+    target, replacement = {
+        "project": (project_env, tmp_path / "replacement.env"),
+        "explicit-legacy": (explicit_env, tmp_path / "replacement.env"),
+    }[request.param]
+    replacement.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+    replacement.chmod(0o600)
     original_identity = target.stat().st_dev, target.stat().st_ino
-    replacement_identity = attacker.stat().st_dev, attacker.stat().st_ino
+    replacement_identity = replacement.stat().st_dev, replacement.stat().st_ino
     assert original_identity != replacement_identity
     original_open = os.open
-    swapped = False
-
-    def replace_before_open(
-        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        flags: int,
-        mode: int = 0o777,
-        *,
-        dir_fd: int | None = None,
-    ) -> int:
-        nonlocal swapped
-        if path == target and dir_fd is None and not swapped:
-            os.replace(attacker, target)
-            swapped = True
-        return original_open(path, flags, mode, dir_fd=dir_fd)
-
+    swapped = [False]
     monkeypatch.setattr(os, "O_NOFOLLOW", 0)
-    monkeypatch.setattr(os, "open", replace_before_open)
+    monkeypatch.setattr(
+        os,
+        "open",
+        _replace_inode_before_open(target, replacement, original_open, swapped),
+    )
     monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {original_open})
-    with pytest.raises(ProjectEnvironmentError) as failure:
-        load_environment_file(target)
 
-    assert swapped
+    return _InodeSwapCase(target=target, swapped=swapped)
+
+
+def test_dotenv_loader_detects_inode_swap_without_nofollow(inode_swap_case: _InodeSwapCase) -> None:
+    with pytest.raises(ProjectEnvironmentError) as failure:
+        load_environment_file(inode_swap_case.target)
+
+    assert inode_swap_case.swapped[0]
     assert "attacker-token" not in str(failure.value)
 
 
