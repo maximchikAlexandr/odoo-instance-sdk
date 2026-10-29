@@ -949,7 +949,9 @@ field = instance.inspector.field("res.partner", "email")
 reference = instance.inspector.ref("base.user_admin")
 
 spec = OdooTestSpec(modules=("sale",), test_tags="/sale", profile=True)
-result: OdooTestResult = run_odoo_tests_command(instance, spec).run()
+result, diagnostic = run_odoo_tests_command(instance, spec).run()
+if diagnostic is not None:
+    print(f"Test runner diagnostic: {diagnostic}")
 if result.profile is not None:
     print(result.profile.total_duration, result.profile.total_query_count)
 ```

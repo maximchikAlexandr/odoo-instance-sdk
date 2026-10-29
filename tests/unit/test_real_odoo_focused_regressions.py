@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
+from contextlib import redirect_stdout
 from inspect import unwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import patch
 
 import msgspec
 import pytest
@@ -14,7 +17,14 @@ import pytest
 if TYPE_CHECKING:
     from click.testing import Result
 
-from odoo_instance_sdk import OdooClient, OdooClientConfig
+from odoo_instance_sdk import (
+    OdooClient,
+    OdooClientConfig,
+    OdooTestProfile,
+    OdooTestProfileEntry,
+    OdooTestResult,
+    OdooTestSpec,
+)
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.conftest import isolated_cli_catalogue
@@ -172,6 +182,61 @@ def test_readme_documents_public_inspection_and_profile_contract() -> None:
     assert "OdooTestResult.profile` is `None` when profiling was not requested" in readme
     assert "bounded metadata" in readme
     assert "does not return record values, execute SQL, write data," in readme
+
+    example = readme.split("The bounded inspector is available directly", 1)[1]
+    example = example.split("```python\n", 1)[1].split("\n```", 1)[0]
+    calls: list[tuple[object, ...]] = []
+
+    class Inspector:
+        def model(self, name: str) -> str:
+            calls.append(("model", name))
+            return "model metadata"
+
+        def field(self, model: str, name: str) -> str:
+            calls.append(("field", model, name))
+            return "field metadata"
+
+        def ref(self, xml_id: str) -> str:
+            calls.append(("ref", xml_id))
+            return "reference metadata"
+
+    profile = OdooTestProfile(
+        total_duration=1.0,
+        total_query_count=2,
+        entries=(OdooTestProfileEntry(test_id="sale.test_order", duration=1.0, query_count=2),),
+    )
+    result = OdooTestResult(
+        counts={"tests": 1, "successful": 1, "failed": 0, "errors": 0, "skipped": 0},
+        failures=False,
+        zero_tests=False,
+        exit_code=0,
+        profile=profile,
+    )
+    captured: dict[str, object] = {}
+
+    def run_command(_instance: object, spec: object) -> SimpleNamespace:
+        captured["spec"] = spec
+        return SimpleNamespace(run=lambda: (result, "sanitized diagnostic"))
+
+    output = io.StringIO()
+    with (
+        patch("odoo_instance_sdk.resources.testing.run_odoo_tests_command", run_command),
+        redirect_stdout(output),
+    ):
+        namespace: dict[str, object] = {
+            "instance": SimpleNamespace(inspector=Inspector()),
+        }
+        exec(compile(example, "README.md", "exec"), namespace)
+
+    assert calls == [
+        ("model", "res.partner"),
+        ("field", "res.partner", "email"),
+        ("ref", "base.user_admin"),
+    ]
+    assert cast("OdooTestSpec", captured["spec"]).profile is True
+    assert namespace["result"] is result
+    assert "sanitized diagnostic" in output.getvalue()
+    assert "1.0 2" in output.getvalue()
 
 
 def _inspect_profile_harness(
