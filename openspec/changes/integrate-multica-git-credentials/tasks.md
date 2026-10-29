@@ -1,14 +1,14 @@
 ## 1. Shared credential contracts
 
-- [ ] 1.1 Extend the protected GitLab mapping/identity model and parser with the provider user ID needed for cache-owner verification while preserving owner-only validation and backward-compatible task credentials.
+- [ ] 1.1 Split/reuse the existing runtime GitLab owner verification so cache-read validation authenticates the configured login and obtains its stable provider user ID without changing stored mappings, encrypted records, the secret-store schema, or the Admin model.
 - [ ] 1.2 Refactor `resolve_gitlab_credential()` and bridge callers to implement encrypted-first, explicit-or-user-root legacy precedence with `ODCLI_USER_ROOT`, no implicit project `.odcli` credential paths, and fail-closed compatibility-file conflicts.
 - [ ] 1.3 Add focused core tests for encrypted records, user-root-only mapping/tokens, explicit path/process overrides, selected `ODCLI_USER_ROOT`, invalid permissions, conflicts, and absence of project-local copies.
 
 ## 2. Native cache helper integration
 
-- [ ] 2.1 Add bounded GitLab token self-information validation for cache-read purpose, requiring exact owner, active state, and an exact standard scope set of `read_repository` before returning a credential.
+- [ ] 2.1 Add bounded GitLab token self-information validation for cache-read purpose, requiring its user ID to equal the runtime owner-verification ID plus active state and an exact standard scope set of `read_repository` before returning a credential.
 - [ ] 2.2 Harden the existing helper's standard-protocol parsing and purpose/host/member validation, keep all failures secret-safe on stderr, and install the stable `git-credential-odcli` entrypoint without duplicating the resolver.
-- [ ] 2.3 Add unit and integration tests for cold-cache and repeated/background fetch routing, exact-host rejection, malformed/unsupported helper requests, read-only versus broader scopes, provider incompatibility, cache/task non-fallback, and concurrent isolation.
+- [ ] 2.3 Add unit and integration tests for runtime owner/self-information agreement, cold-cache and repeated/background fetch routing, exact-host rejection, malformed/unsupported helper requests, read-only versus broader scopes, provider incompatibility, cache/task non-fallback, and concurrent isolation.
 - [ ] 2.4 Extend packaging and installed-artifact smoke coverage to prove the helper exists in wheel, sdist, and numbered installs and works through process-local Git configuration with no credential material in remote URLs or Git config.
 
 ## 3. Explicit Multica member selection
@@ -26,6 +26,6 @@
 ## 5. CI, live verification support, and documentation
 
 - [ ] 5.1 Extend the existing offline and package CI coverage in `.github/workflows/ci.yml` only as needed so all new core, bridge, packaging, and platform-specific helper tests run in their existing jobs without a new test framework.
-- [ ] 5.2 Extend `scripts/e2e_gitlab_member_workflow.py` with isolated cache-read, automatic-root-creator, explicit-member, two-member concurrency, negative-routing, and cleanup phases for the project test repository; keep credentials owner-only and emit only bounded sanitized summaries.
-- [ ] 5.3 Document exact daemon process-local Git configuration, cache credential prerequisites, quiescent rotation/rollback, user-root precedence, `--member-id` behavior, selected-identity output, GitLab compatibility, and the limitation that cached objects do not prove member authorization.
+- [ ] 5.2 Extend `scripts/e2e_gitlab_member_workflow.py` with isolated cache-read, daemon-generation replacement/rollback, automatic-root-creator, explicit-member, two-member concurrency, negative-routing, and cleanup phases for the project test repository; keep credentials owner-only and emit only bounded sanitized summaries.
+- [ ] 5.3 Document exact daemon process-local Git configuration, cache credential prerequisites, stop → validate → restart and rollback, user-root precedence, `--member-id` behavior, selected-identity output, GitLab compatibility, and the limitation that cached objects do not prove member authorization.
 - [ ] 5.4 Run the scoped lint, type, offline bridge/core, packaging, and strict OpenSpec gates on the consolidated revision, and preserve the exact commands and exit codes for review without committing runtime evidence.

@@ -4,7 +4,7 @@ The core package already contains `resolve_gitlab_credential()` and a short-live
 
 Native Multica cache fetches can start before a task worktree exists, so task-path inference cannot authorize them. Conversely, task-checkout operations have verified issue/workspace/repository context and must never fall back to the cache identity. The design keeps those two trust paths separate while reusing one credential resolver and one secret-redaction boundary.
 
-The approved base is `f0918da2d36b59c35cf0a949efc58744d1efb7f9` (`origin/main`). GitLab's token self-information endpoint exposes the authenticated token's active state, owner ID, and scopes; cache mode uses that response to require the exact `read_repository` scope before returning credentials.
+The approved base is `f0918da2d36b59c35cf0a949efc58744d1efb7f9` (`origin/main`). The existing `verify_gitlab_identity()` path already authenticates the configured login and obtains the stable provider user ID at runtime. Cache mode reuses a split owner-verification portion of that path, then compares its runtime provider ID with GitLab token self-information while requiring the exact `read_repository` scope before returning credentials.
 
 ## Goals / Non-Goals
 
@@ -27,9 +27,9 @@ The approved base is `f0918da2d36b59c35cf0a949efc58744d1efb7f9` (`origin/main`).
 
 ### 1. Use one stable short-lived helper in explicit cache-read mode
 
-Package `git-credential-odcli` as the stable executable for the existing helper module. The Multica daemon receives process-local Git configuration that first clears inherited helpers and then selects `odcli`; it also receives `ODCLI_GITLAB_MEMBER_ID` and `ODCLI_GITLAB_CREDENTIAL_PURPOSE=cache-read`. This environment reaches cold-cache creation and later background fetches without repository-local or global Git configuration. The helper accepts only the standard `get` request, normalizes the requested HTTPS host, resolves that exact member/host through the existing resolver, validates the token through GitLab `GET /personal_access_tokens/self`, and returns credentials only when the token is active, belongs to the mapped GitLab user ID, and has exactly `read_repository` with no broader or write-capable scope.
+Package `git-credential-odcli` as the stable executable for the existing helper module. The Multica daemon receives process-local Git configuration that first clears inherited helpers and then selects `odcli`; it also receives `ODCLI_GITLAB_MEMBER_ID` and `ODCLI_GITLAB_CREDENTIAL_PURPOSE=cache-read`. This environment reaches cold-cache creation and later background fetches without repository-local or global Git configuration. The helper accepts only the standard `get` request, normalizes the requested HTTPS host, resolves that exact member/host through the existing resolver, reuses the existing runtime owner check to authenticate the configured login and obtain its provider user ID, then validates GitLab `GET /personal_access_tokens/self`. It returns credentials only when the token is active, the self-information user ID equals that runtime owner ID, and the complete standard scope set is exactly `read_repository` with no broader or write-capable scope. The stored mapping, encrypted record, secret store schema, and Admin model remain unchanged.
 
-The cache account is configured once per daemon, not inferred from project lead. Shared cache keys may serve several projects, so project-lead selection would be ambiguous and could change while background work is active. Cache-owner rotation is an offline operation: stop the owning daemon, replace/validate the configured credential, then restart. Hot rotation is rejected rather than synchronized by a new lock service.
+The cache account is configured once per daemon generation, not inferred from project lead. Shared cache keys may serve several projects, so project-lead selection would be ambiguous and could change while background work is active. The daemon environment is immutable for that generation. Credential replacement therefore uses the existing `multica daemon stop`, one-shot `git credential fill` through `git-credential-odcli`, `multica daemon start`, and `multica daemon status --output json` interfaces. The operator waits for the stopped daemon's Git children, validates before start, and verifies the new daemon identity/status. Rollback repeats the same lifecycle with the prior environment. There is no product rotation API, mutable rotation state, refusal subsystem, or new lock service.
 
 Alternative considered: a project/group deploy token. It offers narrow repository reach, but it does not fit the existing member/host resolver or its owner verification and would require a second credential schema and resolution path. A dedicated personal or service account token limited to the provider's `read_repository` scope reuses the existing store and is mechanically verifiable.
 
@@ -69,9 +69,10 @@ The helper remains a finite process and writes protocol fields only to stdout; s
 ## Ponytail Full Gate
 
 - **Stable helper executable:** Necessary because native Git needs an install-stable command; `python -m ...` is environment-specific. Keep the executable as a thin alias over the existing helper, with no second protocol implementation.
-- **Cache read-scope validation:** Necessary because invoking `fetch` does not make a write-capable token read-only. Keep one bounded provider self-information check in cache mode; do not add a cache credential registry or daemon.
+- **Cache read-scope validation:** Necessary because invoking `fetch` does not make a write-capable token read-only. Reuse/split the existing runtime owner check and compare its provider ID with one bounded self-information response; do not add a provider-ID field, record migration, Admin-model field, cache credential registry, or daemon.
 - **Shared member selection:** Necessary for `--member-id`; the existing root-creator and workspace APIs are the alternative and are reused inside one selector. Keep the selector; remove callback-local or helper-local identity logic.
-- **New storage/service layers:** Not necessary. Do not add a token store, OAuth service, credential broker, global account state, cache lock service, or repository binding registry.
+- **Credential replacement machinery:** Not necessary because process-local environment is immutable for one daemon generation. Keep stop → validate → restart plus rollback as an operating contract; do not add hot-rotation detection, a refusal API/state machine, mutable daemon credential state, or a lock service.
+- **New storage/service layers:** Not necessary. Do not add or migrate a token/provider-identity store, OAuth service, credential broker, global account state, cache lock service, or repository binding registry.
 
 ## Risks / Trade-offs
 
@@ -84,10 +85,10 @@ The helper remains a finite process and writes protocol fields only to stdout; s
 ## Migration Plan
 
 1. Ship the stable helper, cache-read validation, user-root defaulting, typed member selection, CLI flags, and regression tests without enabling cache authentication globally.
-2. Install the exact candidate in an isolated Multica profile and validate the dedicated cache token's owner/scope before configuring the daemon.
-3. Stop that daemon, set the process-local Git helper/member/purpose environment, restart it, and verify cold-cache plus background fetch. Do not change an active daemon's cache owner.
+2. Install the exact candidate in an isolated Multica profile and validate the dedicated cache token's configured login, runtime provider ID, self-information owner/state, and scope before configuring the daemon.
+3. Stop that daemon and wait for its Git children, set the process-local Git helper/member/purpose environment, start one new generation, and verify cold-cache plus background fetch. Do not add or invoke an in-process credential replacement path.
 4. Verify automatic root-creator and explicit-member task operations against isolated checkouts, then publish documentation for the same configuration.
-5. Roll back by stopping the daemon, removing its cache-helper environment, restarting the prior package, and retaining the existing credential data unchanged.
+5. Roll back by stopping the new generation, restoring/removing its cache-helper environment, starting the prior generation, and retaining the unchanged credential records.
 
 ## Open Questions
 
