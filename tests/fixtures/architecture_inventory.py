@@ -144,8 +144,8 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_odcli_autonomous_skill.py", 178),
         ("tests/unit/project/test_prepare_venv.py", 271),
         ("tests/unit/test_gitlab_member_e2e_runner.py", 100),
-        ("tests/unit/test_gitlab_member_e2e_runner.py", 283),
-        ("tests/unit/test_gitlab_member_e2e_runner.py", 338),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 543),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 598),
     }
 )
 
