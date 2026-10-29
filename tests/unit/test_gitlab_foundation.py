@@ -762,6 +762,7 @@ def test_cache_credential_accepts_exact_success_scope(tmp_path: Path) -> None:
         (8, True, ["read_repository"]),
         (7, False, ["read_repository"]),
         (7, True, ["read_repository", "write_repository"]),
+        (7, True, ["read_repository", "read_user"]),
         (7, True, ["read_api"]),
         (7, True, "read_repository"),
     ],
