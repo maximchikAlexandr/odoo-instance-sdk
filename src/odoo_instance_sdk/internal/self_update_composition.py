@@ -337,7 +337,8 @@ def companion_install_argv(
         "tool",
         "install",
         "--force",
-        install_requirement(ref, package_name="odcli-multica", source_repo=source_repo),
+        install_requirement(ref, package_name="odcli-multica", source_repo=source_repo)
+        + "#subdirectory=packages/odcli-multica",
         "--with",
         install_requirement(sdk_ref or ref, source_repo=source_repo),
     )
