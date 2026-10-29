@@ -2,14 +2,15 @@
 
 - Task key: `MYL-615`.
 - OpenSpec change: `expose-dry-run-progress-help-restore-verification`.
+- Planning revision: `R2`; this revision replaces the R1 dependency and evidence topology without changing product scope or estimate authority.
 - Planning base: `origin/main` at the base revision recorded by the publication commit.
 - Estimate authority: the root planning issue custom properties `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours`. Numeric totals are intentionally not duplicated here.
 - Estimate basis: full remaining work for one experienced developer familiar with this Python/Click/Odoo stack, without AI acceleration. It includes implementation, required tests/fixtures/docs, normal review repair, and attended verification; unattended CI/provider waits and approval queues are excluded.
 - Confidence: medium. The existing plan, observer, output, command graph, restore, and real-Odoo seams are inspectable and reusable; uncertainty is concentrated in broad command-family adoption, stderr framing compatibility, Click help edge cases, and real attachment/filestore behavior.
 - Calibration: evidence-based but uncalibrated; no comparable historical implementation-time sample is asserted. Tests were not run to manufacture estimate evidence.
 - Delivery mode: `dag`. The authoritative estimate property is above the single-WP threshold and the stage-2 packages have independent deliverables and non-conflicting primary write zones after the shared contract lands.
-- Stage mapping: `WP-01 -> 1`; `WP-02 -> 2`; `WP-03 -> 2`; `WP-04 -> 2`; `WP-05 -> 2`; `WP-06 -> 2`; `WP-07 -> 3`.
-- Topological frontiers: stage 1 contains `WP-01`; stage 2 contains independent `WP-02` through `WP-06`; stage 3 contains `WP-07`. WIP limits are operational and are not encoded as dependencies.
+- Stage mapping: `WP-01 -> 1`; `WP-05 -> 1`; `WP-06 -> 1`; `WP-02 -> 2`; `WP-03 -> 2`; `WP-04 -> 2`; `WP-07 -> 3`.
+- Topological frontiers: stage 1 contains independent `WP-01`, `WP-05`, and `WP-06`; stage 2 contains independent `WP-02`, `WP-03`, and `WP-04`; stage 3 contains `WP-07`. WIP limits are operational and are not encoded as dependencies.
 - Scope changes to effect vocabulary, progress framing, help source, restore outcome semantics, or WP dependency surfaces require a planning revision. Assignee/status movement does not.
 
 ## Ponytail Result
@@ -29,8 +30,8 @@ The Tester repository is the project-description URL `https://gitlab.icode.by/a.
 | Case ID | OpenSpec requirement/scenario | Verification gap / local decision | OpenAPI operation/schema | Local test script | Independent Tester steps | CI disposition/test/job | Assertions | Artifacts/images |
 |---|---|---|---|---|---|---|---|---|
 | `E01-effects-parity` | `command-execution`: structured effects, command inventory, stale target, dry-run inertness; `translation-export`: all scenarios; `cli-odcli`: consistent consequences | Real filesystem ownership, Odoo ISO resolution, atomic publication, and restore/removal state make plan/execution parity material; selected focused lifecycle | None | `tests/e2e/myl615_transparent_operations_e2e.py --case effects-parity` | On an isolated slot, capture base/candidate translation replacement and representative init/VS Code/env/database dry-runs; execute only disposable candidate actions; inspect exact affected roots and preserved controls; introduce a deterministic external state change before one execution and require safe refusal/revalidation | Implementer extends existing unit/integration matrices and the real-Odoo full tier; `offline-tests` plus focused full real-Odoo job, not smoke-only | Decoded formats agree; Rich exposes same effects; dry-run hashes/state unchanged; executed targets equal frozen targets; unknown/inapplicable effects are not guarantees; secrets absent | Sanitized commands/exits, before/after filesystem/DB projections and hashes in Multica; actual base/candidate text and PNG renders for translation replace, restore move/retain, and one conditional removal |
-| `E02-progress-stream` | `command-execution`: machine progress; `cli-odcli`: separate streams | Real concurrent pipe/HTTP activity is needed to prove progress arrives before final completion and does not corrupt stdout; selected | None | Same script, `--case progress-stream` | Use disposable Git clone, candidate remote-backup download, and restore; drain stdout/stderr concurrently; parse every JSON/TOON frame; independently inspect monotonic bytes/stages and final document; interrupt one disposable operation and inspect cleanup | Unit tests own known/unknown totals, rates, framing and canaries; integration tests own interrupt/failure; full real-Odoo CI covers one restore progress path | Progress is observable before completion; IDs/order attributable; known totals bounded; unknown total has no percentage; JSONL/RS-TOON fully parse; stdout exactly one envelope; no secret/content leak; exit 130 cleanup truthful | Raw sanitized stderr/stdout captures and parser assertion summary in Multica only; actual Rich progress/final-summary text and PNG render, plus machine-frame text render labelled as a render |
-| `E03-restore-verification` | `database-restore`: independent outcomes and all scenarios | Only a real Odoo database plus filestore proves unique `ir_attachment` reconciliation and incomplete-store reporting; selected | None; no API schema change | Same script, `--case restore-verification` | Create disposable fixture attachments with duplicate rows to one stored file and another distinct file; restore a complete fixture, then restore a fixture copy with one owned stored file removed; inspect DB identities and candidate result in every format; never alter reference/source data | Parametrized unit/integration tests own unsafe names/query failure/not-checked; focused full real-Odoo CI owns complete and incomplete fixtures | Complete case passes with unique counts; incomplete case reports exact mismatch and no verified aggregate success; duplicate row counted once; password reset does not affect check state; no content exposed | Sanitized SQL count summary, result documents, exit codes, fixture provenance and cleanup ledger in Multica; Rich complete/incomplete result text and PNG renders |
+| `E02-progress-stream` | `command-execution`: machine progress; `cli-odcli`: separate streams | Real concurrent pipe/HTTP activity is needed to prove progress arrives before final completion and does not corrupt stdout; selected | None | Same script, `--case progress-stream` | Use disposable Git clone, candidate remote-backup download, and restore; drain stdout/stderr concurrently; parse every JSON/TOON frame; independently inspect monotonic bytes/stages and final document; interrupt one disposable operation and inspect cleanup | Unit tests own known/unknown totals, rates, framing and canaries; integration tests own interrupt/failure; full real-Odoo CI covers one restore progress path | Progress is observable before completion; IDs/order attributable; known totals bounded; unknown total has no percentage; JSONL/RS-TOON fully parse; stdout exactly one envelope; no secret/content leak; exit 130 cleanup truthful | Raw sanitized baseline/candidate stderr/stdout captures and parser assertion summaries in Multica only; actual baseline/candidate Rich progress/intermediate/final-summary text and PNG renders. For machine framing, baseline SHALL capture the real command's stdout/stderr/exit and prove that no structured progress frame is present; its labelled text/PNG render SHALL visualize that captured absence rather than inventing a frame. Candidate machine-frame text is rendered and labelled as a render. |
+| `E03-restore-verification` | `database-restore`: independent outcomes and all scenarios | Only a real Odoo database plus filestore proves unique `ir_attachment` reconciliation and incomplete-store reporting; selected | None; no API schema change | Same script, `--case restore-verification` | Create disposable fixture attachments with duplicate rows to one stored file and another distinct file; restore a complete fixture, then restore a fixture copy with one owned stored file removed; inspect DB identities and candidate result in every format; never alter reference/source data | Parametrized unit/integration tests own unsafe names/query failure/not-checked; focused full real-Odoo CI owns complete and incomplete fixtures | Complete case passes with unique counts; incomplete case reports exact mismatch and no verified aggregate success; duplicate row counted once; password reset does not affect check state; no content exposed | Sanitized baseline/candidate SQL count summaries, result documents, exit codes, fixture provenance and cleanup ledger in Multica; actual baseline/candidate Rich restore result text and PNG renders. Baseline SHALL show the real pre-change summary and its absence of explicit independent verification state/counts; candidate SHALL show complete/incomplete outcomes. |
 | `E04-machine-help` | `cli-odcli`: machine-readable help scenarios | No live Odoo gap remains; local stand excluded. Visible public CLI output still needs independent inspection and images | None | No local E2E script; repository Click integration tests are sufficient | From clean base and candidate wheels/checkouts, invoke root and `git clone` Rich/JSON/TOON help with both option orders; decode machine output; compare live Click tree and verify no context/database/network access | `offline-tests` Click/help characterization; package wheel smoke for installed entry point | One versioned tree/subtree; JSON/TOON semantic parity; safe types/defaults; callable defaults unevaluated; Rich unchanged; no second registry | Actual base/candidate help text; PNG renders for root and leaf machine-help difference; command/exit/decode assertions in Multica |
 
 ## Scenario Coverage and Lower-Level Exclusions
@@ -61,8 +62,8 @@ The independent Tester SHALL perform fresh public CLI actions distinct from invo
 For changed macOS terminal output, capture actual UTF-8 text at a fixed locale and 120-column width for baseline and candidate. Render that captured text to PNG with bundled `scripts/render_terminal.swift`; label renders as renders, not terminal screenshots. Preserve the tested language. Capture at minimum:
 
 - baseline/candidate translation replacement dry-run and candidate final publication summary;
-- candidate restore prior-filestore move/retention plan and passed/failed verification summaries;
-- candidate Rich progress intermediate state and final summary, with honest notes where redirection cannot preserve TTY animation/ANSI;
+- baseline/candidate restore prior-filestore move/retention plan and restore summaries; the baseline text/PNG SHALL visibly preserve the pre-change absence of independent verification state/counts, and candidate captures SHALL show passed/failed verification;
+- baseline/candidate Rich progress intermediate state and final summary, with honest notes where redirection cannot preserve TTY animation/ANSI; machine-mode baseline SHALL pair raw stdout/stderr/exit evidence with a labelled text/PNG rendering of the observed absence of structured progress frames;
 - baseline root/leaf help behavior and candidate JSON/TOON root/leaf help text.
 
 Missing a mandatory base/candidate text or PNG pair prevents complete verification. Images, actual logs, parser results, hashes, commands, exit codes, and assertions SHALL be attached to the final Multica Tester comment and verified by comment read-back; they SHALL NOT be committed to GitLab.
@@ -104,14 +105,14 @@ Cleanup SHALL use the same Binta wrapper and `--project` value, remove only iden
 ### WP-03 — Database, backup, and restore verification
 
 - Stage: `2`.
-- `depends_on`: `WP-01`.
-- OpenSpec task coverage: `3.2`, `3.3`, `7.1`, `7.2`, `7.3`, `7.4` exactly once.
-- Deliverable: database/backup effects plus independent restore verification states/counts and real-Odoo fixtures.
-- Owned responsibility scope: database restore/refresh/drop, backup deletion, restore result models, attachment/filestore validation, and related unit/integration/real-Odoo tests.
-- Critical shared files: result serialization consumes existing output documents; `WP-05` owns only progress transport, not restore domain result or validation.
-- Contract surface: prior-filestore move/compensation, provenance-bound deletion/retention, backup facts, neutralization state, safe unique attachment counts.
+- `depends_on`: `WP-01`, `WP-05`.
+- OpenSpec task coverage: `3.2`, `3.3`, `7.1`, `7.2`, `7.3`, `7.4`, `7.5` exactly once.
+- Deliverable: database/backup effects, restore consumption of the stable progress adapter, independent restore verification states/counts, and real-Odoo fixtures.
+- Owned responsibility scope: all database restore/refresh/drop implementation, backup deletion, restore result models, attachment/filestore validation, restore progress integration, and all related unit/integration/real-Odoo restore-domain tests.
+- Critical shared files: restore modules and restore-domain tests are exclusively mutable here. The package consumes `WP-01`'s effect vocabulary and `WP-05`'s stable restore-consumer adapter/event contract; it SHALL not redesign either predecessor contract.
+- Contract surface: prior-filestore move/compensation, provenance-bound deletion/retention, backup facts, neutralization state, safe unique attachment counts, and mapping of restore acquisition/import/filestore/verification/cleanup stages onto the progress adapter.
 - DoD/evidence: complete/incomplete/duplicate/unsafe/not-checked/query-failure matrices pass; publication/compensation stays truthful; focused real-Odoo coverage exists.
-- Parallel-safety rationale: database/restore domain files are disjoint from project/environment, help, Git/runtime, and core progress adapter ownership.
+- Parallel-safety rationale: after both predecessor contracts land, database/restore files and tests are exclusively owned here and are disjoint from the stage-2 project/environment and Git/runtime write zones.
 
 ### WP-04 — Git, runtime, module, and self-update effects
 
@@ -127,32 +128,32 @@ Cleanup SHALL use the same Binta wrapper and `--project` value, remove only iden
 
 ### WP-05 — Machine progress stream
 
-- Stage: `2`.
-- `depends_on`: `WP-01`.
+- Stage: `1`.
+- `depends_on`: none.
 - OpenSpec task coverage: `5.1`, `5.2`, `5.3`, `5.4` exactly once.
-- Deliverable: additive byte/rate events and JSONL/RS-TOON stderr framing for clone/download/restore with one final stdout document.
-- Owned responsibility scope: `internal/proc` event/progress types, `commands/output.py` progress adapter, clone/download/restore progress hooks only, and framing/stream tests.
-- Critical shared files: owns progress sections of `commands/output.py`; `WP-06` owns help projection and SHALL avoid those regions. Restore domain result/verification remains `WP-03`.
-- Contract surface: event schema, monotonic units/rate, framing, stderr/stdout separation, interrupt/failure cleanup, redaction.
+- Deliverable: additive byte/rate events, JSONL/RS-TOON stderr framing for clone/download, and one stable restore-consumer adapter with one final stdout document.
+- Owned responsibility scope: `internal/proc` event/progress types, progress-only regions of `commands/output.py`, Git clone and backup-download producers, the restore-consumer adapter/contract, and their framing/stream tests. It SHALL NOT edit database restore modules or restore-domain tests.
+- Critical shared files: owns only progress transport/projection regions and adapter tests. `WP-06` owns help projection and SHALL avoid those regions; `WP-03` exclusively owns restore implementation, result/verification, and restore-domain tests.
+- Contract surface: event schema, monotonic units/rate, framing, stderr/stdout separation, interrupt/failure cleanup, redaction, and the callable/event mapping consumed later by restore.
 - DoD/evidence: controlled stream/fake-clock tests and integration cases parse every frame, prove early observability, no percentage for unknown totals, one stdout document, and secret absence.
-- Parallel-safety rationale: progress adapter/hooks are separate from effect-domain adoption and machine-help command metadata.
+- Parallel-safety rationale: it can run with `WP-01` and `WP-06` because it neither consumes filesystem effects nor edits help projection; exact restore implementation/test ownership is deferred to dependent `WP-03`.
 
 ### WP-06 — Machine-readable help
 
-- Stage: `2`.
-- `depends_on`: `WP-01`.
+- Stage: `1`.
+- `depends_on`: none.
 - OpenSpec task coverage: `6.1`, `6.2`, `6.3` exactly once.
 - Deliverable: versioned JSON/TOON root/subtree help projected directly from live Click objects with Rich compatibility.
 - Owned responsibility scope: shared Rich Click command/group classes or focused help module, help serialization, and Click/package tests.
 - Critical shared files: if CLI composition changes are needed, restrict them to help registration/projection; do not edit `commands/output.py` progress sections owned by `WP-05`.
 - Contract surface: help schema, option ordering, safe defaults, aliases/hidden/deprecated metadata, no context/domain work, no second registry.
 - DoD/evidence: live graph equals machine help; JSON/TOON decode equally; unsafe defaults are not evaluated; root/leaf Rich help remains characterized.
-- Parallel-safety rationale: help metadata and tests are independent of command execution and domain planners.
+- Parallel-safety rationale: help metadata and tests consume neither filesystem-effect nor progress contracts and are independent of both other stage-1 write zones.
 
 ### WP-07 — Integrated characterization, CI, docs, and E2E handoff
 
 - Stage: `3`.
-- `depends_on`: `WP-02`, `WP-03`, `WP-04`, `WP-05`, `WP-06`.
+- `depends_on`: `WP-02`, `WP-03`, `WP-04`, `WP-06`.
 - OpenSpec task coverage: `8.1`, `8.2`, `8.3`, `8.4` exactly once.
 - Deliverable: consolidated command inventory, CI/real-Odoo fixtures, user documentation, generated artifacts, and executable independent Tester handoff/evidence contract.
 - Owned responsibility scope: `PUBLIC_LEAF_CASES` characterization, generated command matrix, cross-domain integration fixtures, CI workflow adjustments, docs, and evidence coordination. It may make focused repair edits only after sibling integration findings and with ownership coordination.
