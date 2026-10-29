@@ -907,13 +907,13 @@ def _validate_native_cache_daemon(
     candidate_status: dict[str, object],
     task_environment: dict[str, str],
 ) -> int:
+    expected_pid = candidate_status.get("pid")
     if (
         candidate_status.get("status") != "running"
         or candidate_status.get("profile") != args.profile
-        or not isinstance(candidate_status.get("pid"), int)
+        or not isinstance(expected_pid, int)
     ):
         raise RuntimeError("native checkout candidate daemon identity is invalid")
-    expected_pid = candidate_status["pid"]
     current_status = _profile_status(args)
     if any(
         current_status.get(key) != candidate_status.get(key) for key in ("status", "profile", "pid")
