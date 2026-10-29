@@ -693,14 +693,36 @@ def test_update_plan_freezes_companion_install_and_revision_checks(
     assert "update.install.companion" in by_id
     assert any("odcli-multica @" in arg for arg in by_id["update.install.companion"].argv)
     assert _SHA_B in " ".join(by_id["update.install.companion"].argv)
-    assert by_id["update.verify.companion.version"].argv == (str(companion_launcher), "--version")
+    assert by_id["update.verify.companion.version"].argv == (str(companion_launcher), "--help")
     assert "update.verify.companion.revisions" in by_id
     assert "update.recovery.companion" in by_id
+    install = by_id["update.install.companion"].argv
+    assert install[4] == (
+        "odcli-multica @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
+        f"@{_SHA_B}#subdirectory=packages/odcli-multica"
+    )
+    assert install[6] == (
+        "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
+        f"@{_SHA_B}"
+    )
+    rollback = by_id["update.recovery.companion"].argv
+    assert rollback[4].endswith(f"@{_SHA_A}#subdirectory=packages/odcli-multica")
+    assert rollback[6].endswith(f"@{_SHA_A}")
     assert any(step.step_id == "update.warn.companion" for step in command.plan.steps)
 
 
+@pytest.mark.parametrize(
+    "revisions",
+    [
+        pytest.param({"odcli-multica": _SHA_A, "odoo-instance-sdk": _SHA_B}, id="package-old"),
+        pytest.param({"odcli-multica": _SHA_B, "odoo-instance-sdk": _SHA_A}, id="sdk-old"),
+    ],
+)
 def test_companion_revision_mismatch_keeps_two_tool_recovery_evidence(
-    monkeypatch: pytest.MonkeyPatch, user_root: Path, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+    revisions: dict[str, str],
 ) -> None:
     executable = tmp_path / "odcli"
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -721,13 +743,7 @@ def test_companion_revision_mismatch_keeps_two_tool_recovery_evidence(
     provenance = replace(_provenance(executable=executable), companion=companion)
     _patch_distribution(monkeypatch, _FakeDist())
     _patch_provenance(monkeypatch, provenance)
-    executor = _executor_factory(
-        {
-            "companion_revision_json": json.dumps(
-                {"odcli-multica": _SHA_B, "odoo-instance-sdk": _SHA_A}
-            )
-        }
-    )
+    executor = _executor_factory({"companion_revision_json": json.dumps(revisions)})
 
     result = update(ref=_SHA_B, executor=executor)
 
