@@ -403,23 +403,17 @@ def test_explicit_current_human_member_uses_own_credential(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("members", "incomplete", "message"),
+    ("members", "message"),
     [
-        ((), False, "current human workspace member"),
+        ((), "current human workspace member"),
         (
             (SimpleNamespace(id="membership-row", user_id=None),),
-            False,
             "current human workspace member",
-        ),
-        (
-            (SimpleNamespace(id="membership-row", user_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),),
-            True,
-            "incomplete",
         ),
     ],
 )
 def test_explicit_member_requires_current_complete_human_membership(
-    members: tuple[SimpleNamespace, ...], incomplete: bool, message: str
+    members: tuple[SimpleNamespace, ...], message: str
 ) -> None:
     root_member = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     selected_member = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -427,12 +421,29 @@ def test_explicit_member_requires_current_complete_human_membership(
         "root", "Root", "todo", project_id="project", creator_id=root_member, creator_type="member"
     )
     client = _client(root, workspace_members=members)
-    if incomplete:
-        client.multica.workspaces.members = lambda _workspace: SimpleNamespace(
-            items=members, has_more=True, next_cursor=None, offset=0, total=2
-        )
-
     with pytest.raises(ContextVerificationError, match=message):
+        client._resolve_selected_member(_context("root"), selected_member)
+
+
+def test_explicit_member_requires_complete_member_pagination() -> None:
+    root_member = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    selected_member = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=root_member, creator_type="member"
+    )
+    client = _client(
+        root,
+        workspace_members=(SimpleNamespace(id="membership-row", user_id=selected_member),),
+    )
+    client.multica.workspaces.members = lambda _workspace: SimpleNamespace(
+        items=(SimpleNamespace(id="membership-row", user_id=selected_member),),
+        has_more=True,
+        next_cursor=None,
+        offset=0,
+        total=2,
+    )
+
+    with pytest.raises(ContextVerificationError, match="incomplete"):
         client._resolve_selected_member(_context("root"), selected_member)
 
 
@@ -470,16 +481,21 @@ def test_bridge_uses_user_root_and_ignores_project_credential_copies(
     )
     (project_credentials / "gitlab-credentials.toml").chmod(0o600)
     (project_credentials / ".env").write_text(
-        "ODCLI_GITLAB_TOKEN_PROJECT=project-copy-token\n", encoding="utf-8"
+        "ODCLI_GITLAB_TOKEN_ROOT=project-copy-token\n", encoding="utf-8"
     )
     (project_credentials / ".env").chmod(0o600)
 
-    credential = _client(root)._resolve_credentials(
-        _context("root"),
-        host="gitlab.example",
-        project_root=project,
-        mapping_path=None,
-        process_environment={},
+    monkeypatch.chdir(project)
+    credential = (
+        _client(root)
+        .credential_context_command(
+            _context("root"),
+            host="gitlab.example",
+            project_root=project,
+            mapping_path=None,
+            process_environment={},
+        )
+        .run()
     )
 
     assert credential.identity.login == "user-root"

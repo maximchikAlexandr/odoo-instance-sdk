@@ -824,6 +824,7 @@ class MulticaOdooClient:
                 host,
                 mapping_path=Path(mapping_path) if mapping_path is not None else None,
                 process_environment=process_environment,
+                include_implicit_project_root=False,
             )
         except GitLabCredentialError as exc:
             raise ContextVerificationError("GitLab credentials are unavailable") from exc

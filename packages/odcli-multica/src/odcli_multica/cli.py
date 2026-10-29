@@ -165,7 +165,6 @@ def cli() -> None:
 @click.option("--repository-url", required=True)
 @click.option("--profile", default=None)
 @click.option("--workspace-id", default=None)
-@click.option("--member-id", default=None, help="Use this current human workspace member.")
 @click.option("--odoo-bin", default=lambda: os.environ.get("ODCLI_ODOO_BIN", "odoo"))
 @click.option(
     "--format", "output_format", type=click.Choice(["rich", "json", "toon"]), default="rich"
@@ -180,7 +179,6 @@ def context_command(
     repository_url: str,
     profile: str | None,
     workspace_id: str | None,
-    member_id: str | None,
     odoo_bin: str,
     output_format: str,
     dry_run: bool,

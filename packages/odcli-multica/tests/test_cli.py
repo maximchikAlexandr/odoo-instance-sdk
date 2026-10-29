@@ -393,6 +393,13 @@ def test_git_raw_passthrough_routes_after_literal_delimiter(
     assert client.run_count == 0
 
 
+def test_context_does_not_offer_credential_member_override() -> None:
+    result = CliRunner().invoke(cli, ["context", "--help"])
+
+    assert result.exit_code == 0
+    assert "--member-id" not in result.output
+
+
 def test_git_raw_passthrough_accepts_sync_checkout_before_literal_delimiter(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

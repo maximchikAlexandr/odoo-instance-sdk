@@ -340,6 +340,7 @@ def _resolve_dotenv_gitlab_token(
     source: Mapping[str, str],
     environment_path: Path | str | None,
     project_root: Path | str | None,
+    include_implicit_project_root: bool,
     user_root: Path | str | None,
     require_owner_only_directory: bool,
 ) -> str:
@@ -354,8 +355,13 @@ def _resolve_dotenv_gitlab_token(
         ).get(key, "")
     root = get_user_root(ensure_exists=False) if user_root is None else Path(user_root)
     try:
-        project_values = load_project_environment(
-            Path.cwd() if project_root is None else project_root
+        selected_project_root = project_root
+        if selected_project_root is None and include_implicit_project_root:
+            selected_project_root = Path.cwd()
+        project_values = (
+            load_project_environment(selected_project_root)
+            if selected_project_root is not None
+            else {}
         )
         user_values = load_user_environment(root)
     except ProjectEnvironmentError as exc:
@@ -381,10 +387,15 @@ def resolve_gitlab_credential(
     mapping_path: Path | str | None = None,
     environment_path: Path | str | None = None,
     project_root: Path | str | None = None,
+    include_implicit_project_root: bool = True,
     process_environment: Mapping[str, str] | None = None,
     require_owner_only_legacy_directory: bool = True,
 ) -> GitLabCredentialContext:
-    """Resolve one exact member/host pair without consulting Git credentials."""
+    """Resolve one exact member/host pair without consulting Git credentials.
+
+    ``include_implicit_project_root`` preserves the historical CWD dotenv lookup
+    for existing callers while allowing credential bridges to disable it.
+    """
     selected_member = normalize_member_id(member_id)
     normalized_host = normalize_gitlab_host(host)
     from odoo_instance_sdk.internal.secret_store import SecretStore
@@ -425,6 +436,7 @@ def resolve_gitlab_credential(
         source=source,
         environment_path=environment_path,
         project_root=project_root,
+        include_implicit_project_root=include_implicit_project_root,
         user_root=user_root,
         require_owner_only_directory=require_owner_only_legacy_directory,
     )

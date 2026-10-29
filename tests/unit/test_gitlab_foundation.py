@@ -4,7 +4,7 @@ import io
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import msgspec
@@ -16,6 +16,7 @@ from odoo_instance_sdk.exceptions import (
     GitRepositoryChangedError,
     GitRepositoryError,
 )
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal import git_credential_helper
 from odoo_instance_sdk.internal.git_frontier import frontier_environment
 from odoo_instance_sdk.internal.git_repository import (
@@ -31,6 +32,7 @@ from odoo_instance_sdk.internal.gitlab_credentials import (
     verify_git_transport,
 )
 from odoo_instance_sdk.internal.gitlab_identity import (
+    GitLabCacheCredentialTransport,
     verify_gitlab_cache_credential,
     verify_gitlab_identity,
 )
@@ -301,7 +303,7 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     ) -> int:
         nonlocal swapped
         if path == target and dir_fd is None and not swapped:
-            target.unlink()
+            target.rename(target.with_name(f"{target.name}.original"))
             target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
             target.chmod(0o600)
             swapped = True
@@ -719,35 +721,64 @@ def test_gitlab_identity_verification_requires_owner_and_commit_identity(tmp_pat
         (8, True, ["read_repository"]),
         (7, False, ["read_repository"]),
         (7, True, ["read_repository", "write_repository"]),
+        (7, True, ["read_repository", "read_user"]),
         (7, True, ["read_api"]),
         (7, True, "read_repository"),
     ],
 )
-def test_cache_credential_requires_same_owner_active_exact_standard_scope(
-    tmp_path: Path, owner: int, active: bool, scopes: object
+def _cache_transport(
+    calls: list[str], *, owner: int, active: bool, scopes: JsonValue
+) -> GitLabCacheCredentialTransport:
+    class Transport:
+        def get_user(self, host: str, token: str) -> Mapping[str, JsonValue]:
+            calls.append(f"user:{host}:{token}")
+            return {"id": 7, "username": "alice", "name": "Alice", "email": "a@example.test"}
+
+        def get_personal_access_token(self, host: str, token: str) -> Mapping[str, JsonValue]:
+            calls.append(f"token:{host}:{token}")
+            return {"user_id": owner, "active": active, "scopes": scopes}
+
+    return Transport()
+
+
+def test_cache_credential_accepts_exact_success_scope(tmp_path: Path) -> None:
+    _credentials(tmp_path)
+    credential = resolve_gitlab_credential(MEMBER_A, "gitlab.example", user_root=tmp_path)
+    calls: list[str] = []
+
+    assert (
+        verify_gitlab_cache_credential(
+            credential,
+            _cache_transport(calls, owner=7, active=True, scopes=["read_repository"]),
+        )
+        == 7
+    )
+    assert calls == ["user:gitlab.example:file-token", "token:gitlab.example:file-token"]
+
+
+@pytest.mark.parametrize(
+    ("owner", "active", "scopes"),
+    [
+        (8, True, ["read_repository"]),
+        (7, False, ["read_repository"]),
+        (7, True, ["read_repository", "write_repository"]),
+        (7, True, ["read_api"]),
+        (7, True, "read_repository"),
+    ],
+)
+def test_cache_credential_rejects_invalid_owner_or_scope(
+    tmp_path: Path, owner: int, active: bool, scopes: JsonValue
 ) -> None:
     _credentials(tmp_path)
     credential = resolve_gitlab_credential(MEMBER_A, "gitlab.example", user_root=tmp_path)
     calls: list[str] = []
 
-    class Transport:
-        def get_user(self, host: str, token: str) -> dict[str, object]:
-            calls.append(f"user:{host}:{token}")
-            return {"id": 7, "username": "alice", "name": "Alice", "email": "a@example.test"}
-
-        def get_personal_access_token(self, host: str, token: str) -> dict[str, object]:
-            calls.append(f"token:{host}:{token}")
-            return {"user_id": owner, "active": active, "scopes": scopes}
-
-    if owner == 7 and active and scopes == ["read_repository"]:
-        assert verify_gitlab_cache_credential(credential, Transport()) == 7
-    else:
-        with pytest.raises(GitLabIdentityError):
-            verify_gitlab_cache_credential(credential, Transport())
-    assert calls == [
-        "user:gitlab.example:file-token",
-        "token:gitlab.example:file-token",
-    ]
+    with pytest.raises(GitLabIdentityError):
+        verify_gitlab_cache_credential(
+            credential,
+            _cache_transport(calls, owner=owner, active=active, scopes=scopes),
+        )
+    assert calls == ["user:gitlab.example:file-token", "token:gitlab.example:file-token"]
 
 
 @pytest.mark.parametrize(
