@@ -63,18 +63,6 @@ The CLI SHALL classify invalid UTF-8 input and expected local filesystem access 
 - **WHEN** `odcli update --check` encounters an expected permission denial in its local state path
 - **THEN** the command exits non-zero with a sanitized actionable diagnostic or one machine failure document and does not weaken or change the denied permissions
 
-### Requirement: Human doctor output prioritizes remediation
-
-Rich `doctor` output SHALL show each WARN and ERROR with a readable reason, relevant target, and shell-safe copyable remediation command when one exists. It SHALL distinguish unavailable, partial, and no-work states. It SHALL NOT expose Python representations of facts, argv lists, booleans such as `mutating=`, or unsafe terminal sequences. At narrow widths, details and commands SHALL wrap without losing status or target. Redirected output SHALL contain no ANSI. Machine JSON and TOON SHALL retain the complete existing facts and remediation metadata without changing their schema or executing a remediation.
-
-#### Scenario: Problem and command remain readable
-- **WHEN** doctor reports remediable WARN and ERROR findings at normal and narrow terminal widths
-- **THEN** every problem retains its status, target, reason, and safely quoted command without Python repr noise
-
-#### Scenario: Machine facts remain complete
-- **WHEN** the same doctor report is emitted as JSON or TOON
-- **THEN** all existing facts, mutation flags, dry-run support, and remediation argv values remain available and no remediation runs
-
 ### Requirement: Command help is discoverable and accurate
 
 The root, every group, and every leaf SHALL accept `-h` and `--help` through the common Click context and exit `0` without runtime resolution or mutation. A `-h` token after a literal `--` on a native passthrough command SHALL remain a child argument. Help for `init`, `env create`, `db restore`, `run`, `exec`, and `test` SHALL contain one to three parseable examples and the applicable ordering, selector, input, default/config-source, database-mode, dry-run/read-only/mutation, confirmation, and native/live format constraints. The text SHALL state that integrated `init --venv` is optional and that `prepare-venv` is its explicit refresh/recovery path; it SHALL separately state that owned-checkout `env create --create-venv` is optional. Neither option becomes a new default. Help SHALL explain `exec -` stdin, literal `--` native arguments, and `env show`'s positional selector or cwd behavior without renaming commands or options.
@@ -90,35 +78,3 @@ The root, every group, and every leaf SHALL accept `-h` and `--help` through the
 #### Scenario: Documented examples match registration
 - **WHEN** the added examples are parsed or dry-run under isolated fixtures
 - **THEN** their options, ordering, selectors, defaults, and safety claims match the registered command and no real mutation occurs
-
-### Requirement: Selector completion is local and side-effect-free
-
-The root `--env`, positional selectors for existing environments, and named remote-source selectors SHALL use small Click `shell_complete` callbacks backed only by existing local catalogue or project configuration readers. Completion SHALL filter by the incomplete prefix, preserve names containing spaces through Click completion items, and apply the same project scope as command execution. It SHALL NOT perform network access, runtime startup, monitor snapshots, migrations, chmod, reconciliation, or mutation. An absent, unreadable, or partial local source SHALL return no value candidates without traceback and SHALL NOT change ordinary command behavior. Built-in command, option, and path completion SHALL remain available.
-
-#### Scenario: Environment completion respects scope
-- **WHEN** completion is requested for an environment prefix under an explicit project
-- **THEN** only matching environment names and UUIDs in that project are returned, including correctly encoded names with spaces
-
-#### Scenario: Remote completion uses project configuration
-- **WHEN** completion is requested for a named remote selector
-- **THEN** only matching configured local source names are returned and no remote endpoint is contacted
-
-#### Scenario: Completion degrades safely
-- **WHEN** the catalogue or project configuration is missing or unreadable during completion
-- **THEN** completion exits successfully with no value candidates, no traceback, no secret output, and no side effect
-
-### Requirement: Typed field discovery reuses the result schema
-
-Unknown `--fields` paths SHALL report a bounded list of close valid paths derived from the selected leaf's existing concrete typed result schema. Shell completion SHALL derive candidates from the same schema, support dotted paths, and complete only the current item after a comma while preserving earlier items. Suggestions and completion SHALL NOT maintain a manual field registry, collect command data, disclose field values, or change successful projection and envelope schemas. An invalid field SHALL remain a usage error with exit code `2` and SHALL follow the supported machine usage-error contract.
-
-#### Scenario: Unknown field suggests only leaf-valid paths
-- **WHEN** a caller misspells a dotted field path for a bounded leaf
-- **THEN** the diagnostic suggests only close paths in that leaf's typed schema, discloses no values, and exits `2`
-
-#### Scenario: Comma-separated completion preserves prior fields
-- **WHEN** completion is requested after `--fields first.path,sec`
-- **THEN** candidates preserve `first.path,` and complete matching dotted paths for the current leaf beginning with `sec`
-
-#### Scenario: Valid projection remains unchanged
-- **WHEN** a valid field selection is used
-- **THEN** the existing projected result, envelope, redaction, and exit semantics are unchanged
