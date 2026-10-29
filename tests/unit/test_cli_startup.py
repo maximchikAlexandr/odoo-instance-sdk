@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -142,7 +141,7 @@ raise SystemExit(exit_code)
 
 
 def test_installed_executable_metadata_startup_is_measured_outside_checkout(
-    tmp_path: Path, record_property: Callable[[str, object], None]
+    tmp_path: Path,
 ) -> None:
     executable = Path(sys.executable).with_name("odcli")
     if not executable.is_file():
@@ -162,7 +161,7 @@ def test_installed_executable_metadata_startup_is_measured_outside_checkout(
             elapsed = time.perf_counter() - started
             assert result.returncode == 0, result.stderr
             assert result.stdout.strip()
-            record_property(f"installed_{option[2:]}_run_{run_number}_seconds", round(elapsed, 6))
+            print(f"INSTALLED_STARTUP {option} run={run_number} elapsed_seconds={elapsed:.6f}")
 
 
 def test_postgres_command_registration_keeps_resource_transport_lazy(tmp_path: Path) -> None:
