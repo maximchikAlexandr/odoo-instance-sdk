@@ -159,18 +159,28 @@ def test_env_show_catalogue_resolves_cwd_and_fails_ambiguity_or_absence_before_s
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("selector", "diagnostic"),
-    [("missing", "Environment not found"), ("same", "Ambiguous environment selector")],
+    ("selector", "names", "diagnostic"),
+    [
+        pytest.param("missing", ("same",), "Environment not found", id="missing"),
+        pytest.param(
+            "same",
+            ("same", "same"),
+            "Ambiguous environment selector",
+            id="ambiguous",
+        ),
+    ],
 )
 def test_env_show_catalogue_failures_do_not_construct_monitor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     selector: str,
+    names: tuple[str, ...],
     diagnostic: str,
 ) -> None:
-    rows = [_catalogue_row("env-1", "same", "project_a", tmp_path)]
-    if selector == "same":
-        rows.append(_catalogue_row("env-2", "same", "project_a", tmp_path))
+    rows = [
+        _catalogue_row(f"env-{index}", name, "project_a", tmp_path)
+        for index, name in enumerate(names, start=1)
+    ]
     _install_catalogue(monkeypatch, tmp_path, rows)
 
     class ForbiddenMonitor:

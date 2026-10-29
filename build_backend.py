@@ -15,19 +15,6 @@ _DIST = _WEB_ROOT / "dist"
 
 
 def _ensure_dashboard_assets() -> None:
-    # An sdist already carries the dashboard generated while the source
-    # archive was created. Rebuilding it while pip installs that sdist adds
-    # an unnecessary npm install/build to the isolated wheel build.
-    packaged_assets = _ROOT / "PKG-INFO"
-    dashboard_index = _DIST / "index.html"
-    dashboard_assets = _DIST / "assets"
-    if (
-        packaged_assets.is_file()
-        and dashboard_index.is_file()
-        and dashboard_assets.is_dir()
-        and any(dashboard_assets.iterdir())
-    ):
-        return
     ensure_dashboard_assets(_WEB_ROOT, _DIST)
 
 

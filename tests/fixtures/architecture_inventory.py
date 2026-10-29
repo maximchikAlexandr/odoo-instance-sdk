@@ -48,14 +48,14 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 563),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 564),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 479),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 480),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
-        ("src/odoo_instance_sdk/commands/output.py", 115),
-        ("src/odoo_instance_sdk/commands/output.py", 287),
-        ("src/odoo_instance_sdk/commands/output.py", 502),
-        ("src/odoo_instance_sdk/commands/output.py", 504),
-        ("src/odoo_instance_sdk/commands/output.py", 511),
-        ("src/odoo_instance_sdk/commands/output.py", 513),
+        ("src/odoo_instance_sdk/commands/output.py", 114),
+        ("src/odoo_instance_sdk/commands/output.py", 288),
+        ("src/odoo_instance_sdk/commands/output.py", 503),
+        ("src/odoo_instance_sdk/commands/output.py", 505),
+        ("src/odoo_instance_sdk/commands/output.py", 512),
+        ("src/odoo_instance_sdk/commands/output.py", 514),
         ("src/odoo_instance_sdk/internal/self_update.py", 822),
         ("src/odoo_instance_sdk/internal/self_update.py", 823),
         ("src/odoo_instance_sdk/internal/self_update.py", 824),
@@ -75,12 +75,12 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/output.py", 115): "in-memory Rich serialization boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 287): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 502): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 504): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 511): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 513): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 114): "in-memory Rich serialization boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 288): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 503): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 505): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 512): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 514): "shared diagnostic boundary",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
         563,
@@ -91,7 +91,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        479,
+        480,
     ): "documented --version metadata flag transport",
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (

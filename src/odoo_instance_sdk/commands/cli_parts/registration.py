@@ -550,7 +550,7 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
             fail(
                 OutputMode(output_format),
                 ".".join(reversed(path)),
-                error.message,
+                error.format_message(),
                 dry_run=usage_context.params.get("dry_run", False),
                 usage=True,
             )

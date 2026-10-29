@@ -149,10 +149,19 @@ def test_restore_delegates_valid_source_selection(
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "output_args",
+    [
+        pytest.param((), id="rich"),
+        pytest.param(("--format", "json"), id="json"),
+        pytest.param(("--format", "toon"), id="toon"),
+    ],
+)
 def test_restore_rejects_invalid_source_selection_before_context_access(
     monkeypatch: pytest.MonkeyPatch,
     source_args: list[str],
     error_text: str,
+    output_args: tuple[str, ...],
 ) -> None:
     client = MagicMock()
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
@@ -163,16 +172,38 @@ def test_restore_rejects_invalid_source_selection_before_context_access(
 
     result = CliRunner().invoke(
         cli,
-        ["db", "restore", *source_args, "--dry-run", "--format", "json"],
+        ["db", "restore", *source_args, "--dry-run", *output_args],
     )
 
     assert result.exit_code == 2, result.output
-    assert error_text in result.stderr
+    assert error_text in result.output
+    if output_args:
+        assert result.stderr == ""
+        if output_args[-1] == "json":
+            assert json.loads(result.stdout)["error"]["code"] == "usage_error"
+        else:
+            from toon import DecodeOptions, decode
+
+            assert (
+                decode(result.stdout, DecodeOptions(indent=2, strict=True))["error"]["code"]
+                == "usage_error"
+            )
+    else:
+        assert result.stdout == ""
+        assert error_text in result.stderr
     client.environments.refresh_database_command.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("output_args", "output_stream"),
+    [
+        pytest.param((), "stderr", id="rich"),
+        pytest.param(("--format", "json"), "stdout", id="json"),
+        pytest.param(("--format", "toon"), "stdout", id="toon"),
+    ],
+)
 def test_restore_replace_rejects_target_before_environment_resolution(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, output_args: tuple[str, ...], output_stream: str
 ) -> None:
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.resolve_environment",
@@ -189,13 +220,23 @@ def test_restore_replace_rejects_target_before_environment_resolution(
             "--target",
             "recorded_copy",
             "--yes",
-            "--format",
-            "json",
+            *output_args,
         ],
     )
 
     assert result.exit_code == 2
-    assert "cannot be combined" in result.stderr
+    actual_output = result.stderr if output_stream == "stderr" else result.stdout
+    assert "cannot be combined" in actual_output
+    if output_stream == "stdout":
+        if output_args[-1] == "json":
+            assert json.loads(result.stdout)["error"]["code"] == "usage_error"
+        else:
+            from toon import DecodeOptions, decode
+
+            assert (
+                decode(result.stdout, DecodeOptions(indent=2, strict=True))["error"]["code"]
+                == "usage_error"
+            )
 
 
 def test_restore_machine_confirmation_precedes_project_or_catalogue_access(
@@ -374,9 +415,15 @@ def test_refresh_reset_option_is_click_usage_error_before_sdk_invocation(
     client.environments.refresh_database.assert_not_called()
 
 
-@pytest.mark.parametrize("format_args", [["--format", "json"], ["--format", "toon"]])
+@pytest.mark.parametrize(
+    "format_args",
+    [
+        pytest.param(("--format", "json"), id="json"),
+        pytest.param(("--format", "toon"), id="toon"),
+    ],
+)
 def test_refresh_show_command_output_is_rich_only_before_sdk_work(
-    monkeypatch: pytest.MonkeyPatch, format_args: list[str]
+    monkeypatch: pytest.MonkeyPatch, format_args: tuple[str, ...]
 ) -> None:
     client = MagicMock()
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
@@ -390,7 +437,16 @@ def test_refresh_show_command_output_is_rich_only_before_sdk_work(
     )
 
     assert result.exit_code == 2
-    assert "only available with Rich output" in result.stderr
+    assert "only available with Rich output" in result.stdout
+    if format_args[-1] == "json":
+        assert json.loads(result.stdout)["error"]["code"] == "usage_error"
+    else:
+        from toon import DecodeOptions, decode
+
+        assert (
+            decode(result.stdout, DecodeOptions(indent=2, strict=True))["error"]["code"]
+            == "usage_error"
+        )
     client.environments.refresh_database_command.assert_not_called()
 
 

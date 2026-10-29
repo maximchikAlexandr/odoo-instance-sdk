@@ -2997,8 +2997,16 @@ def _option_names(command: click.Command) -> set[str]:
     return {option for param in command.params for option in param.opts}
 
 
-def _usage_error_cases() -> tuple[tuple[PublicLeafCase, str, str | None], ...]:
-    cases: list[tuple[PublicLeafCase, str, str | None]] = []
+@dataclass(frozen=True)
+class UsageErrorCase:
+    leaf: PublicLeafCase
+    argv: tuple[str, ...]
+    expected_exit: int = 2
+    expected_code: str = "usage_error"
+
+
+def _usage_error_cases() -> tuple[UsageErrorCase, ...]:
+    cases: list[UsageErrorCase] = []
     for case in PUBLIC_LEAF_CASES:
         if not case.is_bounded:
             continue
@@ -3008,53 +3016,39 @@ def _usage_error_cases() -> tuple[tuple[PublicLeafCase, str, str | None], ...]:
                 option = next((name for name in param.opts if name.startswith("--")), None)
                 if option is None:
                     continue
-                cases.append((case, "invalid-number", option))
+                cases.append(UsageErrorCase(case, (option, "not-a-number")))
                 if param.type.min is not None:
                     out_of_range = param.type.min - 1
                 elif param.type.max is not None:
                     out_of_range = param.type.max + 1
                 else:
                     continue
-                cases.append((case, "out-of-range", f"{option}={out_of_range}"))
+                cases.append(UsageErrorCase(case, (f"{option}={out_of_range}",)))
             if param.required:
-                cases.append((case, "missing-required", None))
+                cases.append(UsageErrorCase(case, ()))
             if param.name == "field_selection":
-                cases.append((case, "unknown-field", None))
+                cases.append(UsageErrorCase(case, ("--fields", "__unknown_field__")))
     return tuple(cases)
 
 
 @pytest.mark.parametrize(
-    ("case", "failure_kind", "option"),
+    "case",
     _usage_error_cases(),
-    ids=lambda value: ".".join(value.path) if isinstance(value, PublicLeafCase) else str(value),
+    ids=lambda value: f"{'.'.join(value.leaf.path)}:{' '.join(value.argv) or 'missing'}",
 )
 def test_supported_machine_usage_errors_have_json_toon_parity(
-    case: PublicLeafCase,
-    failure_kind: str,
-    option: str | None,
+    case: UsageErrorCase,
 ) -> None:
     documents: list[object] = []
     for mode in ("json", "toon"):
-        args = [*case.path]
-        if failure_kind == "invalid-number":
-            assert option is not None
-            args.extend((option, "not-a-number"))
-        elif failure_kind == "out-of-range":
-            assert option is not None
-            field, value = option.split("=", 1)
-            args.extend((field, value))
-        elif failure_kind == "unknown-field":
-            args.extend(("--fields", "__unknown_field__"))
-        args.extend(("--format", mode))
-
-        invoked = CliRunner().invoke(cli, args)
-        assert invoked.exit_code == 2, invoked.output
+        invoked = CliRunner().invoke(cli, [*case.leaf.path, *case.argv, "--format", mode])
+        assert invoked.exit_code == case.expected_exit, invoked.output
         assert invoked.stderr == ""
         assert invoked.stdout
         assert "\x1b" not in invoked.stdout
         document = _decode_document(invoked.stdout, mode)
         assert document["ok"] is False  # type: ignore[index]
-        assert document["error"]["code"] == "usage_error"  # type: ignore[index]
+        assert document["error"]["code"] == case.expected_code  # type: ignore[index]
         documents.append(document)
     assert documents[0] == documents[1]
 
@@ -3080,6 +3074,16 @@ def test_missing_required_arguments_use_supported_machine_usage_error(
         assert document["error"]["code"] == "usage_error"  # type: ignore[index]
         documents.append(document)
     assert documents[0] == documents[1]
+
+
+def test_env_create_missing_ticket_has_actionable_public_machine_error() -> None:
+    invoked = CliRunner().invoke(cli, ["env", "create", "--format", "json"])
+
+    assert invoked.exit_code == 2
+    document = json.loads(invoked.stdout)
+    assert document["ok"] is False
+    assert document["error"]["code"] == "usage_error"
+    assert "TICKET" in document["error"]["message"]
 
 
 def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
