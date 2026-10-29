@@ -212,7 +212,9 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
 ) -> None:
     monkeypatch.setenv("MULTICA_DAEMON_PORT", "41001")
     monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
-    monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: tmp_path))
+    monkeypatch.setenv("MULTICA_TASK_ID", "task-fixture")
+    monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-fixture")
+    monkeypatch.chdir(tmp_path)
     calls: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
     args = Namespace(
         multica="multica",
@@ -220,6 +222,23 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
         profile="isolated",
         repository_a="https://gitlab.example/team/repo",
     )
+    wrapper = tmp_path / "run" / "native-cache-checkout"
+    actual_checkout = wrapper / "odoo-instance-sdk"
+    daemon_status = {"profile": "isolated", "status": "running", "pid": 42}
+    cache_environment = {
+        "MULTICA_TASK_ID": "task-fixture",
+        "MULTICA_WORKSPACE_ID": "workspace-fixture",
+        "ODCLI_GITLAB_PURPOSE": "cache-read",
+        "ODCLI_GITLAB_MEMBER_ID": "member-fixture",
+        "ODCLI_GITLAB_SELECTED_HOST": "gitlab.example",
+        "GIT_CONFIG_VALUE_1": "odcli",
+    }
+    daemon_environment = {
+        **cache_environment,
+        "MULTICA_DAEMON_PORT": "41001",
+    }
+    statuses = iter((daemon_status, daemon_status))
+    original_run = runner._run
 
     def execute(
         argv: list[str],
@@ -228,36 +247,277 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
         env: dict[str, str] | None = None,
         **_kwargs: object,
     ) -> SimpleNamespace:
+        if argv[0] == "git":
+            return original_run(argv, cwd=cwd, env=env)
         calls.append((argv, cwd, env))
-        return SimpleNamespace(stdout="checked out")
+        if argv[1:3] == ["daemon", "status"]:
+            return SimpleNamespace(stdout=json.dumps(daemon_status))
+        actual_checkout.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", str(actual_checkout)], check=True)
+        subprocess.run(
+            ["git", "-C", str(actual_checkout), "remote", "add", "origin", args.repository_a],
+            check=True,
+        )
+        return SimpleNamespace(
+            stdout=f"{actual_checkout}\n",
+            stderr=f"Checked out {args.repository_a} → {actual_checkout} (branch: fixture)\n",
+        )
 
     monkeypatch.setattr(runner, "_run", execute)
-    monkeypatch.setattr(runner, "_git", lambda *_args, **_kwargs: args.repository_a)
+    monkeypatch.setattr(runner, "_profile_status", lambda _args: next(statuses))
+    monkeypatch.setattr(runner, "_daemon_environment", lambda _status: daemon_environment)
     runner._native_cache_checkout(
         args,
         tmp_path / "run",
-        {
-            "MULTICA_DAEMON_PORT": "41001",
-            "MULTICA_TOKEN": "task-token-fixture",
-            "ODCLI_GITLAB_PURPOSE": "cache-read",
-        },
+        cache_environment,
         ("secret-fixture",),
+        daemon_status,
     )
 
-    assert len(calls) == 1
-    argv, cwd, environment = calls[0]
-    assert argv == [
-        "multica",
-        "--profile",
-        "isolated",
-        "repo",
-        "checkout",
-        args.repository_a,
-    ]
-    assert cwd == tmp_path / "run" / "native-cache-checkout"
+    checkout_calls = [call for call in calls if call[0][1:3] != ["daemon", "status"]]
+    assert len(checkout_calls) == 1
+    argv, cwd, environment = checkout_calls[0]
+    assert argv == ["multica", "repo", "checkout", args.repository_a]
+    assert cwd == wrapper
     assert environment is not None
     assert environment["MULTICA_DAEMON_PORT"] == "41001"
     assert environment["MULTICA_TOKEN"] == "task-token-fixture"
+    assert environment["MULTICA_TASK_ID"] == "task-fixture"
+    assert environment["MULTICA_WORKSPACE_ID"] == "workspace-fixture"
+    status_calls = [call for call in calls if call[0][1:3] == ["daemon", "status"]]
+    assert len(status_calls) == 2
+    assert all(
+        call[0] == ["multica", "daemon", "status", "--output", "json"] for call in status_calls
+    )
+    assert all(call[2] is not None for call in status_calls)
+    assert all(call[2]["MULTICA_DAEMON_PORT"] == "41001" for call in status_calls if call[2])
+    assert all(call[2]["MULTICA_TOKEN"] == "task-token-fixture" for call in status_calls if call[2])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        ("checked out", "one absolute worktree path"),
+        ("/outside/checkout", "outside the owned checkout root"),
+    ],
+)
+def test_native_checkout_rejects_invalid_public_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: str, message: str
+) -> None:
+    monkeypatch.setenv("MULTICA_DAEMON_PORT", "41001")
+    monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
+    monkeypatch.setenv("MULTICA_TASK_ID", "task-fixture")
+    monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-fixture")
+    monkeypatch.chdir(tmp_path)
+    args = Namespace(
+        multica="multica",
+        git="git",
+        profile="isolated",
+        repository_a="https://gitlab.example/team/repo",
+    )
+    status = {"profile": "isolated", "status": "running", "pid": 42}
+    environment = {
+        "MULTICA_TASK_ID": "task-fixture",
+        "MULTICA_WORKSPACE_ID": "workspace-fixture",
+        "ODCLI_GITLAB_PURPOSE": "cache-read",
+        "ODCLI_GITLAB_MEMBER_ID": "member-fixture",
+        "ODCLI_GITLAB_SELECTED_HOST": "gitlab.example",
+        "GIT_CONFIG_VALUE_1": "odcli",
+    }
+    monkeypatch.setattr(runner, "_profile_status", lambda _args: status)
+    monkeypatch.setattr(runner, "_daemon_environment", lambda _status: environment)
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda argv, **_kwargs: SimpleNamespace(
+            stdout=json.dumps(status) if argv[1:3] == ["daemon", "status"] else stdout
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        runner._native_cache_checkout(args, tmp_path / "run", environment, (), status)
+
+
+@pytest.mark.unit
+def test_native_checkout_fails_closed_on_invalid_task_status_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MULTICA_DAEMON_PORT", "41001")
+    monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
+    monkeypatch.setenv("MULTICA_TASK_ID", "task-fixture")
+    monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-fixture")
+    monkeypatch.chdir(tmp_path)
+    args = Namespace(
+        multica="multica",
+        git="git",
+        profile="isolated",
+        repository_a="https://gitlab.example/team/repo",
+    )
+    status = {"profile": "isolated", "status": "running", "pid": 42}
+    environment = {
+        "MULTICA_TASK_ID": "task-fixture",
+        "MULTICA_WORKSPACE_ID": "workspace-fixture",
+        "ODCLI_GITLAB_PURPOSE": "cache-read",
+        "ODCLI_GITLAB_MEMBER_ID": "member-fixture",
+        "ODCLI_GITLAB_SELECTED_HOST": "gitlab.example",
+        "GIT_CONFIG_VALUE_1": "odcli",
+    }
+    commands: list[list[str]] = []
+
+    def execute(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(argv)
+        return SimpleNamespace(stdout="not-json")
+
+    monkeypatch.setattr(runner, "_profile_status", lambda _args: status)
+    monkeypatch.setattr(runner, "_daemon_environment", lambda _status: environment)
+    monkeypatch.setattr(runner, "_run", execute)
+
+    with pytest.raises(RuntimeError, match="task daemon status response is invalid"):
+        runner._native_cache_checkout(args, tmp_path / "run", environment, (), status)
+    assert commands == [["multica", "daemon", "status", "--output", "json"]]
+
+
+@pytest.mark.unit
+def test_native_checkout_rejects_a_stale_candidate_daemon_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MULTICA_DAEMON_PORT", "41001")
+    monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
+    monkeypatch.setenv("MULTICA_TASK_ID", "task-fixture")
+    monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-fixture")
+    monkeypatch.chdir(tmp_path)
+    args = Namespace(
+        multica="multica",
+        git="git",
+        profile="isolated",
+        repository_a="https://gitlab.example/team/repo",
+    )
+    candidate = {"profile": "isolated", "status": "running", "pid": 42}
+    stale = {"profile": "isolated", "status": "running", "pid": 99}
+    calls: list[list[str]] = []
+    cache_environment = {
+        "MULTICA_TASK_ID": "task-fixture",
+        "MULTICA_WORKSPACE_ID": "workspace-fixture",
+    }
+    monkeypatch.setattr(runner, "_profile_status", lambda _args: stale)
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda argv, **_kwargs: calls.append(argv),
+    )
+
+    with pytest.raises(RuntimeError, match="generation changed"):
+        runner._native_cache_checkout(args, tmp_path / "run", cache_environment, (), candidate)
+    assert calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("binding_key", "binding_value", "message"),
+    [
+        ("MULTICA_TASK_ID", "foreign-task", "task binding does not match"),
+        ("ODCLI_GITLAB_PURPOSE", "task", "cache binding does not match"),
+        ("MULTICA_DAEMON_PORT", "42001", "does not match the candidate daemon"),
+    ],
+)
+def test_native_checkout_rejects_foreign_daemon_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    binding_key: str,
+    binding_value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv("MULTICA_DAEMON_PORT", "41001")
+    monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
+    monkeypatch.setenv("MULTICA_TASK_ID", "task-fixture")
+    monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-fixture")
+    monkeypatch.chdir(tmp_path)
+    args = Namespace(
+        multica="multica",
+        git="git",
+        profile="isolated",
+        repository_a="https://gitlab.example/team/repo",
+    )
+    status = {"profile": "isolated", "status": "running", "pid": 42}
+    expected_environment = {
+        "MULTICA_TASK_ID": "task-fixture",
+        "MULTICA_WORKSPACE_ID": "workspace-fixture",
+        "ODCLI_GITLAB_PURPOSE": "cache-read",
+        "ODCLI_GITLAB_MEMBER_ID": "member-fixture",
+        "ODCLI_GITLAB_SELECTED_HOST": "gitlab.example",
+        "GIT_CONFIG_VALUE_1": "odcli",
+    }
+    daemon_environment = expected_environment | {"MULTICA_DAEMON_PORT": "41001"}
+    daemon_environment[binding_key] = binding_value
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runner, "_profile_status", lambda _args: status)
+    monkeypatch.setattr(runner, "_daemon_environment", lambda _status: daemon_environment)
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda argv, **_kwargs: (
+            SimpleNamespace(stdout=json.dumps(status))
+            if argv[1:3] == ["daemon", "status"]
+            else calls.append(argv)
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        runner._native_cache_checkout(args, tmp_path / "run", expected_environment, (), status)
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_native_checkout_preserves_public_cli_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MULTICA_DAEMON_PORT", "41001")
+    monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
+    monkeypatch.setenv("MULTICA_TASK_ID", "task-fixture")
+    monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-fixture")
+    monkeypatch.chdir(tmp_path)
+    args = Namespace(
+        multica="multica",
+        git="git",
+        profile="isolated",
+        repository_a="https://gitlab.example/team/repo",
+    )
+    status = {"profile": "isolated", "status": "running", "pid": 42}
+    environment = {
+        "MULTICA_TASK_ID": "task-fixture",
+        "MULTICA_WORKSPACE_ID": "workspace-fixture",
+        "ODCLI_GITLAB_PURPOSE": "cache-read",
+        "ODCLI_GITLAB_MEMBER_ID": "member-fixture",
+        "ODCLI_GITLAB_SELECTED_HOST": "gitlab.example",
+        "GIT_CONFIG_VALUE_1": "odcli",
+    }
+    calls: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
+
+    def refuse(
+        argv: list[str],
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        calls.append((argv, cwd, env))
+        if argv[1:3] == ["daemon", "status"]:
+            return SimpleNamespace(stdout=json.dumps(status))
+        raise RuntimeError("command failed (1): multica checkout refused")
+
+    monkeypatch.setattr(runner, "_profile_status", lambda _args: status)
+    monkeypatch.setattr(runner, "_daemon_environment", lambda _status: environment)
+    monkeypatch.setattr(runner, "_run", refuse)
+
+    with pytest.raises(RuntimeError, match="checkout refused"):
+        runner._native_cache_checkout(args, tmp_path / "run", environment, (), status)
+    checkout_call = next(call for call in calls if call[0][1:3] != ["daemon", "status"])
+    assert checkout_call[0] == ["multica", "repo", "checkout", args.repository_a]
+    assert checkout_call[1] == tmp_path / "run" / "native-cache-checkout"
+    assert checkout_call[2] is not None
+    assert checkout_call[2]["MULTICA_DAEMON_PORT"] == "41001"
+    assert checkout_call[2]["MULTICA_TOKEN"] == "task-token-fixture"
 
 
 @pytest.mark.unit

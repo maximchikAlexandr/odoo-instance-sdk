@@ -857,23 +857,121 @@ def _native_cache_checkout(
     root: Path,
     cache_environment: dict[str, str],
     secret_values: tuple[str, ...],
+    candidate_status: dict[str, object],
 ) -> None:
-    if not os.environ.get("MULTICA_DAEMON_PORT") or not os.environ.get("MULTICA_TOKEN"):
+    task_environment = os.environ.copy()
+    if not task_environment.get("MULTICA_DAEMON_PORT") or not task_environment.get("MULTICA_TOKEN"):
         raise RuntimeError("native checkout requires the isolated daemon task context")
-    checkout = root / "native-cache-checkout"
-    if not checkout.resolve().is_relative_to(Path.cwd().resolve()):
+    task_bindings = ("MULTICA_TASK_ID", "MULTICA_WORKSPACE_ID")
+    if any(
+        not task_environment.get(key) or cache_environment.get(key) != task_environment.get(key)
+        for key in task_bindings
+    ):
+        raise RuntimeError("native checkout requires task and workspace bindings")
+    wrapper = root / "native-cache-checkout"
+    if not wrapper.resolve().is_relative_to(Path.cwd().resolve()):
         raise RuntimeError("native checkout workspace must be inside the isolated daemon task")
-    checkout.mkdir(mode=0o700, parents=True)
-    _run(
-        [args.multica, "--profile", args.profile, "repo", "checkout", args.repository_a],
-        cwd=checkout,
-        env=os.environ.copy(),
+    expected_pid = _validate_native_cache_daemon(
+        args, cache_environment, candidate_status, task_environment
+    )
+    wrapper.mkdir(mode=0o700, parents=True)
+    result = _run(
+        [args.multica, "repo", "checkout", args.repository_a],
+        cwd=wrapper,
+        env=task_environment,
         secrets=secret_values,
     )
-    if _repository_identity(_git(args.git, checkout, "remote", "get-url", "origin")) != (
-        _repository_identity(args.repository_a)
-    ):
+    checkout = _native_checkout_result_path(result.stdout, wrapper)
+    if Path(_git(args.git, checkout, "rev-parse", "--show-toplevel")).resolve() != checkout:
+        raise RuntimeError("native Multica checkout response is not the actual worktree root")
+    if _repository_identity(
+        _git(args.git, checkout, "remote", "get-url", "origin")
+    ) != _repository_identity(args.repository_a):
         raise RuntimeError("native Multica checkout origin does not match the private repository")
+    final_status = _profile_status(args)
+    if any(
+        final_status.get(key) != expected
+        for key, expected in (
+            ("status", "running"),
+            ("profile", args.profile),
+            ("pid", expected_pid),
+        )
+    ):
+        raise RuntimeError("native checkout candidate daemon generation changed during checkout")
+    _assert_task_daemon_binding(args, task_environment, args.profile, expected_pid)
+
+
+def _validate_native_cache_daemon(
+    args: argparse.Namespace,
+    cache_environment: dict[str, str],
+    candidate_status: dict[str, object],
+    task_environment: dict[str, str],
+) -> int:
+    if (
+        candidate_status.get("status") != "running"
+        or candidate_status.get("profile") != args.profile
+        or not isinstance(candidate_status.get("pid"), int)
+    ):
+        raise RuntimeError("native checkout candidate daemon identity is invalid")
+    expected_pid = candidate_status["pid"]
+    current_status = _profile_status(args)
+    if any(
+        current_status.get(key) != candidate_status.get(key) for key in ("status", "profile", "pid")
+    ):
+        raise RuntimeError("native checkout candidate daemon generation changed")
+    _assert_task_daemon_binding(args, task_environment, args.profile, expected_pid)
+    daemon_environment = _daemon_environment(candidate_status)
+    task_bindings = ("MULTICA_TASK_ID", "MULTICA_WORKSPACE_ID")
+    if any(daemon_environment.get(key) != cache_environment.get(key) for key in task_bindings):
+        raise RuntimeError("native checkout candidate daemon task binding does not match")
+    cache_bindings = (
+        "ODCLI_GITLAB_PURPOSE",
+        "ODCLI_GITLAB_MEMBER_ID",
+        "ODCLI_GITLAB_SELECTED_HOST",
+        "GIT_CONFIG_VALUE_1",
+    )
+    if any(daemon_environment.get(key) != cache_environment.get(key) for key in cache_bindings):
+        raise RuntimeError("native checkout candidate daemon cache binding does not match")
+    daemon_port = daemon_environment.get("MULTICA_DAEMON_PORT")
+    if daemon_port is not None and daemon_port != task_environment["MULTICA_DAEMON_PORT"]:
+        raise RuntimeError(
+            "native checkout task transport port does not match the candidate daemon"
+        )
+    return expected_pid
+
+
+def _assert_task_daemon_binding(
+    args: argparse.Namespace,
+    task_environment: dict[str, str],
+    profile: str,
+    expected_pid: int,
+) -> None:
+    result = _run(
+        [args.multica, "daemon", "status", "--output", "json"],
+        env=task_environment,
+    )
+    try:
+        status = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("task daemon status response is invalid") from exc
+    if not isinstance(status, dict) or any(
+        status.get(key) != expected
+        for key, expected in (("status", "running"), ("profile", profile), ("pid", expected_pid))
+    ):
+        raise RuntimeError("native checkout task transport is not bound to the candidate daemon")
+
+
+def _native_checkout_result_path(stdout: str, wrapper: Path) -> Path:
+    reported_path = stdout.strip()
+    if not reported_path or "\n" in reported_path or not Path(reported_path).is_absolute():
+        raise RuntimeError("native Multica checkout did not return one absolute worktree path")
+    checkout = Path(reported_path).resolve()
+    owned_root = wrapper.resolve()
+    if checkout == owned_root or not checkout.is_relative_to(owned_root):
+        raise RuntimeError("native Multica checkout path is outside the owned checkout root")
+    if not checkout.is_dir():
+        raise RuntimeError("native Multica checkout path is not an existing directory")
+    return checkout
 
 
 def _run_integrated_member_operations(
@@ -1043,7 +1141,7 @@ def _integrated_multica_cache(
             )
         ):
             raise RuntimeError("candidate daemon did not inherit cache-read settings")
-        _native_cache_checkout(args, root, cache_environment, secret_values)
+        _native_cache_checkout(args, root, cache_environment, secret_values, candidate_status)
         evidence.append({"case": "C1", "native_cache_checkout": True, "ok": True})
 
         _run_integrated_member_operations(
