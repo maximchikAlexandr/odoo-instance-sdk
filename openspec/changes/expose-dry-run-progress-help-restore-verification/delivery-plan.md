@@ -2,7 +2,7 @@
 
 - Task key: `MYL-615`.
 - OpenSpec change: `expose-dry-run-progress-help-restore-verification`.
-- Planning revision: `R3`; this revision replaces the R2 implementation topology after a fresh `ponytail full` audit against the current code without changing product scope.
+- Planning revision: `R5`; this revision makes the R3 six-WP topology authoritative with the R4 environment/database test-ownership clarification, without changing DAG, product scope, estimate authority, or E2E scope.
 - Planning base: `origin/main` at the base revision recorded by the publication commit.
 - Estimate authority: the root planning issue custom properties `Estimate, hours`, `Estimate min, hours`, and `Estimate max, hours`. Numeric totals are intentionally not duplicated here.
 - Estimate basis: full remaining work for one experienced developer familiar with this Python/Click/Odoo stack, without AI acceleration. It includes implementation, required tests/fixtures/docs, normal review repair, and attended verification; unattended CI/provider waits and approval queues are excluded.
