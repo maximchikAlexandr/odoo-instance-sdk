@@ -280,10 +280,12 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
     explicit_env.chmod(0o600)
     target = explicit_env if explicit else project_env
-    displaced = tmp_path / "displaced-env"
-    replacement = tmp_path / "replacement-env"
+    original = target.stat()
+    original_identity = original.st_dev, original.st_ino
+    displaced = target.with_name(f"{target.name}.displaced")
     original_open = os.open
     swapped = False
+    replacement_identity: tuple[int, int] | None = None
 
     def replace_before_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -292,12 +294,15 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
         *,
         dir_fd: int | None = None,
     ) -> int:
-        nonlocal swapped
+        nonlocal replacement_identity, swapped
         if path == target and dir_fd is None and not swapped:
             target.rename(displaced)
-            replacement.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-            replacement.chmod(0o600)
-            replacement.replace(target)
+            held_inode = displaced.stat()
+            assert (held_inode.st_dev, held_inode.st_ino) == original_identity
+            target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+            target.chmod(0o600)
+            replacement = target.stat()
+            replacement_identity = replacement.st_dev, replacement.st_ino
             swapped = True
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
@@ -308,6 +313,8 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
         load_environment_file(target)
 
     assert swapped
+    assert replacement_identity is not None
+    assert replacement_identity != original_identity
     assert "attacker-token" not in str(failure.value)
 
 
