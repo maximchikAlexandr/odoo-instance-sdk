@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
 import json
+import os
 import shutil
 import subprocess
+import sys
+import tomllib
 from argparse import Namespace
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -13,15 +20,261 @@ import pytest
 from scripts import _gitlab_member_cache as cache, e2e_gitlab_member_workflow as runner
 
 
+def _clean_sdk_checkout(repository: Path, revision: str, destination: Path) -> Path:
+    subprocess.run(
+        ["git", "clone", "--shared", "--no-checkout", str(repository), str(destination)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(destination), "checkout", "--detach", revision],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return destination
+
+
+def _prepare_public_cache_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    repository: Path,
+    revision: str,
+    helper_dir: Path,
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    checkout_a = root / "task-a"
+    checkout_b = root / "task-b"
+    checkout_a.mkdir()
+    checkout_b.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MULTICA_DAEMON_PORT", "41001")
+    monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
+    environment = {
+        "TEST_MULTICA_PROFILE": "isolated-profile",
+        "TEST_GIT_HELPER_DIR": str(helper_dir),
+        "TEST_CORE_PROJECT": str(repository),
+        "TEST_SDK_SHA": revision,
+        "TEST_MULTICA_PROJECT": "project-fixture",
+        "TEST_MULTICA_WORKSPACE": "workspace-fixture",
+        "TEST_GITLAB_CACHE_MEMBER": "00000000-0000-4000-8000-000000000001",
+        "TEST_GITLAB_CACHE_OWNER_MISMATCH_MEMBER": "00000000-0000-4000-8000-000000000002",
+        "TEST_GITLAB_CACHE_INACTIVE_MEMBER": "00000000-0000-4000-8000-000000000003",
+        "TEST_GITLAB_CACHE_BROADER_SCOPE_MEMBER": "00000000-0000-4000-8000-000000000004",
+        "TEST_GITLAB_CACHE_GRANULAR_SCOPE_MEMBER": "00000000-0000-4000-8000-000000000005",
+        "TEST_GITLAB_CACHE_INCOMPATIBLE_MEMBER": "00000000-0000-4000-8000-000000000006",
+        "TEST_GITLAB_MEMBER": "00000000-0000-4000-8000-000000000007",
+        "TEST_GITLAB_MEMBER_B": "00000000-0000-4000-8000-000000000008",
+        "TEST_GITLAB_MEMBER_MISSING": "00000000-0000-4000-8000-000000000009",
+        "TEST_MULTICA_MEMBER_INVALID": "00000000-0000-4000-8000-000000000010",
+        "TEST_MULTICA_MEMBER_NONHUMAN": "00000000-0000-4000-8000-000000000011",
+        "TEST_MULTICA_MEMBER_CROSS_WORKSPACE": "00000000-0000-4000-8000-000000000012",
+        "TEST_MULTICA_MEMBER_STALE": "00000000-0000-4000-8000-000000000013",
+        "TEST_GITLAB_CACHE_HOST": "gitlab.example",
+        "TEST_MULTICA_ISSUE_A": "MYL-1",
+        "TEST_MULTICA_RUN_A": "run-a",
+        "TEST_MULTICA_ISSUE_B": "MYL-2",
+        "TEST_MULTICA_RUN_B": "run-b",
+        "TEST_MULTICA_CHECKOUT_A": str(checkout_a),
+        "TEST_MULTICA_CHECKOUT_B": str(checkout_b),
+        "TEST_REPOSITORY_URL": "https://gitlab.example/group/project",
+    }
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(cache, "_validate_integrated_checkouts", lambda *_args: None)
+    monkeypatch.setattr(cache, "_secret_corpus", lambda _member: ("fixture-secret",))
+    monkeypatch.setattr(
+        cache,
+        "_integrated_cache_environments",
+        lambda *_args: ({"PATH": str(helper_dir)}, {}),
+    )
+
+
+def _canary_installation(tmp_path: Path, repository: Path, canary: Path) -> Path:
+    install_root = tmp_path / "candidate-venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(install_root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    helper_dir = install_root / "bin"
+    interpreter = helper_dir / "python"
+    site_packages = next(install_root.glob("lib/python*/site-packages"))
+    package_root = site_packages / "odoo_instance_sdk"
+    internal = package_root / "internal"
+    internal.mkdir(parents=True)
+    (package_root / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(canary)!r}).write_text('candidate package executed')\n",
+        encoding="utf-8",
+    )
+    (internal / "__init__.py").write_text("", encoding="utf-8")
+    (internal / "git_credential_helper.py").write_text(
+        "def main():\n    return 1\n", encoding="utf-8"
+    )
+    dist_info = site_packages / "odoo_instance_sdk-0.1.0.dist-info"
+    dist_info.mkdir()
+    project = tomllib.loads((repository / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.4\nName: {project['name']}\nVersion: {project['version']}\n",
+        encoding="utf-8",
+    )
+    entry_points = "[console_scripts]\n" + "".join(
+        f"{name} = {value}\n" for name, value in project["scripts"].items()
+    )
+    (dist_info / "entry_points.txt").write_text(entry_points, encoding="utf-8")
+    (dist_info / "direct_url.json").write_text(
+        json.dumps({"url": repository.as_uri(), "dir_info": {"editable": False}}),
+        encoding="utf-8",
+    )
+    helper = helper_dir / "git-credential-odcli"
+    helper.write_bytes(
+        (
+            f"#!{interpreter}\n"
+            "# -*- coding: utf-8 -*-\n"
+            "import sys\n"
+            "from odoo_instance_sdk.internal.git_credential_helper import main\n"
+            'if __name__ == "__main__":\n'
+            '    if sys.argv[0].endswith("-script.pyw"):\n'
+            "        sys.argv[0] = sys.argv[0][:-11]\n"
+            '    elif sys.argv[0].endswith(".exe"):\n'
+            "        sys.argv[0] = sys.argv[0][:-4]\n"
+            "    sys.exit(main())\n"
+        ).encode()
+    )
+    helper.chmod(0o755)
+    rows: list[tuple[str, str, str]] = []
+    files = (*package_root.rglob("*"), *dist_info.iterdir())
+    for path in files:
+        if path.is_file() and path.name != "RECORD":
+            content = path.read_bytes()
+            digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
+            rows.append(
+                (str(path.relative_to(site_packages)), f"sha256={digest}", str(len(content)))
+            )
+    content = helper.read_bytes()
+    digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
+    rows.extend(
+        (
+            ("../../../bin/git-credential-odcli", f"sha256={digest}", str(len(content))),
+            (f"{dist_info.name}/RECORD", "", ""),
+        )
+    )
+    with (dist_info / "RECORD").open("w", newline="", encoding="utf-8") as stream:
+        csv.writer(stream).writerows(rows)
+    return helper_dir
+
+
+@pytest.mark.unit
+def test_public_cache_runner_rejects_untrusted_package_before_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = Path(__file__).parents[2].resolve()
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    clean_repository = _clean_sdk_checkout(repository, revision, tmp_path / "clean-sdk")
+    canary = tmp_path / "candidate-package-imported"
+    helper_dir = _canary_installation(tmp_path, clean_repository, canary)
+    _prepare_public_cache_runner(
+        monkeypatch, tmp_path / "runner", clean_repository, revision, helper_dir
+    )
+    daemon_status = Mock(side_effect=AssertionError("daemon was queried before provenance passed"))
+    daemon_stop = Mock(side_effect=AssertionError("daemon was mutated before provenance passed"))
+    monkeypatch.setattr(cache, "_profile_status", daemon_status)
+    monkeypatch.setattr(cache, "_profile_stop", daemon_stop)
+
+    result = runner.main(
+        ["--mode", "multica-cache", "--work-root", str(tmp_path / "runner" / "runner-root")]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert response["ok"] is False
+    assert not canary.exists()
+    assert "candidate SDK package bytes do not match" in response["error"]
+    daemon_status.assert_not_called()
+    daemon_stop.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mutate_package",
+    [
+        pytest.param(
+            lambda package_root: (
+                package_root / "internal" / "git_credential_helper.py"
+            ).write_text(
+                (package_root / "internal" / "git_credential_helper.py").read_text(encoding="utf-8")
+                + "\n# dirty candidate\n",
+                encoding="utf-8",
+            ),
+            id="tracked-dirty",
+        ),
+        pytest.param(
+            lambda package_root: (package_root / "untracked_canary.py").write_text(
+                "from pathlib import Path\nPath('candidate-package-imported').write_text('executed')\n",
+                encoding="utf-8",
+            ),
+            id="untracked-python",
+        ),
+    ],
+)
+def test_public_cache_runner_rejects_dirty_candidate_repository_before_probe_or_daemon(
+    mutate_package: Callable[[Path], object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = Path(__file__).parents[2].resolve()
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    dirty_repository = _clean_sdk_checkout(repository, revision, tmp_path / "dirty-sdk")
+    package_root = dirty_repository / "src" / "odoo_instance_sdk"
+    mutate_package(package_root)
+    canary = tmp_path / "candidate-package-imported"
+    helper_dir = _canary_installation(tmp_path, dirty_repository, canary)
+    _prepare_public_cache_runner(
+        monkeypatch, tmp_path / "runner", dirty_repository, revision, helper_dir
+    )
+    daemon_status = Mock(
+        return_value={"profile": "isolated-profile", "status": "running", "pid": 72}
+    )
+    daemon_stop = Mock()
+    lifecycle_gate = Mock(side_effect=RuntimeError("candidate lifecycle was reached"))
+    monkeypatch.setattr(cache, "_profile_status", daemon_status)
+    monkeypatch.setattr(cache, "_profile_stop", daemon_stop)
+    monkeypatch.setattr(cache, "_stop_and_validate_cache_generation", lifecycle_gate)
+
+    result = runner.main(
+        ["--mode", "multica-cache", "--work-root", str(tmp_path / "runner" / "runner-root")]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert response["ok"] is False
+    assert not canary.exists()
+    assert "candidate SDK repository must be clean" in response["error"]
+    daemon_status.assert_not_called()
+    daemon_stop.assert_not_called()
+    lifecycle_gate.assert_not_called()
+
+
 @pytest.mark.unit
 def test_installed_helper_provenance_accepts_exact_candidate_installation() -> None:
     import sys
 
     repository = Path(__file__).parents[2].resolve()
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, capture_output=True, text=True, check=True
+    ).stdout.strip()
     helper_dir = Path(sys.executable).parent
 
     helper = cache._installed_helper_provenance(
-        Namespace(helper_dir=helper_dir, core_project=repository), {"PATH": str(helper_dir)}
+        Namespace(git="git", sdk_sha=revision, helper_dir=helper_dir, core_project=repository),
+        {"PATH": str(helper_dir)},
     )
 
     assert helper == (helper_dir / "git-credential-odcli").resolve()
@@ -49,36 +302,24 @@ def test_installed_helper_provenance_rejects_escaped_launcher_symlink(
 
 
 @pytest.mark.unit
-def test_installed_helper_provenance_rejects_stale_package_sources(
-    monkeypatch: pytest.MonkeyPatch,
+def test_installed_helper_provenance_rejects_installation_bound_to_another_project(
+    tmp_path: Path,
 ) -> None:
-    import importlib
     import sys
 
     repository = Path(__file__).parents[2].resolve()
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    clean_repository = _clean_sdk_checkout(repository, revision, tmp_path / "clean-sdk")
     helper_dir = Path(sys.executable).parent
-    package = importlib.import_module("odoo_instance_sdk")
-    helper_module = importlib.import_module("odoo_instance_sdk.internal.git_credential_helper")
-    assert package.__file__ is not None
-    assert helper_module.__file__ is not None
-    assert sys.executable is not None
-    stale_metadata = {
-        "executable": sys.executable,
-        "prefix": sys.prefix,
-        "package": str(Path(package.__file__).parent.resolve()),
-        "helper": str(Path(helper_module.__file__).resolve()),
-        "files": {"internal/git_credential_helper.py": "stale-source-hash"},
-        "entry_points": ["odoo_instance_sdk.internal.git_credential_helper:main"],
-    }
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(stale_metadata)),
-    )
 
-    with pytest.raises(RuntimeError, match="does not match the exact candidate source"):
+    with pytest.raises(RuntimeError, match="points to a different project"):
         cache._installed_helper_provenance(
-            Namespace(helper_dir=helper_dir, core_project=repository), {"PATH": str(helper_dir)}
+            Namespace(
+                git="git", sdk_sha=revision, helper_dir=helper_dir, core_project=clean_repository
+            ),
+            {"PATH": str(helper_dir)},
         )
 
 
@@ -196,12 +437,25 @@ def test_cache_generation_stops_validates_starts_and_checks_status(
 def test_installed_helper_validation_rejects_refusal_and_wrong_login(
     monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
 ) -> None:
-    args = Namespace(git="git", cache_host="gitlab.example")
+    member_id = "00000000-0000-4000-8000-000000000014"
+    args = Namespace(
+        git="git",
+        cache_host="gitlab.example",
+        helper_dir=Path("/owned/bin"),
+        cache_member_id=member_id,
+    )
     captured: list[tuple[list[str], str, dict[str, str]]] = []
     monkeypatch.setattr(
         cache,
         "read_gitlab_credential_mappings",
-        lambda: (SimpleNamespace(user_id="member", host="gitlab.example", login="alice"),),
+        lambda: (
+            SimpleNamespace(
+                user_id=member_id,
+                host="gitlab.example",
+                login="alice",
+                token_key="ODCLI_GITLAB_TOKEN_CACHE",
+            ),
+        ),
     )
 
     def execute(
@@ -216,7 +470,10 @@ def test_installed_helper_validation_rejects_refusal_and_wrong_login(
     monkeypatch.setattr(subprocess, "run", execute)
     with pytest.raises(RuntimeError, match="rejected"):
         cache._validate_cache_helper(
-            args, {"ODCLI_GITLAB_PURPOSE": "cache-read"}, "member", ("secret-fixture",)
+            args,
+            {"ODCLI_GITLAB_PURPOSE": "cache-read"},
+            member_id,
+            ("secret-fixture",),
         )
 
     assert len(captured) == 1
@@ -230,8 +487,20 @@ def test_installed_helper_validation_rejects_refusal_and_wrong_login(
 def test_installed_helper_validation_accepts_exact_git_fill_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    args = Namespace(git="git", cache_host="gitlab.example")
-    environment = {"ODCLI_GITLAB_PURPOSE": "cache-read", "PATH": "/owned/bin:/usr/bin"}
+    member_id = "00000000-0000-4000-8000-000000000015"
+    args = Namespace(
+        git="git",
+        cache_host="gitlab.example",
+        helper_dir=Path("/owned/bin"),
+        cache_member_id=member_id,
+    )
+    environment = {
+        "ODCLI_GITLAB_PURPOSE": "cache-read",
+        "ODCLI_GITLAB_SELECTED_HOST": "gitlab.example",
+        "ODCLI_GITLAB_TOKEN_CACHE": "secret-fixture",
+        "MULTICA_TOKEN": "must-not-reach-helper",
+        "PYTHONPATH": "/untrusted/site",
+    }
     result = SimpleNamespace(returncode=0, stdout="username=alice\npassword=secret-fixture\n")
     run_mock = Mock(return_value=result)
     monkeypatch.setattr(
@@ -242,15 +511,29 @@ def test_installed_helper_validation_accepts_exact_git_fill_response(
     monkeypatch.setattr(
         cache,
         "read_gitlab_credential_mappings",
-        lambda: (SimpleNamespace(user_id="member", host="gitlab.example", login="alice"),),
+        lambda: (
+            SimpleNamespace(
+                user_id=member_id,
+                host="gitlab.example",
+                login="alice",
+                token_key="ODCLI_GITLAB_TOKEN_CACHE",
+            ),
+        ),
     )
     monkeypatch.setattr(subprocess, "run", run_mock)
 
-    cache._validate_cache_helper(args, environment, "member", ("secret-fixture",))
+    cache._validate_cache_helper(args, environment, member_id, ("secret-fixture",))
 
     assert run_mock.call_args.args[0] == ["git", "credential", "fill"]
     assert run_mock.call_args.kwargs["input"] == "protocol=https\nhost=gitlab.example\n\n"
-    assert run_mock.call_args.kwargs["env"] == environment
+    helper_environment = run_mock.call_args.kwargs["env"]
+    assert helper_environment["ODCLI_GITLAB_TOKEN_CACHE"] == "secret-fixture"
+    assert helper_environment["PATH"].startswith("/owned/bin:")
+    assert helper_environment["PYTHONNOUSERSITE"] == "1"
+    assert helper_environment["PYTHONPYCACHEPREFIX"]
+    assert helper_environment["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert "MULTICA_TOKEN" not in helper_environment
+    assert "PYTHONPATH" not in helper_environment
     assert run_mock.call_args.kwargs["capture_output"] is True
 
 
@@ -712,12 +995,14 @@ def test_cache_negative_fixtures_are_all_executed_through_git_fill(
 ) -> None:
     args = Namespace(
         git="git",
+        helper_dir=Path("/owned/bin"),
         cache_host="gitlab.example",
-        cache_owner_mismatch_member="owner-mismatch",
-        cache_inactive_member="inactive",
-        cache_broader_scope_member="broader",
-        cache_granular_scope_member="granular",
-        cache_incompatible_member="incompatible",
+        cache_member_id="00000000-0000-4000-8000-000000000016",
+        cache_owner_mismatch_member="00000000-0000-4000-8000-000000000017",
+        cache_inactive_member="00000000-0000-4000-8000-000000000018",
+        cache_broader_scope_member="00000000-0000-4000-8000-000000000019",
+        cache_granular_scope_member="00000000-0000-4000-8000-000000000020",
+        cache_incompatible_member="00000000-0000-4000-8000-000000000021",
     )
     calls: list[tuple[list[str], str, dict[str, str]]] = []
 
@@ -728,6 +1013,27 @@ def test_cache_negative_fixtures_are_all_executed_through_git_fill(
         return SimpleNamespace(returncode=1, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", execute)
+    selected = {
+        args.cache_member_id,
+        args.cache_owner_mismatch_member,
+        args.cache_inactive_member,
+        args.cache_broader_scope_member,
+        args.cache_granular_scope_member,
+        args.cache_incompatible_member,
+    }
+    monkeypatch.setattr(
+        cache,
+        "_installed_helper_provenance",
+        lambda *_args: Path("/owned/bin/git-credential-odcli"),
+    )
+    monkeypatch.setattr(
+        cache,
+        "read_gitlab_credential_mappings",
+        lambda: tuple(
+            SimpleNamespace(user_id=member, host="gitlab.example", token_key=f"TOKEN_{member}")
+            for member in selected
+        ),
+    )
     evidence: list[dict[str, str | int | bool]] = []
     cache._assert_cache_helper_negative_inputs(
         args,
@@ -737,6 +1043,7 @@ def test_cache_negative_fixtures_are_all_executed_through_git_fill(
         },
         ("secret-fixture",),
         evidence,
+        Path("/owned/bin/git-credential-odcli"),
     )
 
     assert len(calls) == 8
@@ -744,11 +1051,11 @@ def test_cache_negative_fixtures_are_all_executed_through_git_fill(
     assert calls[1][1] == "protocol=https\nhost=gitlab.example\nhost=wrong.example\n\n"
     assert "ODCLI_GITLAB_PURPOSE" not in calls[2][2]
     assert [call[2]["ODCLI_GITLAB_MEMBER_ID"] for call in calls[3:]] == [
-        "owner-mismatch",
-        "inactive",
-        "broader",
-        "granular",
-        "incompatible",
+        args.cache_owner_mismatch_member,
+        args.cache_inactive_member,
+        args.cache_broader_scope_member,
+        args.cache_granular_scope_member,
+        args.cache_incompatible_member,
     ]
     assert evidence == [
         {"case": "C1", "negative_inputs": 3, "ok": True},

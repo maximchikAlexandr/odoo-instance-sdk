@@ -8,12 +8,17 @@ from __future__ import annotations
 
 import argparse
 import base64
+import configparser
+import csv
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -134,13 +139,48 @@ def _validate_integrated_cache_inputs(
         expected_host = f"{expected_host}:{parsed.port}"
     if args.cache_host != expected_host:
         raise RuntimeError("cache host does not match the private repository authority")
-    if (
-        not _SHA.fullmatch(args.sdk_sha)
-        or _git(args.git, args.core_project.expanduser().resolve(), "rev-parse", "HEAD")
-        != args.sdk_sha
-    ):
-        raise RuntimeError("core project does not match the exact candidate SDK SHA")
+    _validate_candidate_repository(args)
     return cache_member, member_a, member_b, checkouts
+
+
+def _validate_candidate_repository(args: argparse.Namespace) -> tuple[Path, dict[str, str]]:
+    project = args.core_project.expanduser().resolve(strict=True)
+    root = Path(_git(args.git, project, "rev-parse", "--show-toplevel")).resolve(strict=True)
+    if project != root:
+        raise RuntimeError("core project must be the exact SDK repository root")
+    if not _SHA.fullmatch(args.sdk_sha):
+        raise RuntimeError("core project does not match the exact candidate SDK SHA")
+    status = _git(
+        args.git,
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    if status:
+        raise RuntimeError("candidate SDK repository must be clean before cache provenance checks")
+    if _git(args.git, root, "rev-parse", "HEAD") != args.sdk_sha:
+        raise RuntimeError("core project does not match the exact candidate SDK SHA")
+
+    package_prefix = "src/odoo_instance_sdk/"
+    tree = _git(args.git, root, "ls-tree", "-r", "-z", args.sdk_sha, "--", "src/odoo_instance_sdk")
+    manifest: dict[str, str] = {}
+    for record in tree.split("\0"):
+        if not record:
+            continue
+        metadata, path = record.split("\t", 1)
+        mode, object_type, object_id = metadata.split()
+        if (
+            object_type != "blob"
+            or mode not in {"100644", "100755"}
+            or not path.startswith(package_prefix)
+        ):
+            raise RuntimeError("candidate SDK Git package manifest contains an unsupported entry")
+        manifest[path.removeprefix(package_prefix)] = object_id
+    if not manifest:
+        raise RuntimeError("candidate SDK Git package manifest is unavailable")
+    return root, manifest
 
 
 def _validate_integrated_checkouts(args: argparse.Namespace, checkouts: tuple[Path, Path]) -> None:
@@ -250,83 +290,241 @@ def _helper_interpreter(helper_path: Path, install_root: Path) -> Path:
     return interpreter
 
 
-def _installed_sdk_report(interpreter: Path, environment: dict[str, str]) -> dict[str, object]:
-    probe = (
-        "import base64, hashlib, importlib, importlib.metadata, json, pathlib, sys\n"
-        "package = importlib.import_module('odoo_instance_sdk')\n"
-        "helper = importlib.import_module('odoo_instance_sdk.internal.git_credential_helper')\n"
-        "dist = importlib.metadata.distribution('odoo-instance-sdk')\n"
-        "files = {str(p.relative_to(pathlib.Path(package.__file__).parent)): hashlib.sha256(p.read_bytes()).hexdigest() "
-        "for p in pathlib.Path(package.__file__).parent.rglob('*.py')}\n"
-        "eps = [ep.value for ep in dist.entry_points if ep.group == 'console_scripts' and ep.name == 'git-credential-odcli']\n"
-        "scripts = [f for f in (dist.files or []) if pathlib.Path(str(f)).name in {'git-credential-odcli', 'git-credential-odcli.exe'}]\n"
-        "launcher = [{'path': str(dist.locate_file(f).resolve()), 'hash': f.hash.value if f.hash else None} for f in scripts]\n"
-        "print(json.dumps({'executable': str(pathlib.Path(sys.executable)), 'prefix': str(pathlib.Path(sys.prefix).resolve()), 'package': str(pathlib.Path(package.__file__).parent.resolve()), 'helper': str(pathlib.Path(helper.__file__).resolve()), 'files': files, 'entry_points': eps, 'launchers': launcher}))\n"
+def _git_blob_id(data: bytes) -> str:
+    return hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
+
+
+def _site_packages(install_root: Path) -> tuple[Path, ...]:
+    candidates = [
+        *install_root.glob("lib/python*/site-packages"),
+        install_root / "Lib" / "site-packages",
+    ]
+    selected = tuple(
+        sorted(
+            {
+                path.resolve(strict=True)
+                for path in candidates
+                if path.is_dir()
+                and path.resolve(strict=True).is_relative_to(install_root.resolve())
+            }
+        )
     )
-    probe_environment = environment.copy()
-    probe_environment.pop("PYTHONPATH", None)
-    result = subprocess.run(
-        [str(interpreter), "-I", "-c", probe],
-        env=probe_environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("candidate SDK installation provenance could not be verified")
+    if len(selected) != 1:
+        raise RuntimeError("candidate SDK virtual environment has ambiguous site-packages")
+    return selected
+
+
+def _dist_info(site_packages: Path) -> Path:
+    candidates = tuple(site_packages.glob("odoo_instance_sdk-*.dist-info"))
+    if len(candidates) != 1 or candidates[0].is_symlink():
+        raise RuntimeError("candidate SDK distribution metadata is unavailable or ambiguous")
+    return candidates[0].resolve(strict=True)
+
+
+def _record_rows(record: Path) -> tuple[list[str], ...]:
     try:
-        observed = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("candidate SDK installation provenance is invalid") from exc
-    if not isinstance(observed, dict):
-        raise TypeError("candidate SDK installation provenance is invalid")
-    return observed
+        return tuple(csv.reader(io.StringIO(record.read_text(encoding="utf-8"))))
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise RuntimeError("candidate SDK installation RECORD is invalid") from exc
 
 
-def _matches_candidate_sdk(
-    observed: dict[str, object],
-    install_root: Path,
-    source_root: Path,
-    helper_path: Path,
-) -> bool:
-    expected_files = {
-        str(path.relative_to(source_root)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in source_root.rglob("*.py")
+def _validate_record_row(
+    row: list[str], dist_info: Path, install_root: Path, package_root: Path
+) -> Path:
+    if len(row) != 3:
+        raise RuntimeError("candidate SDK installation RECORD is invalid")
+    relative, digest, size = row
+    unresolved = dist_info.parent / relative
+    if unresolved.is_symlink():
+        raise RuntimeError("candidate SDK installation RECORD references a symlink")
+    path = unresolved.resolve(strict=True)
+    roots = (install_root.resolve(), package_root.resolve())
+    if not any(path.is_relative_to(root) for root in roots) or not path.is_file():
+        raise RuntimeError("candidate SDK installation RECORD references an invalid file")
+    content = path.read_bytes()
+    if size and len(content) != int(size):
+        raise RuntimeError("candidate SDK installation RECORD size does not match")
+    if digest:
+        algorithm, separator, encoded = digest.partition("=")
+        actual = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
+        if not separator or algorithm != "sha256" or actual != encoded:
+            raise RuntimeError("candidate SDK installation RECORD digest does not match")
+    return path
+
+
+def _validate_record(dist_info: Path, install_root: Path, package_root: Path) -> None:
+    record = dist_info / "RECORD"
+    seen = {
+        _validate_record_row(row, dist_info, install_root, package_root)
+        for row in _record_rows(record)
     }
-    package_root = Path(str(observed.get("package", ""))).resolve()
-    executable = Path(str(observed.get("executable", ""))).absolute()
-    prefix = Path(str(observed.get("prefix", ""))).resolve()
-    expected_helper = package_root / "internal" / "git_credential_helper.py"
-    package_owned = (
-        package_root.is_relative_to(install_root.resolve()) or package_root == source_root.resolve()
-    )
-    launchers = observed.get("launchers")
-    launcher_record = launchers[0] if isinstance(launchers, list) and len(launchers) == 1 else {}
-    launcher_digest = hashlib.sha256(helper_path.read_bytes()).digest()
-    recorded_digest = base64.urlsafe_b64encode(launcher_digest).decode("ascii").rstrip("=")
+    if record.resolve(strict=True) not in seen:
+        raise RuntimeError("candidate SDK installation RECORD omits itself")
+
+
+def _entry_points(path: Path) -> dict[str, str]:
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    try:
+        parser.read_string(path.read_text(encoding="utf-8"))
+        return dict(parser.items("console_scripts"))
+    except (OSError, UnicodeError, configparser.Error) as exc:
+        raise RuntimeError("candidate SDK entry-points metadata is invalid") from exc
+
+
+def _expected_launcher(interpreter: Path) -> bytes:
     return (
-        executable.parent.resolve().is_relative_to(install_root.resolve())
-        and prefix.is_relative_to(install_root.resolve())
-        and package_owned
-        and Path(str(observed.get("helper", ""))).resolve() == expected_helper
-        and observed.get("entry_points")
-        == ["odoo_instance_sdk.internal.git_credential_helper:main"]
-        and observed.get("files") == expected_files
-        and isinstance(launcher_record, dict)
-        and Path(str(launcher_record.get("path", ""))).resolve() == helper_path
-        and launcher_record.get("hash") == recorded_digest
+        f"#!{interpreter}\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import sys\n"
+        "from odoo_instance_sdk.internal.git_credential_helper import main\n"
+        'if __name__ == "__main__":\n'
+        '    if sys.argv[0].endswith("-script.pyw"):\n'
+        "        sys.argv[0] = sys.argv[0][:-11]\n"
+        '    elif sys.argv[0].endswith(".exe"):\n'
+        "        sys.argv[0] = sys.argv[0][:-4]\n"
+        "    sys.exit(main())\n"
+    ).encode()
+
+
+def _package_root(site_packages: Path, source_root: Path, dist_info: Path) -> Path:
+    direct_url = dist_info / "direct_url.json"
+    if direct_url.exists():
+        try:
+            metadata = json.loads(direct_url.read_text(encoding="utf-8"))
+            editable = metadata.get("dir_info", {}).get("editable") is True
+            url = metadata.get("url")
+            project_root = source_root.parent.parent
+            expected_url = project_root.as_uri()
+        except (OSError, UnicodeError, json.JSONDecodeError, AttributeError) as exc:
+            raise RuntimeError("candidate SDK direct-url metadata is invalid") from exc
+        if url != expected_url:
+            raise RuntimeError("candidate SDK installation points to a different project")
+        if editable:
+            pth_files = tuple(site_packages.glob("*.pth"))
+            expected_line = str(source_root.parent)
+            if len(pth_files) != 1 or pth_files[0].name != "odoo_instance_sdk.pth":
+                raise RuntimeError("candidate SDK editable path configuration is invalid")
+            pth_lines = pth_files[0].read_text(encoding="utf-8").splitlines()
+            if pth_lines != [expected_line]:
+                raise RuntimeError("candidate SDK editable path configuration is unsafe")
+            return source_root
+    return (site_packages / "odoo_instance_sdk").resolve(strict=True)
+
+
+def _candidate_distribution_metadata(
+    site_packages: Path, install_root: Path, interpreter: Path, repository: Path
+) -> tuple[Path, dict[str, object], Path]:
+    dist_info = _dist_info(site_packages)
+    pyvenv = install_root / "pyvenv.cfg"
+    if pyvenv.is_symlink() or not pyvenv.is_file():
+        raise RuntimeError("candidate SDK virtual environment metadata is invalid")
+    try:
+        config = {
+            key.strip(): value.strip()
+            for key, value in (
+                line.split("=", 1)
+                for line in pyvenv.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+        }
+        home = Path(config["home"]).resolve(strict=True)
+        distribution = (dist_info / "METADATA").read_text(encoding="utf-8").splitlines()
+        project = tomllib.loads((repository / "pyproject.toml").read_text(encoding="utf-8"))[
+            "project"
+        ]
+        version = next(
+            line.partition(":")[2].strip() for line in distribution if line.startswith("Version:")
+        )
+        name = next(
+            line.partition(":")[2].strip() for line in distribution if line.startswith("Name:")
+        )
+    except (OSError, UnicodeError, KeyError, StopIteration, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError("candidate SDK virtual environment metadata is invalid") from exc
+    if not interpreter.is_file() or not interpreter.parent.resolve().is_relative_to(
+        install_root.resolve()
+    ):
+        raise RuntimeError("candidate SDK interpreter is outside its owned virtual environment")
+    resolved_interpreter = interpreter.resolve(strict=True)
+    if not resolved_interpreter.is_relative_to(home) and not resolved_interpreter.is_relative_to(
+        install_root.resolve()
+    ):
+        raise RuntimeError("candidate SDK interpreter does not match its virtual environment")
+    if name.casefold() != str(project["name"]).casefold() or version != str(project["version"]):
+        raise RuntimeError(
+            "candidate SDK distribution metadata does not match the candidate project"
+        )
+
+    expected_entries = dict(project.get("scripts", {}))
+    entries = _entry_points(dist_info / "entry_points.txt")
+    if entries != expected_entries or entries.get("git-credential-odcli") != (
+        "odoo_instance_sdk.internal.git_credential_helper:main"
+    ):
+        raise RuntimeError("candidate SDK entry-points do not match the candidate project")
+    return dist_info, project, home
+
+
+def _validate_package_bytes(package_root: Path, manifest: dict[str, str]) -> None:
+    if package_root.is_symlink() or not package_root.is_dir():
+        raise RuntimeError("candidate SDK package root is invalid")
+    actual_files: dict[str, str] = {}
+    for directory, names, files in os.walk(package_root, followlinks=False):
+        base = Path(directory)
+        if any((base / name).is_symlink() for name in names):
+            raise RuntimeError("candidate SDK package contains a directory symlink")
+        names[:] = [name for name in names if name != "__pycache__"]
+        for filename in files:
+            path = base / filename
+            if path.is_symlink():
+                raise RuntimeError("candidate SDK package contains a file symlink")
+            if filename.endswith(".pyc"):
+                continue
+            relative = str(path.relative_to(package_root))
+            actual_files[relative] = _git_blob_id(path.read_bytes())
+    if actual_files != manifest:
+        raise RuntimeError("candidate SDK package bytes do not match the exact Git candidate")
+
+
+def _validate_startup_hooks(site_packages: Path, package_root: Path, source_root: Path) -> None:
+    site_customizations = (site_packages / "sitecustomize.py", site_packages / "usercustomize.py")
+    if any(path.exists() for path in site_customizations):
+        raise RuntimeError("candidate SDK virtual environment contains a startup customization")
+    allowed_pth = tuple(site_packages.glob("*.pth"))
+    editable = package_root.resolve() == source_root.resolve()
+    if editable and (len(allowed_pth) != 1 or allowed_pth[0].name != "odoo_instance_sdk.pth"):
+        raise RuntimeError("candidate SDK editable path configuration is invalid")
+    if not editable and allowed_pth:
+        raise RuntimeError("candidate SDK virtual environment contains an unverified path hook")
+
+
+def _validate_candidate_package(
+    install_root: Path,
+    interpreter: Path,
+    helper_path: Path,
+    repository: Path,
+    manifest: dict[str, str],
+) -> None:
+    source_root = repository / "src" / "odoo_instance_sdk"
+    (site_packages,) = _site_packages(install_root)
+    dist_info, _project, _home = _candidate_distribution_metadata(
+        site_packages, install_root, interpreter, repository
     )
+    package_root = _package_root(site_packages, source_root, dist_info)
+    if package_root != source_root.resolve() and not package_root.is_relative_to(
+        install_root.resolve()
+    ):
+        raise RuntimeError("candidate SDK package escapes its owned roots")
+    _validate_package_bytes(package_root, manifest)
+    _validate_startup_hooks(site_packages, package_root, source_root)
+    _validate_record(dist_info, install_root, package_root)
+    if helper_path.read_bytes() != _expected_launcher(interpreter):
+        raise RuntimeError("candidate SDK helper launcher is not the expected entry point")
 
 
 def _installed_helper_provenance(args: argparse.Namespace, environment: dict[str, str]) -> Path:
     helper_path, install_root = _candidate_helper_path(args.helper_dir)
     interpreter = _helper_interpreter(helper_path, install_root)
-    source_root = args.core_project.expanduser().resolve() / "src" / "odoo_instance_sdk"
-    if not source_root.is_dir():
-        raise RuntimeError("candidate SDK source package is unavailable")
-    observed = _installed_sdk_report(interpreter, environment)
-    if not _matches_candidate_sdk(observed, install_root, source_root, helper_path):
-        raise RuntimeError("installed SDK helper does not match the exact candidate source")
+    repository, manifest = _validate_candidate_repository(args)
+    _validate_candidate_package(install_root, interpreter, helper_path, repository, manifest)
     return helper_path
 
 
@@ -383,16 +581,12 @@ def _validate_cache_helper(
     *,
     expected_helper: Path | None = None,
 ) -> None:
-    helper_path = _installed_helper_provenance(args, cache_environment)
-    if expected_helper is not None and helper_path != expected_helper:
-        raise RuntimeError("candidate SDK credential helper changed after readiness")
-    helper = subprocess.run(
-        [args.git, "credential", "fill"],
-        input=f"protocol=https\nhost={args.cache_host}\n\n",
-        env=cache_environment,
-        capture_output=True,
-        text=True,
-        check=False,
+    helper = _run_cache_helper(
+        args,
+        cache_environment,
+        member_id=cache_member,
+        request=f"protocol=https\nhost={args.cache_host}\n\n",
+        expected_helper=expected_helper,
     )
     helper_fields = dict(
         line.partition("=")[::2] for line in helper.stdout.splitlines() if "=" in line
@@ -413,6 +607,94 @@ def _validate_cache_helper(
         or helper_fields.get("password") not in secret_values
     ):
         raise RuntimeError("installed cache helper rejected the configured account")
+
+
+def _credential_helper_environment(
+    args: argparse.Namespace,
+    environment: dict[str, str],
+    pycache_prefix: str,
+    member_id: str,
+    purpose: bool,
+) -> dict[str, str]:
+    allowed = (
+        "HOME",
+        "USERPROFILE",
+        "XDG_CONFIG_HOME",
+        "APPDATA",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "CURL_CA_BUNDLE",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "ODCLI_GITLAB_USER_ROOT",
+        "ODCLI_GITLAB_MAPPING_PATH",
+        "ODCLI_GITLAB_ENVIRONMENT_PATH",
+    )
+    selected = {key: environment[key] for key in allowed if environment.get(key)}
+    selected.update(
+        {
+            "PATH": os.pathsep.join((str(args.helper_dir.expanduser().resolve()), os.defpath)),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONPYCACHEPREFIX": pycache_prefix,
+            "ODCLI_GITLAB_MEMBER_ID": normalize_member_id(member_id),
+            "ODCLI_GITLAB_SELECTED_HOST": args.cache_host,
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+            "GIT_CONFIG_KEY_1": "credential.helper",
+            "GIT_CONFIG_VALUE_1": "odcli",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    if purpose:
+        selected["ODCLI_GITLAB_PURPOSE"] = "cache-read"
+    selected_members = {normalize_member_id(member_id).casefold()}
+    token_keys = {
+        mapping.token_key
+        for mapping in read_gitlab_credential_mappings()
+        if mapping.user_id.casefold() in selected_members
+        and mapping.host.casefold() == args.cache_host.casefold()
+    }
+    selected.update((key, environment[key]) for key in token_keys if environment.get(key))
+    return selected
+
+
+def _run_cache_helper(
+    args: argparse.Namespace,
+    environment: dict[str, str],
+    *,
+    member_id: str,
+    request: str,
+    expected_helper: Path | None = None,
+    purpose: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    helper_path = _installed_helper_provenance(args, environment)
+    if expected_helper is not None and helper_path != expected_helper:
+        raise RuntimeError("candidate SDK credential helper changed after readiness")
+    with tempfile.TemporaryDirectory(prefix="odcli-helper-pycache-") as pycache_prefix:
+        helper_environment = _credential_helper_environment(
+            args, environment, pycache_prefix, member_id, purpose
+        )
+        return subprocess.run(
+            [args.git, "credential", "fill"],
+            input=request,
+            env=helper_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
 
 def _stop_and_validate_cache_generation(
@@ -438,19 +720,21 @@ def _assert_cache_helper_refusal(
     *,
     host: str,
     request: str,
+    member_id: str,
+    expected_helper: Path,
     purpose: bool = True,
 ) -> None:
     attempt_environment = environment.copy()
     if not purpose:
         attempt_environment.pop("ODCLI_GITLAB_PURPOSE", None)
     attempt_environment["ODCLI_GITLAB_SELECTED_HOST"] = args.cache_host
-    result = subprocess.run(
-        [args.git, "credential", "fill"],
-        input=request.format(host=host),
-        env=attempt_environment,
-        capture_output=True,
-        text=True,
-        check=False,
+    result = _run_cache_helper(
+        args,
+        attempt_environment,
+        member_id=member_id,
+        request=request.format(host=host),
+        expected_helper=expected_helper,
+        purpose=purpose,
     )
     if result.returncode == 0 or any(
         secret and secret in result.stdout for secret in secret_values
@@ -463,6 +747,7 @@ def _assert_cache_helper_negative_inputs(
     environment: dict[str, str],
     secret_values: tuple[str, ...],
     evidence: list[dict[str, str | int | bool]],
+    expected_helper: Path,
 ) -> None:
     _assert_cache_helper_refusal(
         args,
@@ -470,6 +755,8 @@ def _assert_cache_helper_negative_inputs(
         secret_values,
         host="wrong.example",
         request="protocol=https\nhost={host}\n\n",
+        member_id=args.cache_member_id,
+        expected_helper=expected_helper,
     )
     _assert_cache_helper_refusal(
         args,
@@ -477,6 +764,8 @@ def _assert_cache_helper_negative_inputs(
         secret_values,
         host=args.cache_host,
         request="protocol=https\nhost={host}\nhost=wrong.example\n\n",
+        member_id=args.cache_member_id,
+        expected_helper=expected_helper,
     )
     _assert_cache_helper_refusal(
         args,
@@ -484,6 +773,8 @@ def _assert_cache_helper_negative_inputs(
         secret_values,
         host=args.cache_host,
         request="protocol=https\nhost={host}\n\n",
+        member_id=args.cache_member_id,
+        expected_helper=expected_helper,
         purpose=False,
     )
     evidence.append({"case": "C1", "negative_inputs": 3, "ok": True})
@@ -495,15 +786,12 @@ def _assert_cache_helper_negative_inputs(
         ("granular_scope", args.cache_granular_scope_member),
         ("incompatible_response", args.cache_incompatible_member),
     ):
-        attempt_environment = environment.copy()
-        attempt_environment["ODCLI_GITLAB_MEMBER_ID"] = member
-        result = subprocess.run(
-            [args.git, "credential", "fill"],
-            input=f"protocol=https\nhost={args.cache_host}\n\n",
-            env=attempt_environment,
-            capture_output=True,
-            text=True,
-            check=False,
+        result = _run_cache_helper(
+            args,
+            environment,
+            member_id=member,
+            request=f"protocol=https\nhost={args.cache_host}\n\n",
+            expected_helper=expected_helper,
         )
         response = result.stdout + result.stderr
         if result.returncode == 0 or any(secret and secret in response for secret in secret_values):
@@ -785,7 +1073,9 @@ def integrated_multica_cache(
             expected_helper=state.helper_path,
         )
         evidence.append({"case": "C1", "helper_exit": 0, "ok": True})
-        _assert_cache_helper_negative_inputs(args, cache_environment, secret_values, evidence)
+        _assert_cache_helper_negative_inputs(
+            args, cache_environment, secret_values, evidence, state.helper_path
+        )
 
         candidate_started = True
         candidate_status = _profile_start(args, cache_environment)
