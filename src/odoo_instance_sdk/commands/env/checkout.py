@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 import time
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +34,9 @@ from odoo_instance_sdk.commands.env.display import (
     _plan_lines,
     _provider_columns,
 )
+from odoo_instance_sdk.commands.env.show import (
+    resolve_env_show_catalogue as _resolve_env_show_catalogue,
+)
 from odoo_instance_sdk.commands.monitor_context import resolve_monitor_project_id
 from odoo_instance_sdk.commands.output import (
     JsonObject,
@@ -61,7 +62,6 @@ from odoo_instance_sdk.exceptions import BackupCatalogError, StalePlanError
 from odoo_instance_sdk.internal import git_worktree
 from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
-from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models.backup import (
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
@@ -659,66 +659,6 @@ def env_show(
         )
     except Exception as exc:
         fail(mode, "env.show", exc, dry_run=False)
-
-
-def _resolve_env_show_catalogue(selector: str | None, *, cwd: Path) -> tuple[str, str]:
-    """Resolve the selected environment and project before monitor probes."""
-    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-    catalog_path = get_catalog_path(ensure_exists=False)
-    try:
-        if not catalog_path.is_file():
-            raise RuntimeError("environment catalogue unavailable; cannot resolve env show")
-    except OSError as exc:
-        raise RuntimeError("environment catalogue unavailable; cannot resolve env show") from exc
-    try:
-        catalog = BackupCatalog(db_path=catalog_path)
-        try:
-            rows = catalog.list_environments(include_removed=selector is None)
-        finally:
-            catalog.close()
-    except (BackupCatalogError, OSError) as exc:
-        raise RuntimeError("environment catalogue read failed; cannot resolve env show") from exc
-
-    row = _select_env_show_catalogue_row(rows, selector, cwd=cwd)
-    project_id = (
-        row["project_id"]
-        or f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
-    )
-    return str(row["id"]), str(project_id)
-
-
-def _select_env_show_catalogue_row(
-    rows: Sequence[sqlite3.Row], selector: str | None, *, cwd: Path
-) -> sqlite3.Row:
-    if selector is None:
-        current = cwd.resolve()
-        candidates = []
-        for row in rows:
-            worktree = Path(str(row["worktree_path"])).resolve()
-            try:
-                current.relative_to(worktree)
-            except ValueError:
-                continue
-            candidates.append(row)
-        if not candidates:
-            raise ValueError("No environment matches the current working directory")
-        if len(candidates) > 1:
-            raise ValueError(
-                "Ambiguous current environment: " + ", ".join(str(row["id"]) for row in candidates)
-            )
-        return candidates[0]
-
-    by_id = [row for row in rows if str(row["id"]) == selector]
-    candidates = by_id or [row for row in rows if str(row["name"]) == selector]
-    if not candidates:
-        raise ValueError(f"Environment not found: {selector}")
-    if len(candidates) > 1:
-        raise ValueError(
-            f"Ambiguous environment selector {selector!r}: "
-            + ", ".join(str(row["id"]) for row in candidates)
-        )
-    return candidates[0]
 
 
 def _rich_env_show(document: OutputDocument) -> str:

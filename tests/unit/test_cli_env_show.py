@@ -10,7 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands.env import checkout as env_commands
+from odoo_instance_sdk.commands.env import checkout as env_commands, show as env_show_catalogue
 from odoo_instance_sdk.models import ProjectStorageFootprint, ProjectSummary, RuntimeState
 from tests.unit.test_cli_env_list_grouping import (
     _env,
@@ -128,7 +128,7 @@ def test_env_show_catalogue_resolves_uuid_and_name(
     ]
     _install_catalogue(monkeypatch, tmp_path, rows)
 
-    assert env_commands._resolve_env_show_catalogue(selector, cwd=tmp_path) == (
+    assert env_show_catalogue.resolve_env_show_catalogue(selector, cwd=tmp_path) == (
         "11111111-1111-1111-1111-111111111111",
         "project_a",
     )
@@ -142,16 +142,19 @@ def test_env_show_catalogue_resolves_cwd_and_fails_ambiguity_or_absence_before_s
     worktree.mkdir()
     rows = [_catalogue_row("env-1", "one", "project_a", worktree)]
     _install_catalogue(monkeypatch, tmp_path, rows)
-    assert env_commands._resolve_env_show_catalogue(None, cwd=worktree) == ("env-1", "project_a")
+    assert env_show_catalogue.resolve_env_show_catalogue(None, cwd=worktree) == (
+        "env-1",
+        "project_a",
+    )
     with pytest.raises(ValueError, match="Environment not found"):
-        env_commands._resolve_env_show_catalogue("missing", cwd=worktree)
+        env_show_catalogue.resolve_env_show_catalogue("missing", cwd=worktree)
 
     rows.append(_catalogue_row("env-2", "one", "project_a", worktree))
     _install_catalogue(monkeypatch, tmp_path, rows)
     with pytest.raises(ValueError, match="Ambiguous environment selector"):
-        env_commands._resolve_env_show_catalogue("one", cwd=worktree)
+        env_show_catalogue.resolve_env_show_catalogue("one", cwd=worktree)
     with pytest.raises(ValueError, match="Ambiguous current environment"):
-        env_commands._resolve_env_show_catalogue(None, cwd=worktree)
+        env_show_catalogue.resolve_env_show_catalogue(None, cwd=worktree)
 
 
 @pytest.mark.unit
@@ -219,7 +222,7 @@ def _install_catalogue(
             pass
 
     monkeypatch.setattr(backup_catalog, "BackupCatalog", FakeCatalog)
-    monkeypatch.setattr(env_commands, "get_catalog_path", lambda **_kwargs: catalog_path)
+    monkeypatch.setattr(env_show_catalogue, "get_catalog_path", lambda **_kwargs: catalog_path)
 
 
 def _project() -> ProjectSummary:
