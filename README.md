@@ -284,6 +284,10 @@ effective `odoo.conf`, then the default port.
 
 ```bash
 odcli test --changed
+odcli inspect model res.partner --format toon
+odcli inspect field res.partner email --format json
+odcli inspect ref base.user_admin --format toon
+odcli test sale --profile
 odcli module ls
 odcli module update sale
 odcli module test sale
@@ -299,6 +303,19 @@ update fails behind a long startup log, `module update` prioritizes a valid
 nonce-framed `user_error` or `finalization_error` payload and otherwise falls
 back to a bounded redacted tail of `stderr`, not the first characters. Rich,
 JSON, and TOON return the same stable error code and safe details.
+
+Inspection resolves the selected environment or initialized project using the
+same root context rules as other commands; an explicit root `--env` keeps
+precedence. The three `inspect` leaves use the configured headless Odoo shell
+and roll back their transaction, so no Odoo HTTP server is required. A valid
+missing model, field, or XML ID returns `exists: false` with null discovered
+metadata. Inspection exposes bounded model/field metadata and XML-ID identity
+only; it does not dump record values, write data, run SQL, or traverse relations.
+
+Test profiling is opt-in and uses the native per-test duration and SQL-query
+statistics from the same Odoo 19 test-runner result. Entries sort by duration
+descending, then test ID. Without `--profile`, the ordinary test result is
+unchanged. Profiling adds no history, thresholds, or custom profiler.
 
 ### PostgreSQL trust and lifecycle
 
@@ -844,6 +861,8 @@ sentence; use the entry's `--help` for exact options.
 - `odcli eval` — Evaluate one Python expression through the Odoo shell boundary.
 - `odcli exec` — Execute a Python script through the Odoo shell boundary.
 - `odcli test` — Select and run Odoo tests, including changed-add-on selection.
+- `odcli test --profile` — Include native Odoo test duration and SQL-query counts.
+- `odcli inspect model`, `field`, or `ref` — Read bounded registry/XML-ID metadata with rollback.
 - `odcli module ls` — Discover installable modules visible to the environment.
 - `odcli module info` — Show one safely discovered module and manifest metadata.
 - `odcli module where` — Show the resolved absolute path for one module.

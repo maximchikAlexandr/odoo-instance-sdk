@@ -16,6 +16,7 @@ from odoo_instance_sdk.models.database import *  # noqa: F403
 from odoo_instance_sdk.models.deps import *  # noqa: F403
 from odoo_instance_sdk.models.footprint import *  # noqa: F403
 from odoo_instance_sdk.models.git import *  # noqa: F403
+from odoo_instance_sdk.models.inspection import *  # noqa: F403
 from odoo_instance_sdk.models.module import *  # noqa: F403
 from odoo_instance_sdk.models.monitor import *  # noqa: F403
 from odoo_instance_sdk.models.postgres import *  # noqa: F403

@@ -140,6 +140,51 @@ def _module_test(state: _State) -> tuple[Result, dict[str, Any]]:
     return module, module_document
 
 
+def _inspect_profile(state: _State) -> tuple[Result, dict[str, Any]]:
+    checks = (
+        (["inspect", "model", "odcli.e2e.probe"], "exists", True),
+        (["inspect", "field", "odcli.e2e.probe", "marker"], "type", "char"),
+        (
+            ["inspect", "ref", "odcli_e2e_probe.probe_record"],
+            "display_name",
+            "Pinned Odoo 19 fixture",
+        ),
+        (["inspect", "model", "odcli.missing_probe"], "exists", False),
+        (["inspect", "ref", "odcli_e2e_probe.missing_probe"], "exists", False),
+    )
+    last: Result | None = None
+    for command, key, expected in checks:
+        last = _invoke(state, [*command, "--format", "json"])
+        assert last.exit_code == 0, last.output
+        document = json.loads(last.stdout)
+        assert document["ok"] is True
+        assert document["result"][key] == expected
+
+    profiled = _invoke(
+        state,
+        [
+            "test",
+            "odcli_e2e_probe",
+            "--tags",
+            "/odcli_e2e_probe",
+            "--allow-empty",
+            "--profile",
+            "--format",
+            "json",
+        ],
+    )
+    assert profiled.exit_code == 0, profiled.output
+    profile_document = json.loads(profiled.stdout)
+    profile = profile_document["result"]["profile"]
+    assert profile["entries"], "real Odoo test profile must be non-empty"
+    assert all(
+        entry["duration"] >= 0 and type(entry["query_count"]) is int for entry in profile["entries"]
+    )
+    assert profile["total_query_count"] == sum(entry["query_count"] for entry in profile["entries"])
+    assert last is not None
+    return last, json.loads(last.stdout)
+
+
 def _init_monitoring(state: _State) -> tuple[Result, dict[str, Any]]:
     args = [item for item in state.args if item != "--dry-run"]
     first = _invoke(state, args)
@@ -327,6 +372,9 @@ HANDLERS: dict[tuple[str, ...], Handler] = {
     ("db", "reset-admin-password"): _reset_or_shell,
     ("shell",): _reset_or_shell,
     ("module", "test"): _module_test,
+    ("inspect", "model"): _inspect_profile,
+    ("inspect", "field"): _inspect_profile,
+    ("inspect", "ref"): _inspect_profile,
     ("db", "init-monitoring"): _init_monitoring,
     ("psql",): _psql,
     ("logs",): _logs,

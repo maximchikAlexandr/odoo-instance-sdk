@@ -20,7 +20,13 @@ from odoo_instance_sdk.commands.test import (
 )
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.test_selection import _ChangedSelection, _ChangedSelectionError
-from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec, StartConfig
+from odoo_instance_sdk.models import (
+    OdooTestProfile,
+    OdooTestProfileEntry,
+    OdooTestResult,
+    OdooTestSpec,
+    StartConfig,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
@@ -129,6 +135,7 @@ def test_executed_result_contains_only_native_execution_fields(
     assert payload["counts"] == typed.counts
     assert payload["failures"] is False
     assert payload["zero_tests"] is False
+    assert "profile" not in payload
     assert calls == ["preflight", "runner"]
 
 
@@ -158,17 +165,93 @@ def test_changed_dry_run_omits_execution_fields_and_does_not_run(tmp_path: Path)
             return_value=_result_command((None, None)),
         ) as runner,
     ):
-        result = CliRunner().invoke(cli, ["test", "--changed", "--dry-run", "--format", "json"])
+        result = CliRunner().invoke(
+            cli, ["test", "--changed", "--dry-run", "--profile", "--format", "json"]
+        )
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)["result"]
     assert payload["dry_run"] is True
     assert payload["modules"] == ["sale"]
     assert payload["base_source"] == "explicit"
+    assert "profile" not in payload
     for key in ("test_tags", "reload_tests", "allow_empty", "counts", "failures", "zero_tests"):
         assert key not in payload
     preflight.assert_not_called()
     runner.assert_called_once()
+    assert runner.call_args.args[1].profile is True
+
+
+def test_target_profile_is_projected_only_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _addon(tmp_path, "sale")
+    monkeypatch.chdir(tmp_path)
+    env = _environment(tmp_path)
+    instance = _instance(tmp_path)
+    profile = OdooTestProfile(
+        total_duration=1.25,
+        total_query_count=3,
+        entries=(OdooTestProfileEntry(test_id="sale.test_sale", duration=1.25, query_count=3),),
+    )
+    typed = OdooTestResult(
+        counts={"tests": 1, "successful": 1, "failed": 0, "errors": 0, "skipped": 0},
+        failures=False,
+        zero_tests=False,
+        exit_code=0,
+        profile=profile,
+    )
+
+    def runner(_instance: object, spec: OdooTestSpec, **_kwargs: object) -> Command[object]:
+        result = (
+            typed
+            if spec.profile
+            else OdooTestResult(
+                counts=dict(typed.counts),
+                failures=typed.failures,
+                zero_tests=typed.zero_tests,
+                exit_code=typed.exit_code,
+            )
+        )
+        return _result_command((result, None))
+
+    with (
+        patch(
+            "odoo_instance_sdk.commands.test.cli_context.ready_instance",
+            return_value=_resolved_context(env, instance),
+        ),
+        patch("odoo_instance_sdk.commands.test.preflight_installed_modules"),
+        patch(
+            "odoo_instance_sdk.commands.test.run_odoo_tests_command",
+            side_effect=runner,
+        ) as runner,
+    ):
+        rich = CliRunner().invoke(
+            cli,
+            ["test", "sale", "--profile", "--format", "rich"],
+            env={"COLUMNS": "160"},
+        )
+        profiled = CliRunner().invoke(cli, ["test", "sale", "--profile", "--format", "json"])
+        toon = CliRunner().invoke(cli, ["test", "sale", "--profile", "--format", "toon"])
+        ordinary = CliRunner().invoke(cli, ["test", "sale", "--format", "json"])
+
+    assert rich.exit_code == profiled.exit_code == toon.exit_code == ordinary.exit_code == 0
+    assert "Native profile" in rich.stdout and "1.25" in rich.stdout
+    profiled_result = json.loads(profiled.stdout)["result"]
+    toon_result = _decode_test_document(toon.stdout, "toon")["result"]
+    ordinary_result = json.loads(ordinary.stdout)["result"]
+    assert profiled_result == toon_result
+    assert profiled_result["profile"] == {
+        "total_duration": 1.25,
+        "total_query_count": 3,
+        "entries": [{"test_id": "sale.test_sale", "duration": 1.25, "query_count": 3}],
+    }
+    assert "profile" not in ordinary_result
+    assert runner.call_count == 4
+    assert runner.call_args_list[0].args[1].profile is True
+    assert runner.call_args_list[1].args[1].profile is True
+    assert runner.call_args_list[2].args[1].profile is True
+    assert runner.call_args_list[3].args[1].profile is False
 
 
 def test_project_changed_without_base_fails_before_database_or_odoo_work(tmp_path: Path) -> None:
