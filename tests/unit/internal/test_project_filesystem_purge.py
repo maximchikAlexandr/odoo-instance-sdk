@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -146,6 +148,57 @@ def test_filesystem_adapter_refuses_symlink_escape(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="symlink"):
         command.run()
     assert outside.exists()
+
+
+@dataclass(frozen=True)
+class _ReferentCase:
+    id: str
+    is_directory: bool
+    create: Callable[[Path], Path]
+    expected: bytes
+
+
+def _file_referent(path: Path) -> Path:
+    path.write_bytes(b"external file remains unchanged\n")
+    return path
+
+
+def _directory_referent(path: Path) -> Path:
+    path.mkdir()
+    sentinel = path / "sentinel"
+    sentinel.write_bytes(b"external directory remains unchanged\n")
+    return sentinel
+
+
+_REFERENT_CASES = (
+    _ReferentCase("file", False, _file_referent, b"external file remains unchanged\n"),
+    _ReferentCase(
+        "directory", True, _directory_referent, b"external directory remains unchanged\n"
+    ),
+)
+
+
+@pytest.mark.parametrize("case", _REFERENT_CASES, ids=lambda case: case.id)
+def test_filesystem_adapter_unlinks_nested_symlink_without_following_it(
+    tmp_path: Path, case: _ReferentCase
+) -> None:
+    allowed_root = tmp_path / "owned"
+    target = allowed_root / ".venv"
+    target.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    sentinel = case.create(outside)
+    (target / "nested-link").symlink_to(outside, target_is_directory=case.is_directory)
+    identity = "python_environment:project"
+    command = FilesystemPurgeAdapter(
+        (FilesystemPurgeTarget(identity, "project-1", target, allowed_root),)
+    ).capture(_decision(identity, "python_environment"), project_id="project-1")
+
+    assert command is not None
+    command.run()
+
+    assert not target.exists()
+    assert not (target / "nested-link").is_symlink()
+    assert sentinel.read_bytes() == case.expected
 
 
 def test_source_adapter_retains_unknown_odcli_content(tmp_path: Path) -> None:
