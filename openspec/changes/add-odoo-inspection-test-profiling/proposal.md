@@ -27,4 +27,4 @@ Developers can already resolve an Odoo project or environment and run tests thro
 - Runtime: the existing rollback-only headless Odoo shell command and `_test_runner_source()` payload; no HTTP server, raw SQL inspector, second runner, or new subprocess boundary.
 - CLI: one lazy `inspect` group, the existing `test` command, shared bounded output projection, help, and `PUBLIC_LEAF_CASES`.
 - Verification: focused unit/contract tests, existing CI jobs and real-Odoo fixtures, plus an isolated numbered Odoo 19 walkthrough against the project test repository.
-- Documentation: README/CLI help and Python SDK examples for the exact bounded operations.
+- Documentation: README and CLI help for the exact bounded operations.

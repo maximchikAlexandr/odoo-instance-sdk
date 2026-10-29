@@ -46,7 +46,7 @@ Each inspect leaf SHALL appear exactly once in test-owned `PUBLIC_LEAF_CASES` as
 
 ### Requirement: Opt-in test profile CLI projection
 
-Top-level `odcli test [TARGET] --profile` and compatibility `odcli module test ... --profile` SHALL pass `profile=true` into the same `OdooTestSpec` and runner. Executed results SHALL add one profile object with totals and stable ordered entries. Without the option, the decoded field set SHALL remain unchanged and omit `profile`. Non-executed results SHALL NOT fabricate profile values.
+Top-level `odcli test [TARGET] --profile` SHALL pass `profile=true` into the existing `OdooTestSpec` and runner. Executed results SHALL add one profile object with totals and stable ordered entries. Without the option, the decoded field set SHALL remain unchanged and omit `profile`. Non-executed results SHALL NOT fabricate profile values.
 
 #### Scenario: Profile is additive in all formats
 
@@ -60,7 +60,7 @@ Top-level `odcli test [TARGET] --profile` and compatibility `odcli module test .
 
 #### Scenario: Profile combines with existing selection
 
-- **WHEN** profile is requested with an explicit target or `--changed`, and with applicable `--tags`, `--reload-tests`, or `--allow-empty`
+- **WHEN** profile is requested with an explicit target or `--changed`
 - **THEN** existing option validation and selection semantics remain authoritative and the selected native run alone supplies profile data
 
 #### Scenario: Profile dry-run is one existing test plan
@@ -70,7 +70,7 @@ Top-level `odcli test [TARGET] --profile` and compatibility `odcli module test .
 
 ### Requirement: Documentation of bounded diagnostics
 
-README, CLI help, and Python SDK documentation SHALL show model, field, XML-ID, and test-profile examples and SHALL state the resolved project/environment context, rollback-only inspection, missing-object rule, native Odoo-stat source, and unprofiled compatibility. Documentation SHALL explicitly exclude arbitrary record inspection, writes, raw SQL, profile history, and custom profiling.
+README and CLI help SHALL show model, field, XML-ID, and test-profile examples and SHALL state the resolved project/environment context, rollback-only inspection, missing-object rule, native Odoo-stat source, and unprofiled compatibility. Documentation SHALL explicitly exclude arbitrary record inspection, writes, raw SQL, profile history, and custom profiling.
 
 #### Scenario: User guidance states the safety boundary
 

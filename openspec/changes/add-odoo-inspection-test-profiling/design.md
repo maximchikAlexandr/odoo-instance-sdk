@@ -1,87 +1,81 @@
 ## Context
 
-At base `f0918da2d36b59c35cf0a949efc58744d1efb7f9`, project/environment resolution already produces one configured `OdooInstance`; `_shell_script_command()` captures an immutable headless Odoo-shell process and an honest rollback action; `run_odoo_tests_command()` owns the current test command; and `commands/output.py` projects bounded values through one Rich/JSON/TOON pipeline. The test runner source calls Odoo 19 `run_tests()` once and maps native counts, but discards its `stats` mapping. Odoo 19 stores each native stat as `Stat(time: float, queries: int)` keyed by test ID.
+At base `f0918da2d36b59c35cf0a949efc58744d1efb7f9`, the hard infrastructure already exists. `OdooInstance._shell_script_command()` captures a configured headless Odoo-shell process with an explicit rollback action; `run_odoo_tests_command()` calls Odoo 19 `run_tests()` once and converts its result; `commands/output.py` owns Rich/JSON/TOON documents; `commands/test.py` owns target and changed selection; and `PUBLIC_LEAF_CASES` is the test-owned CLI inventory. The missing work is a few bounded values and adapters over those seams.
 
-The implementation must preserve the repository's SDK-first and `internal/proc/` boundaries, the test-owned `PUBLIC_LEAF_CASES` authority, and ordinary test result compatibility. Inspection handles metadata from the live registry, so it needs a configured database and Odoo process but no HTTP server. Planning and implementation must not expose arbitrary record values, credentials, callable field attributes, or a general-purpose ORM/SQL surface.
+GitHub #37 explicitly requires one `OdooInspector` facade, three frozen inspection result models, matching command methods, one native profile entry type, and opt-in `test --profile`. Those are product requirements, not planning inventions. The implementation must not turn them into a generic ORM client, second runner, new planner, or new output framework.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Expose three explicit, frozen, bounded inspection results from a public `OdooInspector` facade and matching immutable command siblings.
-- Use one existing rollback-only Odoo-shell primitive for inspection and the existing test runner for profiling.
-- Preserve one typed result graph across Rich, JSON, and TOON while keeping ordinary `odcli test` output byte-shape compatible at the decoded-field level.
-- Make missing-object, validation, stable ordering, read-only, redaction, and native-stat behavior fully testable.
+- Add the three exact registry/XML-ID reads required by #37 through the existing rollback-only shell command.
+- Add native Odoo test stats to the existing test result only when requested.
+- Keep CLI callbacks as thin argument/result adapters and preserve ordinary test output.
+- Prove the new paths with focused unit tests, one existing real-Odoo fixture, and the minimum independent visible-output walkthrough.
 
 **Non-Goals:**
 
-- General `search`, `read`, `write`, raw SQL, arbitrary field-value export, relation traversal, or a dynamic `inspect(kind, **kwargs)` API.
-- A second test runner, custom profiler, log parser, history store, dashboard, flamegraph, threshold gate, or alternative output/config/registry layer.
-- Command-local `--env`, inspect `--dry-run`, an HTTP server, or changes to test selection and exit rules.
+- Generic ORM/search/read/write, raw SQL, record-value dumps, recursive traversal, or dynamic inspection dispatch.
+- A second runner, profiler service, history, thresholds, dashboard, or persistence.
+- Profiling the legacy `module test` alias, exhaustive retesting of unchanged selection branches, a database fingerprint utility, or a new evidence renderer.
 
 ## Decisions
 
-### D1: One focused facade backed by the existing shell command
+### D1: Keep the facade and three inspection models because #37 requires them
 
-Add a small `OdooInspector` dataclass resource initialized with the other `OdooInstance` resources and exposed as `instance.inspector`. It has only `model(name)`, `field(model, name)`, and `ref(xmlid)` convenience methods plus `model_command(...)`, `field_command(...)`, and `ref_command(...)`. Each convenience method delegates once to its sibling command. The command embeds JSON-escaped validated identifiers in a fixed script, calls `instance._shell_script_command(..., commit=False, exclusive=False)`, and converts the framed payload into one exact frozen result type.
+Add one small `OdooInspector` resource at `instance.inspector`. It exposes only `model`, `field`, and `ref` plus their matching command siblings. Each convenience method calls its command sibling once. `OdooModelInfo`, `OdooFieldInfo`, and `OdooRefInfo` remain separate frozen values because their fields are different and #37 explicitly asks for three typed result models; a generic result/dictionary hierarchy would add indirection while weakening validation.
 
-The existing alternative is direct `run_shell_script_command()`. It remains available for trusted SDK scripts, but making CLI callbacks construct those scripts would violate the SDK-first boundary and duplicate validation/result conversion. A general query/inspector framework is rejected because there are only three fixed operations.
+Each command validates its identifier, embeds only the validated string in one fixed script, calls `_shell_script_command(commit=False, exclusive=False)`, and converts primitive JSON into the result. Valid missing objects use `exists=false` with null discovered metadata. There is no new executor, base class, registry abstraction, or process boundary.
 
-### D2: Three exact results and deterministic absence
+### D2: Keep only the smallest profile value graph
 
-Add frozen, unknown-field-forbidden `OdooModelInfo`, `OdooFieldInfo`, and `OdooRefInfo` values. Model output contains `name`, `exists`, nullable bounded `description` and `table`, nullable `abstract`, `transient`, and `auto`, and nullable non-negative `field_count`. Field output contains `model`, `name`, `exists`, nullable bounded `label`, nullable `type`, `required`, `readonly`, `store`, and `index`, nullable bounded `relation`, and nullable booleans `related` and `computed`. Reference output contains `xmlid`, `exists`, nullable bounded `model`, nullable positive `record_id`, and nullable bounded `display_name`.
+Extend `OdooTestSpec` with `profile: bool = False`. Add `OdooTestProfileEntry(test_id, duration, query_count)` and one aggregate `OdooTestProfile(total_duration, total_query_count, entries)`, then add nullable `profile` to `OdooTestResult`. The entry is explicit in #37; the aggregate is the smallest way to keep totals and entries behind one optional field without adding several nullable fields to the existing result.
 
-Valid but missing models, fields, and XML IDs return `exists=false` with every discovered-metadata field null; they are successful bounded reads, not transport failures. Invalid identifiers fail before command construction. Strings returned by Odoo are normalized to strings and capped at 256 Unicode code points; no callable or arbitrary record field is serialized. `ref` uses `env.ref(xmlid, raise_if_not_found=False)` and reads only `_name`, `id`, and `display_name` from the resolved record.
+When profiling is enabled, `_test_runner_source()` projects `_r.stats` from the same native `run_tests()` result. The existing converter validates the primitive values, sorts duration descending then test ID, and derives totals. When disabled, the runner payload and result remain ordinary. No collector, callback, log parser, or second invocation is added.
 
-The alternative is to raise for missing objects. It is rejected because a uniform typed absence result is deterministic across SDK and all CLI formats and lets automation distinguish absence from an Odoo/process/configuration failure.
+### D3: Add only the requested CLI surface
 
-### D3: Profile is an opt-in extension of the existing test spec/result
+Register one lazy `inspect` group with model, field, and ref leaves. They reuse `ready_instance()`, the shared output document, and one small Rich table per result shape. Add `--profile` only to top-level `odcli test`; the legacy `module test` alias remains unchanged because #37 does not request a second public spelling. Target and changed selection both construct the same `OdooTestSpec`, and profile-aware dry-run shows the existing captured command.
 
-Add `profile: bool = False` to `OdooTestSpec`, `OdooTestProfileEntry(test_id, duration, query_count)`, `OdooTestProfile(total_duration, total_query_count, entries)`, and nullable `profile` on `OdooTestResult`. `_test_runner_source()` receives the flag and, only when true, projects `_r.stats` into primitive `{test_id, duration, query_count}` entries. The converter validates finite non-negative durations and non-negative integer query counts, sorts entries by descending duration then ascending test ID, and derives totals from the validated entries. It does not trust a separate textual total.
+The three inspect leaves get one row each in `PUBLIC_LEAF_CASES`. No second inventory, callback-local script, inspect `--dry-run`, command-local `--env`, or separate renderer is introduced.
 
-When profiling is false, the runner payload and CLI projection retain their existing count fields and the CLI omits `profile` entirely. When profiling is true, the same `run_tests()` result supplies both counts and profile; a missing/invalid native stats mapping is an actionable execution error rather than fabricated zero profile data. Existing failure, zero-test, `allow_empty`, process, and diagnostic rules remain authoritative.
+### D4: Tests follow changed branches, not the entire neighboring system
 
-The alternative is parsing Odoo's stats log. It is rejected because human log detail depends on logger configuration and loses the typed `Stat` source already present on the native result.
+Focused tests cover: exact model fields/validation; one-delegation facade behavior; fixed script/result conversion for existing and missing objects; `commit=false`; native profile mapping, ordering and totals; ordinary profile omission; target and changed profile propagation; dry-run reuse; output parity; and the three inventory rows. Existing selection, failure, zero-test, port, locking, and alias tests remain the regression net and are not duplicated into a new combinatorial matrix.
 
-### D4: CLI remains a thin adapter over public SDK values
+The existing real-Odoo probe fixture gains focused assertions for one model, field, XML ID, missing result, rollback behavior, and one non-empty native profile entry. Independent E2E reuses the existing numbered-slot wrapper and tracked Python text renderer/font. It adds no test-repository helper and no whole-database dump; read-only behavior is proved at the actual command transaction boundary and by the focused real-Odoo regression.
 
-Register one lazy `inspect` group with `model`, `field`, and `ref` leaves. They use the existing `ready_instance()` order, call only the matching public inspector method/command, and pass the frozen result through the shared output document. Add `--profile` to the existing `test` callback and compatibility `module test` path so both construct the same profiled `OdooTestSpec`; do not add a callback-local runner or profile mapper.
+### D5: Ponytail full audit
 
-All three inspect leaves are bounded read-only entries in `PUBLIC_LEAF_CASES`, each with its public SDK primitive, no dry-run, and one focused real-Odoo disposition. `test` remains its single canonical row and dry-run command plan; profile mode changes the captured fixed runner source in that existing plan. Rich tables render the same fields as decoded JSON/TOON and machine stdout stays one clean document.
-
-The alternative is a new CLI renderer or command inventory for diagnostics. It is rejected because the existing bounded output and leaf matrix already enforce serialization, redaction, exit, and E2E ownership.
-
-### D5: Verification extends existing seams
-
-Focused tests cover identifier validation, script/transaction capture, exact missing results, bounded strings, no arbitrary/callable values, strict payload conversion, delegation, exports, CLI context resolution, leaf inventory, format parity, and clean stdout. Existing test tests extend their matrices for profile flag propagation, native stats mapping, invalid stats, ordering/totals, unprofiled shape, selection variants, failure/zero semantics, alias parity, and dry-run plan reuse. A real-Odoo focused integration uses the existing probe addon and native test runner rather than a new harness.
-
-The existing CI jobs and real-Odoo workflow are sufficient. The test repository's existing Python renderer/font are reused for required text renders. Its missing database immutability check is one bounded fingerprint helper with fake-process/config tests, owned by final integration; a new framework is rejected.
-
-### D6: Ponytail full subsystem gate
-
-- `OdooInspector` facade: necessary because the CLI must delegate to public typed SDK primitives; the existing raw shell-script command is too low-level for this public contract. Keep the facade, limited to three methods.
-- Inspection result models: necessary to prevent dynamic registry objects from crossing the process/output boundary; dictionaries alone would weaken validation and exports. Keep exactly three small models and no generic base/result hierarchy.
-- Test profile models: necessary because native stats are repeated entries with totals and must remain immutable/typed. Keep one entry and one aggregate model; do not add a profiler service.
-- E2E evidence utilities: reuse the tracked Python renderer and font. Add only the missing test-repository database fingerprint helper because no current wrapper/CLI operation can prove whole-database immutability without exposing data; keep it outside the SDK API and give it focused tests.
-- New runner, planner, renderer, registry, collector, configuration layer, persistence, or dependency: existing alternatives already satisfy the change. Add none.
+| Candidate addition | Existing alternative | Decision |
+| --- | --- | --- |
+| `OdooInspector` facade | raw trusted shell API | Keep: explicitly required by #37 so CLI can call a bounded public SDK primitive. |
+| Three inspection models | untyped dictionaries or a generic union | Keep: explicitly required and simpler than a dynamic schema. |
+| Profile entry model | raw `_r.stats` tuples | Keep: explicitly required typed SDK output. |
+| Profile aggregate model | several nullable fields on `OdooTestResult` | Keep: one cohesive optional `profile` object is smaller and preserves ordinary output projection. |
+| Command siblings | direct CLI execution | Keep: explicitly required reuse of #40 command plans. |
+| Profile on `module test` | top-level `test --profile` | Remove: not requested; default-false SDK behavior preserves the alias. |
+| Exhaustive selection/exit matrices | existing mature tests | Remove: add only target, changed, dry-run, mapping, and unprofiled regressions touched by the flag. |
+| Database fingerprint helper | `commit=false` command plan plus real-Odoo rollback regression | Remove: it tests the framework around the feature, not #37 implementation. |
+| New renderer or dependency | tracked test-repository Python renderer/font | Remove: reuse existing assets for required images. |
+| Multiple implementation WPs | one cohesive change across adjacent seams | Collapse if the final estimate is within the mandatory single-WP threshold. |
 
 ## Risks / Trade-offs
 
-- [Odoo registry attributes vary by field/model implementation] → Read only the named stable attributes, coerce only primitive values, and fail conversion rather than serialize dynamic objects.
-- [A display name or description can be unexpectedly large or sensitive] → Limit model/field text to metadata and reference output to `display_name`, cap strings, and test that arbitrary fields and credentials never enter the payload or plan.
-- [Native `stats` can contain unusual IDs or numeric values] → Validate ID/string, finite non-negative duration, and integer query count at the SDK boundary; fail invalid data without log fallback.
-- [Adding a nullable field to the SDK result could leak into ordinary CLI output] → Project `profile` conditionally only when requested and lock the unprofiled decoded field set with regression tests.
-- [Inspection starts an Odoo shell process] → Reuse the captured process boundary, dependency readiness, configured database, rollback action, redaction, and lock; no HTTP process is started.
+- Odoo field/model attributes vary → read only the named primitive attributes from #37 and reject malformed payloads.
+- Display text can be large or sensitive → cap returned strings and never read arbitrary record fields.
+- Native stats can be malformed → validate only the required ID/duration/query primitives and fail without log fallback.
+- Optional SDK fields could leak into ordinary CLI output → project `profile` only when the flag is set and keep one exact unprofiled-shape regression.
 
 ## Migration Plan
 
-1. Add frozen models/exports and the focused inspector resource, then prove immutable command capture, rollback, validation, and SDK delegation.
-2. Register the three CLI leaves through the existing context/output seams and update the canonical test-owned inventory.
-3. Extend the existing test spec/result, runner source, converter, and both CLI spellings with opt-in profile data while locking the unprofiled shape.
-4. Add documentation, focused unit/contract tests, existing CI wiring, and real-Odoo fixture assertions; validate the OpenSpec change and repository gates on one exact candidate.
+1. Add the required result values, inspector facade, fixed scripts, and focused SDK tests.
+2. Extend the existing runner/result with optional native stats and focused mapping tests.
+3. Register the requested CLI leaves/flag, inventory rows, output tests, and help/README examples.
+4. Extend the existing real-Odoo focused case, run repository gates, publish one exact candidate, and execute the accepted minimal E2E walkthrough.
 
-Rollback is additive: remove the inspect group/facade/models and profile option/models/mapping while leaving the existing shell and unprofiled test runner behavior intact. No catalog, database, or file-format migration is required.
+Rollback removes only the additive facade/models/CLI leaves/profile flag and restores the unchanged runner projection. No database, catalog, configuration, or file-format migration exists.
 
 ## Open Questions
 
-None. Missing-object behavior, result fields, bounds, native source, ordering, totals, CLI compatibility, and verification ownership are fixed by this design.
+None. The component count above follows explicit #37 SDK requirements; everything else uses existing project seams.
