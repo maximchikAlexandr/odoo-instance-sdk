@@ -585,7 +585,10 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
         },
     }
 )
-@click.group(cls=_OdcliCliGroup)
+@click.group(
+    cls=_OdcliCliGroup,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 @click.option(
     "--version",
     is_flag=True,
@@ -648,14 +651,32 @@ cli.add_command(
 _rich_command = cast("Callable[..., click.Command]", click.RichCommand)
 _rich_group = cast("Callable[..., click.Group]", click.RichGroup)
 
+_RUN_HELP = (
+    "Start resolved Odoo in the foreground or detached.\n\n"
+    "Examples:\n"
+    "  odcli run --dry-run\n"
+    "  odcli run --dry-run -- --stop-after-init\n\n"
+    "Native Odoo arguments must follow a literal `--` delimiter.\n"
+    "Use --dry-run for a read-only plan; Rich/JSON/TOON output options require --dry-run."
+)
+_EXEC_HELP = (
+    "Execute a Python script in Odoo.\n\n"
+    "Examples:\n"
+    "  odcli exec ./script.py --dry-run\n"
+    "  odcli exec - --dry-run\n\n"
+    "Use `-` to read source from stdin. Arguments after the script are passed to it; "
+    "use a literal `--` before script arguments that begin with an option. --dry-run "
+    "plans without starting Odoo."
+)
+
 for _name, _help in {
     "stop": "Stop the selected runtime.",
-    "run": "Start resolved Odoo in the foreground or detached.",
+    "run": _RUN_HELP,
     "logs": "Read or follow retained Odoo logs.",
     "shell": "Open an interactive Odoo shell.",
     "monitor": "Start the observability monitor (FastAPI + React UI).",
     "eval": "Evaluate a Python expression in Odoo.",
-    "exec": "Execute a Python script in Odoo.",
+    "exec": _EXEC_HELP,
 }.items():
     cli.add_command(_rich_command(name=_name, help=_help), name=_name)
 for _name, _help in {

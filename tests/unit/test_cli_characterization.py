@@ -4,6 +4,7 @@ import importlib
 import importlib.metadata
 import inspect
 import json
+import shlex
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -246,13 +247,170 @@ def test_rich_click_run_help_documents_delimiter_passthrough() -> None:
     assert "Native Odoo arguments must follow a literal `--` delimiter." in result.output
 
 
+def test_short_help_covers_the_command_tree_without_runtime_resolution() -> None:
+    runner = CliRunner()
+    paths: list[tuple[str, ...]] = [()]
+
+    def collect(command: click.Command, parent: tuple[str, ...]) -> None:
+        if not isinstance(command, click.Group):
+            return
+        for name, child in command.commands.items():
+            path = (*parent, name)
+            paths.append(path)
+            collect(child, path)
+
+    collect(cli, ())
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("help must not resolve a runtime"),
+    ):
+        for path in paths:
+            result = runner.invoke(cli, [*path, "-h"])
+            assert result.exit_code == 0, (path, result.output)
+            assert "Usage:" in result.output
+
+    for path, passthrough in ((("run",), ["--", "-h"]), (("exec",), ["-", "--", "-h"])):
+        context = _command(path).make_context("odcli", passthrough, resilient_parsing=True)
+        try:
+            target = "odoo_args" if path == ("run",) else "script_args"
+            assert context.params[target] == ("-h",)
+        finally:
+            context.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "examples", "required_help"),
+    (
+        (
+            ("init",),
+            (("--dry-run",), ("--venv", ".venv", "--dry-run")),
+            ("prepare-venv", "optional"),
+        ),
+        (
+            ("env", "create"),
+            (
+                ("PROJ-123", "--dry-run"),
+                ("PROJ-123", "--create-venv", "--dry-run"),
+            ),
+            ("optional", "owned"),
+        ),
+        (("env", "show"), ((), ("PROJ-123",)), ("positional", "working directory")),
+        (
+            ("db", "restore"),
+            (
+                ("01234567-89ab-cdef-0123-456789abcdef", "--dry-run"),
+                ("--file", "./backup.zip", "--target", "restored_db", "--dry-run"),
+            ),
+            ("exactly one", "--yes"),
+        ),
+        (
+            ("run",),
+            (("--dry-run",), ("--dry-run", "--", "--stop-after-init")),
+            ("literal `--`", "--dry-run"),
+        ),
+        (
+            ("exec",),
+            (("./script.py", "--dry-run"), ("-", "--dry-run")),
+            ("stdin", "literal `--`", "--dry-run"),
+        ),
+        (
+            ("test",),
+            (
+                ("--dry-run",),
+                ("./addons/my_module", "--tags", "/my_module", "--dry-run"),
+            ),
+            ("--changed", "--base"),
+        ),
+    ),
+)
+def test_named_command_help_examples_parse_and_state_constraints(
+    path: tuple[str, ...],
+    examples: tuple[tuple[str, ...], ...],
+    required_help: tuple[str, ...],
+) -> None:
+    result = CliRunner().invoke(cli, [*path, "-h"])
+    assert result.exit_code == 0
+    assert "Examples:" in result.output
+    assert all(text in result.output for text in required_help)
+
+    command = _command(path)
+    help_text = " ".join(result.output.split())
+    for example in examples:
+        rendered = "odcli " + " ".join(shlex.quote(value) for value in (*path, *example))
+        assert rendered in help_text
+        context = command.make_context("odcli", list(example), resilient_parsing=True)
+        context.close()
+
+
+@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+def test_exec_invalid_utf8_is_classified_before_runtime_or_child(tmp_path: Path, mode: str) -> None:
+    source = tmp_path / "invalid.py"
+    source.write_bytes(b"print('secret-\xff-source')")
+    args = ["exec", str(source)]
+    if mode != "rich":
+        args.extend(("--format", mode))
+
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("invalid source must fail before runtime resolution"),
+    ):
+        result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "secret-" not in result.output
+    if mode == "rich":
+        assert "not valid UTF-8" in result.stderr
+        assert "save it as UTF-8" in result.stderr
+    else:
+        assert result.stderr == ""
+        if mode == "json":
+            document = json.loads(result.stdout)
+        else:
+            from toon import DecodeOptions, decode
+
+            document = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+        assert document["error"]["code"] == "exec_invalid_encoding"
+        assert "not valid UTF-8" in document["error"]["message"]
+
+
+@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+def test_cli_update_permission_denial_is_actionable_and_sanitized(mode: str) -> None:
+    update_cli = importlib.import_module("odoo_instance_sdk.commands.update")
+
+    def denied(**_kwargs: object) -> object:
+        raise PermissionError("/private/secret/update/journal.json")
+
+    with patch.object(update_cli, "_select_update_command", denied):
+        args = ["update", "--check"]
+        if mode != "rich":
+            args.extend(("--format", mode))
+        result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "/private/secret" not in result.output
+    assert "check ODCLI_USER_ROOT permissions" in result.output
+    if mode == "rich":
+        assert result.stdout == ""
+    else:
+        assert result.stderr == ""
+        if mode == "json":
+            document = json.loads(result.stdout)
+        else:
+            from toon import DecodeOptions, decode
+
+            document = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+        assert document["error"]["code"] == "update_state_access_denied"
+
+
 def test_typed_help_remains_readable_at_narrow_width() -> None:
     result = CliRunner().invoke(cli, ["module", "test", "--help"], terminal_width=40)
 
     assert result.exit_code == 0
     assert "Run tests for selected Odoo modules." in result.output
     assert "--test-" in result.output
-    assert "[required]" in result.output
+    assert "required" in result.output
     assert "--format" in result.output
 
 

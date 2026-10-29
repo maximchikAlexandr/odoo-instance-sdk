@@ -364,7 +364,14 @@ def env_group() -> None:
 @env_group.command(
     "create",
     aliases=["checkout"],
-    help="Create an isolated environment from a Ticket branch.",
+    help=(
+        "Create an isolated environment from a Ticket branch.\n\n"
+        "Examples:\n"
+        "  odcli env create PROJ-123 --dry-run\n"
+        "  odcli env create PROJ-123 --create-venv --dry-run\n\n"
+        "--create-venv is optional and creates an environment-owned virtualenv; it is "
+        "separate from the optional primary-project `init --venv` setup."
+    ),
 )
 @click.argument("ticket", metavar="TICKET", type=_TICKET)
 @click.option("--base", "base_ref", default=None, help="Base ref (default HEAD).")
@@ -613,7 +620,17 @@ def env_list(
     _print_env_list_human(inventory)
 
 
-@env_group.command("show", help="Show one environment, its project, and PostgreSQL runtime facts.")
+@env_group.command(
+    "show",
+    help=(
+        "Show one environment, its project, and PostgreSQL runtime facts.\n\n"
+        "Examples:\n"
+        "  odcli env show\n"
+        "  odcli env show PROJ-123\n\n"
+        "Select by the positional environment name or UUID; when omitted, the current "
+        "working directory selects its environment."
+    ),
+)
 @click.argument("environment", required=False, metavar="ENVIRONMENT")
 @output_options
 @field_schema(_EnvShowResult)

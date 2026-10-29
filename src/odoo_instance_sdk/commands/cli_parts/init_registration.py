@@ -436,7 +436,17 @@ def _execute_init(  # noqa: C901
 def register_init_command(cli: click.Group) -> None:
     """Register the ``init`` leaf on the root CLI group."""
 
-    @cli.command(cls=_InitCommand, help="Create or update the project manifest.")
+    @cli.command(
+        cls=_InitCommand,
+        help=(
+            "Create or update the project manifest.\n\n"
+            "Examples:\n"
+            "  odcli init --dry-run\n"
+            "  odcli init --venv .venv --dry-run\n\n"
+            "Primary virtualenv setup with --venv is optional. Use `odcli prepare-venv` "
+            "to explicitly refresh or recover that project virtualenv."
+        ),
+    )
     @click.option(
         "--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin."
     )
