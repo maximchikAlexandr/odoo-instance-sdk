@@ -262,18 +262,89 @@ def test_public_cache_runner_rejects_dirty_candidate_repository_before_probe_or_
     lifecycle_gate.assert_not_called()
 
 
-@pytest.mark.unit
-def test_installed_helper_provenance_accepts_exact_candidate_installation() -> None:
-    import sys
+def _exact_candidate_installation(tmp_path: Path, repository: Path) -> Path:
+    install_root = tmp_path / "exact-candidate-venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(install_root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    helper_dir = install_root / "bin"
+    interpreter = helper_dir / "python"
+    site_packages = next(install_root.glob("lib/python*/site-packages"))
+    dist_info = site_packages / "odoo_instance_sdk-0.1.0.dist-info"
+    dist_info.mkdir()
+    project = tomllib.loads((repository / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.4\nName: {project['name']}\nVersion: {project['version']}\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        "[console_scripts]\n"
+        + "".join(f"{name} = {value}\n" for name, value in project["scripts"].items()),
+        encoding="utf-8",
+    )
+    (dist_info / "direct_url.json").write_text(
+        json.dumps({"url": repository.as_uri(), "dir_info": {"editable": True}}),
+        encoding="utf-8",
+    )
+    (site_packages / "odoo_instance_sdk.pth").write_text(
+        str(repository / "src") + "\n", encoding="utf-8"
+    )
+    helper = helper_dir / "git-credential-odcli"
+    helper.write_bytes(
+        (
+            f"#!{interpreter}\n"
+            "# -*- coding: utf-8 -*-\n"
+            "import sys\n"
+            "from odoo_instance_sdk.internal.git_credential_helper import main\n"
+            'if __name__ == "__main__":\n'
+            '    if sys.argv[0].endswith("-script.pyw"):\n'
+            "        sys.argv[0] = sys.argv[0][:-11]\n"
+            '    elif sys.argv[0].endswith(".exe"):\n'
+            "        sys.argv[0] = sys.argv[0][:-4]\n"
+            "    sys.exit(main())\n"
+        ).encode()
+    )
+    helper.chmod(0o755)
+    files = (*site_packages.glob("*.pth"), *dist_info.iterdir())
+    rows: list[tuple[str, str, str]] = []
+    for path in files:
+        if path.is_file() and path.name != "RECORD":
+            content = path.read_bytes()
+            digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
+            rows.append(
+                (str(path.relative_to(site_packages)), f"sha256={digest}", str(len(content)))
+            )
+    content = helper.read_bytes()
+    digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
+    rows.extend(
+        (
+            ("../../../bin/git-credential-odcli", f"sha256={digest}", str(len(content))),
+            (f"{dist_info.name}/RECORD", "", ""),
+        )
+    )
+    with (dist_info / "RECORD").open("w", newline="", encoding="utf-8") as stream:
+        csv.writer(stream).writerows(rows)
+    return helper_dir
 
+
+@pytest.mark.unit
+def test_installed_helper_provenance_accepts_exact_candidate_installation(
+    tmp_path: Path,
+) -> None:
     repository = Path(__file__).parents[2].resolve()
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repository, capture_output=True, text=True, check=True
     ).stdout.strip()
-    helper_dir = Path(sys.executable).parent
+    clean_repository = _clean_sdk_checkout(repository, revision, tmp_path / "clean-sdk")
+    helper_dir = _exact_candidate_installation(tmp_path, clean_repository)
 
     helper = cache._installed_helper_provenance(
-        Namespace(git="git", sdk_sha=revision, helper_dir=helper_dir, core_project=repository),
+        Namespace(
+            git="git", sdk_sha=revision, helper_dir=helper_dir, core_project=clean_repository
+        ),
         {"PATH": str(helper_dir)},
     )
 
