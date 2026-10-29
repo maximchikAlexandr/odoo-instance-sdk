@@ -141,6 +141,18 @@ resolution. Eligible bounded machine-readable leaves also support typed
 schema comes from that leaf's typed result, and Rich output is never
 field-filtered. TOON is the compact structured form.
 
+For a resolved command that supports bounded JSON or TOON output, ordinary
+usage errors such as an invalid number, range, or `--fields` path, and a missing
+required argument, return one sanitized `usage_error` document with exit code
+`2`. Unknown commands and formats, plus raw-streaming commands, retain Click's
+native error output. Expected invalid-source and filesystem-access failures
+are reported without tracebacks or secret values. `env show` resolves its
+selector from the local catalogue before collecting metrics and samples only
+the selected project. Metadata commands such as `odcli --help` and
+`odcli --version` defer operation-only imports. Use `-h` or `--help` at the
+root, group, and leaf levels; executable help includes examples and constraints
+for `init`, `env create`, `db restore`, `run`, `exec`, and `test`.
+
 To enter a registered environment worktree, use ordinary shell command substitution: `cd "$(odcli env path <environment>)"`.
 
 All bounded mutating or process-backed leaves support the same inspect-first

@@ -104,6 +104,45 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
         text=True,
     )
     assert "Usage" in help_result.stdout
+    short_help_result = subprocess.run(
+        [str(odcli), "-h"],
+        cwd=empty,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert short_help_result.stdout == help_result.stdout
+    init_help_result = subprocess.run(
+        [str(odcli), "init", "-h"],
+        cwd=empty,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--venv" in init_help_result.stdout
+    assert "prepare-venv" in init_help_result.stdout
+    startup_import = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import sys; from odoo_instance_sdk.cli import cli; "
+                "forbidden = ('odoo_instance_sdk.resources.monitor', "
+                "'odoo_instance_sdk.internal.dbprep.source', "
+                "'odoo_instance_sdk.internal.dbprep.source_restore', "
+                "'alembic', 'sqlalchemy'); "
+                "assert not set(forbidden).intersection(sys.modules)"
+            ),
+        ],
+        cwd=empty,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert startup_import.returncode == 0, startup_import.stderr
     metadata = subprocess.run(
         [
             str(python),
