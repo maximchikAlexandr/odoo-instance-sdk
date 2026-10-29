@@ -24,9 +24,7 @@ from odoo_instance_sdk.models import (
     BackupFormat,
     BackupState,
 )
-from odoo_instance_sdk.storage.catalog_migrate import (
-    CATALOG_REVISION,
-)
+from odoo_instance_sdk.storage.catalog.revision import CATALOG_REVISION
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue

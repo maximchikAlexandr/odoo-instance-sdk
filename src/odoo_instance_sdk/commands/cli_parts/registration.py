@@ -23,6 +23,7 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
+    fail,
     run_or_preview,
 )
 from odoo_instance_sdk.commands.cli_parts.init_registration import register_init_command
@@ -523,7 +524,36 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
             subcommand = ctx.invoked_subcommand
             if subcommand is not None and subcommand != "update":
                 assert_update_not_blocking(subcommand)
-        super().invoke(ctx)
+        try:
+            super().invoke(ctx)
+        except click.UsageError as error:
+            usage_context = error.ctx
+            if usage_context is None:
+                raise
+            output_format = usage_context.params.get("output_format")
+            if output_format not in {OutputMode.JSON.value, OutputMode.TOON.value}:
+                raise
+            if usage_context.command.name in {"run", "shell"} and not usage_context.params.get(
+                "dry_run", False
+            ):
+                raise
+            if usage_context.params.get("watch", False) or usage_context.params.get(
+                "follow", False
+            ):
+                raise
+            path: list[str] = []
+            current: click.Context | None = usage_context
+            while current is not None and current.parent is not None:
+                if current.command.name is not None:
+                    path.append(current.command.name)
+                current = current.parent
+            fail(
+                OutputMode(output_format),
+                ".".join(reversed(path)),
+                error.message,
+                dry_run=usage_context.params.get("dry_run", False),
+                usage=True,
+            )
 
 
 @click.rich_config(  # type: ignore[operator]
