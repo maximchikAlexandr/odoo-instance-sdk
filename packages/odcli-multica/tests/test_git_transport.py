@@ -811,6 +811,7 @@ def test_project_legacy_credential_fallback_accepts_existing_0755_directory(
         ("fetch", "origin"),
         git_resource=git,
         project_root=project,
+        mapping_path=mapping,
     ).run()
 
     assert credential_dir.stat().st_mode & 0o777 == 0o755
