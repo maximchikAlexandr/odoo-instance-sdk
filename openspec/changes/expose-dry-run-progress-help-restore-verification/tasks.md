@@ -16,7 +16,8 @@
 - [ ] 3.1 Extend environment create/checkout/sync/removal plans for worktree, generated config, dependency lock, owned/reused venv, cleanup rollback, backup, and filestore preservation/deletion conditions.
 - [ ] 3.2 Extend database restore/refresh/drop plans for backup/config/filestore paths, prior-filestore move destination, publication/cleanup/compensation order, and provenance-bound filestore retention.
 - [ ] 3.3 Integrate standardized delete/retain effects into backup deletion without losing existing path, presence, size, or relationship fields.
-- [ ] 3.4 Add parametrized ownership, conditional-effect, drift, retry, dry-run-inertness, and plan/execution parity tests across environment/database/backup flows.
+- [ ] 3.4 Add parametrized ownership, conditional-effect, drift, retry, dry-run-inertness, and plan/execution parity tests for environment flows.
+- [ ] 3.5 Add parametrized conditional-effect, drift, retry, dry-run-inertness, and plan/execution parity tests for database and backup flows.
 
 ## 4. Git, Runtime, Module, and Self-Update Effects
 

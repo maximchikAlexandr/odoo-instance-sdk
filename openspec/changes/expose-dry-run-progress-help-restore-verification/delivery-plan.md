@@ -99,19 +99,19 @@ Cleanup SHALL use the same Binta wrapper and `--project` value, remove only iden
 - Owned responsibility scope: translation/project-init/VS Code/bug-report/environment planners and their related tests/fixtures/docs; excludes database restore internals owned by `WP-03`.
 - Critical shared files: may consume effect helper and existing output functions; changes to shared schema require coordination through `WP-01`, not local divergence.
 - Contract surface: PO/POT publication, generated project files, draft metadata, worktree/config/lock/venv/backup/filestore ownership and rollback.
-- DoD/evidence: parametrized modes cover new/existing/no-op/uncertain/owned/reused/preserved/error-cleanup states and exact dry-run non-mutation.
+- DoD/evidence: project/environment parametrized modes cover new/existing/no-op/uncertain/owned/reused/preserved/error-cleanup states, environment drift/retry and parity, and exact dry-run non-mutation; no database/backup/restore test is mutable here.
 - Parallel-safety rationale: primary writes are project/environment domains and do not overlap Git/runtime or database/restore domains after `WP-01`.
 
 ### WP-03 — Database, backup, and restore verification
 
 - Stage: `2`.
 - `depends_on`: `WP-01`.
-- OpenSpec task coverage: `3.2`, `3.3`, `5.3`, `7.1`, `7.2`, `7.3`, `7.4` exactly once.
+- OpenSpec task coverage: `3.2`, `3.3`, `3.5`, `5.3`, `7.1`, `7.2`, `7.3`, `7.4` exactly once.
 - Deliverable: database/backup effects, existing-event progress for download/restore, independent restore verification states/counts, and real-Odoo fixtures.
 - Owned responsibility scope: all database restore/refresh/drop implementation, backup deletion/download, restore result models, attachment/filestore validation, restore progress publication, and all related unit/integration/real-Odoo database-domain tests.
 - Critical shared files: database/backup/restore modules and their domain tests are exclusively mutable here. The package consumes `WP-01`'s effect and frame projections and SHALL not redesign them.
 - Contract surface: prior-filestore move/compensation, provenance-bound deletion/retention, backup facts, download bytes, existing restore stages/heartbeats, neutralization state, and safe unique attachment counts.
-- DoD/evidence: complete/incomplete/duplicate/unsafe/not-checked/query-failure matrices pass; publication/compensation stays truthful; focused real-Odoo coverage exists.
+- DoD/evidence: database/backup conditional-effect, drift, retry, dry-run-inertness, and plan/execution parity tests pass alongside complete/incomplete/duplicate/unsafe/not-checked/query-failure restore matrices; publication/compensation stays truthful; focused real-Odoo coverage exists.
 - Parallel-safety rationale: after both predecessor contracts land, database/restore files and tests are exclusively owned here and are disjoint from the stage-2 project/environment and Git/runtime write zones.
 
 ### WP-04 — Git, runtime, module, and self-update effects
