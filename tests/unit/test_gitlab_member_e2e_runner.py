@@ -246,7 +246,7 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         **_kwargs: object,
-    ) -> SimpleNamespace:
+    ) -> subprocess.CompletedProcess[str] | SimpleNamespace:
         if argv[0] == "git":
             return original_run(argv, cwd=cwd, env=env)
         calls.append((argv, cwd, env))
