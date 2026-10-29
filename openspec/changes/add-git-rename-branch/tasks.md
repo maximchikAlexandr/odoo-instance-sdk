@@ -1,15 +1,14 @@
 ## 1. Shared Ticket Allocation
 
-- [ ] 1.1 Add frozen ticket-allocation/result types and move ticket validation, iteration parsing, catalogue projection, local/origin evidence capture, maximum allocation, provenance, and stale-absence checks into one SDK-owned module.
-- [ ] 1.2 Switch `env create`/`env checkout` to the shared allocator while preserving existing command plans, provenance, locking, errors, and allocation behavior.
-- [ ] 1.3 Relocate and extend focused allocation tests for free names, local/catalogue/origin collisions, gapped suffixes, unavailable evidence, and checkout stale-plan regression.
+- [ ] 1.1 Move the existing `_TicketAllocation` data plus ticket validation/parsing, catalogue projection, local/origin evidence capture, maximum allocation, provenance, and stale-absence helpers from the Click adapter into one narrow SDK-owned module without changing their behavior or shape.
+- [ ] 1.2 Switch `env create`/`env checkout` imports to the moved helpers while preserving existing command plans, provenance, locking, errors, and allocation behavior.
+- [ ] 1.3 Move the existing focused allocation tests with their owner and add only the rename-sharing regression cases; do not retain duplicate allocation matrices.
 
 ## 2. Public SDK Rename Operation
 
-- [ ] 2.1 Implement `GitResource.rename_branch_command(ticket)` and delegating `rename_branch(ticket)` with one frozen inspectable command, attached-branch/idempotent planning, and typed JSON-safe result.
-- [ ] 2.2 Add named repository/current-branch/HEAD/index/dirty/upstream and local/catalogue/origin revalidation before a non-force rename, with no dynamic process construction during execution.
-- [ ] 2.3 Implement mismatched-upstream removal, final state verification, and bounded non-overwriting compensation with explicit incomplete-recovery errors.
-- [ ] 2.4 Add SDK tests covering free and occupied names from every source, multiple iterations, already-matching no-op, detached HEAD, post-plan collisions, changed repository state, HEAD/index/dirty preservation, upstream cleanup, compensation, and absence of remote/worktree/catalogue mutation.
+- [ ] 2.1 Implement `GitResource.rename_branch_command(ticket)` and delegating `rename_branch(ticket)` with one frozen inspectable command, attached-branch/idempotent planning, one non-force `git branch -m` step, and a typed JSON-safe result.
+- [ ] 2.2 Revalidate only current branch, HEAD, and selected-name absence across local/catalogue/origin evidence before mutation; fail stale rather than reallocating, and preserve standard Git branch configuration/upstream behavior.
+- [ ] 2.3 Add focused SDK tests for free and occupied names from every source, multiple iterations, already-matching no-op, detached HEAD, post-plan branch/HEAD/collision changes, dirty/index/untracked preservation, standard branch-config behavior, and absence of remote/worktree/catalogue mutation.
 
 ## 3. CLI, Inventory, and Documentation
 

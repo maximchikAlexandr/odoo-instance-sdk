@@ -5,11 +5,11 @@ Automatically prepared checkouts can reach adoption or their first commit while 
 ## What Changes
 
 - Add `odcli git rename-branch TICKET` using existing project/environment selection, bounded Rich/JSON/TOON output, and dry-run behavior.
-- Add a public SDK command builder and convenience operation that return the previous and selected branch names through one immutable inspectable command snapshot.
-- Move ticket suffix parsing and allocation from the environment CLI adapter into a reusable SDK-owned component, preserving current `env create`/`env checkout` behavior.
+- Add the required public SDK command builder and convenience operation, returning the previous and selected branch names through the repository's existing immutable command pattern.
+- Move only the existing ticket-allocation data and helpers from the environment CLI adapter to a narrow SDK-owned module so checkout and rename call the same code without introducing another policy or framework.
 - Allocate `TICKET`, `TICKET_1`, `TICKET_2`, and later suffixes from local heads, OdCLI catalogue history, and current `origin` heads; return the current branch unchanged when it already matches the requested ticket family.
-- Revalidate the selected name immediately before mutation and fail safely for detached HEAD, unavailable evidence, stale collisions, or any rename that would overwrite/switch to an existing branch.
-- Preserve HEAD, checkout/index/dirty state, avoid worktree/database/environment creation, avoid push/remote rename, and remove an upstream that would still target a differently named remote branch.
+- Revalidate the current branch, HEAD, and selected-name absence immediately before one non-force local rename; fail safely for detached HEAD, unavailable evidence, stale collisions, or any overwrite attempt.
+- Preserve HEAD, checkout/index/dirty state and Git's normal renamed-branch configuration/upstream behavior; avoid worktree/database/environment creation and any fetch, push, or remote rename.
 
 ## Capabilities
 

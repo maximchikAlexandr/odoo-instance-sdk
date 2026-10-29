@@ -7,7 +7,7 @@ Ticket iteration parsing, catalogue filtering, local/origin inspection, and stal
 **Goals:**
 
 - Reuse exactly one SDK-owned ticket allocation algorithm for checkout and rename.
-- Plan and execute a non-force local current-branch rename with complete volatile-evidence revalidation and bounded compensation.
+- Plan and execute one non-force local current-branch rename after revalidating only the volatile inputs that can invalidate that rename.
 - Preserve HEAD, index, worktree, dirty/untracked state, selector behavior, output envelopes, and existing checkout semantics.
 - Return a frozen JSON-safe result through public SDK and bounded CLI surfaces.
 
@@ -21,7 +21,7 @@ Ticket iteration parsing, catalogue filtering, local/origin inspection, and stal
 
 ### 1. Move allocation into one narrow SDK-owned module
 
-Introduce a focused internal ticket-branch allocation module that owns ticket validation/parsing, catalogue projection, local/origin evidence capture, maximum-iteration selection, bounded provenance, and stale absence checks. Both environment checkout and `GitResource.rename_branch_command()` consume its typed immutable snapshot; the CLI keeps only argument conversion and rendering.
+Move the existing `_TicketAllocation` data and ticket validation/parsing, catalogue projection, local/origin evidence capture, maximum-iteration selection, bounded provenance, and stale-absence helpers from `commands/env/checkout.py` into one narrow SDK-owned module. Both environment checkout and `GitResource.rename_branch_command()` call those helpers; their behavior and data shape stay unchanged, and the CLI keeps only argument conversion and rendering.
 
 Alternative considered: call private functions in `commands/env/checkout.py` from `GitResource`. Rejected because it reverses the SDK-first dependency direction and keeps reusable domain behavior in a Click adapter. Duplicating the parser/allocation for rename is rejected by the issue contract.
 
@@ -31,17 +31,17 @@ Rename planning captures the current attached branch before allocation. If it is
 
 Alternative considered: always allocate after counting the current branch. Rejected because repeated invocation would unnecessarily advance the suffix and violate explicit idempotency.
 
-### 3. Capture one repository snapshot and explicit allocation evidence
+### 3. Revalidate only inputs that can invalidate the rename
 
-Planning uses canonical repository root/common-dir, attached branch, HEAD SHA, index tree, porcelain dirty state, local heads, relevant catalogue history, relevant current `origin` heads, and upstream configuration. A failed probe is an error, never an empty set. The command snapshot contains named read-only revalidation steps followed by only the necessary local mutation/postcondition steps; every Git child goes through `internal/proc` with argv and `shell=False`.
+Planning captures the attached current branch and HEAD together with the shared allocator's local/catalogue/current-`origin` evidence. A failed probe is an error, never an empty set. Immediately before mutation, named read-only steps revalidate current branch, HEAD, and selected-name absence in the same three allocation sources; the only mutating step is a non-force `git branch -m`. Every Git child goes through `internal/proc` with argv and `shell=False`. Index, staged, unstaged, and untracked state are not planning inputs because branch rename does not depend on them; focused tests prove they remain unchanged.
 
-Alternative considered: rerun allocation inside the callback and construct the rename dynamically. Rejected because the selected name and effects would not be inspectable in dry-run and would violate immutable-command rules.
+Alternative considered: revalidate index, porcelain state, upstream configuration, and every allocation value. Rejected because those values cannot change the validity of this single local rename; adding them would create failure modes unrelated to the requested operation. Rerunning allocation and dynamically selecting another name is also rejected because dry-run must remain inspectable and a stale target must fail rather than silently change.
 
-### 4. Use non-force Git rename with explicit upstream cleanup and compensation
+### 4. Keep standard Git branch-rename semantics
 
-Execution first consumes all named revalidation evidence and refuses any mismatch or selected-name collision. It then runs non-force current-branch rename, removes inherited upstream only when it points to a differently named remote branch, and verifies final branch, HEAD, index/dirty state, and upstream. If cleanup or postconditions fail, a bounded compensation path renames back only while the captured old name remains free and restores the captured branch configuration; otherwise it reports incomplete recovery without overwrite.
+Execution consumes the named revalidation evidence, refuses a changed branch/HEAD or selected-name collision, and then runs exactly one non-force current-branch rename. Git moves the branch's local configuration and retains its upstream relation according to normal `git branch -m` behavior. There is no post-rename cleanup phase, custom compensation path, fetch, push, or remote-ref mutation.
 
-Alternative considered: force rename or switch/create the target ref. Rejected because either can overwrite/switch existing state. Leaving inherited upstream untouched is rejected because later sync/push could target the old remote name.
+Alternative considered: clear a now-differently-named upstream and add compensation if that cleanup fails. Rejected by Ponytail full: the request is local branch rename, standard Git intentionally preserves branch configuration, and an extra mutation/recovery subsystem would be larger and more surprising than Git itself. Force rename or switch/create remains rejected because it can overwrite or switch existing state.
 
 ### 5. Keep CLI changes transport-only
 
@@ -51,21 +51,25 @@ Alternative considered: a new `branch` group or CLI-side catalogue/Git orchestra
 
 ### Ponytail full gate
 
-No new subsystem, framework, dependency, registry, runner, or configurable naming policy is needed. The only extracted component is necessary because two existing public workflows must share one collision-sensitive algorithm; the existing alternative is CLI-private code that cannot be reused without violating SDK-first layering, so the narrow shared SDK module is retained. Extra ticket providers, custom suffix formats, explicit-repository mode, remote rename, and generalized branch management are removed from scope.
+No new subsystem, framework, dependency, registry, runner, configurable naming policy, cleanup workflow, or recovery engine is needed.
+
+- **Shared allocation module — retain.** Necessary because checkout and rename must use the same existing collision-sensitive code. Importing the Click adapter from `GitResource` would reverse SDK-first layering; duplicating it would create two policies. The module is a move of current data/helpers, not a redesign.
+- **Public SDK command/result — retain.** Necessary because every process-spawning CLI leaf in this repository delegates to an inspectable public SDK command. The existing alternative is raw CLI Git orchestration, which violates the main command-execution contract. The result contains only `previous_branch`, `selected_branch`, and `renamed`.
+- **CLI/inventory/docs — retain.** Necessary public surface and existing contract fixtures for one requested leaf; no new group or registry is added.
+- **Upstream cleanup, postcondition phase, and compensation — remove.** Standard non-force `git branch -m` is the complete mutation and preserves local branch configuration. Extra ticket providers, custom suffix formats, explicit-repository mode, remote rename, and generalized branch management also remain out of scope.
 
 ## Risks / Trade-offs
 
 - [Remote evidence can change between planning and execution] → repeat the same bounded origin-head probe as a named revalidation step and fail stale without mutation.
 - [Catalogue rows can change without a Git process step] → re-read matching history inside the command callback before the first mutation under the existing provisioning/catalogue locking boundary.
-- [Upstream cleanup can fail after rename] → capture branch configuration, verify postconditions, and perform bounded non-overwriting compensation with explicit incomplete-recovery reporting.
 - [Extracting checkout allocation can regress mature behavior] → retain its typed evidence/provenance and move existing unit cases to the shared owner before adding rename cases.
-- [Dirty-state snapshots can include untracked paths and mutable index state] → capture both index tree and porcelain output, revalidate before mutation, and assert equality after rename/compensation.
+- [Branch rename must not disturb developer work] → test HEAD, index tree, porcelain output, and untracked bytes before/after the standard Git mutation; do not turn unrelated dirty state into a stale-plan precondition.
 
 ## Migration Plan
 
 1. Add result/evidence types and the shared allocator while porting existing checkout allocation tests unchanged.
-2. Switch environment checkout to the shared allocator without changing its public output or command shape.
-3. Add the SDK rename command/convenience operation, CLI leaf, inventory/docs, and focused tests.
+2. Switch environment checkout imports to the moved helpers without changing its public output or command shape.
+3. Add the minimal SDK rename command/convenience operation, CLI leaf, inventory/docs, and focused tests.
 4. Run strict OpenSpec and repository gates; deployment is an ordinary backward-compatible package update with no data migration.
 
 Rollback removes the new CLI/SDK surface and restores checkout imports to the prior owner; no persisted schema or remote state requires rollback.
