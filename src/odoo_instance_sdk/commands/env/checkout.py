@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 
@@ -687,13 +688,9 @@ def _resolve_env_show_catalogue(selector: str | None, *, cwd: Path) -> tuple[str
     return str(row["id"]), str(project_id)
 
 
-class _EnvShowCatalogueRow(Protocol):
-    def __getitem__(self, key: str) -> object: ...
-
-
 def _select_env_show_catalogue_row(
-    rows: Sequence[_EnvShowCatalogueRow], selector: str | None, *, cwd: Path
-) -> _EnvShowCatalogueRow:
+    rows: Sequence[sqlite3.Row], selector: str | None, *, cwd: Path
+) -> sqlite3.Row:
     if selector is None:
         current = cwd.resolve()
         candidates = []

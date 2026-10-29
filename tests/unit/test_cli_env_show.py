@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
+from typing import cast
 
 import msgspec
 import pytest
@@ -178,19 +180,28 @@ def test_env_show_catalogue_failures_do_not_construct_monitor(
     assert diagnostic in result.output
 
 
-def _catalogue_row(env_id: str, name: str, project_id: str, worktree: Path) -> dict[str, str]:
-    return {
-        "id": env_id,
-        "name": name,
-        "project_id": project_id,
-        "worktree_path": str(worktree),
-        "repository_root": str(worktree.parent),
-        "git_common_dir": str(worktree.parent / ".git"),
-    }
+def _catalogue_row(env_id: str, name: str, project_id: str, worktree: Path) -> sqlite3.Row:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    row = connection.execute(
+        "SELECT ? AS id, ? AS name, ? AS project_id, ? AS worktree_path, "
+        "? AS repository_root, ? AS git_common_dir",
+        (
+            env_id,
+            name,
+            project_id,
+            str(worktree),
+            str(worktree.parent),
+            str(worktree.parent / ".git"),
+        ),
+    ).fetchone()
+    connection.close()
+    assert row is not None
+    return cast("sqlite3.Row", row)
 
 
 def _install_catalogue(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows: list[dict[str, str]]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows: list[sqlite3.Row]
 ) -> None:
     from odoo_instance_sdk.storage import backup_catalog
 
@@ -201,7 +212,7 @@ def _install_catalogue(
         def __init__(self, *, db_path: Path) -> None:
             assert db_path == catalog_path
 
-        def list_environments(self, *, include_removed: bool) -> list[dict[str, str]]:
+        def list_environments(self, *, include_removed: bool) -> list[sqlite3.Row]:
             return rows
 
         def close(self) -> None:
