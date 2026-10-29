@@ -35,10 +35,70 @@ Git passthrough, HTTPS GitLab synchronization, and exact-key merge-request
 publication each fail before remote work when their prerequisite is absent.
 The extension never stores a token or creates a second checkout binding.
 
-Git and GitLab operations run as the resolved human root creator. Remote URLs,
-argv, logs, and result documents contain only safe host/project identifiers;
-credentials are supplied to the child process for one command and redacted at
-the boundary. Publication descriptions are file-backed and bounded.
+Git and GitLab operations use the resolved human root creator by default.
+Credential-dependent `git`, `git sync`, and `gitlab mr publish` also accept
+`--member-id USER_ID` to select a different current human in the verified
+workspace. The selection is checked again immediately before credentials are
+delivered or publication begins. It changes only the credential identity; the
+verified checkout, issue, workspace, repository, origin, branch, and host stay
+authoritative. A missing selected credential fails without trying another
+member. Remote URLs, argv, logs, and result documents contain only safe
+host/project and selected-member/source observations; credentials are supplied
+to the child process for one command and redacted at the boundary. Publication
+descriptions are file-backed and bounded.
+
+The bridge resolves credentials through the core encrypted-first resolver and
+the effective user root (`ODCLI_USER_ROOT`, or `~/.odcli`). It does not infer
+`.odcli` mapping or dotenv paths from the project directory. Process environment
+and explicitly supplied legacy mapping paths remain supported; project-local
+credential files are used only when their paths are passed explicitly.
+
+## Native shared-cache reads
+
+The SDK installs `git-credential-odcli`, a thin alias for the existing finite
+Git helper. A daemon generation can use it for native Git cache reads by
+inheriting the exact cache member, HTTPS host, and purpose in its launch
+environment, with Git configuration kept process-local:
+
+```sh
+ODCLI_GITLAB_PURPOSE=cache-read \
+ODCLI_GITLAB_MEMBER_ID="$CACHE_MEMBER_USER_ID" \
+ODCLI_GITLAB_SELECTED_HOST=gitlab.example \
+GIT_CONFIG_COUNT=2 \
+GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1=odcli \
+multica daemon start
+```
+
+The helper requires `get`, HTTPS, and the configured exact host. Cache reads
+resolve only that member and host, verify that the configured login matches
+`/api/v4/user`, then require `/api/v4/personal_access_tokens/self` to report the
+same provider user, `active: true`, and exactly the standard `read_repository`
+scope. Broader, granular, unavailable, or mismatched token information fails
+closed without fallback. No provider ID or token is persisted by this check.
+
+Treat each daemon generation's inherited environment as immutable. To replace
+the cache identity, stop that profile and its Git children, validate the
+candidate through the installed helper with `git credential fill` redirected
+to `/dev/null`, then start the next generation with the replacement
+environment and check its status. Rollback uses the same stop → validate →
+start → status sequence with the prior environment. Do not write the helper or
+member into global/repository Git configuration; task operations continue to
+use their selected member's one-command credential snapshot.
+
+The independent C1–C4 path uses
+`python scripts/e2e_gitlab_member_workflow.py --mode multica-cache` and requires a pre-authenticated, isolated Multica profile
+that is stopped, two clean task checkouts for the same private test repository,
+current member A/B fixtures, and a third current human member with no matching
+GitLab credential. Put fixture tokens only in owner-only user-root storage and
+install the candidate SDK into the helper directory. The runner validates the
+helper through Git, cold-clones the repository, checks automatic and explicit
+member observations, proves the missing-credential operation fails, starts a
+replacement daemon generation, then restarts with the runner's prior process
+environment and checks that replacement inputs are absent. It stops the test
+daemon at cleanup; remove the disposable profile and local cache using the
+profile-specific setup's cleanup procedure.
+
 For `gitlab mr publish`, pass `--issue-url` with the exact HTTPS issue link when
 the Multica client profile has no `server_url`. Git operations use the verified
 checkout root and an installed `odcli-multica-askpass` executable for HTTPS.

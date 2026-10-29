@@ -36,13 +36,18 @@ _SECRET_TEXT: Final[re.Pattern[str]] = re.compile(
     r"(?i)((?:private-token|password|token|authorization)\s*[:=]\s*)[^\s,}]+"
 )
 _SHA: Final[re.Pattern[str]] = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
+_URL: Final[re.Pattern[str]] = re.compile(r"(?:https?://|git@)[^\s,}]+", re.IGNORECASE)
+_UUID: Final[re.Pattern[str]] = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("all", "clone", "commit", "sync", "mr"),
+        choices=("all", "clone", "commit", "sync", "mr", "multica-cache"),
         default="all",
         help="workflow phase to execute (default: all)",
     )
@@ -76,6 +81,27 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repository-independent",
         default=os.environ.get("TEST_REPOSITORY_INDEPENDENT_URL"),
+    )
+    parser.add_argument("--odcli-multica", default="odcli-multica")
+    parser.add_argument("--multica", default="multica")
+    parser.add_argument("--profile", default=os.environ.get("TEST_MULTICA_PROFILE"))
+    parser.add_argument("--helper-dir", type=Path, default=os.environ.get("TEST_GIT_HELPER_DIR"))
+    parser.add_argument("--core-project", type=Path, default=os.environ.get("TEST_CORE_PROJECT"))
+    parser.add_argument("--multica-project", default=os.environ.get("TEST_MULTICA_PROJECT"))
+    parser.add_argument("--workspace-id", default=os.environ.get("TEST_MULTICA_WORKSPACE"))
+    parser.add_argument("--cache-member-id", default=os.environ.get("TEST_GITLAB_CACHE_MEMBER"))
+    parser.add_argument("--member-b", default=os.environ.get("TEST_GITLAB_MEMBER_B"))
+    parser.add_argument("--member-missing", default=os.environ.get("TEST_GITLAB_MEMBER_MISSING"))
+    parser.add_argument("--cache-host", default=os.environ.get("TEST_GITLAB_CACHE_HOST"))
+    parser.add_argument("--issue-a", default=os.environ.get("TEST_MULTICA_ISSUE_A"))
+    parser.add_argument("--run-a", default=os.environ.get("TEST_MULTICA_RUN_A"))
+    parser.add_argument("--issue-b", default=os.environ.get("TEST_MULTICA_ISSUE_B"))
+    parser.add_argument("--run-b", default=os.environ.get("TEST_MULTICA_RUN_B"))
+    parser.add_argument(
+        "--checkout-a", type=Path, default=os.environ.get("TEST_MULTICA_CHECKOUT_A")
+    )
+    parser.add_argument(
+        "--checkout-b", type=Path, default=os.environ.get("TEST_MULTICA_CHECKOUT_B")
     )
     return parser
 
@@ -138,6 +164,8 @@ def _sanitize(text: str, *, secrets: tuple[str, ...] = ()) -> str:
     for secret in secrets:
         text = text.replace(secret, "<redacted>")
     text = _SECRET_TEXT.sub(r"\1<redacted>", text)
+    text = _URL.sub("<repository-url>", text)
+    text = _UUID.sub("<member-id>", text)
     return _SHA.sub("<sha>", text)
 
 
@@ -407,6 +435,323 @@ def _mr(
         raise RuntimeError("MR assets entered tracked/index files")
 
 
+def _profile_status(args: argparse.Namespace) -> dict[str, object]:
+    result = _run([args.multica, "--profile", args.profile, "daemon", "status", "--output", "json"])
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, dict):
+        raise TypeError("isolated daemon status is invalid")
+    return payload
+
+
+def _profile_start(args: argparse.Namespace, environment: dict[str, str]) -> dict[str, object]:
+    _run([args.multica, "--profile", args.profile, "daemon", "start"], env=environment)
+    status = _profile_status(args)
+    if status.get("status") != "running" or status.get("profile") != args.profile:
+        raise RuntimeError("isolated daemon did not become ready")
+    return status
+
+
+def _profile_stop(args: argparse.Namespace) -> None:
+    _run([args.multica, "--profile", args.profile, "daemon", "stop"])
+
+
+def _daemon_environment(status: dict[str, object]) -> dict[str, str]:
+    daemon_pid = status.get("pid")
+    if not isinstance(daemon_pid, int):
+        raise TypeError("isolated daemon process identity is unavailable")
+    try:
+        import psutil
+
+        return psutil.Process(daemon_pid).environ()
+    except Exception as exc:
+        raise RuntimeError("isolated daemon environment could not be verified") from exc
+
+
+def _member_observation(value: object) -> tuple[str, str] | None:
+    if isinstance(value, dict):
+        member_id = value.get("member_id")
+        source = value.get("member_source")
+        if isinstance(member_id, str) and source in {"root_creator", "explicit"}:
+            return member_id, source
+        for child in value.values():
+            found = _member_observation(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _member_observation(child)
+            if found is not None:
+                return found
+    return None
+
+
+def _multica_sync_command(
+    args: argparse.Namespace,
+    *,
+    checkout: Path,
+    issue: str,
+    run_id: str,
+    member_id: str | None,
+    dry_run: bool,
+) -> list[str]:
+    command = [
+        args.odcli_multica,
+        "git",
+        "sync",
+        "--project",
+        str(args.core_project),
+        "--multica-project",
+        args.multica_project,
+        "--issue",
+        issue,
+        "--run",
+        run_id,
+        "--repository-url",
+        args.repository_a,
+        "--profile",
+        args.profile,
+        "--workspace-id",
+        args.workspace_id,
+    ]
+    if member_id is not None:
+        command.extend(("--member-id", normalize_member_id(member_id)))
+    command.extend((str(checkout), "--format", "json"))
+    if dry_run:
+        command.append("--dry-run")
+    return command
+
+
+def _integrated_multica_cache(  # noqa: C901 - this is the single integrated live acceptance path
+    args: argparse.Namespace,
+    root: Path,
+    evidence: list[dict[str, str | int | bool]],
+) -> tuple[str, ...]:
+    required = (
+        args.profile,
+        args.helper_dir,
+        args.core_project,
+        args.multica_project,
+        args.workspace_id,
+        args.cache_member_id,
+        args.member_id,
+        args.member_b,
+        args.member_missing,
+        args.cache_host,
+        args.issue_a,
+        args.run_a,
+        args.issue_b,
+        args.run_b,
+        args.checkout_a,
+        args.checkout_b,
+        args.repository_a,
+    )
+    if any(value is None or value == "" for value in required):
+        raise RuntimeError("multica-cache requires an isolated profile and complete test inputs")
+    cache_member = normalize_member_id(args.cache_member_id)
+    member_a = normalize_member_id(args.member_id)
+    member_b = normalize_member_id(args.member_b)
+    missing_member = normalize_member_id(args.member_missing)
+    checkouts = (args.checkout_a.expanduser().resolve(), args.checkout_b.expanduser().resolve())
+    if checkouts[0] == checkouts[1] or any(not path.is_dir() for path in checkouts):
+        raise RuntimeError("two distinct existing task checkouts are required")
+    for checkout in checkouts:
+        if (checkout / ".odcli" / "gitlab-credentials.toml").exists() or (
+            checkout / ".odcli" / ".env"
+        ).exists():
+            raise RuntimeError("task checkouts must not contain project credential copies")
+        remote = _git(args.git, checkout, "remote", "get-url", "origin")
+        if _repository_identity(remote) != _repository_identity(args.repository_a):
+            raise RuntimeError("task checkout origin does not match the private test repository")
+        if _git(args.git, checkout, "status", "--porcelain=v1", "--untracked-files=all"):
+            raise RuntimeError("task checkouts must start clean")
+    parsed = urlsplit(args.repository_a)
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.hostname
+    ):
+        raise RuntimeError("cache repository must be an HTTPS URL without embedded credentials")
+    expected_host = parsed.hostname.casefold()
+    if parsed.port is not None:
+        expected_host = f"{expected_host}:{parsed.port}"
+    if args.cache_host != expected_host:
+        raise RuntimeError("cache host does not match the private repository authority")
+    initial_status = _profile_status(args)
+    if initial_status.get("profile") != args.profile:
+        raise RuntimeError("Multica returned a different profile")
+    if initial_status.get("status") == "running":
+        raise RuntimeError("the requested isolated Multica profile is already running")
+
+    cache_secrets = _secret_corpus(cache_member)
+    secret_values = tuple(
+        dict.fromkeys((*cache_secrets, *_secret_corpus(member_a), *_secret_corpus(member_b)))
+    )
+    cache_environment = os.environ.copy()
+    cache_environment["PATH"] = (
+        str(args.helper_dir.expanduser().resolve()) + os.pathsep + cache_environment.get("PATH", "")
+    )
+    cache_environment.update(
+        {
+            "ODCLI_GITLAB_PURPOSE": "cache-read",
+            "ODCLI_GITLAB_MEMBER_ID": cache_member,
+            "ODCLI_GITLAB_SELECTED_HOST": args.cache_host,
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "",
+            "GIT_CONFIG_KEY_1": "credential.helper",
+            "GIT_CONFIG_VALUE_1": "odcli",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    prior_environment = os.environ.copy()
+    for key in tuple(prior_environment):
+        if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            prior_environment.pop(key, None)
+    for key in (
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_TERMINAL_PROMPT",
+        "ODCLI_GITLAB_PURPOSE",
+        "ODCLI_GITLAB_MEMBER_ID",
+        "ODCLI_GITLAB_SELECTED_HOST",
+    ):
+        prior_environment.pop(key, None)
+
+    candidate_started = False
+    rollback_started = False
+    try:
+        candidate_started = True
+        candidate_status = _profile_start(args, cache_environment)
+        candidate_process_environment = _daemon_environment(candidate_status)
+        if any(
+            candidate_process_environment.get(key) != cache_environment.get(key)
+            for key in (
+                "ODCLI_GITLAB_PURPOSE",
+                "ODCLI_GITLAB_MEMBER_ID",
+                "ODCLI_GITLAB_SELECTED_HOST",
+                "GIT_CONFIG_VALUE_1",
+            )
+        ):
+            raise RuntimeError("candidate daemon did not inherit cache-read settings")
+        helper = subprocess.run(
+            [args.git, "credential", "fill"],
+            input=f"protocol=https\nhost={args.cache_host}\n\n",
+            env=cache_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        helper_fields = dict(
+            line.partition("=")[::2] for line in helper.stdout.splitlines() if "=" in line
+        )
+        cache_mapping = next(
+            (
+                mapping
+                for mapping in read_gitlab_credential_mappings()
+                if mapping.user_id.casefold() == cache_member.casefold()
+                and mapping.host == args.cache_host
+            ),
+            None,
+        )
+        if (
+            helper.returncode != 0
+            or cache_mapping is None
+            or helper_fields.get("username") != cache_mapping.login
+            or helper_fields.get("password") not in cache_secrets
+        ):
+            raise RuntimeError("installed cache helper rejected the configured account")
+        evidence.append({"case": "C1", "helper_exit": 0, "ok": True})
+
+        _run(
+            [
+                args.git,
+                "clone",
+                "--no-checkout",
+                args.repository_a,
+                str(root / "native-cache-clone"),
+            ],
+            env=cache_environment,
+            secrets=secret_values,
+        )
+        evidence.append({"case": "C1", "cold_clone": True, "ok": True})
+
+        for case, checkout, issue, run_id, selected, expected_id in (
+            ("C2", checkouts[0], args.issue_a, args.run_a, None, member_a),
+            ("C3", checkouts[1], args.issue_b, args.run_b, member_b, member_b),
+        ):
+            preview = _run(
+                _multica_sync_command(
+                    args,
+                    checkout=checkout,
+                    issue=issue,
+                    run_id=run_id,
+                    member_id=selected,
+                    dry_run=True,
+                ),
+                env=prior_environment,
+                secrets=secret_values,
+            )
+            observation = _member_observation(json.loads(preview.stdout))
+            expected_source = "root_creator" if selected is None else "explicit"
+            if observation != (expected_id, expected_source):
+                raise RuntimeError(f"{case} selected-member observation is incorrect")
+            _run(
+                _multica_sync_command(
+                    args,
+                    checkout=checkout,
+                    issue=issue,
+                    run_id=run_id,
+                    member_id=selected,
+                    dry_run=False,
+                ),
+                env=prior_environment,
+                secrets=secret_values,
+            )
+            evidence.append({"case": case, "sync": True, "ok": True})
+
+        failed = subprocess.run(
+            _multica_sync_command(
+                args,
+                checkout=checkouts[1],
+                issue=args.issue_b,
+                run_id=args.run_b,
+                member_id=missing_member,
+                dry_run=False,
+            ),
+            env=prior_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        failure_text = failed.stdout + failed.stderr
+        if failed.returncode == 0 or any(
+            secret and secret in failure_text for secret in secret_values
+        ):
+            raise RuntimeError("missing selected credentials did not fail safely")
+        evidence.append({"case": "C3", "missing_member_failed": True, "ok": True})
+
+        _profile_stop(args)
+        candidate_started = False
+        rollback_started = True
+        status = _profile_start(args, prior_environment)
+        inherited = _daemon_environment(status)
+        replacement = (
+            "ODCLI_GITLAB_PURPOSE",
+            "ODCLI_GITLAB_MEMBER_ID",
+            "ODCLI_GITLAB_SELECTED_HOST",
+            "GIT_CONFIG_VALUE_1",
+        )
+        if any(inherited.get(key) == cache_environment.get(key) for key in replacement):
+            raise RuntimeError("rollback daemon inherited replacement cache settings")
+        evidence.append({"case": "C4", "rollback_started": True, "ok": True})
+    finally:
+        if candidate_started or rollback_started:
+            _profile_stop(args)
+    return secret_values
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     secrets: tuple[str, ...] = ()
@@ -418,43 +763,46 @@ def main(argv: list[str] | None = None) -> int:
     root.mkdir(parents=True, exist_ok=True)
     evidence: list[dict[str, str | int | bool]] = []
     try:
-        member = _selected_member(args)
-        secrets = _secret_corpus(member)
-        checkouts = _clone(args, root, evidence, secrets)
-        if args.mode in {"all", "commit"}:
-            for role in ("A", "B/ours", "Independent"):
-                _commit(
-                    args,
-                    checkouts[role],
-                    member,
-                    label=role.replace("/", "-"),
-                    ticket=args.ticket_a if role == "A" else None,
-                    evidence=evidence,
-                    secrets=secrets,
+        if args.mode == "multica-cache":
+            secrets = _integrated_multica_cache(args, root, evidence)
+        else:
+            member = _selected_member(args)
+            secrets = _secret_corpus(member)
+            checkouts = _clone(args, root, evidence, secrets)
+            if args.mode in {"all", "commit"}:
+                for role in ("A", "B/ours", "Independent"):
+                    _commit(
+                        args,
+                        checkouts[role],
+                        member,
+                        label=role.replace("/", "-"),
+                        ticket=args.ticket_a if role == "A" else None,
+                        evidence=evidence,
+                        secrets=secrets,
+                    )
+            if args.mode in {"all", "sync"}:
+                parent_gitlink_before = _git(
+                    args.git, checkouts["B"], "ls-files", "-s", secrets=secrets
                 )
-        if args.mode in {"all", "sync"}:
-            parent_gitlink_before = _git(
-                args.git, checkouts["B"], "ls-files", "-s", secrets=secrets
-            )
-            _sync(args, checkouts["A"], member, evidence, secrets, publish=True)
-            _sync(args, checkouts["B/ours"], member, evidence, secrets, publish=True)
-            _sync(args, checkouts["Independent"], member, evidence, secrets, publish=True)
-            _sync(args, checkouts["B"], member, evidence, secrets, publish=False)
-            _require(
-                _git(args.git, checkouts["B"], "ls-files", "-s", secrets=secrets)
-                == parent_gitlink_before,
-                "recursive sync changed the B superproject gitlink",
-            )
-        if args.mode in {"all", "mr"}:
-            for role in ("A", "B/ours"):
-                _mr(
-                    args,
-                    checkouts[role],
-                    member,
-                    label=role.replace("/", "-"),
-                    evidence=evidence,
-                    secrets=secrets,
+                _sync(args, checkouts["A"], member, evidence, secrets, publish=True)
+                _sync(args, checkouts["B/ours"], member, evidence, secrets, publish=True)
+                _sync(args, checkouts["Independent"], member, evidence, secrets, publish=True)
+                _sync(args, checkouts["B"], member, evidence, secrets, publish=False)
+                _require(
+                    _git(args.git, checkouts["B"], "ls-files", "-s", secrets=secrets)
+                    == parent_gitlink_before,
+                    "recursive sync changed the B superproject gitlink",
                 )
+            if args.mode in {"all", "mr"}:
+                for role in ("A", "B/ours"):
+                    _mr(
+                        args,
+                        checkouts[role],
+                        member,
+                        label=role.replace("/", "-"),
+                        evidence=evidence,
+                        secrets=secrets,
+                    )
     except (OSError, RuntimeError, ValueError) as exc:
         print(
             json.dumps(
@@ -468,10 +816,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     else:
-        product_shas = {
-            role: _git(args.git, checkout, "rev-parse", "HEAD", secrets=secrets)
-            for role, checkout in checkouts.items()
-        }
+        product_shas = (
+            {
+                "task_a": _git(
+                    args.git,
+                    args.checkout_a.expanduser().resolve(),
+                    "rev-parse",
+                    "HEAD",
+                    secrets=secrets,
+                ),
+                "task_b": _git(
+                    args.git,
+                    args.checkout_b.expanduser().resolve(),
+                    "rev-parse",
+                    "HEAD",
+                    secrets=secrets,
+                ),
+            }
+            if args.mode == "multica-cache"
+            else {
+                role: _git(args.git, checkout, "rev-parse", "HEAD", secrets=secrets)
+                for role, checkout in checkouts.items()
+            }
+        )
         print(
             json.dumps(
                 {

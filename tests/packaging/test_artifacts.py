@@ -61,15 +61,25 @@ def test_wheel_contains_package_typed_marker_and_odcli() -> None:
     assert any("odoo_instance_sdk/web/dist/assets/" in n for n in names)
     assert "odcli = odoo_instance_sdk.cli:cli" in entry
     assert "odcli-git-askpass = odoo_instance_sdk.internal.git_askpass:main" in entry
+    assert "git-credential-odcli = odoo_instance_sdk.internal.git_credential_helper:main" in entry
 
 
 def test_sdist_contains_package() -> None:
     _wheel, sdist = _dist()
     with tarfile.open(sdist) as tf:
         names = tf.getnames()
+        project_file = tf.extractfile(
+            next(name for name in names if name.endswith("/pyproject.toml"))
+        )
+        assert project_file is not None
+        project_config = project_file.read().decode("utf-8")
     assert any("src/odoo_instance_sdk" in name for name in names)
     assert any(name.endswith("src/odoo_instance_sdk/web/dist/index.html") for name in names)
     assert any("src/odoo_instance_sdk/web/dist/assets/" in name for name in names)
+    assert (
+        'git-credential-odcli = "odoo_instance_sdk.internal.git_credential_helper:main"'
+        in project_config
+    )
 
 
 def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
@@ -79,6 +89,9 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
     subprocess.run(["uv", "venv", "--python", sys.executable, str(venv)], check=True, cwd=tmp_path)
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     odcli = venv / ("Scripts/odcli.exe" if os.name == "nt" else "bin/odcli")
+    git_credential = venv / (
+        "Scripts/git-credential-odcli.exe" if os.name == "nt" else "bin/git-credential-odcli"
+    )
     subprocess.run(
         ["uv", "pip", "install", "--python", str(python), str(artifact)],
         check=True,
@@ -95,6 +108,18 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
     )
     assert "odoo_instance_sdk" in imported.stdout
     assert str(_REPO) not in imported.stdout
+    assert git_credential.is_file()
+    helper_result = subprocess.run(
+        [str(git_credential), "get"],
+        input="protocol=https\nhost=gitlab.example\n\n",
+        cwd=empty,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert helper_result.returncode != 0
+    assert helper_result.stdout == ""
     help_result = subprocess.run(
         [str(odcli), "--help"],
         cwd=empty,

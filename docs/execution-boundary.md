@@ -180,6 +180,19 @@ tokens, askpass paths, authorization values, and secret-derived fingerprints;
 submodule hosts must each have an exact mapping for that same member. MR image
 uploads are action steps and their digest marker is kept outside Git.
 
+The installed `git-credential-odcli` alias serves native cache reads only when
+the daemon generation supplies an exact host, member, and `cache-read` purpose.
+It checks `/api/v4/user` ownership against one
+`/api/v4/personal_access_tokens/self` response and accepts only an active token
+with the exact standard `read_repository` scope. The helper has bounded `get`
+parsing and does not fall back to another member. Daemon generations keep this
+configuration in their launch environment; replacement and rollback use the
+existing stop → one-shot validate → start → status lifecycle. The Multica
+bridge accepts optional `member_id` for current human workspace members on
+raw Git, sync, and MR publication, and revalidates the selection before
+credential delivery. Without an explicit selection it keeps root-creator
+behavior. Its resolver does not infer project-local credential defaults.
+
 Resource inventory and doctor are observation-only projections. They report
 logical versus measured bytes, ownership confidence, retained data, and
 incomplete probes, but never turn an observation into a lifecycle mutation.

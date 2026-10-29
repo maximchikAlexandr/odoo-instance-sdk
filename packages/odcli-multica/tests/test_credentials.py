@@ -66,9 +66,24 @@ def _context(issue_id: str = "child", *, root_creator_id: str | None = None) -> 
     )
 
 
-def _client(*issues: Issue, other_workspace: str = "different-workspace") -> MulticaOdooClient:
+def _client(
+    *issues: Issue,
+    other_workspace: str = "different-workspace",
+    workspace_members: tuple[SimpleNamespace, ...] = (),
+) -> MulticaOdooClient:
     client = object.__new__(MulticaOdooClient)
-    client.multica = SimpleNamespace(issues=_Issues(issues), projects=_Projects(other_workspace))
+    member_page = SimpleNamespace(
+        items=workspace_members,
+        has_more=False,
+        next_cursor=None,
+        offset=0,
+        total=len(workspace_members),
+    )
+    client.multica = SimpleNamespace(
+        issues=_Issues(issues),
+        projects=_Projects(other_workspace),
+        workspaces=SimpleNamespace(members=lambda _workspace: member_page),
+    )
     client._compatibility = MulticaCompatibility(
         package_version="0.1.0",
         package_revision="c1842ae2dfcd0cc5e739b7785d3209d5e72d01ed",
@@ -349,6 +364,126 @@ def test_credential_mapping_uses_process_precedence_and_redacts_token(tmp_path: 
     assert credential.child_environment()["GITLAB_TOKEN"] == "process-token"
     assert "process-token" not in repr(credential)
     assert "process-token" not in repr(credential.identity)
+
+
+def test_explicit_current_human_member_uses_own_credential(tmp_path: Path) -> None:
+    root_member = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    selected_member = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=root_member, creator_type="member"
+    )
+    mapping = tmp_path / "credentials.toml"
+    mapping.write_text(
+        f'[[mappings]]\nuser_id = "{selected_member}"\nhost = "gitlab.example"\n'
+        'login = "selected"\ntoken_key = "ODCLI_GITLAB_TOKEN_SELECTED"\n',
+        encoding="utf-8",
+    )
+    mapping.chmod(0o600)
+    members = (SimpleNamespace(id="membership-row", user_id=selected_member),)
+    client = _client(root, workspace_members=members)
+
+    credential = client._resolve_credentials(
+        _context("root"),
+        host="gitlab.example",
+        project_root=tmp_path,
+        mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_SELECTED": "selected-token"},
+        member_id=selected_member,
+    )
+
+    assert credential.identity.user_id == selected_member
+    assert credential.identity.login == "selected"
+    assert credential.child_environment()["GITLAB_TOKEN"] == "selected-token"
+    selected = client._resolve_selected_member(_context("root"), selected_member)
+    assert (selected.member_id, selected.source, selected.root_creator_id) == (
+        selected_member,
+        "explicit",
+        root_member,
+    )
+
+
+@pytest.mark.parametrize(
+    ("members", "incomplete", "message"),
+    [
+        ((), False, "current human workspace member"),
+        (
+            (SimpleNamespace(id="membership-row", user_id=None),),
+            False,
+            "current human workspace member",
+        ),
+        (
+            (SimpleNamespace(id="membership-row", user_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),),
+            True,
+            "incomplete",
+        ),
+    ],
+)
+def test_explicit_member_requires_current_complete_human_membership(
+    members: tuple[SimpleNamespace, ...], incomplete: bool, message: str
+) -> None:
+    root_member = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    selected_member = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=root_member, creator_type="member"
+    )
+    client = _client(root, workspace_members=members)
+    if incomplete:
+        client.multica.workspaces.members = lambda _workspace: SimpleNamespace(
+            items=members, has_more=True, next_cursor=None, offset=0, total=2
+        )
+
+    with pytest.raises(ContextVerificationError, match=message):
+        client._resolve_selected_member(_context("root"), selected_member)
+
+
+def test_bridge_uses_user_root_and_ignores_project_credential_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.gitlab_credentials import ensure_credential_directory
+
+    member_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    root = Issue(
+        "root", "Root", "todo", project_id="project", creator_id=member_id, creator_type="member"
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.gitlab_credentials.get_user_root",
+        lambda *, ensure_exists=True: tmp_path,
+    )
+    user_credentials = ensure_credential_directory(tmp_path)
+    (user_credentials / "gitlab-credentials.toml").write_text(
+        f'[[mappings]]\nuser_id = "{member_id}"\nhost = "gitlab.example"\n'
+        'login = "user-root"\ntoken_key = "ODCLI_GITLAB_TOKEN_ROOT"\n',
+        encoding="utf-8",
+    )
+    (user_credentials / "gitlab-credentials.toml").chmod(0o600)
+    (user_credentials / ".env").write_text(
+        "ODCLI_GITLAB_TOKEN_ROOT=user-root-token\n", encoding="utf-8"
+    )
+    (user_credentials / ".env").chmod(0o600)
+    project = tmp_path / "project"
+    project_credentials = project / ".odcli"
+    project_credentials.mkdir(parents=True)
+    (project_credentials / "gitlab-credentials.toml").write_text(
+        f'[[mappings]]\nuser_id = "{member_id}"\nhost = "gitlab.example"\n'
+        'login = "project-copy"\ntoken_key = "ODCLI_GITLAB_TOKEN_PROJECT"\n',
+        encoding="utf-8",
+    )
+    (project_credentials / "gitlab-credentials.toml").chmod(0o600)
+    (project_credentials / ".env").write_text(
+        "ODCLI_GITLAB_TOKEN_PROJECT=project-copy-token\n", encoding="utf-8"
+    )
+    (project_credentials / ".env").chmod(0o600)
+
+    credential = _client(root)._resolve_credentials(
+        _context("root"),
+        host="gitlab.example",
+        project_root=project,
+        mapping_path=None,
+        process_environment={},
+    )
+
+    assert credential.identity.login == "user-root"
+    assert credential.child_environment()["GITLAB_TOKEN"] == "user-root-token"
 
 
 def test_mapping_reader_rejects_duplicate_host_and_bad_token_key(tmp_path: Path) -> None:
