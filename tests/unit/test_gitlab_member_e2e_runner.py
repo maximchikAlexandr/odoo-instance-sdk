@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from argparse import Namespace
 from pathlib import Path
@@ -38,7 +39,7 @@ def test_installed_helper_provenance_rejects_escaped_launcher_symlink(
     foreign_helper.chmod(0o700)
     (helper_dir / "git-credential-odcli").symlink_to(foreign_helper)
     monkeypatch.setattr(
-        cache.shutil, "which", lambda *_args, **_kwargs: str(helper_dir / "git-credential-odcli")
+        shutil, "which", lambda *_args, **_kwargs: str(helper_dir / "git-credential-odcli")
     )
 
     with pytest.raises(RuntimeError, match="escapes its owned installation"):
@@ -58,6 +59,9 @@ def test_installed_helper_provenance_rejects_stale_package_sources(
     helper_dir = Path(sys.executable).parent
     package = importlib.import_module("odoo_instance_sdk")
     helper_module = importlib.import_module("odoo_instance_sdk.internal.git_credential_helper")
+    assert package.__file__ is not None
+    assert helper_module.__file__ is not None
+    assert sys.executable is not None
     stale_metadata = {
         "executable": sys.executable,
         "prefix": sys.prefix,
@@ -67,7 +71,7 @@ def test_installed_helper_provenance_rejects_stale_package_sources(
         "entry_points": ["odoo_instance_sdk.internal.git_credential_helper:main"],
     }
     monkeypatch.setattr(
-        cache.subprocess,
+        subprocess,
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(stale_metadata)),
     )
@@ -123,7 +127,6 @@ def test_cache_generation_stops_validates_starts_and_checks_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     args = Namespace(multica="multica", profile="isolated")
-    calls: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
     events: list[str] = []
 
     responses = iter(
@@ -173,12 +176,12 @@ def test_cache_generation_stops_validates_starts_and_checks_status(
     )
 
     assert events == ["stop", "validate-installed-helper", "start", "status"]
-    calls = run_mock.call_args_list
-    assert [tuple(call.args[0]) for call in calls] == [
+    invocations = run_mock.call_args_list
+    assert [tuple(invocation.args[0]) for invocation in invocations] == [
         ("multica", "--profile", "isolated", "daemon", "start"),
         ("multica", "--profile", "isolated", "daemon", "status", "--output", "json"),
     ]
-    start_environment = calls[0].kwargs["env"]
+    start_environment = invocations[0].kwargs["env"]
     assert "MULTICA_TOKEN" not in start_environment
     assert "MULTICA_DAEMON_PORT" not in start_environment
     assert status["status"] == "running"
@@ -360,7 +363,6 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
     monkeypatch.setenv("MULTICA_TASK_ID", "task-fixture")
     monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-fixture")
     monkeypatch.chdir(tmp_path)
-    calls: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
     args = Namespace(
         multica="multica",
         git="git",
@@ -413,12 +415,12 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
         ("secret-fixture",),
         daemon_status,
     )
-    calls = [
+    recorded_calls: list[tuple[list[str], Path | None, dict[str, str] | None]] = [
         (list(call.args[0]), call.kwargs.get("cwd"), call.kwargs.get("env"))
         for call in run_mock.call_args_list
     ]
 
-    checkout_calls = [call for call in calls if call[0][1:3] != ["daemon", "status"]]
+    checkout_calls = [call for call in recorded_calls if call[0][1:3] != ["daemon", "status"]]
     assert len(checkout_calls) == 1
     argv, cwd, environment = checkout_calls[0]
     assert argv == ["multica", "repo", "checkout", args.repository_a]
@@ -428,7 +430,7 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
     assert environment["MULTICA_TOKEN"] == "task-token-fixture"
     assert environment["MULTICA_TASK_ID"] == "task-fixture"
     assert environment["MULTICA_WORKSPACE_ID"] == "workspace-fixture"
-    status_calls = [call for call in calls if call[0][1:3] == ["daemon", "status"]]
+    status_calls = [call for call in recorded_calls if call[0][1:3] == ["daemon", "status"]]
     assert len(status_calls) == 2
     assert all(
         call[0] == ["multica", "daemon", "status", "--output", "json"] for call in status_calls
@@ -436,6 +438,7 @@ def test_native_checkout_uses_the_public_daemon_repo_checkout(
     assert all(call[2] is not None for call in status_calls)
     assert all(call[2]["MULTICA_DAEMON_PORT"] == "41001" for call in status_calls if call[2])
     assert all(call[2]["MULTICA_TOKEN"] == "task-token-fixture" for call in status_calls if call[2])
+    assert profile_status_mock.call_count == 2
 
 
 @pytest.mark.unit
