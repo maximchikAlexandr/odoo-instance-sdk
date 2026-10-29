@@ -1513,18 +1513,23 @@ def _patch_leaf_external(  # noqa: C901
 
     if path == ("env", "show"):
 
+        def resolve_catalogue(selector: str | None, *, cwd: Path) -> tuple[str, str]:
+            assert selector == "env-1"
+            assert cwd == Path.cwd()
+            return "env-1", "project-1"
+
         class FakeMonitor:
-            def snapshot(self) -> Snapshot:
-                return Snapshot(
-                    schema_version=3,
-                    generated_at=datetime(2020, 1, 1, tzinfo=UTC),
-                    projects=(),
-                    environments=(),
-                )
+            def snapshot(self, *, project_id: str | None = None) -> SimpleNamespace:
+                assert project_id == "project-1"
+                return SimpleNamespace(generated_at=datetime(2020, 1, 1, tzinfo=UTC))
 
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.checkout.EnvironmentMonitor",
             FakeMonitor,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.checkout._resolve_env_show_catalogue",
+            resolve_catalogue,
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.checkout.select_snapshot_environment",
