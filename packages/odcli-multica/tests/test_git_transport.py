@@ -200,6 +200,7 @@ def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Pat
         git_resource=remote_git,
         project_root=project,
         mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "secret-token"},
     ).run()
     environment = remote_git.passthrough_calls[0][1]["environment"]
     assert environment["GITLAB_LOGIN"] == "root-login"
@@ -216,6 +217,7 @@ def test_git_passthrough_and_sync_scope_https_credentials_to_child(tmp_path: Pat
         git_resource=sync_git,
         project_root=project,
         mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "secret-token"},
     ).run()
     sync_environment = sync_git.sync_calls[0]["environment"]
     assert sync_environment["GITLAB_LOGIN"] == environment["GITLAB_LOGIN"]
@@ -361,6 +363,7 @@ def test_credentialed_git_rechecks_origin_at_execution(tmp_path: Path) -> None:
         git_resource=git,
         project_root=project,
         mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "secret-token"},
     )
     subprocess.run(
         [
@@ -406,6 +409,7 @@ def test_credentialed_git_uses_hermetic_environment_and_disables_hooks(
         git_resource=git,
         project_root=project,
         mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "secret-token"},
     ).run()
 
     call = git.passthrough_calls[0][1]
@@ -481,6 +485,7 @@ def test_never_run_credentialed_command_does_not_create_channel(
         git_resource=git,
         project_root=project,
         mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "secret-token"},
     )
 
     assert command.plan.steps
@@ -528,6 +533,7 @@ def test_credential_channel_is_removed_when_child_construction_fails(
             git_resource=FailingGit(),
             project_root=project,
             mapping_path=mapping,
+            process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "secret-token"},
         ).run()
 
     assert not channel.exists()
@@ -812,6 +818,7 @@ def test_project_legacy_credential_fallback_accepts_existing_0755_directory(
         git_resource=git,
         project_root=project,
         mapping_path=mapping,
+        process_environment={"ODCLI_GITLAB_TOKEN_ROOT": "legacy-token"},
     ).run()
 
     assert credential_dir.stat().st_mode & 0o777 == 0o755
@@ -821,7 +828,7 @@ def test_project_legacy_credential_fallback_accepts_existing_0755_directory(
 
 def _dotenv_token_case(monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.delenv("ODCLI_GITLAB_TOKEN_ROOT", raising=False)
-    return "dotenv-token"
+    return "user-root-token"
 
 
 def _process_override_case(monkeypatch: pytest.MonkeyPatch) -> str:
@@ -832,9 +839,9 @@ def _process_override_case(monkeypatch: pytest.MonkeyPatch) -> str:
 @pytest.mark.parametrize(
     "credential_case",
     [_dotenv_token_case, _process_override_case],
-    ids=["project-dotenv", "process-overrides-dotenv"],
+    ids=["user-root-dotenv", "process-overrides-user-root"],
 )
-def test_external_legacy_mapping_in_0755_parent_keeps_project_and_process_precedence(
+def test_external_legacy_mapping_in_0755_parent_keeps_user_root_and_process_precedence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     credential_case: Callable[[pytest.MonkeyPatch], str],
@@ -845,6 +852,15 @@ def test_external_legacy_mapping_in_0755_parent_keeps_project_and_process_preced
     project_config.chmod(0o700)
     (project_config / ".env").write_text("ODCLI_GITLAB_TOKEN_ROOT=dotenv-token\n", encoding="utf-8")
     (project_config / ".env").chmod(0o600)
+    user_root = tmp_path / "user-root"
+    user_root.mkdir(mode=0o700)
+    user_root.chmod(0o700)
+    (user_root / ".env").write_text("ODCLI_GITLAB_TOKEN_ROOT=user-root-token\n", encoding="utf-8")
+    (user_root / ".env").chmod(0o600)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.gitlab_credentials.get_user_root",
+        lambda *, ensure_exists=True: user_root,
+    )
     mapping_parent = tmp_path / "external-mapping"
     mapping_parent.mkdir()
     mapping_parent.chmod(0o755)
