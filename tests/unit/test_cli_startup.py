@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,12 @@ print(json.dumps({name: name in sys.modules for name in (
     'odoo_instance_sdk.resources.monitor',
     'odoo_instance_sdk.execution',
     'odoo_instance_sdk.internal.proc',
+    'odoo_instance_sdk.internal.dbprep.source',
+    'odoo_instance_sdk.internal.dbprep.source_restore',
+    'odoo_instance_sdk.internal.dbreplace.planning',
+    'odoo_instance_sdk.internal.pg.drop',
+    'alembic',
+    'sqlalchemy',
     'expression',
     'httpx',
 )}))
@@ -55,6 +62,12 @@ print(json.dumps({name: name in sys.modules for name in (
         "odoo_instance_sdk.resources.monitor": False,
         "odoo_instance_sdk.execution": False,
         "odoo_instance_sdk.internal.proc": False,
+        "odoo_instance_sdk.internal.dbprep.source": False,
+        "odoo_instance_sdk.internal.dbprep.source_restore": False,
+        "odoo_instance_sdk.internal.dbreplace.planning": False,
+        "odoo_instance_sdk.internal.pg.drop": False,
+        "alembic": False,
+        "sqlalchemy": False,
         "expression": False,
         "httpx": False,
     }
@@ -86,6 +99,12 @@ print('BOUNDARY=' + json.dumps({name: name in sys.modules for name in (
     'odoo_instance_sdk.resources.monitor',
     'odoo_instance_sdk.execution',
     'odoo_instance_sdk.internal.proc',
+    'odoo_instance_sdk.internal.dbprep.source',
+    'odoo_instance_sdk.internal.dbprep.source_restore',
+    'odoo_instance_sdk.internal.dbreplace.planning',
+    'odoo_instance_sdk.internal.pg.drop',
+    'alembic',
+    'sqlalchemy',
     'expression',
 )}))
 raise SystemExit(exit_code)
@@ -98,6 +117,12 @@ raise SystemExit(exit_code)
     assert result.returncode == 0, result.stderr
     assert expected_output in output
     assert boundary["odoo_instance_sdk.resources.monitor"] is False
+    assert boundary["odoo_instance_sdk.internal.dbprep.source"] is False
+    assert boundary["odoo_instance_sdk.internal.dbprep.source_restore"] is False
+    assert boundary["odoo_instance_sdk.internal.dbreplace.planning"] is False
+    assert boundary["odoo_instance_sdk.internal.pg.drop"] is False
+    assert boundary["alembic"] is False
+    assert boundary["sqlalchemy"] is False
     assert boundary["expression"] is False
     if option == "--version":
         assert boundary == {
@@ -105,8 +130,38 @@ raise SystemExit(exit_code)
             "odoo_instance_sdk.resources.monitor": False,
             "odoo_instance_sdk.execution": True,
             "odoo_instance_sdk.internal.proc": True,
+            "odoo_instance_sdk.internal.dbprep.source": False,
+            "odoo_instance_sdk.internal.dbprep.source_restore": False,
+            "odoo_instance_sdk.internal.dbreplace.planning": False,
+            "odoo_instance_sdk.internal.pg.drop": False,
+            "alembic": False,
+            "sqlalchemy": False,
             "expression": False,
         }
+
+
+def test_installed_executable_metadata_startup_is_measured_outside_checkout(
+    tmp_path: Path,
+) -> None:
+    executable = Path(sys.executable).with_name("odcli")
+    if not executable.is_file():
+        pytest.skip("installed odcli executable is unavailable in this interpreter")
+
+    for option in ("--help", "--version"):
+        for run_number in (1, 2):
+            started = time.perf_counter()
+            result = subprocess.run(
+                [str(executable), option],
+                cwd=tmp_path,
+                env=_clean_environment(),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            elapsed = time.perf_counter() - started
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip()
+            print(f"INSTALLED_STARTUP {option} run={run_number} elapsed_seconds={elapsed:.6f}")
 
 
 def test_postgres_command_registration_keeps_resource_transport_lazy(tmp_path: Path) -> None:
@@ -129,9 +184,9 @@ print(json.dumps({name: name in sys.modules for name in (
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
         "odoo_instance_sdk.commands.pg": True,
-        "odoo_instance_sdk.resources.postgres": True,
-        "odoo_instance_sdk.internal.pg.transport": True,
-        "odoo_instance_sdk.internal.proc": True,
+        "odoo_instance_sdk.resources.postgres": False,
+        "odoo_instance_sdk.internal.pg.transport": False,
+        "odoo_instance_sdk.internal.proc": False,
     }
 
 
