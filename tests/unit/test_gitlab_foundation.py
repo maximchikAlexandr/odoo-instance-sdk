@@ -291,8 +291,10 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
     explicit_env.chmod(0o600)
     target = explicit_env if explicit else project_env
+    attacker = tmp_path / "attacker.env"
+    attacker.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+    attacker.chmod(0o600)
     original_open = os.open
-    swapped = False
 
     def replace_before_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -301,12 +303,8 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
         *,
         dir_fd: int | None = None,
     ) -> int:
-        nonlocal swapped
-        if path == target and dir_fd is None and not swapped:
-            target.rename(target.with_name(f"{target.name}.original"))
-            target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-            target.chmod(0o600)
-            swapped = True
+        target.unlink()
+        target.symlink_to(attacker)
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "O_NOFOLLOW", 0)
@@ -315,7 +313,7 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     with pytest.raises(ProjectEnvironmentError) as failure:
         load_environment_file(target)
 
-    assert swapped
+    assert target.is_symlink()
     assert "attacker-token" not in str(failure.value)
 
 
