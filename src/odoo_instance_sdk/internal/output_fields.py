@@ -234,6 +234,7 @@ def output_options(
             "output_format",
             type=click.Choice(["rich", "json", "toon"], case_sensitive=True),
             default=None,
+            is_eager=True,
             help="Output format (default: rich).",
         )(command)
         if schema is not None:
@@ -269,6 +270,7 @@ def output_options(
         "output_format",
         type=click.Choice(["rich", "json", "toon"], case_sensitive=True),
         default=None,
+        is_eager=True,
         help="Output format (default: rich).",
     )(compose)
     if schema is not None:

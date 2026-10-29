@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -93,6 +94,36 @@ def _assert_local_archive_source(source: object) -> None:
     assert getattr(source, "path") == "backup.zip"
 
 
+def _assert_rich_usage(result: Any, diagnostic: str) -> None:
+    assert result.stderr
+    assert result.stdout == ""
+    assert diagnostic in result.stderr
+
+
+def _assert_json_usage(result: Any, diagnostic: str) -> None:
+    assert result.stderr == ""
+    assert diagnostic in result.stdout
+    assert json.loads(result.stdout)["error"]["code"] == "usage_error"
+
+
+def _assert_toon_usage(result: Any, diagnostic: str) -> None:
+    from toon import DecodeOptions, decode
+
+    assert result.stderr == ""
+    assert diagnostic in result.stdout
+    assert (
+        decode(result.stdout, DecodeOptions(indent=2, strict=True))["error"]["code"]
+        == "usage_error"
+    )
+
+
+_USAGE_FORMATS = (
+    pytest.param((), _assert_rich_usage, id="rich"),
+    pytest.param(("--format", "json"), _assert_json_usage, id="json"),
+    pytest.param(("--format", "toon"), _assert_toon_usage, id="toon"),
+)
+
+
 @pytest.mark.parametrize(
     ("source_args", "assert_source"),
     [
@@ -134,25 +165,30 @@ def test_restore_delegates_valid_source_selection(
 
 
 @pytest.mark.parametrize(
-    ("source_args", "error_text"),
+    ("source_args", "error_text", "output_args", "assert_usage"),
     [
         pytest.param(
-            ["00000000-0000-0000-0000-000000000007", "--file", "backup.zip"],
-            "exactly one",
-            id="both",
-        ),
-        pytest.param([], "exactly one", id="neither"),
-        pytest.param(
-            ["--file", "backup.zip", "--replace"],
-            "only available",
-            id="file-replace",
-        ),
+            source_args, error_text, output_args, assert_usage, id=f"{source_id}-{format_case.id}"
+        )
+        for source_id, source_args, error_text in (
+            (
+                "both",
+                ["00000000-0000-0000-0000-000000000007", "--file", "backup.zip"],
+                "exactly one",
+            ),
+            ("neither", [], "exactly one"),
+            ("file-replace", ["--file", "backup.zip", "--replace"], "only available"),
+        )
+        for format_case in _USAGE_FORMATS
+        for output_args, assert_usage in (format_case.values,)
     ],
 )
 def test_restore_rejects_invalid_source_selection_before_context_access(
     monkeypatch: pytest.MonkeyPatch,
     source_args: list[str],
     error_text: str,
+    output_args: tuple[str, ...],
+    assert_usage: Callable[[Any, str], None],
 ) -> None:
     client = MagicMock()
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
@@ -163,16 +199,22 @@ def test_restore_rejects_invalid_source_selection_before_context_access(
 
     result = CliRunner().invoke(
         cli,
-        ["db", "restore", *source_args, "--dry-run", "--format", "json"],
+        ["db", "restore", *source_args, "--dry-run", *output_args],
     )
 
     assert result.exit_code == 2, result.output
-    assert error_text in result.stderr
+    assert_usage(result, error_text)
     client.environments.refresh_database_command.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("output_args", "assert_usage"),
+    [pytest.param(*format_case.values, id=format_case.id) for format_case in _USAGE_FORMATS],
+)
 def test_restore_replace_rejects_target_before_environment_resolution(
     monkeypatch: pytest.MonkeyPatch,
+    output_args: tuple[str, ...],
+    assert_usage: Callable[[Any, str], None],
 ) -> None:
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.resolve_environment",
@@ -189,13 +231,12 @@ def test_restore_replace_rejects_target_before_environment_resolution(
             "--target",
             "recorded_copy",
             "--yes",
-            "--format",
-            "json",
+            *output_args,
         ],
     )
 
     assert result.exit_code == 2
-    assert "cannot be combined" in result.stderr
+    assert_usage(result, "cannot be combined")
 
 
 def test_restore_machine_confirmation_precedes_project_or_catalogue_access(
@@ -374,9 +415,14 @@ def test_refresh_reset_option_is_click_usage_error_before_sdk_invocation(
     client.environments.refresh_database.assert_not_called()
 
 
-@pytest.mark.parametrize("format_args", [["--format", "json"], ["--format", "toon"]])
+@pytest.mark.parametrize(
+    ("format_args", "assert_usage"),
+    [pytest.param(*format_case.values, id=format_case.id) for format_case in _USAGE_FORMATS[1:]],
+)
 def test_refresh_show_command_output_is_rich_only_before_sdk_work(
-    monkeypatch: pytest.MonkeyPatch, format_args: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    format_args: tuple[str, ...],
+    assert_usage: Callable[[Any, str], None],
 ) -> None:
     client = MagicMock()
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
@@ -390,7 +436,7 @@ def test_refresh_show_command_output_is_rich_only_before_sdk_work(
     )
 
     assert result.exit_code == 2
-    assert "only available with Rich output" in result.stderr
+    assert_usage(result, "only available with Rich output")
     client.environments.refresh_database_command.assert_not_called()
 
 

@@ -1513,18 +1513,23 @@ def _patch_leaf_external(  # noqa: C901
 
     if path == ("env", "show"):
 
+        def resolve_catalogue(selector: str | None, *, cwd: Path) -> tuple[str, str]:
+            assert selector == "env-1"
+            assert cwd == Path.cwd()
+            return "env-1", "project-1"
+
         class FakeMonitor:
-            def snapshot(self) -> Snapshot:
-                return Snapshot(
-                    schema_version=3,
-                    generated_at=datetime(2020, 1, 1, tzinfo=UTC),
-                    projects=(),
-                    environments=(),
-                )
+            def snapshot(self, *, project_id: str | None = None) -> SimpleNamespace:
+                assert project_id == "project-1"
+                return SimpleNamespace(generated_at=datetime(2020, 1, 1, tzinfo=UTC))
 
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.checkout.EnvironmentMonitor",
             FakeMonitor,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.checkout._resolve_env_show_catalogue",
+            resolve_catalogue,
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.checkout.select_snapshot_environment",
@@ -2990,6 +2995,95 @@ def _command(path: tuple[str, ...]) -> click.Command:
 
 def _option_names(command: click.Command) -> set[str]:
     return {option for param in command.params for option in param.opts}
+
+
+@dataclass(frozen=True)
+class UsageErrorCase:
+    leaf: PublicLeafCase
+    argv: tuple[str, ...]
+    expected_exit: int = 2
+    expected_code: str = "usage_error"
+
+
+def _usage_error_cases() -> tuple[UsageErrorCase, ...]:
+    cases: list[UsageErrorCase] = []
+    for case in PUBLIC_LEAF_CASES:
+        if not case.is_bounded:
+            continue
+        command = _command(case.path)
+        for param in command.params:
+            if isinstance(param.type, click.IntRange):
+                option = next((name for name in param.opts if name.startswith("--")), None)
+                if option is None:
+                    continue
+                cases.append(UsageErrorCase(case, (option, "not-a-number")))
+                if param.type.min is not None:
+                    out_of_range = param.type.min - 1
+                elif param.type.max is not None:
+                    out_of_range = param.type.max + 1
+                else:
+                    continue
+                cases.append(UsageErrorCase(case, (f"{option}={out_of_range}",)))
+            if param.required:
+                cases.append(UsageErrorCase(case, ()))
+            if param.name == "field_selection":
+                cases.append(UsageErrorCase(case, ("--fields", "__unknown_field__")))
+    return tuple(cases)
+
+
+@pytest.mark.parametrize(
+    "case",
+    _usage_error_cases(),
+    ids=lambda value: f"{'.'.join(value.leaf.path)}:{' '.join(value.argv) or 'missing'}",
+)
+def test_supported_machine_usage_errors_have_json_toon_parity(
+    case: UsageErrorCase,
+) -> None:
+    documents: list[object] = []
+    for mode in ("json", "toon"):
+        invoked = CliRunner().invoke(cli, [*case.leaf.path, *case.argv, "--format", mode])
+        assert invoked.exit_code == case.expected_exit, invoked.output
+        assert invoked.stderr == ""
+        assert invoked.stdout
+        assert "\x1b" not in invoked.stdout
+        document = _decode_document(invoked.stdout, mode)
+        assert document["ok"] is False  # type: ignore[index]
+        assert document["error"]["code"] == case.expected_code  # type: ignore[index]
+        documents.append(document)
+    assert documents[0] == documents[1]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        case
+        for case in PUBLIC_LEAF_CASES
+        if case.is_bounded and any(param.required for param in _command(case.path).params)
+    ],
+    ids=lambda case: ".".join(case.path),
+)
+def test_missing_required_arguments_use_supported_machine_usage_error(
+    case: PublicLeafCase,
+) -> None:
+    documents: list[object] = []
+    for mode in ("json", "toon"):
+        invoked = CliRunner().invoke(cli, [*case.path, "--format", mode])
+        assert invoked.exit_code == 2, invoked.output
+        assert invoked.stderr == ""
+        document = _decode_document(invoked.stdout, mode)
+        assert document["error"]["code"] == "usage_error"  # type: ignore[index]
+        documents.append(document)
+    assert documents[0] == documents[1]
+
+
+def test_env_create_missing_ticket_has_actionable_public_machine_error() -> None:
+    invoked = CliRunner().invoke(cli, ["env", "create", "--format", "json"])
+
+    assert invoked.exit_code == 2
+    document = json.loads(invoked.stdout)
+    assert document["ok"] is False
+    assert document["error"]["code"] == "usage_error"
+    assert "TICKET" in document["error"]["message"]
 
 
 def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:

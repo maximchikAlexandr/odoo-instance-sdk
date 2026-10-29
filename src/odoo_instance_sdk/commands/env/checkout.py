@@ -34,6 +34,9 @@ from odoo_instance_sdk.commands.env.display import (
     _plan_lines,
     _provider_columns,
 )
+from odoo_instance_sdk.commands.env.show import (
+    resolve_env_show_catalogue as _resolve_env_show_catalogue,
+)
 from odoo_instance_sdk.commands.monitor_context import resolve_monitor_project_id
 from odoo_instance_sdk.commands.output import (
     JsonObject,
@@ -361,7 +364,14 @@ def env_group() -> None:
 @env_group.command(
     "create",
     aliases=["checkout"],
-    help="Create an isolated environment from a Ticket branch.",
+    help=(
+        "Create an isolated environment from a Ticket branch.\n\n"
+        "Examples:\n"
+        "  odcli env create PROJ-123 --dry-run\n"
+        "  odcli env create PROJ-123 --create-venv --dry-run\n\n"
+        "--create-venv is optional and creates an environment-owned virtualenv; it is "
+        "separate from the optional primary-project `init --venv` setup."
+    ),
 )
 @click.argument("ticket", metavar="TICKET", type=_TICKET)
 @click.option("--base", "base_ref", default=None, help="Base ref (default HEAD).")
@@ -610,7 +620,17 @@ def env_list(
     _print_env_list_human(inventory)
 
 
-@env_group.command("show", help="Show one environment, its project, and PostgreSQL runtime facts.")
+@env_group.command(
+    "show",
+    help=(
+        "Show one environment, its project, and PostgreSQL runtime facts.\n\n"
+        "Examples:\n"
+        "  odcli env show\n"
+        "  odcli env show PROJ-123\n\n"
+        "Select by the positional environment name or UUID; when omitted, the current "
+        "working directory selects its environment."
+    ),
+)
 @click.argument("environment", required=False, metavar="ENVIRONMENT")
 @output_options
 @field_schema(_EnvShowResult)
@@ -632,14 +652,10 @@ def env_show(
             usage=True,
         )
     try:
+        selected_id, selected_project_id = _resolve_env_show_catalogue(environment, cwd=Path.cwd())
         monitor = EnvironmentMonitor()
-        snapshot = monitor.snapshot()
-        paths: dict[str, str] = (
-            _catalog_worktree_paths(monitor, include_removed=True) if environment is None else {}
-        )
-        selected = select_snapshot_environment(
-            snapshot, environment, cwd=Path.cwd(), worktree_paths=paths
-        )
+        snapshot = monitor.snapshot(project_id=selected_project_id)
+        selected = select_snapshot_environment(snapshot, selected_id)
         payload = _EnvShowResult(
             generated_at=snapshot.generated_at,
             environment=selected.environment,

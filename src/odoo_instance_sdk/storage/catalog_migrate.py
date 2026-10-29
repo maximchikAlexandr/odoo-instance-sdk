@@ -15,13 +15,14 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
+from odoo_instance_sdk.storage.catalog.revision import (
+    CATALOG_REVISION as CATALOG_REVISION,  # noqa: PLC0414
+)
 from odoo_instance_sdk.storage.catalog_schema import (
     CATALOG_TABLES,
     ENVIRONMENT_RUNTIME_VIEW_SQL,
     metadata,
 )
-
-CATALOG_REVISION = "0015"
 
 type _DdlFingerprint = tuple[
     tuple[

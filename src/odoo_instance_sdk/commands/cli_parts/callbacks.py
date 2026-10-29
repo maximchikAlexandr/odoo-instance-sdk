@@ -19,6 +19,8 @@ from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.init_registration import _OptionState
 from odoo_instance_sdk.commands.cli_parts.monitor import register_monitor_command
 from odoo_instance_sdk.commands.cli_parts.registration import (
+    _EXEC_HELP,
+    _RUN_HELP,
     _run_shell_command,
     _RunCommand,
     _ShellCommandFailure,
@@ -391,9 +393,7 @@ def stop(
 
 
 @cli.command(
-    cls=_RunCommand,
-    help="Native Odoo arguments must follow a literal `--` delimiter.",
-    short_help="Start resolved Odoo in the foreground or detached.",
+    cls=_RunCommand, help=_RUN_HELP, short_help="Start resolved Odoo in the foreground or detached."
 )
 @click.option(
     "-d",
@@ -645,7 +645,7 @@ def eval_cmd(
     sys.exit(status)
 
 
-@cli.command("exec", help="Execute a Python script in Odoo.")
+@cli.command("exec", help=_EXEC_HELP)
 @click.argument("script")
 @click.argument("script_args", nargs=-1, type=click.UNPROCESSED)
 @click.option(
@@ -672,8 +672,22 @@ def exec_cmd(
             fail(output_mode, "exec", f"script not found: {script}", dry_run=dry_run)
         try:
             source = p.read_text(encoding="utf-8")
-        except OSError as e:
-            fail(output_mode, "exec", f"cannot read script: {e}", dry_run=dry_run)
+        except UnicodeDecodeError:
+            fail(
+                output_mode,
+                "exec",
+                "script source is not valid UTF-8; save it as UTF-8 and retry",
+                dry_run=dry_run,
+                error_code="exec_invalid_encoding",
+            )
+        except OSError:
+            fail(
+                output_mode,
+                "exec",
+                "cannot read script; check file access and retry",
+                dry_run=dry_run,
+                error_code="exec_source_unavailable",
+            )
     try:
         runtime_context = _ready_instance(ctx)
         instance = runtime_context.instance

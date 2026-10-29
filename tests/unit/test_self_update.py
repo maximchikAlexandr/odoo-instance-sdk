@@ -179,10 +179,17 @@ def test_alternate_launcher_rejects_direct_self_update_before_provenance(
     identifier: str,
     remediation: str,
 ) -> None:
+    from odoo_instance_sdk.internal import self_update_commands
+
     monkeypatch.setenv("ODCLI_LAUNCHER_KIND", kind)
     monkeypatch.setenv("ODCLI_LAUNCHER_ID", identifier)
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update.read_uv_tool_direct_url",
+        lambda: pytest.fail("alternate update inspected installed provenance"),
+    )
+    monkeypatch.setattr(
+        self_update_commands,
+        "read_uv_tool_direct_url",
         lambda: pytest.fail("alternate update inspected installed provenance"),
     )
 

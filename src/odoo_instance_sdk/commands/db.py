@@ -270,7 +270,15 @@ def db_list(
 
 
 @db_group.command(
-    "restore", help="Restore one retained backup or local archive into a new database."
+    "restore",
+    help=(
+        "Restore one retained backup or local archive into a new database.\n\n"
+        "Examples:\n"
+        "  odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run\n"
+        "  odcli db restore --file ./backup.zip --target restored_db --dry-run\n\n"
+        "Choose exactly one backup UUID or --file. Use --dry-run to preview; a real "
+        "restore writes a new database and requires --yes in JSON/TOON mode."
+    ),
 )
 @click.argument("backup_uuid", required=False)
 @click.option(

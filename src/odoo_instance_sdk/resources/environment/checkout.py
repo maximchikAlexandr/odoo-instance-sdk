@@ -19,10 +19,6 @@ from odoo_instance_sdk.exceptions import (
     StalePlanError,
 )
 from odoo_instance_sdk.internal import paths as _paths
-from odoo_instance_sdk.internal.dbprep.source import (
-    classify_freshness,
-    compare_provenance,
-)
 from odoo_instance_sdk.internal.locks import (
     exclusive_lock,
     provisioning_lock_path,
@@ -478,6 +474,11 @@ class _CheckoutMixin(_CheckoutApiMixin):
         options: EnvironmentCheckoutOptions,
     ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]:
         """Resolve provenance and freshness without creating checkout artifacts."""
+        from odoo_instance_sdk.internal.dbprep.source import (
+            classify_freshness,
+            compare_provenance,
+        )
+
         project_config = (
             project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
         )

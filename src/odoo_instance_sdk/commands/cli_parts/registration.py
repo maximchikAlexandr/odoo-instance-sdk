@@ -23,6 +23,7 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
+    fail,
     run_or_preview,
 )
 from odoo_instance_sdk.commands.cli_parts.init_registration import register_init_command
@@ -523,7 +524,36 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
             subcommand = ctx.invoked_subcommand
             if subcommand is not None and subcommand != "update":
                 assert_update_not_blocking(subcommand)
-        super().invoke(ctx)
+        try:
+            super().invoke(ctx)
+        except click.UsageError as error:
+            usage_context = error.ctx
+            if usage_context is None:
+                raise
+            output_format = usage_context.params.get("output_format")
+            if output_format not in {OutputMode.JSON.value, OutputMode.TOON.value}:
+                raise
+            if usage_context.command.name in {"run", "shell"} and not usage_context.params.get(
+                "dry_run", False
+            ):
+                raise
+            if usage_context.params.get("watch", False) or usage_context.params.get(
+                "follow", False
+            ):
+                raise
+            path: list[str] = []
+            current: click.Context | None = usage_context
+            while current is not None and current.parent is not None:
+                if current.command.name is not None:
+                    path.append(current.command.name)
+                current = current.parent
+            fail(
+                OutputMode(output_format),
+                ".".join(reversed(path)),
+                error.format_message(),
+                dry_run=usage_context.params.get("dry_run", False),
+                usage=True,
+            )
 
 
 @click.rich_config(  # type: ignore[operator]
@@ -555,7 +585,10 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
         },
     }
 )
-@click.group(cls=_OdcliCliGroup)
+@click.group(
+    cls=_OdcliCliGroup,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 @click.option(
     "--version",
     is_flag=True,
@@ -618,14 +651,32 @@ cli.add_command(
 _rich_command = cast("Callable[..., click.Command]", click.RichCommand)
 _rich_group = cast("Callable[..., click.Group]", click.RichGroup)
 
+_RUN_HELP = (
+    "Start resolved Odoo in the foreground or detached.\n\n"
+    "Examples:\n"
+    "  odcli run --dry-run\n"
+    "  odcli run --dry-run -- --stop-after-init\n\n"
+    "Native Odoo arguments must follow a literal `--` delimiter.\n"
+    "Use --dry-run for a read-only plan; Rich/JSON/TOON output options require --dry-run."
+)
+_EXEC_HELP = (
+    "Execute a Python script in Odoo.\n\n"
+    "Examples:\n"
+    "  odcli exec ./script.py --dry-run\n"
+    "  odcli exec - --dry-run\n\n"
+    "Use `-` to read source from stdin. Arguments after the script are passed to it; "
+    "use a literal `--` before script arguments that begin with an option. --dry-run "
+    "plans without starting Odoo."
+)
+
 for _name, _help in {
     "stop": "Stop the selected runtime.",
-    "run": "Start resolved Odoo in the foreground or detached.",
+    "run": _RUN_HELP,
     "logs": "Read or follow retained Odoo logs.",
     "shell": "Open an interactive Odoo shell.",
     "monitor": "Start the observability monitor (FastAPI + React UI).",
     "eval": "Evaluate a Python expression in Odoo.",
-    "exec": "Execute a Python script in Odoo.",
+    "exec": _EXEC_HELP,
 }.items():
     cli.add_command(_rich_command(name=_name, help=_help), name=_name)
 for _name, _help in {

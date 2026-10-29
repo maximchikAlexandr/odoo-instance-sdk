@@ -45,7 +45,6 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     encode_catalog_cursor as encode_catalog_cursor,
     normalize_db_host as normalize_db_host,
 )
-from odoo_instance_sdk.storage.catalog_migrate import ensure_catalog_migrated
 
 
 class _BackupMixin:
@@ -89,6 +88,8 @@ class _BackupMixin:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            from odoo_instance_sdk.storage.catalog_migrate import ensure_catalog_migrated
+
             ensure_catalog_migrated(self.db_path)
             self.db_path.chmod(0o600)
             for sidecar in (

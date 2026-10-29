@@ -291,6 +291,14 @@ def update_command_cli(
             preview=lambda selected: model_to_dict(selected.plan),
             emit_normal=False,
         )
+    except PermissionError:
+        fail(
+            mode,
+            "update",
+            "cannot access local update state; check ODCLI_USER_ROOT permissions and retry",
+            dry_run=dry_run,
+            error_code="update_state_access_denied",
+        )
     except UpdateError as exc:
         fail(mode, "update", str(exc), dry_run=dry_run)
 

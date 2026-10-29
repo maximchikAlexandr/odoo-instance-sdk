@@ -38,7 +38,6 @@ else:
     import rich_click as click
 from toon import encode, encoders as toon_encoders
 
-from odoo_instance_sdk.internal.dbprep.source import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.output_rich import rich_plan_projection as _rich_plan_projection
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 from odoo_instance_sdk.models.backup import PostgresClusterState
@@ -232,7 +231,9 @@ def model_to_dict(value: msgspec.Struct) -> JsonObject:
 
 def _failure_context(error: BaseException | None) -> JsonObject:
     """Project only the typed, secret-free retained-artifact context."""
-    context = getattr(error, "failure_context", None) if error is not None else None
+    if (context := getattr(error, "failure_context", None)) is None:
+        return {}
+    from odoo_instance_sdk.internal.dbprep.source import DatabasePreparationFailureContext
     from odoo_instance_sdk.internal.dbreplace.planning import CopyReplacementFailureContext
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropFailureContext
 
