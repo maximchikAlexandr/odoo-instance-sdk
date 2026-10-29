@@ -55,13 +55,14 @@ The alternative is a new CLI renderer or command inventory for diagnostics. It i
 
 Focused tests cover identifier validation, script/transaction capture, exact missing results, bounded strings, no arbitrary/callable values, strict payload conversion, delegation, exports, CLI context resolution, leaf inventory, format parity, and clean stdout. Existing test tests extend their matrices for profile flag propagation, native stats mapping, invalid stats, ordering/totals, unprofiled shape, selection variants, failure/zero semantics, alias parity, and dry-run plan reuse. A real-Odoo focused integration uses the existing probe addon and native test runner rather than a new harness.
 
-The existing CI jobs and real-Odoo workflow are sufficient. A new framework is rejected; only the smallest fixture/test additions and focused case wiring are needed.
+The existing CI jobs and real-Odoo workflow are sufficient. The test repository's existing Python renderer/font are reused for required text renders. Its missing database immutability check is one bounded fingerprint helper with fake-process/config tests, owned by final integration; a new framework is rejected.
 
 ### D6: Ponytail full subsystem gate
 
 - `OdooInspector` facade: necessary because the CLI must delegate to public typed SDK primitives; the existing raw shell-script command is too low-level for this public contract. Keep the facade, limited to three methods.
 - Inspection result models: necessary to prevent dynamic registry objects from crossing the process/output boundary; dictionaries alone would weaken validation and exports. Keep exactly three small models and no generic base/result hierarchy.
 - Test profile models: necessary because native stats are repeated entries with totals and must remain immutable/typed. Keep one entry and one aggregate model; do not add a profiler service.
+- E2E evidence utilities: reuse the tracked Python renderer and font. Add only the missing test-repository database fingerprint helper because no current wrapper/CLI operation can prove whole-database immutability without exposing data; keep it outside the SDK API and give it focused tests.
 - New runner, planner, renderer, registry, collector, configuration layer, persistence, or dependency: existing alternatives already satisfy the change. Add none.
 
 ## Risks / Trade-offs
