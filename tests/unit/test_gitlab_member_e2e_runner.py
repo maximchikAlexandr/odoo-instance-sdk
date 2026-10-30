@@ -27,6 +27,14 @@ def _trusted_tool(name: str) -> str:
     return str(Path(executable).resolve())
 
 
+def _trusted_multica_fixture(root: Path) -> Path:
+    executable = root / "trusted-bin" / "multica"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+    return executable
+
+
 def _clean_sdk_checkout(repository: Path, revision: str, destination: Path) -> Path:
     subprocess.run(
         ["git", "clone", "--shared", "--no-checkout", str(repository), str(destination)],
@@ -351,6 +359,10 @@ def _public_security_fixture(
     helper_dir = _exact_candidate_installation(tmp_path, clean_repository)
     runner_root = tmp_path / "runner"
     _prepare_public_cache_runner(monkeypatch, runner_root, clean_repository, revision, helper_dir)
+    trusted_multica = _trusted_multica_fixture(tmp_path)
+    monkeypatch.setenv(
+        "PATH", str(trusted_multica.parent) + os.pathsep + os.environ.get("PATH", "")
+    )
     token_key = "ODCLI_GITLAB_TOKEN_CACHE"
     token_value = "mapped-token-fixture"
     monkeypatch.setattr(
@@ -388,7 +400,7 @@ def _trusted_git_fixture(tmp_path: Path) -> Path:
     assert real_git is not None
     executable = tmp_path / "trusted-bin" / "git"
     trace = tmp_path / "trusted-git-credential-called"
-    executable.parent.mkdir()
+    executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "credential" ] && [ "$2" = "fill" ]; then\n'
@@ -738,11 +750,19 @@ def test_public_cache_runner_rejects_global_helper_before_daemon_mutation(
     monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
     monkeypatch.setenv("TEST_GIT_HELPER_DIR", str(tmp_path / "owned" / "bin"))
     monkeypatch.setenv("TEST_CORE_PROJECT", str(Path(__file__).parents[2].resolve()))
-    monkeypatch.setenv("PATH", str(tmp_path / "global-bin") + os.pathsep + os.environ["PATH"])
     owned_bin = tmp_path / "owned" / "bin"
     owned_bin.mkdir(parents=True)
     global_bin = tmp_path / "global-bin"
     global_bin.mkdir()
+    trusted_multica = _trusted_multica_fixture(tmp_path)
+    monkeypatch.setenv(
+        "PATH",
+        str(global_bin)
+        + os.pathsep
+        + str(trusted_multica.parent)
+        + os.pathsep
+        + os.environ["PATH"],
+    )
     global_helper = global_bin / "git-credential-odcli"
     global_helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     global_helper.chmod(0o700)
