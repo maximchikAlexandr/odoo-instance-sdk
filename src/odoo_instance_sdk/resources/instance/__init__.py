@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.resources.database import DatabaseResource
+from odoo_instance_sdk.resources.inspector import OdooInspector
 from odoo_instance_sdk.resources.instance.auxiliary_restore import (
     AuxiliaryRestoreSession,
     activate_auxiliary_restore_session,
@@ -35,6 +36,7 @@ class OdooInstance(_IdentityMixin, _PlanningMixin):
     databases: DatabaseResource = field(init=False)
     modules: ModuleResource = field(init=False)
     git: GitResource = field(init=False)
+    inspector: OdooInspector = field(init=False)
     _artifact_lock_path: Path | None = field(default=None, repr=False)
     _postgres_cluster: PostgresCluster | None = field(default=None, repr=False)
     _environment_id: str | None = field(default=None, repr=False)
@@ -44,6 +46,7 @@ class OdooInstance(_IdentityMixin, _PlanningMixin):
 __all__ = [
     "AuxiliaryRestoreSession",
     "InstanceFactory",
+    "OdooInspector",
     "OdooInstance",
     "activate_auxiliary_restore_session",
     "active_auxiliary_restore_session",
