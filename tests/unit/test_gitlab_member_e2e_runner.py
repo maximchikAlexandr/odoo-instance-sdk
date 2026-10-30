@@ -12,8 +12,10 @@ import sys
 import tomllib
 from argparse import Namespace
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -470,12 +472,34 @@ def test_public_cache_runner_does_not_execute_candidate_git_with_token(
     assert token not in json.dumps(response)
 
 
-@pytest.mark.unit
-def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
+@dataclass(frozen=True)
+class _CandidateFirstCacheRun:
+    result: int
+    response: dict[str, object]
+    calls: tuple[tuple[list[str], dict[str, str], Path | None], ...]
+    expected_argv: tuple[list[str], ...]
+    git_argv: tuple[list[str], ...]
+    trusted_git: str
+    git_results: tuple[str, ...]
+    checkout: Path
+    repository_url: str
+    process_path: str
+    trusted_path: str
+    helper_dir: Path
+    task_env: dict[str, str]
+    wrapper: Path
+    token: str
+    candidate_git_sentinel: Path
+    candidate_multica_sentinel: Path
+    provenance_validation: Mock
+
+
+@pytest.fixture
+def candidate_first_native_checkout_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-) -> None:
+) -> _CandidateFirstCacheRun:
     original_environments = cache._integrated_cache_environments
     original_profile_status = cache._profile_status
     original_profile_stop = cache._profile_stop
@@ -484,22 +508,23 @@ def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
     trusted_path = os.environ["PATH"]
     trusted_git = shutil.which("git", path=trusted_path)
     trusted_multica = shutil.which("multica", path=trusted_path)
-    assert trusted_git is not None
-    assert trusted_multica is not None
+    assert trusted_git is not None and trusted_multica is not None
     trusted_git = str(Path(trusted_git).resolve())
     trusted_multica = str(Path(trusted_multica).resolve())
     monkeypatch.setenv("PATH", str(helper_dir) + os.pathsep + trusted_path)
+    process_path = os.environ["PATH"]
     monkeypatch.setattr(cache, "_integrated_cache_environments", original_environments)
-    for checkout_name in ("task-a", "task-b"):
-        task_checkout = runner_root / checkout_name
-        subprocess.run([trusted_git, "-C", str(task_checkout), "init", "-q"], check=True)
-        (task_checkout / "fixture.txt").write_text("fixture\n", encoding="utf-8")
-        subprocess.run([trusted_git, "-C", str(task_checkout), "add", "fixture.txt"], check=True)
+
+    for name in ("task-a", "task-b"):
+        checkout = runner_root / name
+        subprocess.run([trusted_git, "-C", str(checkout), "init", "-q"], check=True)
+        (checkout / "fixture.txt").write_text("fixture\n", encoding="utf-8")
+        subprocess.run([trusted_git, "-C", str(checkout), "add", "fixture.txt"], check=True)
         subprocess.run(
             [
                 trusted_git,
                 "-C",
-                str(task_checkout),
+                str(checkout),
                 "-c",
                 "user.name=Fixture",
                 "-c",
@@ -510,12 +535,12 @@ def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
             ],
             check=True,
         )
-    candidate_git_sentinel = tmp_path / "candidate-git-received-token"
-    candidate_multica_sentinel = tmp_path / "candidate-multica-received-token"
-    for name, sentinel in (
-        ("git", candidate_git_sentinel),
-        ("multica", candidate_multica_sentinel),
-    ):
+
+    sentinels = {
+        "git": tmp_path / "candidate-git-received-token",
+        "multica": tmp_path / "candidate-multica-received-token",
+    }
+    for name, sentinel in sentinels.items():
         executable = helper_dir / name
         executable.write_text(
             "#!/bin/sh\nprintf '%s' \"$ODCLI_GITLAB_TOKEN_CACHE\" > "
@@ -529,13 +554,14 @@ def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
     wrapper = runner_root / "runner-root" / "native-cache-checkout"
     checkout = wrapper / "actual-worktree"
 
-    def prepare_checkout() -> None:
+    def checkout_response() -> SimpleNamespace:
         checkout.mkdir(parents=True)
         subprocess.run([trusted_git, "-C", str(checkout), "init", "-q"], check=True)
         subprocess.run(
             [trusted_git, "-C", str(checkout), "remote", "add", "origin", repository_url],
             check=True,
         )
+        return SimpleNamespace(stdout=str(checkout))
 
     profile = "isolated-profile"
     task_env = {
@@ -546,7 +572,7 @@ def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
     }
     monkeypatch.setenv("MULTICA_TASK_ID", task_env["MULTICA_TASK_ID"])
     monkeypatch.setenv("MULTICA_WORKSPACE_ID", task_env["MULTICA_WORKSPACE_ID"])
-    candidate_daemon_env = {
+    candidate_env = {
         **task_env,
         "ODCLI_GITLAB_PURPOSE": "cache-read",
         "ODCLI_GITLAB_MEMBER_ID": "00000000-0000-4000-8000-000000000001",
@@ -554,17 +580,29 @@ def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
         "GIT_CONFIG_VALUE_1": f"!{helper_dir / 'git-credential-odcli'}",
         "PATH": trusted_path,
     }
-    prior_daemon_env = dict(task_env)
-    daemon_environments = iter((candidate_daemon_env, candidate_daemon_env, prior_daemon_env))
-    monkeypatch.setattr(cache, "_daemon_environment", lambda _status: next(daemon_environments))
-    provenance_validation = Mock(wraps=original_provenance)
-    monkeypatch.setattr(cache, "_installed_helper_provenance", provenance_validation)
+    monkeypatch.setattr(
+        cache,
+        "_daemon_environment",
+        Mock(side_effect=[candidate_env, candidate_env, dict(task_env)]),
+    )
+    provenance = Mock(wraps=original_provenance)
+    monkeypatch.setattr(cache, "_installed_helper_provenance", provenance)
+    original_git = cache._git
+    git_argv: list[list[str]] = []
+    git_results: list[str] = []
+
+    def record_git(executable: str, repository: Path, *args: str) -> str:
+        git_argv.append([executable, "-C", str(repository), *args])
+        result = original_git(executable, repository, *args)
+        git_results.append(result)
+        return result
+
+    monkeypatch.setattr(cache, "_git", record_git)
 
     def successful_helper_response(
         args: Namespace, environment: dict[str, str], **kwargs: object
     ) -> SimpleNamespace:
-        helper = cache._installed_helper_provenance(args, environment)
-        assert helper == kwargs["expected_helper"]
+        assert cache._installed_helper_provenance(args, environment) == kwargs["expected_helper"]
         return SimpleNamespace(returncode=0, stdout="username=alice\npassword=fixture-secret\n")
 
     monkeypatch.setattr(cache, "_run_cache_helper", successful_helper_response)
@@ -572,23 +610,24 @@ def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
     monkeypatch.setattr(cache, "_run_integrated_member_operations", lambda *_a, **_kw: None)
 
     status = json.dumps({"profile": profile, "status": "running", "pid": 72})
-    executor_steps: tuple[tuple[SimpleNamespace, Callable[[], None]], ...] = (
-        (SimpleNamespace(stdout=status), lambda: None),
-        (SimpleNamespace(stdout=""), lambda: None),
-        (SimpleNamespace(stdout=""), lambda: None),
-        (SimpleNamespace(stdout=status), lambda: None),
-        (SimpleNamespace(stdout=status), lambda: None),
-        (SimpleNamespace(stdout=status), lambda: None),
-        (SimpleNamespace(stdout=str(checkout)), prepare_checkout),
-        (SimpleNamespace(stdout=status), lambda: None),
-        (SimpleNamespace(stdout=status), lambda: None),
-        (SimpleNamespace(stdout=""), lambda: None),
-        (SimpleNamespace(stdout=""), lambda: None),
-        (SimpleNamespace(stdout=""), lambda: None),
-        (SimpleNamespace(stdout=status), lambda: None),
-        (SimpleNamespace(stdout=""), lambda: None),
+    response_factories = iter(
+        [
+            lambda value=value: SimpleNamespace(stdout=value)
+            for value in (status, "", "", status, status, status)
+        ]
+        + [
+            checkout_response,
+            *[
+                lambda value=value: SimpleNamespace(stdout=value)
+                for value in (status, status, "", "", "", status, "")
+            ],
+        ]
     )
-    expected_calls = (
+
+    def execute_in_order(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return next(response_factories)()
+
+    expected_argv = (
         [trusted_multica, "--profile", profile, "daemon", "status", "--output", "json"],
         [trusted_multica, "--profile", profile, "daemon", "stop"],
         [trusted_multica, "--profile", profile, "daemon", "start"],
@@ -604,45 +643,90 @@ def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
         [trusted_multica, "--profile", profile, "daemon", "status", "--output", "json"],
         [trusted_multica, "--profile", profile, "daemon", "stop"],
     )
-    calls: list[tuple[list[str], dict[str, str], Path | None]] = []
-
-    def execute(
-        argv: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: Path | None = None,
-        **_kwargs: object,
-    ) -> SimpleNamespace:
-        index = len(calls)
-        calls.append((argv, env or {}, cwd))
-        assert argv == expected_calls[index]
-        response, prepare = executor_steps[index]
-        prepare()
-        return response
-
-    monkeypatch.setattr(cache, "_run", execute)
+    run = Mock(side_effect=execute_in_order)
+    monkeypatch.setattr(cache, "_run", run)
     monkeypatch.setattr(cache, "_profile_status", original_profile_status)
     monkeypatch.setattr(cache, "_profile_stop", original_profile_stop)
     result = runner.main(
         ["--mode", "multica-cache", "--work-root", str(runner_root / "runner-root")]
     )
     response = json.loads(capsys.readouterr().out)
+    assert len(run.call_args_list) == len(expected_argv), (result, response, run.call_args_list)
+    assert [call.args[0] for call in run.call_args_list] == list(expected_argv)
+    calls = tuple(
+        (
+            cast("list[str]", call.args[0]),
+            cast("dict[str, str]", call.kwargs.get("env", {})),
+            cast("Path | None", call.kwargs.get("cwd")),
+        )
+        for call in run.call_args_list
+    )
+    return _CandidateFirstCacheRun(
+        result,
+        response,
+        calls,
+        expected_argv,
+        tuple(git_argv),
+        trusted_git,
+        tuple(git_results),
+        checkout,
+        repository_url,
+        process_path,
+        trusted_path,
+        helper_dir,
+        task_env,
+        wrapper,
+        token,
+        sentinels["git"],
+        sentinels["multica"],
+        provenance,
+    )
 
-    assert result == 0, response
-    assert response["ok"] is True
-    assert len(calls) == len(expected_calls)
-    assert provenance_validation.call_count == 2
-    assert all(call[0][0] == str(Path(trusted_multica).resolve()) for call in calls)
-    assert all(str(helper_dir.resolve()) not in call[1].get("PATH", "") for call in calls)
-    assert calls[2][1]["PATH"] == calls[6][1]["PATH"]
-    assert calls[6][1]["MULTICA_TOKEN"] == task_env["MULTICA_TOKEN"]
-    assert calls[6][1]["MULTICA_DAEMON_PORT"] == task_env["MULTICA_DAEMON_PORT"]
-    assert calls[6][1]["MULTICA_TASK_ID"] == task_env["MULTICA_TASK_ID"]
-    assert calls[6][1]["MULTICA_WORKSPACE_ID"] == task_env["MULTICA_WORKSPACE_ID"]
-    assert calls[6][2] == wrapper
-    assert not candidate_git_sentinel.exists()
-    assert not candidate_multica_sentinel.exists()
-    assert token not in json.dumps(response)
+
+@pytest.mark.unit
+def test_candidate_first_cache_runner_succeeds_without_disclosing_token(
+    candidate_first_native_checkout_run: _CandidateFirstCacheRun,
+) -> None:
+    run = candidate_first_native_checkout_run
+    assert run.result == 0
+    assert run.response["ok"] is True
+    assert run.token not in json.dumps(run.response)
+
+
+@pytest.mark.unit
+def test_candidate_first_process_path_is_filtered_before_native_checkout(
+    candidate_first_native_checkout_run: _CandidateFirstCacheRun,
+) -> None:
+    run = candidate_first_native_checkout_run
+    assert run.process_path == str(run.helper_dir) + os.pathsep + run.trusted_path
+    assert run.provenance_validation.call_count == 2
+    assert not run.candidate_git_sentinel.exists()
+    assert not run.candidate_multica_sentinel.exists()
+    child_paths = [environment["PATH"] for _, environment, _ in run.calls if "PATH" in environment]
+    assert child_paths and all(str(run.helper_dir.resolve()) not in path for path in child_paths)
+    assert run.calls[2][1]["PATH"] == run.calls[6][1]["PATH"]
+
+
+@pytest.mark.unit
+def test_native_checkout_uses_pinned_multica_and_task_environment(
+    candidate_first_native_checkout_run: _CandidateFirstCacheRun,
+) -> None:
+    run = candidate_first_native_checkout_run
+    assert [call[0] for call in run.calls] == list(run.expected_argv)
+    assert all(argv[0].startswith("/") for argv in (call[0] for call in run.calls))
+    assert run.calls[2][1]["PATH"] == run.calls[6][1]["PATH"]
+    native_env = run.calls[6][1]
+    for key, value in run.task_env.items():
+        assert native_env[key] == value
+    assert run.calls[6][2] == run.wrapper
+    assert len(run.git_argv) == 2
+    assert all(argv[0].startswith("/") for argv in run.git_argv)
+    assert run.git_argv == (
+        [run.trusted_git, "-C", str(run.checkout), "rev-parse", "--show-toplevel"],
+        [run.trusted_git, "-C", str(run.checkout), "remote", "get-url", "origin"],
+    )
+    assert Path(run.git_results[0]).resolve() == run.checkout.resolve()
+    assert run.git_results[1] == run.repository_url
 
 
 @pytest.mark.unit
