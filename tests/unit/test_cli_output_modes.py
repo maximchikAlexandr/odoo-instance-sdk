@@ -578,13 +578,43 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
     PublicLeafCase(
         ("test",),
-        ("test", "--changed", "--dry-run"),
+        ("test", "--changed", "--dry-run", "--profile"),
         classification="process-previewable-read-only",
         requires_dry_run=True,
         sdk_primitive="run_odoo_tests_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-07",),
         e2e_rationale="probe module native runner report",
+    ),
+    PublicLeafCase(
+        ("inspect", "model"),
+        ("inspect", "model", "res.partner", "--format", "json"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="OdooInspector.model_command",
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-13",),
+        e2e_rationale="live bounded registry model metadata and missing-model behavior",
+    ),
+    PublicLeafCase(
+        ("inspect", "field"),
+        ("inspect", "field", "res.partner", "email", "--format", "json"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="OdooInspector.field_command",
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-13",),
+        e2e_rationale="live bounded field metadata without record values",
+    ),
+    PublicLeafCase(
+        ("inspect", "ref"),
+        ("inspect", "ref", "base.user_admin", "--format", "json"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="OdooInspector.ref_command",
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-13",),
+        e2e_rationale="live XML-ID resolution with bounded display metadata",
     ),
     PublicLeafCase(
         ("module", "ls"),
@@ -2015,6 +2045,7 @@ def _patch_leaf_external(  # noqa: C901
         path in {("eval",), ("exec",)}
         or path[:1] == ("module",)
         or path[:1] == ("test",)
+        or path[:1] == ("inspect",)
         or path[:1]
         in {
             ("translations",),
@@ -2103,6 +2134,59 @@ def _patch_leaf_external(  # noqa: C901
                     )
                 ),
             )
+        return
+
+    if path[:1] == ("inspect",):
+        from odoo_instance_sdk.models import OdooFieldInfo, OdooModelInfo, OdooRefInfo
+
+        inspector = MagicMock()
+        failure = RuntimeError("isolated external operation failed") if failing else None
+        inspector.model_command.return_value = _matrix_command(
+            OdooModelInfo(
+                name="res.partner",
+                exists=True,
+                description="Contact",
+                table="res_partner",
+                abstract=False,
+                transient=False,
+                auto=True,
+                field_count=7,
+            ),
+            error=failure,
+        )
+        inspector.field_command.return_value = _matrix_command(
+            OdooFieldInfo(
+                model="res.partner",
+                name="email",
+                exists=True,
+                label="Email",
+                type="char",
+                required=False,
+                readonly=False,
+                store=True,
+                index=False,
+                relation=None,
+                related=False,
+                computed=False,
+            ),
+            error=failure,
+        )
+        inspector.ref_command.return_value = _matrix_command(
+            OdooRefInfo(
+                xmlid="base.user_admin",
+                exists=True,
+                model="res.users",
+                record_id=1,
+                display_name="Administrator",
+            ),
+            error=failure,
+        )
+        instance = MagicMock()
+        instance.inspector = inspector
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.inspect.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), instance),
+        )
         return
 
     if path == ("module", "update"):
