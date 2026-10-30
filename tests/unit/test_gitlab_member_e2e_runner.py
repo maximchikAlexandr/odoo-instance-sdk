@@ -909,7 +909,7 @@ def test_installed_helper_validation_rejects_refusal_and_wrong_login(
 
     assert len(captured) == 1
     argv, request, _environment = captured[0]
-    trusted_git = shutil.which("git")
+    trusted_git = shutil.which("git", path=os.defpath)
     assert trusted_git is not None
     assert argv == [str(Path(trusted_git).resolve()), "credential", "fill"]
     assert request == "protocol=https\nhost=gitlab.example\n\n"
@@ -957,7 +957,7 @@ def test_installed_helper_validation_accepts_exact_git_fill_response(
 
     cache._validate_cache_helper(args, environment, member_id, ("secret-fixture",))
 
-    trusted_git = shutil.which("git")
+    trusted_git = shutil.which("git", path=os.defpath)
     assert trusted_git is not None
     assert run_mock.call_args.args[0] == [
         str(Path(trusted_git).resolve()),
