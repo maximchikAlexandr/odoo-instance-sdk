@@ -143,10 +143,10 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_mutmut_results.py", 47),
         ("tests/unit/test_odcli_autonomous_skill.py", 178),
         ("tests/unit/project/test_prepare_venv.py", 271),
-        ("tests/unit/test_gitlab_member_e2e_runner.py", 901),
-        ("tests/unit/test_gitlab_member_e2e_runner.py", 956),
-        ("tests/unit/test_gitlab_member_e2e_runner.py", 1398),
-        ("tests/unit/test_gitlab_member_e2e_runner.py", 1455),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 985),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 1040),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 1482),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 1539),
     }
 )
 
