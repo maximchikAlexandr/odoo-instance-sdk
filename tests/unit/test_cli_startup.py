@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,25 @@ def _fresh_process(code: str, *args: str, cwd: Path) -> subprocess.CompletedProc
     )
 
 
+def _run_measured_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    clock: Callable[[], float] = time.perf_counter,
+) -> tuple[subprocess.CompletedProcess[str], float]:
+    started = clock()
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, clock() - started
+
+
 def _boundary_from_output(output: str) -> tuple[str, dict[str, bool]]:
     prefix, boundary = output.rsplit("BOUNDARY=", 1)
     return prefix, json.loads(boundary)
@@ -42,6 +63,12 @@ print(json.dumps({name: name in sys.modules for name in (
     'odoo_instance_sdk.resources.monitor',
     'odoo_instance_sdk.execution',
     'odoo_instance_sdk.internal.proc',
+    'odoo_instance_sdk.internal.dbprep.source',
+    'odoo_instance_sdk.internal.dbprep.source_restore',
+    'odoo_instance_sdk.internal.dbreplace.planning',
+    'odoo_instance_sdk.internal.pg.drop',
+    'alembic',
+    'sqlalchemy',
     'expression',
     'httpx',
 )}))
@@ -55,20 +82,69 @@ print(json.dumps({name: name in sys.modules for name in (
         "odoo_instance_sdk.resources.monitor": False,
         "odoo_instance_sdk.execution": False,
         "odoo_instance_sdk.internal.proc": False,
+        "odoo_instance_sdk.internal.dbprep.source": False,
+        "odoo_instance_sdk.internal.dbprep.source_restore": False,
+        "odoo_instance_sdk.internal.dbreplace.planning": False,
+        "odoo_instance_sdk.internal.pg.drop": False,
+        "alembic": False,
+        "sqlalchemy": False,
         "expression": False,
         "httpx": False,
     }
 
 
+METADATA_IMPORT_BOUNDARIES = {
+    "--help": {
+        "httpx": False,
+        "odoo_instance_sdk.resources.monitor": False,
+        "odoo_instance_sdk.execution": True,
+        "odoo_instance_sdk.internal.proc": True,
+        "odoo_instance_sdk.internal.dbprep.source": False,
+        "odoo_instance_sdk.internal.dbprep.source_restore": False,
+        "odoo_instance_sdk.internal.dbreplace.planning": False,
+        "odoo_instance_sdk.internal.pg.drop": False,
+        "alembic": False,
+        "sqlalchemy": False,
+        "expression": False,
+    },
+    "--version": {
+        "httpx": False,
+        "odoo_instance_sdk.resources.monitor": False,
+        "odoo_instance_sdk.execution": True,
+        "odoo_instance_sdk.internal.proc": True,
+        "odoo_instance_sdk.internal.dbprep.source": False,
+        "odoo_instance_sdk.internal.dbprep.source_restore": False,
+        "odoo_instance_sdk.internal.dbreplace.planning": False,
+        "odoo_instance_sdk.internal.pg.drop": False,
+        "alembic": False,
+        "sqlalchemy": False,
+        "expression": False,
+    },
+}
+
+
 @pytest.mark.parametrize(
-    ("option", "expected_output"),
+    ("option", "expected_output", "expected_boundary"),
     [
-        ("--help", "--version"),
-        ("--version", f"odcli, version {importlib.metadata.version('odoo-instance-sdk')}"),
+        pytest.param(
+            "--help",
+            "--version",
+            METADATA_IMPORT_BOUNDARIES["--help"],
+            id="help",
+        ),
+        pytest.param(
+            "--version",
+            f"odcli, version {importlib.metadata.version('odoo-instance-sdk')}",
+            METADATA_IMPORT_BOUNDARIES["--version"],
+            id="version",
+        ),
     ],
 )
 def test_metadata_options_are_lightweight_in_fresh_interpreters(
-    tmp_path: Path, option: str, expected_output: str
+    tmp_path: Path,
+    option: str,
+    expected_output: str,
+    expected_boundary: dict[str, bool],
 ) -> None:
     result = _fresh_process(
         """
@@ -86,6 +162,12 @@ print('BOUNDARY=' + json.dumps({name: name in sys.modules for name in (
     'odoo_instance_sdk.resources.monitor',
     'odoo_instance_sdk.execution',
     'odoo_instance_sdk.internal.proc',
+    'odoo_instance_sdk.internal.dbprep.source',
+    'odoo_instance_sdk.internal.dbprep.source_restore',
+    'odoo_instance_sdk.internal.dbreplace.planning',
+    'odoo_instance_sdk.internal.pg.drop',
+    'alembic',
+    'sqlalchemy',
     'expression',
 )}))
 raise SystemExit(exit_code)
@@ -97,16 +179,58 @@ raise SystemExit(exit_code)
     output, boundary = _boundary_from_output(result.stdout)
     assert result.returncode == 0, result.stderr
     assert expected_output in output
-    assert boundary["odoo_instance_sdk.resources.monitor"] is False
-    assert boundary["expression"] is False
-    if option == "--version":
-        assert boundary == {
-            "httpx": False,
-            "odoo_instance_sdk.resources.monitor": False,
-            "odoo_instance_sdk.execution": True,
-            "odoo_instance_sdk.internal.proc": True,
-            "expression": False,
-        }
+    assert boundary == expected_boundary
+
+
+INSTALLED_ODCLI = Path(sys.executable).with_name("odcli")
+
+
+@pytest.mark.skipif(
+    not INSTALLED_ODCLI.is_file(), reason="installed odcli executable is unavailable"
+)
+@pytest.mark.parametrize(
+    ("option", "expected_output"),
+    [
+        pytest.param("--help", "Usage:", id="help"),
+        pytest.param(
+            "--version",
+            f"odcli, version {importlib.metadata.version('odoo-instance-sdk')}",
+            id="version",
+        ),
+    ],
+)
+@pytest.mark.parametrize("run_number", [1, 2], ids=["first", "second"])
+def test_installed_executable_metadata_startup_is_measured_outside_checkout(
+    tmp_path: Path, option: str, expected_output: str, run_number: int
+) -> None:
+    result, elapsed = _run_measured_process(
+        [str(INSTALLED_ODCLI), option],
+        cwd=tmp_path,
+        env=_clean_environment(),
+    )
+    assert result.returncode == 0, result.stderr
+    assert expected_output in result.stdout
+    print(f"INSTALLED_STARTUP {option} run={run_number} elapsed_seconds={elapsed:.6f}")
+
+
+def test_startup_measurement_uses_injected_clock(
+    tmp_path: Path,
+) -> None:
+    ticks = iter((1.25, 1.75))
+
+    def clock() -> float:
+        return next(ticks)
+
+    result, elapsed = _run_measured_process(
+        [sys.executable, "-c", "print('ready')"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        clock=clock,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "ready\n"
+    assert elapsed == 0.5
 
 
 def test_postgres_command_registration_keeps_resource_transport_lazy(tmp_path: Path) -> None:
@@ -129,9 +253,9 @@ print(json.dumps({name: name in sys.modules for name in (
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
         "odoo_instance_sdk.commands.pg": True,
-        "odoo_instance_sdk.resources.postgres": True,
-        "odoo_instance_sdk.internal.pg.transport": True,
-        "odoo_instance_sdk.internal.proc": True,
+        "odoo_instance_sdk.resources.postgres": False,
+        "odoo_instance_sdk.internal.pg.transport": False,
+        "odoo_instance_sdk.internal.proc": False,
     }
 
 

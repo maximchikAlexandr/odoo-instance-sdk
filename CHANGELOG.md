@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   versioned applied-settings evidence, and read-only doctor drift diagnosis
 
 ### Changed
+- Document the supported JSON/TOON usage-error boundary, sanitized expected
+  failures, project-scoped `env show` collection, lightweight metadata startup,
+  and inherited `-h`/`--help` examples and constraints.
 - Make identical Compose init resumable and keep no-op `dry_run` metadata
   truthful; retain exact `incomplete` restore evidence for guarded diagnosis,
   retry, and drop, and synchronize project-owned generated `db_name`/`dbfilter`

@@ -277,7 +277,17 @@ def resolve_module_test_selection(
     )
 
 
-@click.command("test", help="Select and run Odoo tests.")
+@click.command(
+    "test",
+    help=(
+        "Select and run Odoo tests.\n\n"
+        "Examples:\n"
+        "  odcli test --dry-run\n"
+        "  odcli test ./addons/my_module --tags /my_module --dry-run\n\n"
+        "Use --dry-run to inspect selection without running tests. --changed selects "
+        "changed add-ons and accepts --base for its Git baseline."
+    ),
+)
 @click.argument("target", required=False)
 @click.option("--tags", "tags", default=None, help="Native Odoo test tags.")
 @click.option("--reload-tests", is_flag=True, default=False)

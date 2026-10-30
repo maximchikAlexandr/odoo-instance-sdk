@@ -4,6 +4,7 @@ import importlib
 import importlib.metadata
 import inspect
 import json
+import shlex
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -246,13 +247,226 @@ def test_rich_click_run_help_documents_delimiter_passthrough() -> None:
     assert "Native Odoo arguments must follow a literal `--` delimiter." in result.output
 
 
+def _registered_command_paths(
+    command: click.Command = cli, parent: tuple[str, ...] = ()
+) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(command, click.Group):
+        return ()
+    return tuple(
+        path
+        for name, child in command.commands.items()
+        for path in ((*parent, name), *_registered_command_paths(child, (*parent, name)))
+    )
+
+
+SHORT_HELP_PATHS = ((), *_registered_command_paths())
+
+
+@pytest.mark.parametrize("path", SHORT_HELP_PATHS, ids=lambda path: ".".join(path) or "root")
+def test_short_help_covers_the_command_tree_without_runtime_resolution(
+    path: tuple[str, ...],
+) -> None:
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("help must not resolve a runtime"),
+    ):
+        result = CliRunner().invoke(cli, [*path, "-h"])
+
+    assert result.exit_code == 0, (path, result.output)
+    assert "Usage:" in result.output
+
+
+@pytest.mark.parametrize(
+    ("path", "argv", "parameter", "expected"),
+    [
+        pytest.param(("run",), ("--", "-h"), "odoo_args", ("-h",), id="run"),
+        pytest.param(("exec",), ("-", "--", "-h"), "script_args", ("-h",), id="exec-stdin"),
+    ],
+)
+def test_short_help_passthrough_is_preserved(
+    path: tuple[str, ...],
+    argv: tuple[str, ...],
+    parameter: str,
+    expected: tuple[str, ...],
+) -> None:
+    context = _command(path).make_context("odcli", list(argv), resilient_parsing=True)
+    assert context.params[parameter] == expected
+    context.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "examples", "required_help"),
+    (
+        (
+            ("init",),
+            (("--dry-run",), ("--venv", ".venv", "--dry-run")),
+            ("prepare-venv", "optional"),
+        ),
+        (
+            ("env", "create"),
+            (
+                ("PROJ-123", "--dry-run"),
+                ("PROJ-123", "--create-venv", "--dry-run"),
+            ),
+            ("optional", "owned"),
+        ),
+        (("env", "show"), ((), ("PROJ-123",)), ("positional", "working directory")),
+        (
+            ("db", "restore"),
+            (
+                ("01234567-89ab-cdef-0123-456789abcdef", "--dry-run"),
+                ("--file", "./backup.zip", "--target", "restored_db", "--dry-run"),
+            ),
+            ("exactly one", "--yes"),
+        ),
+        (
+            ("run",),
+            (("--dry-run",), ("--dry-run", "--", "--stop-after-init")),
+            ("literal `--`", "--dry-run"),
+        ),
+        (
+            ("exec",),
+            (("./script.py", "--dry-run"), ("-", "--dry-run")),
+            ("stdin", "literal `--`", "--dry-run"),
+        ),
+        (
+            ("test",),
+            (
+                ("--dry-run",),
+                ("./addons/my_module", "--tags", "/my_module", "--dry-run"),
+            ),
+            ("--changed", "--base"),
+        ),
+    ),
+)
+def test_named_command_help_examples_parse_and_state_constraints(
+    path: tuple[str, ...],
+    examples: tuple[tuple[str, ...], ...],
+    required_help: tuple[str, ...],
+) -> None:
+    result = CliRunner().invoke(cli, [*path, "-h"])
+    assert result.exit_code == 0
+    assert "Examples:" in result.output
+    assert all(text in result.output for text in required_help)
+
+    command = _command(path)
+    help_text = " ".join(result.output.split())
+    for example in examples:
+        rendered = "odcli " + " ".join(shlex.quote(value) for value in (*path, *example))
+        assert rendered in help_text
+        context = command.make_context("odcli", list(example), resilient_parsing=True)
+        context.close()
+
+
+def test_exec_invalid_utf8_is_classified_before_runtime_or_child(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "invalid.py"
+    source.write_bytes(b"print('secret-\xff-source')")
+
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("invalid source must fail before runtime resolution"),
+    ):
+        result = CliRunner().invoke(cli, ["exec", str(source)])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "secret-" not in result.output
+    assert "not valid UTF-8" in result.stderr
+    assert "save it as UTF-8" in result.stderr
+
+
+def _decode_toon_document(output: str) -> dict[str, object]:
+    from toon import DecodeOptions, decode
+
+    return cast("dict[str, object]", decode(output, DecodeOptions(indent=2, strict=True)))
+
+
+@pytest.mark.parametrize(
+    ("mode", "args", "decode_document"),
+    [
+        pytest.param("json", ("--format", "json"), json.loads, id="json"),
+        pytest.param("toon", ("--format", "toon"), _decode_toon_document, id="toon"),
+    ],
+)
+def test_exec_invalid_utf8_machine_errors_are_secret_free_before_runtime_or_child(
+    tmp_path: Path,
+    mode: str,
+    args: tuple[str, ...],
+    decode_document: Callable[[str], dict[str, object]],
+) -> None:
+    source = tmp_path / "invalid.py"
+    source.write_bytes(b"print('secret-\xff-source')")
+
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("invalid source must fail before runtime resolution"),
+    ):
+        result = CliRunner().invoke(cli, ["exec", str(source), *args])
+
+    document = decode_document(result.stdout)
+    error = cast("dict[str, str]", document["error"])
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    assert "Traceback" not in result.output
+    assert "secret-" not in result.output
+    assert error["code"] == "exec_invalid_encoding"
+    assert "not valid UTF-8" in error["message"]
+
+
+def _denied_update_cli_result(args: tuple[str, ...]) -> Result:
+    update_cli = importlib.import_module("odoo_instance_sdk.commands.update")
+
+    def denied(**_kwargs: object) -> object:
+        raise PermissionError("/private/secret/update/journal.json")
+
+    with patch.object(update_cli, "_select_update_command", denied):
+        return CliRunner().invoke(cli, ["update", "--check", *args])
+
+
+def test_cli_update_permission_denial_is_actionable_and_sanitized() -> None:
+    result = _denied_update_cli_result(())
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "/private/secret" not in result.output
+    assert "check ODCLI_USER_ROOT permissions" in result.output
+    assert result.stdout == ""
+    assert "check ODCLI_USER_ROOT permissions" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "args", "decode_document"),
+    [
+        pytest.param("json", ("--format", "json"), json.loads, id="json"),
+        pytest.param("toon", ("--format", "toon"), _decode_toon_document, id="toon"),
+    ],
+)
+def test_cli_update_permission_denial_machine_errors_are_sanitized(
+    mode: str,
+    args: tuple[str, ...],
+    decode_document: Callable[[str], dict[str, object]],
+) -> None:
+    result = _denied_update_cli_result(args)
+    document = decode_document(result.stdout)
+    error = cast("dict[str, str]", document["error"])
+
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    assert "Traceback" not in result.output
+    assert "/private/secret" not in result.output
+    assert "check ODCLI_USER_ROOT permissions" in error["message"]
+    assert error["code"] == "update_state_access_denied"
+
+
 def test_typed_help_remains_readable_at_narrow_width() -> None:
     result = CliRunner().invoke(cli, ["module", "test", "--help"], terminal_width=40)
 
     assert result.exit_code == 0
     assert "Run tests for selected Odoo modules." in result.output
     assert "--test-" in result.output
-    assert "[required]" in result.output
+    assert "required" in result.output
     assert "--format" in result.output
 
 

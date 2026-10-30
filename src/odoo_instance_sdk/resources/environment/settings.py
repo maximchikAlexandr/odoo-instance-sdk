@@ -23,7 +23,6 @@ from odoo_instance_sdk.exceptions import (
     PostgresClusterError,
     StalePlanError,
 )
-from odoo_instance_sdk.internal.dbprep.source import acquire_copy_backup
 from odoo_instance_sdk.internal.dependency_sync import (
     build_trusted_sync_argv,
     resolve_hash_lock,
@@ -168,6 +167,8 @@ class _SettingsMixin(_CheckoutInventoryMixin):
                 raise DatabaseAlreadyExistsError(
                     f"Target database {target_db!r} already exists on {base_url}"
                 )
+        from odoo_instance_sdk.internal.dbprep.source import acquire_copy_backup
+
         acquired = acquire_copy_backup(
             self._client,
             project,
