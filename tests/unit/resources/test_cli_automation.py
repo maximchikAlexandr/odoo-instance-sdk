@@ -31,7 +31,12 @@ from odoo_instance_sdk.internal.automation import (
     verify_deps,
 )
 from odoo_instance_sdk.internal.server import _build_shell_wrapper, parse_payload
-from odoo_instance_sdk.models import CommandResult, OdooTestSpec
+from odoo_instance_sdk.models import (
+    CommandResult,
+    OdooTestProfile,
+    OdooTestProfileEntry,
+    OdooTestSpec,
+)
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
@@ -466,6 +471,91 @@ class TestOdooTestRunner:
         assert type(arguments["modules"]) is tuple
         assert type(arguments["test_tags"]) is str
         assert type(arguments["reload_tests"]) is bool
+
+    def test_native_profile_maps_one_runner_stats_in_stable_order(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "result": {
+                "tests": 2,
+                "successful": 2,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "profile": [
+                    {"test_id": "test_b", "duration": 1.0, "query_count": 3},
+                    {"test_id": "test_c", "duration": 2.0, "query_count": 4},
+                    {"test_id": "test_a", "duration": 1.0, "query_count": 5},
+                ],
+            }
+        }
+        source: list[str] = []
+        with (
+            patch.object(
+                type(inst),
+                "_shell_script_command",
+                _stub_run_shell_script(payload, captured_source=source),
+            ),
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.FREE,
+            ),
+        ):
+            result, diagnostic = run_odoo_tests(
+                inst,
+                OdooTestSpec(modules=("sale",), test_tags="/sale", profile=True),
+                http_interface="127.0.0.1",
+                http_port=18087,
+            )
+
+        assert diagnostic is None
+        assert result.profile == OdooTestProfile(
+            total_duration=4.0,
+            total_query_count=12,
+            entries=(
+                OdooTestProfileEntry(test_id="test_c", duration=2.0, query_count=4),
+                OdooTestProfileEntry(test_id="test_a", duration=1.0, query_count=5),
+                OdooTestProfileEntry(test_id="test_b", duration=1.0, query_count=3),
+            ),
+        )
+        assert source[0].count("_odcli_run_tests(") == 1
+        assert "getattr(_r, 'stats', None)" in source[0]
+        assert "odoo.tests.stats" in source[0]
+
+    @pytest.mark.parametrize(
+        "stats",
+        [
+            None,
+            [{"test_id": "", "duration": 1.0, "query_count": 1}],
+            [{"test_id": "test_a", "duration": float("nan"), "query_count": 1}],
+            [{"test_id": "test_a", "duration": 1.0, "query_count": True}],
+        ],
+    )
+    def test_invalid_native_profile_fails_closed(self, tmp_path: Path, stats: Any) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "result": {
+                "tests": 1,
+                "successful": 1,
+                "failed": 0,
+                "errors": 0,
+                "skipped": 0,
+                "profile": stats,
+            }
+        }
+        with (
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)),
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.FREE,
+            ),
+            pytest.raises(ConfigError, match="native Odoo test stats are invalid"),
+        ):
+            run_odoo_tests(
+                inst,
+                OdooTestSpec(modules=("sale",), test_tags="/sale", profile=True),
+                http_interface="127.0.0.1",
+                http_port=18088,
+            )
 
     @pytest.mark.parametrize("allow_empty, expected_exit", [(False, 1), (True, 0)])
     def test_native_zero_tests_respects_allow_empty(

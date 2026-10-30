@@ -48,7 +48,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 563),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 564),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 479),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 485),
         ("src/odoo_instance_sdk/commands/backup.py", 355),
         ("src/odoo_instance_sdk/commands/output.py", 115),
         ("src/odoo_instance_sdk/commands/output.py", 287),
@@ -64,7 +64,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/git_credential_helper.py", 44),
         ("src/odoo_instance_sdk/internal/git_credential_helper.py", 45),
         ("src/odoo_instance_sdk/internal/git_askpass.py", 72),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 508),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 513),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 980),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 982),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 984),
@@ -91,7 +91,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        479,
+        485,
     ): "documented --version metadata flag transport",
     ("src/odoo_instance_sdk/commands/backup.py", 355): "shared Rich output boundary",
     (
@@ -125,7 +125,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/internal/git_askpass.py", 72): "Git askpass child transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        508,
+        513,
     ): "lifecycle cleanup diagnostic transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 980): "alternate lifecycle JSON transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 982): "alternate lifecycle JSON transport",

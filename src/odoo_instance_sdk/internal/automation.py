@@ -15,11 +15,13 @@ from odoo_instance_sdk.exceptions import ConfigError, StalePlanError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
+from odoo_instance_sdk.internal.test_profile import test_profile
 from odoo_instance_sdk.models import (
     CommandResult,
     DepsDistributionDetail,
     DepsMissingImport,
     DepsVerifyResult,
+    OdooTestProfile,
     OdooTestResult,
     OdooTestSpec,
     TestCommandSnapshot,
@@ -377,15 +379,37 @@ def _update_modules_source(modules: tuple[str, ...]) -> str:
     )
 
 
-def _test_runner_source(modules: tuple[str, ...], test_tags: str, reload_tests: bool) -> str:
+def _test_runner_source(
+    modules: tuple[str, ...], test_tags: str, reload_tests: bool, *, profile: bool = False
+) -> str:
     """Build the single native Odoo test invocation used by both APIs."""
     modules_repr = repr(modules)
     tags_repr = repr(test_tags)
     reload_repr = repr(reload_tests)
+    profile_setup = (
+        "import logging as _odcli_logging\n"
+        "_odcli_logging.getLogger('odoo.tests.stats').setLevel(_odcli_logging.INFO)\n"
+        if profile
+        else ""
+    )
+    profile_source = (
+        "_stats = getattr(_r, 'stats', None)\n"
+        "if not hasattr(_stats, 'items'):\n"
+        "    raise ValueError('native Odoo test stats are unavailable')\n"
+        "_profile = []\n"
+        "for _test_id, _stat in _stats.items():\n"
+        "    _profile.append({'test_id': _test_id, "
+        "'duration': getattr(_stat, 'time', None), "
+        "'query_count': getattr(_stat, 'queries', None)})\n"
+        "result['profile'] = _profile\n"
+        if profile
+        else ""
+    )
     return (
         "from odoo.tools import config as _odcli_config\n"
         "_odcli_config['workers'] = 0\n"
         "from odoo.tests.shell import run_tests as _odcli_run_tests\n"
+        f"{profile_setup}"
         f"_r = _odcli_run_tests(env, test_tags={tags_repr}, "
         f"modules={modules_repr}, reload_tests={reload_repr})\n"
         "_tests = getattr(_r, 'testsRun', getattr(_r, 'tests_count', 0))\n"
@@ -405,6 +429,7 @@ def _test_runner_source(modules: tuple[str, ...], test_tags: str, reload_tests: 
         "_skipped = _odcli_count(_skipped)\n"
         "result = {'tests': _tests, 'successful': max(_tests - _failed - _errors - _skipped, 0), "
         "'failed': _failed, 'errors': _errors, 'skipped': _skipped}\n"
+        f"{profile_source}"
     )
 
 
@@ -420,6 +445,19 @@ def _test_counts(payload: dict[str, JsonValue]) -> dict[str, int]:
         key: _nonnegative_count(raw.get(key))
         for key in ("tests", "successful", "failed", "errors", "skipped")
     }
+
+
+def _test_profile_result(
+    payload: dict[str, JsonValue], *, requested: bool, returncode: int, failures: bool
+) -> OdooTestProfile | None:
+    if not requested or returncode != 0:
+        return None
+    try:
+        return test_profile(payload)
+    except ConfigError:
+        if failures:
+            return None
+        raise
 
 
 def run_odoo_tests(
@@ -487,12 +525,19 @@ def run_odoo_tests_command(
         diagnostic = _safe_stderr(result.stderr) if result.returncode != 0 else None
         if result.returncode == 0 and failures and result.stderr:
             diagnostic = _safe_stderr(result.stderr)
+        profile = _test_profile_result(
+            payload or {},
+            requested=spec.profile,
+            returncode=result.returncode,
+            failures=failures,
+        )
         return (
             OdooTestResult(
                 counts=counts,
                 failures=failures,
                 zero_tests=zero_tests,
                 exit_code=exit_code,
+                profile=profile,
             ),
             diagnostic,
         )
@@ -578,7 +623,7 @@ def run_odoo_tests_command(
         provenance_steps.append(module_step)
 
     return instance._shell_script_command(
-        _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests),
+        _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests, profile=spec.profile),
         commit=False,
         exclusive=True,
         result_converter=convert,

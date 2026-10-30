@@ -5,6 +5,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import Mock
 
 import msgspec
 import pytest
@@ -281,7 +282,8 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     explicit_env.chmod(0o600)
     target = explicit_env if explicit else project_env
     original_open = os.open
-    swapped = False
+    original_descriptor = original_open(target, os.O_RDONLY)
+    original_inode = os.fstat(original_descriptor)
 
     def replace_before_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -290,21 +292,33 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
         *,
         dir_fd: int | None = None,
     ) -> int:
-        nonlocal swapped
-        if path == target and dir_fd is None and not swapped:
-            target.unlink()
-            target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-            target.chmod(0o600)
-            swapped = True
+        assert path == target
+        assert dir_fd is None
+        assert flags == os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        target.unlink()
+        target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+        target.chmod(0o600)
+        replacement_inode = target.stat()
+        assert (original_inode.st_dev, original_inode.st_ino) != (
+            replacement_inode.st_dev,
+            replacement_inode.st_ino,
+        )
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "O_NOFOLLOW", 0)
-    monkeypatch.setattr(os, "open", replace_before_open)
+    opener = Mock(side_effect=replace_before_open)
+    monkeypatch.setattr(os, "open", opener)
     monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {original_open})
-    with pytest.raises(ProjectEnvironmentError) as failure:
-        load_environment_file(target)
+    try:
+        with pytest.raises(ProjectEnvironmentError, match="changed while opening") as failure:
+            load_environment_file(target)
+    finally:
+        os.close(original_descriptor)
 
-    assert swapped
+    opener.assert_called_once()
+    assert opener.call_args is not None
+    assert opener.call_args.args == (target, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    assert opener.call_args.kwargs == {}
     assert "attacker-token" not in str(failure.value)
 
 

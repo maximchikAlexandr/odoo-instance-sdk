@@ -4,13 +4,13 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
-from odoo_instance_sdk import OdooClient
+from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.commands.test import (
@@ -19,8 +19,16 @@ from odoo_instance_sdk.commands.test import (
     run_module_tests,
 )
 from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.test_selection import _ChangedSelection, _ChangedSelectionError
-from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec, StartConfig
+from odoo_instance_sdk.models import (
+    CommandResult,
+    OdooTestProfile,
+    OdooTestProfileEntry,
+    OdooTestResult,
+    OdooTestSpec,
+    StartConfig,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
@@ -129,6 +137,7 @@ def test_executed_result_contains_only_native_execution_fields(
     assert payload["counts"] == typed.counts
     assert payload["failures"] is False
     assert payload["zero_tests"] is False
+    assert "profile" not in payload
     assert calls == ["preflight", "runner"]
 
 
@@ -158,17 +167,228 @@ def test_changed_dry_run_omits_execution_fields_and_does_not_run(tmp_path: Path)
             return_value=_result_command((None, None)),
         ) as runner,
     ):
-        result = CliRunner().invoke(cli, ["test", "--changed", "--dry-run", "--format", "json"])
+        result = CliRunner().invoke(
+            cli, ["test", "--changed", "--dry-run", "--profile", "--format", "json"]
+        )
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)["result"]
     assert payload["dry_run"] is True
     assert payload["modules"] == ["sale"]
     assert payload["base_source"] == "explicit"
+    assert "profile" not in payload
     for key in ("test_tags", "reload_tests", "allow_empty", "counts", "failures", "zero_tests"):
         assert key not in payload
     preflight.assert_not_called()
     runner.assert_called_once()
+    assert runner.call_args.args[1].profile is True
+
+
+def test_target_profile_is_projected_only_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _addon(tmp_path, "sale")
+    monkeypatch.chdir(tmp_path)
+    env = _environment(tmp_path)
+    instance = _instance(tmp_path)
+    profile = OdooTestProfile(
+        total_duration=1.25,
+        total_query_count=3,
+        entries=(OdooTestProfileEntry(test_id="sale.test_sale", duration=1.25, query_count=3),),
+    )
+    typed = OdooTestResult(
+        counts={"tests": 1, "successful": 1, "failed": 0, "errors": 0, "skipped": 0},
+        failures=False,
+        zero_tests=False,
+        exit_code=0,
+        profile=profile,
+    )
+
+    def runner(_instance: object, spec: OdooTestSpec, **_kwargs: object) -> Command[object]:
+        result = (
+            typed
+            if spec.profile
+            else OdooTestResult(
+                counts=dict(typed.counts),
+                failures=typed.failures,
+                zero_tests=typed.zero_tests,
+                exit_code=typed.exit_code,
+            )
+        )
+        return _result_command((result, None))
+
+    with (
+        patch(
+            "odoo_instance_sdk.commands.test.cli_context.ready_instance",
+            return_value=_resolved_context(env, instance),
+        ),
+        patch("odoo_instance_sdk.commands.test.preflight_installed_modules"),
+        patch(
+            "odoo_instance_sdk.commands.test.run_odoo_tests_command",
+            side_effect=runner,
+        ) as runner,
+    ):
+        rich = CliRunner().invoke(
+            cli,
+            ["test", "sale", "--profile", "--format", "rich"],
+            env={"COLUMNS": "160"},
+        )
+        profiled = CliRunner().invoke(cli, ["test", "sale", "--profile", "--format", "json"])
+        toon = CliRunner().invoke(cli, ["test", "sale", "--profile", "--format", "toon"])
+        ordinary = CliRunner().invoke(cli, ["test", "sale", "--format", "json"])
+
+    assert rich.exit_code == profiled.exit_code == toon.exit_code == ordinary.exit_code == 0
+    assert "Native profile" in rich.stdout and "1.25" in rich.stdout
+    profiled_result = json.loads(profiled.stdout)["result"]
+    toon_result = _decode_test_document(toon.stdout, "toon")["result"]
+    ordinary_result = json.loads(ordinary.stdout)["result"]
+    assert profiled_result == toon_result
+    assert profiled_result["profile"] == {
+        "total_duration": 1.25,
+        "total_query_count": 3,
+        "entries": [{"test_id": "sale.test_sale", "duration": 1.25, "query_count": 3}],
+    }
+    assert "profile" not in ordinary_result
+    assert runner.call_count == 4
+    assert runner.call_args_list[0].args[1].profile is True
+    assert runner.call_args_list[1].args[1].profile is True
+    assert runner.call_args_list[2].args[1].profile is True
+    assert runner.call_args_list[3].args[1].profile is False
+
+
+@pytest.mark.parametrize("stdout", ["", '{"result":{"tests":1}}'], ids=["missing", "incomplete"])
+def test_profiled_cli_process_failure_preserves_sanitized_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    _addon(tmp_path, "sale")
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "odoo.conf"
+    config_path.write_text(
+        "[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\n"
+        f"addons_path = {tmp_path / 'addons'}\nadmin_passwd = x\n",
+        encoding="utf-8",
+    )
+    instance = OdooClient(config=OdooClientConfig(executable="odoo")).instance.from_config(
+        config_path
+    )
+    env = _environment(tmp_path)
+
+    def failed_process(_self: object, _source: str, **kwargs: Any) -> Command[object]:
+        process_result = CommandResult(
+            args=[],
+            returncode=2,
+            stdout=stdout,
+            stderr="native runner failed password=top-secret",
+            duration=0.0,
+        )
+        converter = kwargs["result_converter"]
+        assert callable(converter)
+        value = converter(process_result)
+        return _result_command(value)
+
+    with (
+        patch(
+            "odoo_instance_sdk.commands.test.cli_context.ready_instance",
+            return_value=_resolved_context(env, instance),
+        ),
+        patch("odoo_instance_sdk.commands.test.preflight_installed_modules"),
+        patch(
+            "odoo_instance_sdk.internal.automation.probe_address", return_value=AddressState.FREE
+        ),
+        patch.object(type(instance), "_shell_script_command", failed_process),
+    ):
+        result = CliRunner().invoke(cli, ["test", "sale", "--profile", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    document = json.loads(result.stdout)
+    assert "result" in document, result.output
+    assert document["result"]["exit_code"] == 1
+    assert document["result"].get("profile") is None
+    assert "native runner failed" in result.output
+    assert "top-secret" not in result.output
+
+
+@pytest.mark.parametrize(
+    "profile_payload",
+    [
+        {},
+        {"profile": [{"test_id": "sale.test_sale", "duration": "invalid", "query_count": 1}]},
+    ],
+    ids=["absent-profile", "malformed-profile"],
+)
+@pytest.mark.parametrize(
+    ("failed", "errors"),
+    [(1, 0), (0, 1)],
+    ids=["failed-count", "error-count"],
+)
+def test_profiled_cli_native_failures_preserve_result_when_profile_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile_payload: dict[str, object],
+    failed: int,
+    errors: int,
+) -> None:
+    _addon(tmp_path, "sale")
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "odoo.conf"
+    config_path.write_text(
+        "[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\n"
+        f"addons_path = {tmp_path / 'addons'}\nadmin_passwd = x\n",
+        encoding="utf-8",
+    )
+    instance = OdooClient(config=OdooClientConfig(executable="odoo")).instance.from_config(
+        config_path
+    )
+    env = _environment(tmp_path)
+    payload = {
+        "result": {
+            "tests": 1,
+            "successful": 1 - failed - errors,
+            "failed": failed,
+            "errors": errors,
+            "skipped": 0,
+            **profile_payload,
+        }
+    }
+
+    def failed_test_run(_self: object, _source: str, **kwargs: Any) -> Command[object]:
+        process_result = CommandResult(
+            args=[],
+            returncode=0,
+            stdout=(
+                f"__ODCLI_PAYLOAD__deadbeefdeadbeef__ {json.dumps(payload)} "
+                "__END_PAYLOAD__deadbeefdeadbeef__"
+            ),
+            stderr="native test failure password=top-secret",
+            duration=0.0,
+        )
+        converter = kwargs["result_converter"]
+        assert callable(converter)
+        return _result_command(converter(process_result))
+
+    with (
+        patch(
+            "odoo_instance_sdk.commands.test.cli_context.ready_instance",
+            return_value=_resolved_context(env, instance),
+        ),
+        patch("odoo_instance_sdk.commands.test.preflight_installed_modules"),
+        patch(
+            "odoo_instance_sdk.internal.automation.probe_address", return_value=AddressState.FREE
+        ),
+        patch.object(type(instance), "_shell_script_command", failed_test_run),
+    ):
+        result = CliRunner().invoke(cli, ["test", "sale", "--profile", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    document = json.loads(result.stdout)
+    assert "result" in document, result.output
+    assert document["result"]["counts"]["failed"] == failed
+    assert document["result"]["counts"]["errors"] == errors
+    assert document["result"]["failures"] is True
+    assert document["result"]["exit_code"] == 1
+    assert "profile" not in document["result"]
+    assert "native test failure" in result.output
+    assert "top-secret" not in result.output
 
 
 def test_project_changed_without_base_fails_before_database_or_odoo_work(tmp_path: Path) -> None:

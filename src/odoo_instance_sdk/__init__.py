@@ -167,7 +167,12 @@ if TYPE_CHECKING:
         MonitoringExtensionSkip,
         MonitoringInitializationResult,
         NoBackup,
+        OdooFieldInfo,
+        OdooModelInfo,
         OdooProcess,
+        OdooRefInfo,
+        OdooTestProfile,
+        OdooTestProfileEntry,
         OdooTestResult,
         OdooTestSpec,
         PgAdminEligibility,
@@ -224,6 +229,7 @@ if TYPE_CHECKING:
         EnvironmentResource,
     )
     from odoo_instance_sdk.resources.git import GitResource
+    from odoo_instance_sdk.resources.inspector import OdooInspector
     from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
@@ -483,8 +489,14 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "OdooClient": ("odoo_instance_sdk.client", "OdooClient"),
     "OdooClientConfig": ("odoo_instance_sdk.config", "OdooClientConfig"),
     "OdooInstance": ("odoo_instance_sdk.resources.instance", "OdooInstance"),
+    "OdooInspector": ("odoo_instance_sdk.resources.inspector", "OdooInspector"),
     "OdooInstanceSdkError": ("odoo_instance_sdk.exceptions", "OdooInstanceSdkError"),
     "OdooProcess": ("odoo_instance_sdk.models", "OdooProcess"),
+    "OdooFieldInfo": ("odoo_instance_sdk.models", "OdooFieldInfo"),
+    "OdooModelInfo": ("odoo_instance_sdk.models", "OdooModelInfo"),
+    "OdooRefInfo": ("odoo_instance_sdk.models", "OdooRefInfo"),
+    "OdooTestProfile": ("odoo_instance_sdk.models", "OdooTestProfile"),
+    "OdooTestProfileEntry": ("odoo_instance_sdk.models", "OdooTestProfileEntry"),
     "OdooTestResult": ("odoo_instance_sdk.models", "OdooTestResult"),
     "OdooTestSpec": ("odoo_instance_sdk.models", "OdooTestSpec"),
     "PgAdminDatabaseNotFoundError": (
@@ -794,9 +806,15 @@ if TYPE_CHECKING:
         "NonLocalInstanceError",
         "OdooClient",
         "OdooClientConfig",
+        "OdooFieldInfo",
+        "OdooInspector",
         "OdooInstance",
         "OdooInstanceSdkError",
+        "OdooModelInfo",
         "OdooProcess",
+        "OdooRefInfo",
+        "OdooTestProfile",
+        "OdooTestProfileEntry",
         "OdooTestResult",
         "OdooTestSpec",
         "OmittedStepError",
