@@ -21,6 +21,12 @@ import pytest
 from scripts import _gitlab_member_cache as cache, e2e_gitlab_member_workflow as runner
 
 
+def _trusted_tool(name: str) -> str:
+    executable = shutil.which(name)
+    assert executable is not None
+    return str(Path(executable).resolve())
+
+
 def _clean_sdk_checkout(repository: Path, revision: str, destination: Path) -> Path:
     subprocess.run(
         ["git", "clone", "--shared", "--no-checkout", str(repository), str(destination)],
@@ -426,6 +432,7 @@ def test_public_cache_runner_does_not_execute_candidate_git_with_token(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     helper_dir, runner_root, token, _daemon_stop = _public_security_fixture(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", str(helper_dir) + os.pathsep + os.environ["PATH"])
     sentinel = tmp_path / "candidate-git-executed"
     candidate_git = helper_dir / "git"
     candidate_git.write_text(
@@ -444,6 +451,181 @@ def test_public_cache_runner_does_not_execute_candidate_git_with_token(
     assert result == 1
     assert response["ok"] is False
     assert not sentinel.exists()
+    assert token not in json.dumps(response)
+
+
+@pytest.mark.unit
+def test_public_cache_runner_pins_candidate_first_path_through_native_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original_environments = cache._integrated_cache_environments
+    original_profile_status = cache._profile_status
+    original_profile_stop = cache._profile_stop
+    original_provenance = cache._installed_helper_provenance
+    helper_dir, runner_root, token, _daemon_stop = _public_security_fixture(monkeypatch, tmp_path)
+    trusted_path = os.environ["PATH"]
+    trusted_git = shutil.which("git", path=trusted_path)
+    trusted_multica = shutil.which("multica", path=trusted_path)
+    assert trusted_git is not None
+    assert trusted_multica is not None
+    trusted_git = str(Path(trusted_git).resolve())
+    trusted_multica = str(Path(trusted_multica).resolve())
+    monkeypatch.setenv("PATH", str(helper_dir) + os.pathsep + trusted_path)
+    monkeypatch.setattr(cache, "_integrated_cache_environments", original_environments)
+    for checkout_name in ("task-a", "task-b"):
+        task_checkout = runner_root / checkout_name
+        subprocess.run([trusted_git, "-C", str(task_checkout), "init", "-q"], check=True)
+        (task_checkout / "fixture.txt").write_text("fixture\n", encoding="utf-8")
+        subprocess.run([trusted_git, "-C", str(task_checkout), "add", "fixture.txt"], check=True)
+        subprocess.run(
+            [
+                trusted_git,
+                "-C",
+                str(task_checkout),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+    candidate_git_sentinel = tmp_path / "candidate-git-received-token"
+    candidate_multica_sentinel = tmp_path / "candidate-multica-received-token"
+    for name, sentinel in (
+        ("git", candidate_git_sentinel),
+        ("multica", candidate_multica_sentinel),
+    ):
+        executable = helper_dir / name
+        executable.write_text(
+            "#!/bin/sh\nprintf '%s' \"$ODCLI_GITLAB_TOKEN_CACHE\" > "
+            + shlex.quote(str(sentinel))
+            + "\nexit 91\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o700)
+
+    repository_url = "https://gitlab.example/group/project"
+    wrapper = runner_root / "runner-root" / "native-cache-checkout"
+    checkout = wrapper / "actual-worktree"
+
+    def prepare_checkout() -> None:
+        checkout.mkdir(parents=True)
+        subprocess.run([trusted_git, "-C", str(checkout), "init", "-q"], check=True)
+        subprocess.run(
+            [trusted_git, "-C", str(checkout), "remote", "add", "origin", repository_url],
+            check=True,
+        )
+
+    profile = "isolated-profile"
+    task_env = {
+        "MULTICA_DAEMON_PORT": "41001",
+        "MULTICA_TOKEN": "task-token-fixture",
+        "MULTICA_TASK_ID": "task-fixture",
+        "MULTICA_WORKSPACE_ID": "workspace-fixture",
+    }
+    monkeypatch.setenv("MULTICA_TASK_ID", task_env["MULTICA_TASK_ID"])
+    monkeypatch.setenv("MULTICA_WORKSPACE_ID", task_env["MULTICA_WORKSPACE_ID"])
+    candidate_daemon_env = {
+        **task_env,
+        "ODCLI_GITLAB_PURPOSE": "cache-read",
+        "ODCLI_GITLAB_MEMBER_ID": "00000000-0000-4000-8000-000000000001",
+        "ODCLI_GITLAB_SELECTED_HOST": "gitlab.example",
+        "GIT_CONFIG_VALUE_1": f"!{helper_dir / 'git-credential-odcli'}",
+        "PATH": trusted_path,
+    }
+    prior_daemon_env = dict(task_env)
+    daemon_environments = iter((candidate_daemon_env, candidate_daemon_env, prior_daemon_env))
+    monkeypatch.setattr(cache, "_daemon_environment", lambda _status: next(daemon_environments))
+    provenance_validation = Mock(wraps=original_provenance)
+    monkeypatch.setattr(cache, "_installed_helper_provenance", provenance_validation)
+
+    def successful_helper_response(
+        args: Namespace, environment: dict[str, str], **kwargs: object
+    ) -> SimpleNamespace:
+        helper = cache._installed_helper_provenance(args, environment)
+        assert helper == kwargs["expected_helper"]
+        return SimpleNamespace(returncode=0, stdout="username=alice\npassword=fixture-secret\n")
+
+    monkeypatch.setattr(cache, "_run_cache_helper", successful_helper_response)
+    monkeypatch.setattr(cache, "_assert_cache_helper_negative_inputs", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cache, "_run_integrated_member_operations", lambda *_a, **_kw: None)
+
+    status = json.dumps({"profile": profile, "status": "running", "pid": 72})
+    executor_steps: tuple[tuple[SimpleNamespace, Callable[[], None]], ...] = (
+        (SimpleNamespace(stdout=status), lambda: None),
+        (SimpleNamespace(stdout=""), lambda: None),
+        (SimpleNamespace(stdout=""), lambda: None),
+        (SimpleNamespace(stdout=status), lambda: None),
+        (SimpleNamespace(stdout=status), lambda: None),
+        (SimpleNamespace(stdout=status), lambda: None),
+        (SimpleNamespace(stdout=str(checkout)), prepare_checkout),
+        (SimpleNamespace(stdout=status), lambda: None),
+        (SimpleNamespace(stdout=status), lambda: None),
+        (SimpleNamespace(stdout=""), lambda: None),
+        (SimpleNamespace(stdout=""), lambda: None),
+        (SimpleNamespace(stdout=""), lambda: None),
+        (SimpleNamespace(stdout=status), lambda: None),
+        (SimpleNamespace(stdout=""), lambda: None),
+    )
+    expected_calls = (
+        [trusted_multica, "--profile", profile, "daemon", "status", "--output", "json"],
+        [trusted_multica, "--profile", profile, "daemon", "stop"],
+        [trusted_multica, "--profile", profile, "daemon", "start"],
+        [trusted_multica, "--profile", profile, "daemon", "status", "--output", "json"],
+        [trusted_multica, "--profile", profile, "daemon", "status", "--output", "json"],
+        [trusted_multica, "daemon", "status", "--output", "json"],
+        [trusted_multica, "repo", "checkout", repository_url],
+        [trusted_multica, "--profile", profile, "daemon", "status", "--output", "json"],
+        [trusted_multica, "daemon", "status", "--output", "json"],
+        [trusted_multica, "--profile", profile, "daemon", "stop"],
+        [trusted_multica, "--profile", profile, "daemon", "stop"],
+        [trusted_multica, "--profile", profile, "daemon", "start"],
+        [trusted_multica, "--profile", profile, "daemon", "status", "--output", "json"],
+        [trusted_multica, "--profile", profile, "daemon", "stop"],
+    )
+    calls: list[tuple[list[str], dict[str, str], Path | None]] = []
+
+    def execute(
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        index = len(calls)
+        calls.append((argv, env or {}, cwd))
+        assert argv == expected_calls[index]
+        response, prepare = executor_steps[index]
+        prepare()
+        return response
+
+    monkeypatch.setattr(cache, "_run", execute)
+    monkeypatch.setattr(cache, "_profile_status", original_profile_status)
+    monkeypatch.setattr(cache, "_profile_stop", original_profile_stop)
+    result = runner.main(
+        ["--mode", "multica-cache", "--work-root", str(runner_root / "runner-root")]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert result == 0, response
+    assert response["ok"] is True
+    assert len(calls) == len(expected_calls)
+    assert provenance_validation.call_count == 2
+    assert all(call[0][0] == str(Path(trusted_multica).resolve()) for call in calls)
+    assert all(str(helper_dir.resolve()) not in call[1].get("PATH", "") for call in calls)
+    assert calls[2][1]["PATH"] == calls[6][1]["PATH"]
+    assert calls[6][1]["MULTICA_TOKEN"] == task_env["MULTICA_TOKEN"]
+    assert calls[6][1]["MULTICA_DAEMON_PORT"] == task_env["MULTICA_DAEMON_PORT"]
+    assert calls[6][1]["MULTICA_TASK_ID"] == task_env["MULTICA_TASK_ID"]
+    assert calls[6][1]["MULTICA_WORKSPACE_ID"] == task_env["MULTICA_WORKSPACE_ID"]
+    assert calls[6][2] == wrapper
+    assert not candidate_git_sentinel.exists()
+    assert not candidate_multica_sentinel.exists()
     assert token not in json.dumps(response)
 
 
@@ -556,7 +738,7 @@ def test_public_cache_runner_rejects_global_helper_before_daemon_mutation(
     monkeypatch.setenv("MULTICA_TOKEN", "task-token-fixture")
     monkeypatch.setenv("TEST_GIT_HELPER_DIR", str(tmp_path / "owned" / "bin"))
     monkeypatch.setenv("TEST_CORE_PROJECT", str(Path(__file__).parents[2].resolve()))
-    monkeypatch.setenv("PATH", str(tmp_path / "global-bin"))
+    monkeypatch.setenv("PATH", str(tmp_path / "global-bin") + os.pathsep + os.environ["PATH"])
     owned_bin = tmp_path / "owned" / "bin"
     owned_bin.mkdir(parents=True)
     global_bin = tmp_path / "global-bin"
@@ -667,6 +849,7 @@ def test_installed_helper_validation_rejects_refusal_and_wrong_login(
         cache_host="gitlab.example",
         helper_dir=Path("/owned/bin"),
         cache_member_id=member_id,
+        _trusted_search_path=os.defpath,
     )
     captured: list[tuple[list[str], str, dict[str, str]]] = []
     monkeypatch.setattr(
@@ -760,7 +943,7 @@ def test_installed_helper_validation_accepts_exact_git_fill_response(
     assert run_mock.call_args.kwargs["input"] == "protocol=https\nhost=gitlab.example\n\n"
     helper_environment = run_mock.call_args.kwargs["env"]
     assert helper_environment["ODCLI_GITLAB_TOKEN_CACHE"] == "secret-fixture"
-    assert helper_environment["PATH"].startswith("/owned/bin:")
+    assert helper_environment["PATH"] == os.defpath
     assert helper_environment["PYTHONNOUSERSITE"] == "1"
     assert helper_environment["PYTHONPYCACHEPREFIX"]
     assert helper_environment["GIT_CONFIG_GLOBAL"] == os.devnull
