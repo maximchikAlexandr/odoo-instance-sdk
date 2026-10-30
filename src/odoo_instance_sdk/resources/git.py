@@ -31,6 +31,7 @@ from odoo_instance_sdk.internal.git_sync import SyncSteps, execute_sync
 from odoo_instance_sdk.models import (
     CommandResult,
     GitAbsorbResult,
+    GitBranchRenameResult,
     GitCheckIssue,
     GitCheckResult,
     GitCommitContext,
@@ -165,14 +166,6 @@ def _capture_probe(step: PreparedStep, *, allow_failure: bool = False) -> Proces
     if result.returncode != 0 and not allow_failure:
         raise GitWorkflowError(f"Git planning probe failed: {step.step_id}")
     return result
-
-
-def _remote_head(value: str) -> str | None:
-    for line in value.splitlines():
-        sha, separator, ref = line.strip().partition("\t")
-        if separator and ref.startswith("refs/heads/") and re.fullmatch(r"[0-9a-fA-F]{40}", sha):
-            return sha
-    return None
 
 
 def _validate_description(description: str) -> str:
@@ -382,6 +375,14 @@ def _verified_base_ref(root: Path, candidate: str) -> str:
 class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
     def __init__(self, instance: OdooInstance) -> None:
         self._instance = instance
+
+    def rename_branch_command(self, ticket: str) -> Command[GitBranchRenameResult]:
+        from odoo_instance_sdk.resources.git_rename import rename_branch_command
+
+        return rename_branch_command(self, ticket)
+
+    def rename_branch(self, ticket: str) -> GitBranchRenameResult:
+        return self.rename_branch_command(ticket).run()
 
     def passthrough_command(
         self,

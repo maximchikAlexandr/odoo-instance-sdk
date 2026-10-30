@@ -128,7 +128,7 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.checkout.remote_branch_names", lambda *_args: ()
+        "odoo_instance_sdk.internal.git_worktree.remote_branch_names", lambda *_args: ()
     )
     before = env_client.environments.list(project=project_manifest, include_removed=True)
     result = _invoke(
