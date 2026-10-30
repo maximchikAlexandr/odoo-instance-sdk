@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -376,6 +377,48 @@ def _public_security_fixture(
     return helper_dir, runner_root, token_value, daemon_stop
 
 
+def _trusted_git_fixture(tmp_path: Path) -> Path:
+    real_git = shutil.which("git")
+    assert real_git is not None
+    executable = tmp_path / "trusted-bin" / "git"
+    trace = tmp_path / "trusted-git-credential-called"
+    executable.parent.mkdir()
+    executable.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "credential" ] && [ "$2" = "fill" ]; then\n'
+        f"  printf '%s\\n' \"$GIT_CONFIG_VALUE_1:$PATH\" > {shlex.quote(str(trace))}\n"
+        '  helper="$(command -v git-credential-odcli)"\n'
+        '  exec "$helper" get\n'
+        "fi\n"
+        f'exec {shlex.quote(real_git)} "$@"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
+def _compile_candidate_interpreter_canary(executable: Path, sentinel: Path) -> None:
+    compiler = shutil.which("cc")
+    assert compiler is not None
+    source = (
+        "#include <stdio.h>\n"
+        "#include <stdlib.h>\n"
+        "int main(void) {\n"
+        f'  FILE *file = fopen({json.dumps(str(sentinel))}, "w");\n'
+        '  const char *token = getenv("ODCLI_GITLAB_TOKEN_CACHE");\n'
+        "  if (file != NULL) { if (token != NULL) fputs(token, file); fclose(file); }\n"
+        "  return 1;\n"
+        "}\n"
+    )
+    subprocess.run(
+        [compiler, "-x", "c", "-o", str(executable), "-"],
+        input=source,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+
+
 @pytest.mark.unit
 def test_public_cache_runner_does_not_execute_candidate_git_with_token(
     monkeypatch: pytest.MonkeyPatch,
@@ -417,15 +460,17 @@ def test_public_cache_runner_rejects_untrusted_interpreter_before_secret_or_life
     sentinel = tmp_path / "candidate-interpreter-executed"
     interpreter = helper_dir / "python"
     interpreter.unlink()
-    interpreter.write_text(
-        "#!/bin/sh\nprintf '%s' \"$ODCLI_GITLAB_TOKEN_CACHE\" > "
-        + repr(str(sentinel))
-        + "\nexit 1\n",
-        encoding="utf-8",
-    )
-    interpreter.chmod(0o700)
+    _compile_candidate_interpreter_canary(interpreter, sentinel)
+    trusted_git = _trusted_git_fixture(tmp_path)
     result = runner.main(
-        ["--mode", "multica-cache", "--work-root", str(runner_root / "runner-root")]
+        [
+            "--mode",
+            "multica-cache",
+            "--git",
+            str(trusted_git),
+            "--work-root",
+            str(runner_root / "runner-root"),
+        ]
     )
     response = json.loads(capsys.readouterr().out)
 
@@ -433,6 +478,7 @@ def test_public_cache_runner_rejects_untrusted_interpreter_before_secret_or_life
     assert response["ok"] is False
     assert not sentinel.exists()
     assert token not in json.dumps(response)
+    assert not (tmp_path / "trusted-git-credential-called").exists()
     secret_corpus.assert_not_called()
     daemon_stop.assert_not_called()
 
