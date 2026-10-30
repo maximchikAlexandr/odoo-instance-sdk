@@ -144,6 +144,34 @@ Git revision, path, port, database/provenance fact, or other captured
 precondition raises a typed stale-plan error before the first mutation; the
 command is not replanned or replaced.
 
+## Inspection and test profiling
+
+The bounded inspector is available directly on the instance. It returns typed
+identity/metadata models and never exposes arbitrary record fields. Inspection
+is limited to one model, field, or XML ID and bounded metadata; it does not
+return record values, execute SQL, write data, or traverse relations. SDK
+profiling is opt-in through `OdooTestSpec.profile`; `OdooTestResult.profile` is
+`None` when profiling was not requested.
+
+```python
+from odoo_instance_sdk import OdooClient, OdooClientConfig, OdooTestSpec
+from odoo_instance_sdk.resources.testing import run_odoo_tests_command
+
+client = OdooClient(config=OdooClientConfig(executable="odoo-bin"))
+instance = client.instance.from_config("./odoo.conf")
+
+model = instance.inspector.model("res.partner")
+field = instance.inspector.field("res.partner", "email")
+reference = instance.inspector.ref("base.user_admin")
+
+spec = OdooTestSpec(modules=("sale",), test_tags="/sale", profile=True)
+result, diagnostic = run_odoo_tests_command(instance, spec).run()
+if diagnostic is not None:
+    print(f"Test runner diagnostic: {diagnostic}")
+if result.profile is not None:
+    print(result.profile.total_duration, result.profile.total_query_count)
+```
+
 `ActionStep` is used for honest in-process effects such as locks, catalog
 updates, filesystem changes, signals, and compensation. It is not disguised
 shell text. `ProcessStep` is used for captured children and includes the
