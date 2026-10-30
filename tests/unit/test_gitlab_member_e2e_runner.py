@@ -330,6 +330,113 @@ def _exact_candidate_installation(tmp_path: Path, repository: Path) -> Path:
     return helper_dir
 
 
+def _public_security_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    secret_corpus: Mock | None = None,
+) -> tuple[Path, Path, str, Mock]:
+    repository = Path(__file__).parents[2].resolve()
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    clean_repository = _clean_sdk_checkout(repository, revision, tmp_path / "clean-sdk")
+    helper_dir = _exact_candidate_installation(tmp_path, clean_repository)
+    runner_root = tmp_path / "runner"
+    _prepare_public_cache_runner(monkeypatch, runner_root, clean_repository, revision, helper_dir)
+    token_key = "ODCLI_GITLAB_TOKEN_CACHE"
+    token_value = "mapped-token-fixture"
+    monkeypatch.setattr(
+        cache,
+        "read_gitlab_credential_mappings",
+        lambda: (
+            SimpleNamespace(
+                user_id="00000000-0000-4000-8000-000000000001",
+                host="gitlab.example",
+                login="alice",
+                token_key=token_key,
+            ),
+        ),
+    )
+    monkeypatch.setenv(token_key, token_value)
+    environment = {
+        "PATH": str(helper_dir),
+        token_key: token_value,
+    }
+    monkeypatch.setattr(cache, "_integrated_cache_environments", lambda *_args: (environment, {}))
+    monkeypatch.setattr(
+        cache,
+        "_profile_status",
+        lambda _args: {"profile": "isolated-profile", "status": "running", "pid": 72},
+    )
+    daemon_stop = Mock()
+    monkeypatch.setattr(cache, "_profile_stop", daemon_stop)
+    if secret_corpus is not None:
+        monkeypatch.setattr(cache, "_secret_corpus", secret_corpus)
+    return helper_dir, runner_root, token_value, daemon_stop
+
+
+@pytest.mark.unit
+def test_public_cache_runner_does_not_execute_candidate_git_with_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    helper_dir, runner_root, token, _daemon_stop = _public_security_fixture(monkeypatch, tmp_path)
+    sentinel = tmp_path / "candidate-git-executed"
+    candidate_git = helper_dir / "git"
+    candidate_git.write_text(
+        "#!/bin/sh\nprintf '%s' \"$ODCLI_GITLAB_TOKEN_CACHE\" > "
+        + repr(str(sentinel))
+        + "\nexit 1\n",
+        encoding="utf-8",
+    )
+    candidate_git.chmod(0o700)
+
+    result = runner.main(
+        ["--mode", "multica-cache", "--work-root", str(runner_root / "runner-root")]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert response["ok"] is False
+    assert not sentinel.exists()
+    assert token not in json.dumps(response)
+
+
+@pytest.mark.unit
+def test_public_cache_runner_rejects_untrusted_interpreter_before_secret_or_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret_corpus = Mock(return_value=("mapped-token-fixture",))
+    helper_dir, runner_root, token, daemon_stop = _public_security_fixture(
+        monkeypatch, tmp_path, secret_corpus=secret_corpus
+    )
+    sentinel = tmp_path / "candidate-interpreter-executed"
+    interpreter = helper_dir / "python"
+    interpreter.unlink()
+    interpreter.write_text(
+        "#!/bin/sh\nprintf '%s' \"$ODCLI_GITLAB_TOKEN_CACHE\" > "
+        + repr(str(sentinel))
+        + "\nexit 1\n",
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o700)
+    result = runner.main(
+        ["--mode", "multica-cache", "--work-root", str(runner_root / "runner-root")]
+    )
+    response = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert response["ok"] is False
+    assert not sentinel.exists()
+    assert token not in json.dumps(response)
+    secret_corpus.assert_not_called()
+    daemon_stop.assert_not_called()
+
+
 @pytest.mark.unit
 def test_installed_helper_provenance_accepts_exact_candidate_installation(
     tmp_path: Path,
@@ -549,7 +656,9 @@ def test_installed_helper_validation_rejects_refusal_and_wrong_login(
 
     assert len(captured) == 1
     argv, request, _environment = captured[0]
-    assert argv == ["git", "credential", "fill"]
+    trusted_git = shutil.which("git")
+    assert trusted_git is not None
+    assert argv == [str(Path(trusted_git).resolve()), "credential", "fill"]
     assert request == "protocol=https\nhost=gitlab.example\n\n"
     assert "secret-fixture" not in request
 
@@ -595,7 +704,13 @@ def test_installed_helper_validation_accepts_exact_git_fill_response(
 
     cache._validate_cache_helper(args, environment, member_id, ("secret-fixture",))
 
-    assert run_mock.call_args.args[0] == ["git", "credential", "fill"]
+    trusted_git = shutil.which("git")
+    assert trusted_git is not None
+    assert run_mock.call_args.args[0] == [
+        str(Path(trusted_git).resolve()),
+        "credential",
+        "fill",
+    ]
     assert run_mock.call_args.kwargs["input"] == "protocol=https\nhost=gitlab.example\n\n"
     helper_environment = run_mock.call_args.kwargs["env"]
     assert helper_environment["ODCLI_GITLAB_TOKEN_CACHE"] == "secret-fixture"
@@ -603,6 +718,7 @@ def test_installed_helper_validation_accepts_exact_git_fill_response(
     assert helper_environment["PYTHONNOUSERSITE"] == "1"
     assert helper_environment["PYTHONPYCACHEPREFIX"]
     assert helper_environment["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert helper_environment["GIT_CONFIG_VALUE_1"] == "!/owned/bin/git-credential-odcli"
     assert "MULTICA_TOKEN" not in helper_environment
     assert "PYTHONPATH" not in helper_environment
     assert run_mock.call_args.kwargs["capture_output"] is True
