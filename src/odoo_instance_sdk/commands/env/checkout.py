@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import re
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -36,7 +34,6 @@ from odoo_instance_sdk.commands.env.display import (
 )
 from odoo_instance_sdk.commands.monitor_context import resolve_monitor_project_id
 from odoo_instance_sdk.commands.output import (
-    JsonObject,
     OutputDocument,
     OutputMode,
     bordered_table,
@@ -54,11 +51,18 @@ from odoo_instance_sdk.commands.output import (
     sanitize_terminal_text,
     success_document,
 )
+from odoo_instance_sdk.commands.ticket import TICKET as _TICKET
 from odoo_instance_sdk.config import OdooClientConfig
-from odoo_instance_sdk.exceptions import BackupCatalogError, StalePlanError
+from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.internal import git_worktree
 from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
+from odoo_instance_sdk.internal.ticket_branch_allocation import (
+    TicketAllocation as _TicketAllocation,
+    ensure_ticket_branch_absent,
+    resolve_ticket_allocation as _resolve_ticket_allocation,
+    ticket_provenance as _ticket_provenance,
+)
 from odoo_instance_sdk.models.backup import (
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
@@ -75,7 +79,6 @@ from odoo_instance_sdk.models.monitor import (
     ProjectSummary,
     Snapshot,
 )
-from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentResource,
@@ -136,91 +139,6 @@ class _EnvShowResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     cluster: ClusterSnapshot | None
 
 
-_TICKET_RE = re.compile(r"[A-Z][A-Z0-9]+-[1-9][0-9]*\Z")
-_TICKET_EVIDENCE_LIMIT = 32
-
-
-class _TicketType(click.ParamType[str]):
-    name = "TICKET"
-
-    def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
-        ticket = str(value)
-        if _TICKET_RE.fullmatch(ticket) is None:
-            self.fail("expected ticket like PROJ-123", param, ctx)
-        return ticket
-
-
-_TICKET = _TicketType()
-
-
-@dataclass(frozen=True, slots=True)
-class _TicketAllocation:
-    ticket: str
-    branch: str
-    repo_root: Path
-    git_common_dir: Path
-    base_ref: str
-    local_heads: tuple[str, ...]
-    catalogue_heads: tuple[str, ...]
-    remote_heads: tuple[str, ...]
-
-
-def _ticket_iteration(ticket: str, branch: str) -> int | None:
-    if branch == ticket:
-        return 0
-    match = re.fullmatch(rf"{re.escape(ticket)}_([1-9][0-9]*)", branch)
-    return int(match.group(1)) if match is not None else None
-
-
-def _catalogue_branch_names(
-    client: OdooClient, repo_root: Path, git_common_dir: Path
-) -> tuple[str, ...]:
-    catalog = client.get_catalog()
-    names: set[str] = set()
-    for row in catalog.list_environments(git_common_dir=str(git_common_dir), include_removed=True):
-        if (
-            Path(str(row["repository_root"])).resolve() == repo_root
-            and Path(str(row["git_common_dir"])).resolve() == git_common_dir
-        ):
-            branch = row["branch"]
-            if isinstance(branch, str):
-                names.add(branch)
-    return tuple(sorted(names))
-
-
-def _resolve_ticket_allocation(
-    client: OdooClient,
-    project_path: Path,
-    ticket: str,
-    base_ref_override: str | None,
-) -> _TicketAllocation:
-    repo_root = rev_parse_toplevel(project_path)
-    git_common_dir = rev_parse_git_common_dir(repo_root)
-    project = ProjectConfig.load(repo_root)
-    base_ref = base_ref_override or project.default_base_ref or "HEAD"
-    local_heads = tuple(sorted(set(local_branch_names(repo_root))))
-    catalogue_heads = tuple(sorted(set(_catalogue_branch_names(client, repo_root, git_common_dir))))
-    remote_heads = tuple(sorted(set(remote_branch_names(repo_root, ticket))))
-    all_heads = (*local_heads, *catalogue_heads, *remote_heads)
-    iterations = [
-        iteration
-        for branch in all_heads
-        if (iteration := _ticket_iteration(ticket, branch)) is not None
-    ]
-    next_iteration = max(iterations, default=-1) + 1
-    branch = ticket if next_iteration == 0 else f"{ticket}_{next_iteration}"
-    return _TicketAllocation(
-        ticket=ticket,
-        branch=branch,
-        repo_root=repo_root,
-        git_common_dir=git_common_dir,
-        base_ref=base_ref,
-        local_heads=local_heads,
-        catalogue_heads=catalogue_heads,
-        remote_heads=remote_heads,
-    )
-
-
 def _revalidate_ticket_absence(
     client: OdooClient,
     allocation: _TicketAllocation,
@@ -240,44 +158,7 @@ def _revalidate_ticket_absence(
         for line in str(remote_output or "").splitlines()
         if "\t" in line and line.split("\t", 1)[1].startswith("refs/heads/")
     }
-    sources = (
-        ("local", local_heads),
-        (
-            "catalogue",
-            set(_catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir)),
-        ),
-        ("origin", remote_heads),
-    )
-    for source, branches in sources:
-        if allocation.branch in branches:
-            raise StalePlanError(
-                "Ticket branch allocation became stale",
-                expected={"branch": allocation.branch, "absent": True},
-                actual={"source": source, "branch": allocation.branch},
-            )
-
-
-def _bounded_ticket_heads(heads: tuple[str, ...]) -> JsonObject:
-    return {
-        "heads": list(heads[:_TICKET_EVIDENCE_LIMIT]),
-        "total": len(heads),
-        "truncated": len(heads) > _TICKET_EVIDENCE_LIMIT,
-    }
-
-
-def _ticket_provenance(allocation: _TicketAllocation) -> JsonObject:
-    return {
-        "ticket_allocation": {
-            "ticket": allocation.ticket,
-            "resolved_branch": allocation.branch,
-            "base_ref": allocation.base_ref,
-            "evidence": {
-                "local": _bounded_ticket_heads(allocation.local_heads),
-                "catalogue": _bounded_ticket_heads(allocation.catalogue_heads),
-                "origin": _bounded_ticket_heads(allocation.remote_heads),
-            },
-        }
-    }
+    ensure_ticket_branch_absent(client, allocation, local_heads, remote_heads)
 
 
 def _ticket_rich_lines(document: OutputDocument) -> list[str]:

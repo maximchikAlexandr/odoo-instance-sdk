@@ -82,6 +82,12 @@ class GitSyncResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_
     guidance: tuple[str, ...] = ()
 
 
+class GitBranchRenameResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    previous_branch: str
+    selected_branch: str
+    renamed: bool
+
+
 class GitLabCredentialMapping(
     msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
 ):

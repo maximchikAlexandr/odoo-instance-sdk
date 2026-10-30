@@ -13,7 +13,7 @@ from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.env import checkout as env
 from odoo_instance_sdk.exceptions import StalePlanError
 from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
-from odoo_instance_sdk.internal import git_worktree
+from odoo_instance_sdk.internal import git_worktree, ticket_branch_allocation as allocation_api
 from odoo_instance_sdk.internal.git_worktree import GitError
 from odoo_instance_sdk.models import DevelopmentEnvironment
 from odoo_instance_sdk.project import ProjectConfig
@@ -49,15 +49,21 @@ def test_ticket_allocation_uses_sparse_union_and_removed_catalogue_rows(
 ) -> None:
     root = tmp_path.resolve()
     common = (root / ".git").resolve()
-    monkeypatch.setattr(env, "rev_parse_toplevel", lambda _: root)
-    monkeypatch.setattr(env, "rev_parse_git_common_dir", lambda _: common)
+    monkeypatch.setattr(git_worktree, "rev_parse_toplevel", lambda _: root)
+    monkeypatch.setattr(git_worktree, "rev_parse_git_common_dir", lambda _: common)
     monkeypatch.setattr(
         ProjectConfig, "load", lambda _: SimpleNamespace(default_base_ref="develop")
     )
     monkeypatch.setattr(
-        env, "local_branch_names", lambda _: ("PROJ-123", "PROJ-123_1", "PROJ-123_0")
+        git_worktree,
+        "local_branch_names",
+        lambda _: ("PROJ-123", "PROJ-123_1", "PROJ-123_0"),
     )
-    monkeypatch.setattr(env, "remote_branch_names", lambda _, __: ("PROJ-123_2", "PROJ-123_x"))
+    monkeypatch.setattr(
+        git_worktree,
+        "remote_branch_names",
+        lambda _, __: ("PROJ-123_2", "PROJ-123_x"),
+    )
     client = _allocation_client(
         [
             {"repository_root": str(root), "git_common_dir": str(common), "branch": "PROJ-123_3"},
@@ -69,12 +75,14 @@ def test_ticket_allocation_uses_sparse_union_and_removed_catalogue_rows(
         ]
     )
 
-    allocation = env._resolve_ticket_allocation(cast("OdooClient", client), root, "PROJ-123", None)
+    allocation = allocation_api.resolve_ticket_allocation(
+        cast("OdooClient", client), root, "PROJ-123", None
+    )
 
     assert allocation.branch == "PROJ-123_4"
     assert allocation.base_ref == "develop"
     assert allocation.catalogue_heads == ("PROJ-123_3",)
-    assert env._ticket_provenance(allocation) == {
+    assert allocation_api.ticket_provenance(allocation) == {
         "ticket_allocation": {
             "ticket": "PROJ-123",
             "resolved_branch": "PROJ-123_4",
@@ -104,15 +112,15 @@ def test_ticket_allocation_honors_explicit_base_and_exact_ticket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path.resolve()
-    monkeypatch.setattr(env, "rev_parse_toplevel", lambda _: root)
-    monkeypatch.setattr(env, "rev_parse_git_common_dir", lambda _: root / ".git")
+    monkeypatch.setattr(git_worktree, "rev_parse_toplevel", lambda _: root)
+    monkeypatch.setattr(git_worktree, "rev_parse_git_common_dir", lambda _: root / ".git")
     monkeypatch.setattr(
         ProjectConfig, "load", lambda _: SimpleNamespace(default_base_ref="develop")
     )
-    monkeypatch.setattr(env, "local_branch_names", lambda _: ())
-    monkeypatch.setattr(env, "remote_branch_names", lambda _, __: ())
+    monkeypatch.setattr(git_worktree, "local_branch_names", lambda _: ())
+    monkeypatch.setattr(git_worktree, "remote_branch_names", lambda _, __: ())
 
-    allocation = env._resolve_ticket_allocation(
+    allocation = allocation_api.resolve_ticket_allocation(
         cast("OdooClient", _allocation_client([])), root, "PROJ-123", "release"
     )
 
@@ -123,7 +131,7 @@ def test_ticket_allocation_honors_explicit_base_and_exact_ticket(
 def test_ticket_revalidation_consumes_named_git_steps_inside_checkout_context(
     tmp_path: Path,
 ) -> None:
-    allocation = env._TicketAllocation(
+    allocation = allocation_api.TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_1",
         repo_root=tmp_path,
@@ -154,7 +162,7 @@ def test_ticket_allocation_revalidation_is_stale_without_reallocation(
 ) -> None:
     root = tmp_path.resolve()
     common = root / ".git"
-    allocation = env._TicketAllocation(
+    allocation = allocation_api.TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_1",
         repo_root=root,
@@ -165,8 +173,8 @@ def test_ticket_allocation_revalidation_is_stale_without_reallocation(
         remote_heads=(),
     )
     monkeypatch.setattr(
-        env,
-        "_catalogue_branch_names",
+        allocation_api,
+        "catalogue_branch_names",
         lambda *_: ("PROJ-123_1",) if source == "catalogue" else (),
     )
     context = MagicMock()
@@ -187,7 +195,7 @@ def test_ticket_checkout_passes_captured_base_to_existing_command() -> None:
     command = object()
     client = SimpleNamespace(environments=MagicMock())
     client.environments.checkout_command.return_value = command
-    allocation = env._TicketAllocation(
+    allocation = allocation_api.TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_2",
         repo_root=Path("/repo"),
@@ -256,8 +264,8 @@ def test_unavailable_ticket_evidence_fails_before_checkout_mutation(
     root = tmp_path.resolve()
     common = root / ".git"
     calls: list[str] = []
-    monkeypatch.setattr(env, "rev_parse_toplevel", lambda _: root)
-    monkeypatch.setattr(env, "rev_parse_git_common_dir", lambda _: common)
+    monkeypatch.setattr(git_worktree, "rev_parse_toplevel", lambda _: root)
+    monkeypatch.setattr(git_worktree, "rev_parse_git_common_dir", lambda _: common)
     monkeypatch.setattr(ProjectConfig, "load", lambda _: SimpleNamespace(default_base_ref="HEAD"))
 
     def local(_: Path) -> tuple[str, ...]:
@@ -278,12 +286,12 @@ def test_unavailable_ticket_evidence_fails_before_checkout_mutation(
             raise GitError("origin unavailable")
         return ()
 
-    monkeypatch.setattr(env, "local_branch_names", local)
-    monkeypatch.setattr(env, "_catalogue_branch_names", catalogue)
-    monkeypatch.setattr(env, "remote_branch_names", origin)
+    monkeypatch.setattr(git_worktree, "local_branch_names", local)
+    monkeypatch.setattr(allocation_api, "catalogue_branch_names", catalogue)
+    monkeypatch.setattr(git_worktree, "remote_branch_names", origin)
 
     with pytest.raises((GitError, RuntimeError)):
-        env._resolve_ticket_allocation(
+        allocation_api.resolve_ticket_allocation(
             cast("OdooClient", _allocation_client([])), root, "PROJ-123", None
         )
 
@@ -301,7 +309,7 @@ def test_ticket_provenance_is_present_in_rich_json_and_toon(
 
     from odoo_instance_sdk.commands.output import OutputMode, emit, success_document
 
-    allocation = env._TicketAllocation(
+    allocation = allocation_api.TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_2",
         repo_root=Path("/repo"),
@@ -311,7 +319,7 @@ def test_ticket_provenance_is_present_in_rich_json_and_toon(
         catalogue_heads=("PROJ-123_1",),
         remote_heads=("PROJ-123_2",),
     )
-    expected = env._ticket_provenance(allocation)
+    expected = allocation_api.ticket_provenance(allocation)
 
     rich_status = emit(
         success_document(
@@ -396,7 +404,7 @@ def _invoke_ticket_checkout(
     from tests.unit.test_cli_output_modes import _matrix_checkout_plan, _matrix_public_environment
 
     plan = _matrix_checkout_plan()
-    allocation = env._TicketAllocation(
+    allocation = allocation_api.TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_2",
         repo_root=tmp_path,
@@ -450,7 +458,7 @@ def _invoke_ticket_checkout(
         ),
     ):
         result = CliRunner().invoke(cli, argv)
-    return result, env._ticket_provenance(allocation)["ticket_allocation"]
+    return result, allocation_api.ticket_provenance(allocation)["ticket_allocation"]
 
 
 @pytest.mark.parametrize("spelling", ["checkout", "create"], ids=["checkout", "create"])
