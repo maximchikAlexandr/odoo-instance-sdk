@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
     from odoo_instance_sdk.resources.git import GitResource
+    from odoo_instance_sdk.resources.inspector import OdooInspector
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -88,6 +89,7 @@ class _IdentityMixin:
         config: InstanceConfig
         _client: OdooClient
         databases: DatabaseResource
+        inspector: OdooInspector
         modules: ModuleResource
         git: GitResource
         _artifact_lock_path: Path | None
@@ -106,6 +108,9 @@ class _IdentityMixin:
         from odoo_instance_sdk.resources.module import ModuleResource
 
         self.modules = ModuleResource(instance)
+        from odoo_instance_sdk.resources.inspector import OdooInspector
+
+        self.inspector = OdooInspector(instance)
         self.git = GitResource(instance)
 
     def __repr__(self) -> str:

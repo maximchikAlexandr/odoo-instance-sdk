@@ -157,6 +157,8 @@ def project_execution_result(
             "zero_tests": typed.zero_tests,
         }
     )
+    if typed.profile is not None:
+        result["profile"] = model_to_dict(typed.profile)
     return result
 
 
@@ -220,6 +222,22 @@ def rich_test_result(result: dict[str, JsonValue]) -> str:
     elif result.get("dry_run"):
         table.add_row("Mode", "dry-run")
     table.add_row("Exit code", rich_cell(result["exit_code"]))
+    profile = result.get("profile")
+    if isinstance(profile, dict):
+        entries = profile.get("entries")
+        summary = (
+            f"{profile.get('total_duration', 0)}s; {profile.get('total_query_count', 0)} queries"
+        )
+        table.add_row("Native profile", rich_cell(summary))
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, dict):
+                    table.add_row(
+                        rich_cell(entry.get("test_id", "")),
+                        rich_cell(
+                            f"{entry.get('duration', 0)}s; {entry.get('query_count', 0)} queries"
+                        ),
+                    )
     return render_rich_text(table)
 
 
@@ -231,6 +249,7 @@ def _execute_selection(
     reload_tests: bool,
     allow_empty: bool,
     tags: str | None,
+    profile: bool = False,
     observer: StepObserver | None = None,
 ) -> tuple[dict[str, JsonValue], str | None]:
     spec = OdooTestSpec(
@@ -238,6 +257,7 @@ def _execute_selection(
         test_tags=selection.test_tags if tags is None else tags,
         reload_tests=reload_tests,
         allow_empty=allow_empty,
+        profile=profile,
     )
     preflight_installed_modules(instance, spec.modules)
     command = run_odoo_tests_command(
@@ -277,7 +297,14 @@ def resolve_module_test_selection(
     )
 
 
-@click.command("test", help="Select and run Odoo tests.")
+@click.command(
+    "test",
+    help=(
+        "Select and run Odoo tests. --profile adds native Odoo 19 duration/query statistics "
+        "without changing the ordinary result.\n\nExamples:\n  odcli test sale --profile\n"
+        "  odcli test --changed --profile --dry-run --format json"
+    ),
+)
 @click.argument("target", required=False)
 @click.option("--tags", "tags", default=None, help="Native Odoo test tags.")
 @click.option("--reload-tests", is_flag=True, default=False)
@@ -285,6 +312,12 @@ def resolve_module_test_selection(
 @click.option("--changed", is_flag=True, default=False, help="Select directly changed addons.")
 @click.option("--base", default=None, help="Git baseline used with --changed.")
 @click.option("--dry-run", is_flag=True, default=False, help="Select and report without running.")
+@click.option(
+    "--profile",
+    is_flag=True,
+    default=False,
+    help="Include native per-test time and SQL query statistics.",
+)
 @output_options
 @pass_cli_context
 def test_command(  # noqa: C901
@@ -296,6 +329,7 @@ def test_command(  # noqa: C901
     changed: bool,
     base: str | None,
     dry_run: bool,
+    profile: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -339,6 +373,7 @@ def test_command(  # noqa: C901
                 or ",".join(f"/{module}" for module in plan.modules),
                 reload_tests=reload_tests,
                 allow_empty=allow_empty,
+                profile=profile,
             )
             command = run_odoo_tests_command(
                 instance,
@@ -407,6 +442,7 @@ def test_command(  # noqa: C901
                     reload_tests=reload_tests,
                     allow_empty=allow_empty,
                     tags=tags,
+                    profile=profile,
                     observer=observer,
                 )
             )
@@ -418,6 +454,7 @@ def test_command(  # noqa: C901
                 reload_tests=reload_tests,
                 allow_empty=allow_empty,
                 tags=tags,
+                profile=profile,
             )
         _emit_result(mode=mode, command="test", result=result, dry_run=False, diagnostic=diagnostic)
         raise click.exceptions.Exit(cast("int", result["exit_code"]))  # noqa: TRY301
