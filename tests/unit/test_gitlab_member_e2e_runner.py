@@ -59,6 +59,10 @@ def _prepare_public_cache_runner(
     helper_dir: Path,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    trusted_multica = _trusted_multica_fixture(root)
+    monkeypatch.setenv(
+        "PATH", str(trusted_multica.parent) + os.pathsep + os.environ.get("PATH", "")
+    )
     checkout_a = root / "task-a"
     checkout_b = root / "task-b"
     checkout_a.mkdir()
