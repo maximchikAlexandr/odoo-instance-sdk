@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 69-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 70-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -66,6 +66,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `git commit` | mutating-or-spawning | yes | not-applicable | upstream Git workflow is outside the disposable Odoo fixture |
 | `git clone` | mutating-or-spawning | yes | not-applicable | authenticated GitLab clone is covered by generic Git contract tests and private E2E |
 | `git check` | bounded-read-only | no | not-applicable | upstream Git policy inspection is covered by unit contracts |
+| `git rename-branch` | mutating-or-spawning | yes | not-applicable | isolated numbered Git rename is verified by the independent GRB walkthrough, outside the Odoo lifecycle matrix |
 | `git absorb` | mutating-or-spawning | yes | not-applicable | upstream Git mutation is outside the disposable Odoo fixture |
 | `git sync` | mutating-or-spawning | yes | not-applicable | upstream remote Git publication is intentionally outside E2E |
 | `git mr create` | mutating-or-spawning | yes | not-applicable | GitLab merge-request publication is covered by focused transport tests and private E2E |
