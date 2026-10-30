@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import msgspec
@@ -15,6 +16,8 @@ from odoo_instance_sdk.exceptions import (
     GitRepositoryChangedError,
     GitRepositoryError,
 )
+from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal import git_credential_helper
 from odoo_instance_sdk.internal.git_frontier import frontier_environment
 from odoo_instance_sdk.internal.git_repository import (
     resolve_repository,
@@ -28,7 +31,11 @@ from odoo_instance_sdk.internal.gitlab_credentials import (
     resolve_gitlab_credential,
     verify_git_transport,
 )
-from odoo_instance_sdk.internal.gitlab_identity import verify_gitlab_identity
+from odoo_instance_sdk.internal.gitlab_identity import (
+    GitLabCacheCredentialTransport,
+    verify_gitlab_cache_credential,
+    verify_gitlab_identity,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessOutputLimitError,
@@ -40,7 +47,11 @@ from odoo_instance_sdk.internal.proc.redaction import project_process_step
 from odoo_instance_sdk.internal.project_env import ProjectEnvironmentError, load_environment_file
 from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.internal.transport.gitlab import GitLabHttpClient
-from odoo_instance_sdk.models import GitLabCredentialContext, GitMergeRequestResult
+from odoo_instance_sdk.models import (
+    GitLabCredentialContext,
+    GitLabCredentialIdentity,
+    GitMergeRequestResult,
+)
 from odoo_instance_sdk.resources.git import _command_result
 
 MEMBER_A = "11111111-1111-4111-8111-111111111111"
@@ -280,8 +291,10 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     explicit_env.write_text("ODCLI_GITLAB_TOKEN_ALICE=explicit-token\n", encoding="utf-8")
     explicit_env.chmod(0o600)
     target = explicit_env if explicit else project_env
+    attacker = tmp_path / "attacker.env"
+    attacker.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+    attacker.chmod(0o600)
     original_open = os.open
-    swapped = False
 
     def replace_before_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -290,12 +303,8 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
         *,
         dir_fd: int | None = None,
     ) -> int:
-        nonlocal swapped
-        if path == target and dir_fd is None and not swapped:
-            target.unlink()
-            target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-            target.chmod(0o600)
-            swapped = True
+        target.unlink()
+        target.symlink_to(attacker)
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "O_NOFOLLOW", 0)
@@ -304,7 +313,7 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     with pytest.raises(ProjectEnvironmentError) as failure:
         load_environment_file(target)
 
-    assert swapped
+    assert target.is_symlink()
     assert "attacker-token" not in str(failure.value)
 
 
@@ -701,6 +710,132 @@ def test_gitlab_identity_verification_requires_owner_and_commit_identity(tmp_pat
             credential,
             lambda _host, _token: {"id": 7, "username": "alice", "name": "Alice"},
         )
+
+
+@pytest.mark.parametrize(
+    ("owner", "active", "scopes"),
+    [
+        (7, True, ["read_repository"]),
+        (8, True, ["read_repository"]),
+        (7, False, ["read_repository"]),
+        (7, True, ["read_repository", "write_repository"]),
+        (7, True, ["read_repository", "read_user"]),
+        (7, True, ["read_api"]),
+        (7, True, "read_repository"),
+    ],
+)
+def _cache_transport(
+    calls: list[str], *, owner: int, active: bool, scopes: JsonValue
+) -> GitLabCacheCredentialTransport:
+    class Transport:
+        def get_user(self, host: str, token: str) -> Mapping[str, JsonValue]:
+            calls.append(f"user:{host}:{token}")
+            return {"id": 7, "username": "alice", "name": "Alice", "email": "a@example.test"}
+
+        def get_personal_access_token(self, host: str, token: str) -> Mapping[str, JsonValue]:
+            calls.append(f"token:{host}:{token}")
+            return {"user_id": owner, "active": active, "scopes": scopes}
+
+    return Transport()
+
+
+def test_cache_credential_accepts_exact_success_scope(tmp_path: Path) -> None:
+    _credentials(tmp_path)
+    credential = resolve_gitlab_credential(MEMBER_A, "gitlab.example", user_root=tmp_path)
+    calls: list[str] = []
+
+    assert (
+        verify_gitlab_cache_credential(
+            credential,
+            _cache_transport(calls, owner=7, active=True, scopes=["read_repository"]),
+        )
+        == 7
+    )
+    assert calls == ["user:gitlab.example:file-token", "token:gitlab.example:file-token"]
+
+
+@pytest.mark.parametrize(
+    ("owner", "active", "scopes"),
+    [
+        (8, True, ["read_repository"]),
+        (7, False, ["read_repository"]),
+        (7, True, ["read_repository", "write_repository"]),
+        (7, True, ["read_repository", "read_user"]),
+        (7, True, ["read_api"]),
+        (7, True, "read_repository"),
+    ],
+)
+def test_cache_credential_rejects_invalid_owner_or_scope(
+    tmp_path: Path, owner: int, active: bool, scopes: JsonValue
+) -> None:
+    _credentials(tmp_path)
+    credential = resolve_gitlab_credential(MEMBER_A, "gitlab.example", user_root=tmp_path)
+    calls: list[str] = []
+
+    with pytest.raises(GitLabIdentityError):
+        verify_gitlab_cache_credential(
+            credential,
+            _cache_transport(calls, owner=owner, active=active, scopes=scopes),
+        )
+    assert calls == ["user:gitlab.example:file-token", "token:gitlab.example:file-token"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "request_text", "selected_host", "purpose", "expected"),
+    [
+        (["get"], "protocol=https\nhost=gitlab.example\n\n", "gitlab.example", "", 1),
+        (["get"], "protocol=https\nhost=gitlab.example\n\n", "gitlab.example", "cache-read", 0),
+        (["store"], "protocol=https\nhost=gitlab.example\n\n", "gitlab.example", "", 1),
+        (["get"], "protocol=https\nhost=other.example\n\n", "gitlab.example", "", 1),
+        (
+            ["get"],
+            "protocol=https\nhost=gitlab.example\nhost=other.example\n\n",
+            "gitlab.example",
+            "",
+            1,
+        ),
+        (["get"], "protocol=https\nhost=gitlab.example\n", "gitlab.example", "", 1),
+        (["get"], "protocol=https\nhost=gitlab.example\n\n", "gitlab.example", "cache", 1),
+    ],
+)
+def test_credential_helper_accepts_only_finite_exact_get_request(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    request_text: str,
+    selected_host: str,
+    purpose: str,
+    expected: int,
+) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO(request_text))
+    stdout = io.StringIO()
+    monkeypatch.setattr("sys.stdout", stdout)
+    monkeypatch.setenv("ODCLI_GITLAB_SELECTED_HOST", selected_host)
+    monkeypatch.setenv("ODCLI_GITLAB_PURPOSE", purpose)
+    monkeypatch.setenv("ODCLI_GITLAB_MEMBER_ID", MEMBER_A)
+    monkeypatch.setattr(
+        git_credential_helper,
+        "resolve_gitlab_credential",
+        lambda *_args, **_kwargs: GitLabCredentialContext(
+            GitLabCredentialIdentity(
+                user_id=MEMBER_A,
+                host="gitlab.example",
+                login="alice",
+                token_key="ODCLI_GITLAB_TOKEN_ALICE",
+            ),
+            "fake-secret",
+        ),
+    )
+    verified: list[bool] = []
+    monkeypatch.setattr(
+        git_credential_helper,
+        "verify_gitlab_cache_credential",
+        lambda *_args: verified.append(True),
+    )
+    monkeypatch.setenv("ODCLI_GITLAB_USER_ROOT", "/unused")
+
+    assert git_credential_helper.main(arguments) == expected
+    assert bool(verified) is (purpose == "cache-read")
+    assert stdout.getvalue() == ("username=alice\npassword=fake-secret\n" if expected == 0 else "")
 
 
 def _git(root: Path, *args: str) -> None:

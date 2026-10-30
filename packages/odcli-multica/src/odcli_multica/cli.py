@@ -256,6 +256,7 @@ class _GitGroup(click.Group):
 @click.option("--repository-url", required=False)
 @click.option("--profile", default=None)
 @click.option("--workspace-id", default=None)
+@click.option("--member-id", default=None, help="Use this current human workspace member.")
 @click.option("--odoo-bin", default=lambda: os.environ.get("ODCLI_ODOO_BIN", "odoo"))
 @click.option(
     "--format", "output_format", type=click.Choice(["rich", "json", "toon"]), default="rich"
@@ -271,6 +272,7 @@ def git(
     repository_url: str | None,
     profile: str | None,
     workspace_id: str | None,
+    member_id: str | None,
     odoo_bin: str,
     output_format: str,
     dry_run: bool,
@@ -316,6 +318,7 @@ def git(
             native_args,
             git_resource=resource,
             project_root=project,
+            member_id=member_id,
         )
         if dry_run:
             _finish(
@@ -334,6 +337,7 @@ def git(
 @git.command("sync")
 @click.option("--base", default=None)
 @click.option("--push", is_flag=True)
+@click.option("--member-id", default=None, help="Use this current human workspace member.")
 @click.option("--project", "project", required=True, type=click.Path(path_type=Path))
 @click.option("--multica-project", required=True)
 @click.option("--issue", required=True)
@@ -361,6 +365,7 @@ def git_sync(
     odoo_bin: str,
     output_format: str,
     dry_run: bool,
+    member_id: str | None,
 ) -> None:
     mode = _mode(output_format)
     client = _client_or_failure(profile, workspace_id, odoo_bin, mode, "git.sync")
@@ -376,6 +381,7 @@ def git_sync(
             project_root=project,
             base=base,
             push=push,
+            member_id=member_id,
         )
         if dry_run:
             _finish(
@@ -421,6 +427,7 @@ def merge_request() -> None:
     help="Numeric ID or exact username as an explicit override; precedence is --assignee, project setting, then global gitlab.mr.default_assignee. Otherwise no assignee. Sets assignee_id, not reviewers.",
 )
 @click.option("--project-path", default=None)
+@click.option("--member-id", default=None, help="Use this current human workspace member.")
 @click.option("--profile", default=None)
 @click.option("--workspace-id", default=None)
 @click.option("--odoo-bin", default=lambda: os.environ.get("ODCLI_ODOO_BIN", "odoo"))
@@ -447,6 +454,7 @@ def merge_request_publish(
     odoo_bin: str,
     output_format: str,
     dry_run: bool,
+    member_id: str | None,
 ) -> None:
     mode = _mode(output_format)
     client = _client_or_failure(profile, workspace_id, odoo_bin, mode, "gitlab.mr.publish")
@@ -467,6 +475,7 @@ def merge_request_publish(
             issue_url=issue_url,
             assignee=assignee,
             project_path=project_path,
+            member_id=member_id,
         )
         if dry_run:
             _finish(

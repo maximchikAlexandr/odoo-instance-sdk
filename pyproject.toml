@@ -41,6 +41,7 @@ dashboard = [
 [project.scripts]
 odcli = "odoo_instance_sdk.cli:cli"
 odcli-git-askpass = "odoo_instance_sdk.internal.git_askpass:main"
+git-credential-odcli = "odoo_instance_sdk.internal.git_credential_helper:main"
 
 [project.urls]
 Source = "https://github.com/maximchikAlexandr/odoo-instance-sdk"

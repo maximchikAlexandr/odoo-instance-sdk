@@ -59,10 +59,8 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/self_update.py", 822),
         ("src/odoo_instance_sdk/internal/self_update.py", 823),
         ("src/odoo_instance_sdk/internal/self_update.py", 824),
-        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 31),
-        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 32),
-        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 44),
-        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 45),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 74),
+        ("src/odoo_instance_sdk/internal/git_credential_helper.py", 75),
         ("src/odoo_instance_sdk/internal/git_askpass.py", 72),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 508),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 980),
@@ -108,19 +106,11 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/git_credential_helper.py",
-        31,
+        74,
     ): "Git credential protocol child transport",
     (
         "src/odoo_instance_sdk/internal/git_credential_helper.py",
-        32,
-    ): "Git credential protocol child transport",
-    (
-        "src/odoo_instance_sdk/internal/git_credential_helper.py",
-        44,
-    ): "Git credential protocol child transport",
-    (
-        "src/odoo_instance_sdk/internal/git_credential_helper.py",
-        45,
+        75,
     ): "Git credential protocol child transport",
     ("src/odoo_instance_sdk/internal/git_askpass.py", 72): "Git askpass child transport",
     (
@@ -153,6 +143,10 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_mutmut_results.py", 47),
         ("tests/unit/test_odcli_autonomous_skill.py", 178),
         ("tests/unit/project/test_prepare_venv.py", 271),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 985),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 1040),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 1482),
+        ("tests/unit/test_gitlab_member_e2e_runner.py", 1539),
     }
 )
 

@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import urlsplit
 
+import msgspec
 from multica_py.models.project_resources import GithubRepoResourceRef, ProjectResourceRecord
 
 from odcli_multica.client_policies import (
     askpass_command as _askpass_command,
     canonical_checkout as _canonical_checkout,
     current_branch as _current_branch,
-    default_mapping_path as _default_mapping_path,
     https_host as _https_host,
     optional_root_creator as _optional_root_creator,
     read_gitlab_credential_mappings,
@@ -63,7 +63,10 @@ from odoo_instance_sdk import (
 from odoo_instance_sdk.commands.output import action_command
 from odoo_instance_sdk.exceptions import GitLabCredentialError, GitLabPublicationError
 from odoo_instance_sdk.execution import ExecutionPlan
-from odoo_instance_sdk.internal.gitlab_credentials import resolve_gitlab_credential
+from odoo_instance_sdk.internal.gitlab_credentials import (
+    normalize_member_id,
+    resolve_gitlab_credential,
+)
 from odoo_instance_sdk.internal.proc import RunContext
 from odoo_instance_sdk.models import CommandResult, GitSyncResult
 from odoo_instance_sdk.storage.catalog import BackupCatalog, CatalogSetting
@@ -79,6 +82,13 @@ def _default_mr_assignee_setting(
     return catalog.get_setting(project_setting_key) or catalog.get_setting(
         "gitlab.mr.default_assignee"
     )
+
+
+def _normalize_member_id(value: str) -> str:
+    try:
+        return normalize_member_id(value)
+    except GitLabCredentialError as exc:
+        raise ContextVerificationError("selected member identifier is invalid") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +212,7 @@ class MulticaOdooClient:
         project_root: Path | str,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> Command[GitLabCredentialContext]:
         """Capture one private, host-scoped credential for a child command."""
         self._require_contract()
@@ -215,6 +226,7 @@ class MulticaOdooClient:
                     project_root=project_root,
                     mapping_path=mapping_path,
                     process_environment=process_environment,
+                    member_id=member_id,
                 ),
                 description="Resolve root-creator credentials for one GitLab host",
             ),
@@ -228,6 +240,7 @@ class MulticaOdooClient:
         project_root: Path | str,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> GitLabCredentialContext:
         """Resolve one private credential snapshot without persisting its token."""
         return self.credential_context_command(
@@ -236,6 +249,7 @@ class MulticaOdooClient:
             project_root=project_root,
             mapping_path=mapping_path,
             process_environment=process_environment,
+            member_id=member_id,
         ).run()
 
     resolve_root_creator = root_creator
@@ -296,9 +310,13 @@ class MulticaOdooClient:
         project_root: Path | str,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> Command[CommandResult]:
         """Capture credentials privately, then recheck transport at execution."""
         native_args = tuple(str(value) for value in args)
+        selected_member_id = (
+            _normalize_member_id(member_id) if member_id is not None else context.root_creator_id
+        )
         remote_host = _remote_host_for_operation(native_args, context.repository_url)
         credential_snapshot = (
             GitCredentialSnapshot(
@@ -309,6 +327,7 @@ class MulticaOdooClient:
                     project_root=project_root,
                     mapping_path=mapping_path,
                     process_environment=process_environment,
+                    member_id=member_id,
                 ),
             )
             if remote_host is not None
@@ -333,6 +352,7 @@ class MulticaOdooClient:
                 verify_transport=lambda: _verify_git_transport(
                     context.checkout_path, native_args, context.repository_url
                 ),
+                verify_member=lambda: self._verify_selected_member(context, member_id),
                 askpass=_askpass_command,
                 build_child=build_child,
             )
@@ -341,6 +361,10 @@ class MulticaOdooClient:
             "odcli.git.execute",
             execute,
             description="validate and execute raw Git transport",
+            details={
+                "member_id": selected_member_id,
+                "member_source": "explicit" if member_id is not None else "root_creator",
+            },
         )
 
     def git(
@@ -352,6 +376,7 @@ class MulticaOdooClient:
         project_root: Path | str,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> CommandResult:
         return self.git_command(
             context,
@@ -360,6 +385,7 @@ class MulticaOdooClient:
             project_root=project_root,
             mapping_path=mapping_path,
             process_environment=process_environment,
+            member_id=member_id,
         ).run()
 
     def sync_command(
@@ -372,8 +398,12 @@ class MulticaOdooClient:
         push: bool = False,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> Command[GitSyncResult]:
         """Capture sync credentials privately, then recheck transport at execution."""
+        selected_member_id = (
+            _normalize_member_id(member_id) if member_id is not None else context.root_creator_id
+        )
         remote_host = _remote_host_for_operation(("fetch",), context.repository_url)
         credential_snapshot = (
             GitCredentialSnapshot(
@@ -384,6 +414,7 @@ class MulticaOdooClient:
                     project_root=project_root,
                     mapping_path=mapping_path,
                     process_environment=process_environment,
+                    member_id=member_id,
                 ),
             )
             if remote_host is not None
@@ -415,6 +446,7 @@ class MulticaOdooClient:
                 verify_transport=lambda: _verify_git_transport(
                     context.checkout_path, ("fetch",), context.repository_url
                 ),
+                verify_member=lambda: self._verify_selected_member(context, member_id),
                 askpass=_askpass_command,
                 build_child=build_child,
             )
@@ -423,6 +455,10 @@ class MulticaOdooClient:
             "odcli.git.sync.execute",
             execute,
             description="validate and execute Git synchronization",
+            details={
+                "member_id": selected_member_id,
+                "member_source": "explicit" if member_id is not None else "root_creator",
+            },
         )
 
     def sync(
@@ -435,6 +471,7 @@ class MulticaOdooClient:
         push: bool = False,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> GitSyncResult:
         return self.sync_command(
             context,
@@ -444,6 +481,7 @@ class MulticaOdooClient:
             push=push,
             mapping_path=mapping_path,
             process_environment=process_environment,
+            member_id=member_id,
         ).run()
 
     def publish_merge_request_command(
@@ -461,6 +499,7 @@ class MulticaOdooClient:
         project_path: str | None = None,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> Command[MergeRequestPublicationResult]:
         """Capture a dry-runnable GitLab create-or-update MR operation."""
         from odcli_multica.gitlab import (
@@ -472,6 +511,9 @@ class MulticaOdooClient:
         from odoo_instance_sdk.internal.proc import PreparedAction
 
         host, inferred_project = repository_project_path(context.repository_url)
+        selected_member_id = (
+            _normalize_member_id(member_id) if member_id is not None else context.root_creator_id
+        )
         selected_project = _validated_project_path(project_path, inferred_project)
         description = read_description_file(description_file)
         configured_server_url = getattr(self.multica.config, "server_url", None)
@@ -491,6 +533,8 @@ class MulticaOdooClient:
                 "issue_id": context.issue_id,
                 "root_issue_id": context.root_issue_id,
                 "root_creator_id": context.root_creator_id,
+                "member_id": selected_member_id,
+                "member_source": "explicit" if member_id is not None else "root_creator",
                 "host": host,
                 "project_path": selected_project,
             },
@@ -547,6 +591,7 @@ class MulticaOdooClient:
                 and root.root_creator_id != context.root_creator_id
             ):
                 raise ContextVerificationError("task root creator changed")
+            self._verify_selected_member(context, member_id)
             run_context.complete_action(context_step.step_id)
 
             if git_resource is not None:
@@ -563,6 +608,7 @@ class MulticaOdooClient:
                 project_root=project_root,
                 mapping_path=mapping_path,
                 process_environment=process_environment,
+                member_id=member_id,
             )
             setting_key = f"gitlab.mr.default_assignee:https://{host}/{selected_project}"
             override = assignee if assignee is not None and assignee.strip() else None
@@ -630,6 +676,7 @@ class MulticaOdooClient:
         project_path: str | None = None,
         mapping_path: Path | str | None = None,
         process_environment: Mapping[str, str] | None = None,
+        member_id: str | None = None,
     ) -> MergeRequestPublicationResult:
         return self.publish_merge_request_command(
             context,
@@ -643,6 +690,7 @@ class MulticaOdooClient:
             project_path=project_path,
             mapping_path=mapping_path,
             process_environment=process_environment,
+            member_id=member_id,
         ).run()
 
     def _read_context(self, request: ContextRequest) -> VerifiedTaskContext:
@@ -716,6 +764,49 @@ class MulticaOdooClient:
     def _resolve_root_creator(self, context: VerifiedTaskContext) -> RootCreatorContext:
         return _resolve_root_creator(context, self.multica.issues, self.multica.projects)
 
+    def _resolve_selected_member(
+        self, context: VerifiedTaskContext, member_id: str | None
+    ) -> RootCreatorContext:
+        root = self._resolve_root_creator(context)
+        if member_id is None:
+            return msgspec.structs.replace(
+                root, member_id=root.root_creator_id, source="root_creator"
+            )
+        try:
+            selected = _normalize_member_id(member_id)
+            page = self.multica.workspaces.members(context.workspace_id)
+        except Exception as exc:
+            raise ContextVerificationError("workspace member evidence is unavailable") from exc
+        if (
+            page.has_more is not False
+            or page.next_cursor is not None
+            or page.offset not in (None, 0)
+            or page.total is None
+            or page.total != len(page.items)
+        ):
+            raise ContextVerificationError("workspace member evidence is incomplete")
+        matches = tuple(member for member in page.items if member.user_id == selected)
+        if len(matches) != 1 or not matches[0].user_id:
+            raise ContextVerificationError(
+                "selected member is not a current human workspace member"
+            )
+        return msgspec.structs.replace(root, member_id=selected, source="explicit")
+
+    def _verify_selected_member(self, context: VerifiedTaskContext, member_id: str | None) -> None:
+        selected = self._resolve_selected_member(context, member_id)
+        expected_id = (
+            context.root_creator_id if member_id is None else _normalize_member_id(member_id)
+        )
+        expected_source = "root_creator" if member_id is None else "explicit"
+        if (
+            selected.workspace_id != context.workspace_id
+            or selected.root_issue_id != context.root_issue_id
+            or selected.root_creator_id != context.root_creator_id
+            or selected.member_id != expected_id
+            or selected.source != expected_source
+        ):
+            raise ContextVerificationError("selected workspace member changed")
+
     def _resolve_credentials(
         self,
         context: VerifiedTaskContext,
@@ -724,20 +815,16 @@ class MulticaOdooClient:
         project_root: Path | str,
         mapping_path: Path | str | None,
         process_environment: Mapping[str, str] | None,
+        member_id: str | None = None,
     ) -> GitLabCredentialContext:
-        root = self._resolve_root_creator(context)
-        project_legacy_directory = Path(project_root).expanduser().resolve() / ".odcli"
+        selected = self._resolve_selected_member(context, member_id)
         try:
             return resolve_gitlab_credential(
-                root.root_creator_id,
+                selected.member_id or selected.root_creator_id,
                 host,
-                mapping_path=(
-                    Path(mapping_path)
-                    if mapping_path is not None
-                    else _default_mapping_path(project_legacy_directory.parent)
-                ),
-                environment_path=project_legacy_directory / ".env",
+                mapping_path=Path(mapping_path) if mapping_path is not None else None,
                 process_environment=process_environment,
+                include_implicit_project_root=False,
                 require_owner_only_legacy_directory=False,
             )
         except GitLabCredentialError as exc:

@@ -198,6 +198,7 @@ def execute_child(
     snapshot: GitCredentialSnapshot | None,
     *,
     verify_transport: Callable[[], None],
+    verify_member: Callable[[], None] | None = None,
     askpass: Callable[[], str],
     build_child: Callable[[Mapping[str, str], Sequence[str], str | None], Runnable[T_co]],
 ) -> T_co:
@@ -214,6 +215,8 @@ def execute_child(
         environment: Mapping[str, str] = {}
         secret_values: tuple[str, ...] = ()
         if snapshot is not None:
+            if verify_member is not None:
+                verify_member()
             verify_transport()
             channel_path = write_askpass_channel(snapshot.credential)
             hooks_path = tempfile.mkdtemp(prefix="odcli-git-hooks-")
