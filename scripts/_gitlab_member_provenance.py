@@ -22,7 +22,7 @@ _SHA = runner._SHA
 _git = runner._git
 
 
-def _validate_candidate_repository(args: argparse.Namespace) -> tuple[Path, dict[str, str]]:
+def validate_candidate_repository(args: argparse.Namespace) -> tuple[Path, dict[str, str]]:
     project = args.core_project.expanduser().resolve(strict=True)
     root = Path(_git(args.git, project, "rev-parse", "--show-toplevel")).resolve(strict=True)
     if project != root:
@@ -60,6 +60,57 @@ def _validate_candidate_repository(args: argparse.Namespace) -> tuple[Path, dict
     if not manifest:
         raise RuntimeError("candidate SDK Git package manifest is unavailable")
     return root, manifest
+
+
+def pin_trusted_executables(args: argparse.Namespace) -> None:
+    """Resolve runner tools without searching the candidate installation."""
+    helper_dir = Path(args.helper_dir).expanduser().absolute()
+    if helper_dir.is_symlink():
+        raise RuntimeError("candidate SDK helper directory must not be a symlink")
+    resolved_helper_dir = helper_dir.resolve(strict=True)
+    install_root = resolved_helper_dir.parent.resolve(strict=True)
+    inherited_path = os.environ.get("PATH", os.defpath)
+    trusted_entries: list[str] = []
+    for entry in inherited_path.split(os.pathsep):
+        candidate = Path(entry or os.curdir).expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved == install_root or resolved.is_relative_to(install_root):
+            continue
+        if resolved.is_dir():
+            trusted_entries.append(str(resolved))
+    search_path = os.pathsep.join(dict.fromkeys(trusted_entries))
+    if not search_path:
+        raise RuntimeError("trusted executable search path is unavailable")
+
+    def resolve(name: str) -> str:
+        requested = Path(name).expanduser()
+        resolved_text = (
+            str(requested.resolve(strict=True))
+            if requested.is_absolute()
+            else shutil.which(name, path=search_path)
+        )
+        if resolved_text is None:
+            raise RuntimeError(
+                f"trusted executable is unavailable outside candidate installation: {name}"
+            )
+        executable = Path(resolved_text).resolve(strict=True)
+        if (
+            not executable.is_file()
+            or not os.access(executable, os.X_OK)
+            or executable == install_root
+            or executable.is_relative_to(install_root)
+        ):
+            raise RuntimeError(
+                f"trusted executable is unavailable outside candidate installation: {name}"
+            )
+        return str(executable)
+
+    args.git = resolve(args.git)
+    args.multica = resolve(args.multica)
+    args._trusted_search_path = search_path
 
 
 def _candidate_helper_path(helper_dir: Path) -> tuple[Path, Path]:
@@ -360,6 +411,6 @@ def validate_installed_helper(args: argparse.Namespace) -> Path:
     helper_path, install_root = _candidate_helper_path(args.helper_dir)
     interpreter = _helper_interpreter(helper_path, install_root)
     _validate_trusted_interpreter(interpreter, install_root)
-    repository, manifest = _validate_candidate_repository(args)
+    repository, manifest = validate_candidate_repository(args)
     _validate_candidate_package(install_root, interpreter, helper_path, repository, manifest)
     return helper_path

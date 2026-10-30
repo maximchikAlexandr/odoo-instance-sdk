@@ -542,6 +542,9 @@ def main(argv: list[str] | None = None) -> int:
     evidence: list[dict[str, str | int | bool]] = []
     try:
         if args.mode == "multica-cache":
+            from scripts._gitlab_member_provenance import pin_trusted_executables
+
+            pin_trusted_executables(args)
             secrets = _integrated_multica_cache(args, root, evidence)
         else:
             member = _selected_member(args)

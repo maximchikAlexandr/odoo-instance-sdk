@@ -23,7 +23,6 @@ from odoo_instance_sdk.internal.gitlab_credentials import (
 )
 from scripts import _gitlab_member_provenance as provenance, e2e_gitlab_member_workflow as runner
 
-_SHA = runner._SHA
 _git = runner._git
 _run = runner._run
 _secret_corpus = runner._secret_corpus
@@ -35,7 +34,7 @@ _member_observation = runner._member_observation
 def _profile_status(args: argparse.Namespace) -> dict[str, object]:
     result = _run(
         [args.multica, "--profile", args.profile, "daemon", "status", "--output", "json"],
-        env=_daemon_profile_environment(),
+        env=_daemon_profile_environment(args),
     )
     payload = json.loads(result.stdout)
     if not isinstance(payload, dict):
@@ -46,7 +45,7 @@ def _profile_status(args: argparse.Namespace) -> dict[str, object]:
 def _profile_start(args: argparse.Namespace, environment: dict[str, str]) -> dict[str, object]:
     _run(
         [args.multica, "--profile", args.profile, "daemon", "start"],
-        env=_daemon_profile_environment(environment),
+        env=_daemon_profile_environment(args, environment),
     )
     status = _profile_status(args)
     if status.get("status") != "running" or status.get("profile") != args.profile:
@@ -57,14 +56,17 @@ def _profile_start(args: argparse.Namespace, environment: dict[str, str]) -> dic
 def _profile_stop(args: argparse.Namespace) -> None:
     _run(
         [args.multica, "--profile", args.profile, "daemon", "stop"],
-        env=_daemon_profile_environment(),
+        env=_daemon_profile_environment(args),
     )
 
 
-def _daemon_profile_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
+def _daemon_profile_environment(
+    args: argparse.Namespace, environment: dict[str, str] | None = None
+) -> dict[str, str]:
     selected = os.environ.copy() if environment is None else environment.copy()
     selected.pop("MULTICA_TOKEN", None)
     selected.pop("MULTICA_DAEMON_PORT", None)
+    selected["PATH"] = getattr(args, "_trusted_search_path", os.defpath)
     return selected
 
 
@@ -133,48 +135,8 @@ def _validate_integrated_cache_inputs(
         expected_host = f"{expected_host}:{parsed.port}"
     if args.cache_host != expected_host:
         raise RuntimeError("cache host does not match the private repository authority")
-    _validate_candidate_repository(args)
+    provenance.validate_candidate_repository(args)
     return cache_member, member_a, member_b, checkouts
-
-
-def _validate_candidate_repository(args: argparse.Namespace) -> tuple[Path, dict[str, str]]:
-    project = args.core_project.expanduser().resolve(strict=True)
-    root = Path(_git(args.git, project, "rev-parse", "--show-toplevel")).resolve(strict=True)
-    if project != root:
-        raise RuntimeError("core project must be the exact SDK repository root")
-    if not _SHA.fullmatch(args.sdk_sha):
-        raise RuntimeError("core project does not match the exact candidate SDK SHA")
-    status = _git(
-        args.git,
-        root,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--ignore-submodules=none",
-    )
-    if status:
-        raise RuntimeError("candidate SDK repository must be clean before cache provenance checks")
-    if _git(args.git, root, "rev-parse", "HEAD") != args.sdk_sha:
-        raise RuntimeError("core project does not match the exact candidate SDK SHA")
-
-    package_prefix = "src/odoo_instance_sdk/"
-    tree = _git(args.git, root, "ls-tree", "-r", "-z", args.sdk_sha, "--", "src/odoo_instance_sdk")
-    manifest: dict[str, str] = {}
-    for record in tree.split("\0"):
-        if not record:
-            continue
-        metadata, path = record.split("\t", 1)
-        mode, object_type, object_id = metadata.split()
-        if (
-            object_type != "blob"
-            or mode not in {"100644", "100755"}
-            or not path.startswith(package_prefix)
-        ):
-            raise RuntimeError("candidate SDK Git package manifest contains an unsupported entry")
-        manifest[path.removeprefix(package_prefix)] = object_id
-    if not manifest:
-        raise RuntimeError("candidate SDK Git package manifest is unavailable")
-    return root, manifest
 
 
 def _validate_integrated_checkouts(args: argparse.Namespace, checkouts: tuple[Path, Path]) -> None:
@@ -198,9 +160,8 @@ def _integrated_cache_environments(
     cache_environment = os.environ.copy()
     cache_environment.pop("MULTICA_TOKEN", None)
     cache_environment.pop("MULTICA_DAEMON_PORT", None)
-    cache_environment["PATH"] = (
-        str(args.helper_dir.expanduser().resolve()) + os.pathsep + cache_environment.get("PATH", "")
-    )
+    trusted_search_path = getattr(args, "_trusted_search_path", os.defpath)
+    cache_environment["PATH"] = trusted_search_path
     cache_environment.update(
         {
             "ODCLI_GITLAB_PURPOSE": "cache-read",
@@ -216,6 +177,7 @@ def _integrated_cache_environments(
         }
     )
     prior_environment = os.environ.copy()
+    prior_environment["PATH"] = trusted_search_path
     for key in tuple(prior_environment):
         if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
             prior_environment.pop(key, None)
@@ -251,18 +213,15 @@ def _installed_helper_provenance(
 
 def _trusted_git_executable(args: argparse.Namespace, helper_path: Path) -> Path:
     requested = Path(args.git).expanduser()
-    resolved_text = (
-        str(requested.resolve(strict=True)) if requested.is_absolute() else shutil.which(args.git)
+    resolved = (
+        str(requested.resolve(strict=True))
+        if requested.is_absolute()
+        else shutil.which(args.git, path=getattr(args, "_trusted_search_path", os.defpath))
     )
-    if resolved_text is None:
+    if resolved is None:
         raise RuntimeError("trusted Git executable is unavailable outside candidate installation")
-    try:
-        executable = Path(resolved_text).resolve(strict=True)
-        install_root = helper_path.parent.parent.resolve()
-    except OSError as exc:
-        raise RuntimeError(
-            "trusted Git executable is unavailable outside candidate installation"
-        ) from exc
+    executable = Path(resolved).resolve(strict=True)
+    install_root = helper_path.parent.parent.resolve()
     if (
         not executable.is_file()
         or not os.access(executable, os.X_OK)
@@ -392,7 +351,7 @@ def _credential_helper_environment(
     selected = {key: environment[key] for key in allowed if environment.get(key)}
     selected.update(
         {
-            "PATH": os.pathsep.join((str(args.helper_dir.expanduser().resolve()), os.defpath)),
+            "PATH": getattr(args, "_trusted_search_path", os.defpath),
             "PYTHONNOUSERSITE": "1",
             "PYTHONPYCACHEPREFIX": pycache_prefix,
             "ODCLI_GITLAB_MEMBER_ID": normalize_member_id(member_id),
@@ -559,6 +518,7 @@ def _native_cache_checkout(
     candidate_status: dict[str, object],
 ) -> None:
     task_environment = os.environ.copy()
+    task_environment["PATH"] = getattr(args, "_trusted_search_path", os.defpath)
     if not task_environment.get("MULTICA_DAEMON_PORT") or not task_environment.get("MULTICA_TOKEN"):
         raise RuntimeError("native checkout requires the isolated daemon task context")
     task_bindings = ("MULTICA_TASK_ID", "MULTICA_WORKSPACE_ID")
