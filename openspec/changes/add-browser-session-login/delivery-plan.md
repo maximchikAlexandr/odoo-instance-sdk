@@ -1,7 +1,7 @@
 ## Delivery contract
 
 - Change: `add-browser-session-login`
-- Planning revision: R2 on the exact OpenSpec-only commit named in the planning handoff.
+- Planning revision: R3 on the exact OpenSpec-only commit named in the planning handoff.
 - Approved base: `origin/main` at the base SHA recorded in that handoff.
 - Delivery mode: `dag`. The authoritative `Estimate, hours` issue property is above the single-WP threshold, and the graph contains genuine parallel fronts with disjoint primary write zones.
 - Scope authority: `proposal.md`, `design.md`, delta specs, and `tasks.md`. This file maps every task exactly once and does not replace requirements.
@@ -43,7 +43,57 @@ export EVIDENCE_DIR='<private directory outside every Git checkout>'
 mkdir -p "$EVIDENCE_DIR"
 ```
 
-Create equivalent baseline and candidate numbered slots. The baseline exists only for changed-UI comparison; all behavioral cases use the candidate slot:
+Define partial-state-safe cleanup and register it before the first slot is created. The create wrapper is responsible for removing resources when its own create operation fails before it can emit a valid manifest; after a valid manifest is parsed, the slot is immediately registered with this handler. Fixture cleanup is enabled only after its `seed` command succeeds. Unset paths and identifiers are never dereferenced, every applicable cleanup is attempted, an original non-zero status is preserved, and a cleanup failure makes an otherwise successful run non-zero:
+
+```bash
+set -euo pipefail
+BASELINE_SLOT_CREATED=0
+CANDIDATE_SLOT_CREATED=0
+BASELINE_FIXTURE_SEEDED=0
+CANDIDATE_FIXTURE_SEEDED=0
+
+cleanup_open_as_slots() {
+  local cleanup_failed=0
+  if [ "${CANDIDATE_FIXTURE_SEEDED:-0}" = 1 ] &&
+     [ -n "${CANDIDATE_CHECKOUT:-}" ] && [ -n "${CANDIDATE_ENV_ID:-}" ]; then
+    python3 "$CANDIDATE_CHECKOUT/scripts/e2e/open_as_fixture.py" cleanup \
+      --project "$CANDIDATE_CHECKOUT" --environment-id "$CANDIDATE_ENV_ID" \
+      --output "$EVIDENCE_DIR/candidate-fixture-cleanup.json" || cleanup_failed=1
+  fi
+  if [ "${CANDIDATE_SLOT_CREATED:-0}" = 1 ] && [ -n "${CANDIDATE_SLOT_ID:-}" ]; then
+    python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" remove "$CANDIDATE_SLOT_ID" \
+      --project "$NUMBERED_PROJECT" --checkout-parent "$CHECKOUT_PARENT" || cleanup_failed=1
+  fi
+  if [ "${BASELINE_FIXTURE_SEEDED:-0}" = 1 ] &&
+     [ -n "${BASELINE_CHECKOUT:-}" ] && [ -n "${BASELINE_ENV_ID:-}" ]; then
+    python3 "$BASELINE_CHECKOUT/scripts/e2e/open_as_fixture.py" cleanup \
+      --project "$BASELINE_CHECKOUT" --environment-id "$BASELINE_ENV_ID" \
+      --output "$EVIDENCE_DIR/baseline-fixture-cleanup.json" || cleanup_failed=1
+  fi
+  if [ "${BASELINE_SLOT_CREATED:-0}" = 1 ] && [ -n "${BASELINE_SLOT_ID:-}" ]; then
+    python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" remove "$BASELINE_SLOT_ID" \
+      --project "$NUMBERED_PROJECT" --checkout-parent "$CHECKOUT_PARENT" || cleanup_failed=1
+  fi
+  return "$cleanup_failed"
+}
+
+cleanup_on_exit() {
+  local original_status=$?
+  local cleanup_status=0
+  cleanup_open_as_slots || cleanup_status=$?
+  trap - EXIT INT TERM
+  if [ "$original_status" -ne 0 ]; then
+    exit "$original_status"
+  fi
+  exit "$cleanup_status"
+}
+
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+```
+
+Create equivalent baseline and candidate numbered slots. The baseline exists only for changed-UI comparison; all behavioral cases use the candidate slot. Parse and register each successful manifest before starting the next fallible operation:
 
 ```bash
 python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" create \
@@ -54,6 +104,10 @@ python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" create \
   --sdk-sha "$BASELINE_SHA" \
   --http-port "$BASELINE_HTTP_PORT" \
   --target-database "$BASELINE_DATABASE" > "$EVIDENCE_DIR/baseline-slot.json"
+export BASELINE_SLOT_ID="$(jq -er .identifier "$EVIDENCE_DIR/baseline-slot.json")"
+BASELINE_SLOT_CREATED=1
+export BASELINE_CHECKOUT="$(jq -er .checkout "$EVIDENCE_DIR/baseline-slot.json")"
+export BASELINE_ENV_ID="$(jq -er .environment_id "$EVIDENCE_DIR/baseline-slot.json")"
 
 python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" create \
   --project "$NUMBERED_PROJECT" \
@@ -63,42 +117,25 @@ python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" create \
   --sdk-sha "$PRODUCT_SHA" \
   --http-port "$CANDIDATE_HTTP_PORT" \
   --target-database "$CANDIDATE_DATABASE" > "$EVIDENCE_DIR/candidate-slot.json"
-
-export BASELINE_SLOT_ID="$(jq -er .identifier "$EVIDENCE_DIR/baseline-slot.json")"
-export BASELINE_CHECKOUT="$(jq -er .checkout "$EVIDENCE_DIR/baseline-slot.json")"
-export BASELINE_ENV_ID="$(jq -er .environment_id "$EVIDENCE_DIR/baseline-slot.json")"
 export CANDIDATE_SLOT_ID="$(jq -er .identifier "$EVIDENCE_DIR/candidate-slot.json")"
+CANDIDATE_SLOT_CREATED=1
 export CANDIDATE_CHECKOUT="$(jq -er .checkout "$EVIDENCE_DIR/candidate-slot.json")"
 export CANDIDATE_ENV_ID="$(jq -er .environment_id "$EVIDENCE_DIR/candidate-slot.json")"
 ```
 
-Seed the same fixture in each slot and register failure-safe cleanup before browser work:
+Seed the same fixture in each slot and register each successful seed immediately:
 
 ```bash
 python3 "$BASELINE_CHECKOUT/scripts/e2e/open_as_fixture.py" seed \
   --project "$BASELINE_CHECKOUT" --environment-id "$BASELINE_ENV_ID" \
   --fixture "$BASELINE_CHECKOUT/tests/e2e/fixtures/open_as_users.json" \
   --output "$EVIDENCE_DIR/baseline-fixture.json"
+BASELINE_FIXTURE_SEEDED=1
 python3 "$CANDIDATE_CHECKOUT/scripts/e2e/open_as_fixture.py" seed \
   --project "$CANDIDATE_CHECKOUT" --environment-id "$CANDIDATE_ENV_ID" \
   --fixture "$CANDIDATE_CHECKOUT/tests/e2e/fixtures/open_as_users.json" \
   --output "$EVIDENCE_DIR/candidate-fixture.json"
-
-cleanup_open_as_slots() {
-  local cleanup_failed=0
-  python3 "$CANDIDATE_CHECKOUT/scripts/e2e/open_as_fixture.py" cleanup \
-    --project "$CANDIDATE_CHECKOUT" --environment-id "$CANDIDATE_ENV_ID" \
-    --output "$EVIDENCE_DIR/candidate-fixture-cleanup.json" || cleanup_failed=1
-  python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" remove "$CANDIDATE_SLOT_ID" \
-    --project "$NUMBERED_PROJECT" --checkout-parent "$CHECKOUT_PARENT" || cleanup_failed=1
-  python3 "$BASELINE_CHECKOUT/scripts/e2e/open_as_fixture.py" cleanup \
-    --project "$BASELINE_CHECKOUT" --environment-id "$BASELINE_ENV_ID" \
-    --output "$EVIDENCE_DIR/baseline-fixture-cleanup.json" || cleanup_failed=1
-  python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" remove "$BASELINE_SLOT_ID" \
-    --project "$NUMBERED_PROJECT" --checkout-parent "$CHECKOUT_PARENT" || cleanup_failed=1
-  return "$cleanup_failed"
-}
-trap cleanup_open_as_slots EXIT INT TERM
+CANDIDATE_FIXTURE_SEEDED=1
 ```
 
 Before each case, run `open_as_fixture.py reset --project "$CANDIDATE_CHECKOUT" --environment-id "$CANDIDATE_ENV_ID" --case BL-XX --output "$EVIDENCE_DIR/bl-xx-reset.json"`; after each case run the same arguments with `inspect` to prove expected user/session/publication state. BL-04 and BL-05 additionally run `open_as_probe.py run --case <subcase> --project "$CANDIDATE_CHECKOUT" --environment-id "$CANDIDATE_ENV_ID" --output "$EVIDENCE_DIR/<case>-<subcase>.json"`. The driver SHALL obtain and consume tickets internally, never print them, and reject output containing a credential canary. Routine completion SHALL run `trap - EXIT INT TERM; cleanup_open_as_slots`; any non-zero cleanup command blocks acceptance. Then `python3 "$REFERENCE_CHECKOUT/scripts/agent_checkout.py" list --limit 100` SHALL show neither identifier, and this exact catalogue assertion SHALL return zero:
@@ -116,13 +153,45 @@ test "$(docker compose -p odcli-e2e-pg \
 
 | Case | Requirement / scenario | Gap and local decision | Public boundary | Repeatable script / CI disposition | Independent Tester actions | Assertions | Multica-only artifacts / images |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| BL-01 | Eligible discovery; Open as action/dialog | Live walkthrough is required for changed visible UI; SDK/HTTP semantics remain covered deterministically | `POST /api/v1/odoo/users/query`; panel card/dialog | `open_as_fixture.py reset/inspect --case BL-01`; normal CI runs SDK/dashboard/React tests | At 1440×900, `en-US`, light scheme and clean profile, open the same owner card on baseline and candidate; on candidate open the dialog, search, paginate, and select default | equivalent fixture/card state; baseline has existing Open Odoo only; candidate action/dialog, search/page/default are usable; no poll spawn | `bl01-baseline-card.png`, `bl01-candidate-card.png`, `bl01-candidate-dialog.png`; commands/exits and fixture hashes |
-| BL-02 | Successful consume and real identity | Local E2E required: only browser+proxy+Odoo proves cookie/session acceptance | ticket operation; form `POST /_odcli/auth/consume`; Odoo session-info | `open_as_fixture.py reset/inspect --case BL-02`; product CI covers deterministic contracts | In candidate clean profile, open as user A, inspect safe session-info and one allowed action; reset browser/session, repeat as user B and observe denied/changed action | expected UID/db, no `su`, distinct rights, fixed `/odoo`, shared same-host behavior | `bl02-user-a-odoo.png`, `bl02-user-b-odoo.png`; safe session-info text; product/test SHA |
-| BL-03 | Host-only isolation | Local E2E required: cookie scoping is browser behavior | two published instance hosts | `open_as_fixture.py reset/inspect --case BL-03`; lower-level cookie/Caddy tests | Publish the fixture's two isolated hosts, open as on host A, then inspect host B with no prior host-B session | no `Domain`; host B receives no selected session; host A stays selected | `bl03-host-a-selected.png`, `bl03-host-b-isolated.png`; sanitized publication state |
-| BL-04 | Replay, expiry, concurrency, restart | Focused local API/proxy E2E required for atomic store integration; images add no evidence | consume form response/error | `open_as_fixture.py reset/inspect --case BL-04`; `open_as_probe.py run --case replay|expiry|concurrency|restart`; fake-clock/thread tests in CI | Run each probe subcase through the published proxy; restart only the isolated candidate backend for `restart` | one creator maximum; terminal 410; no second session; runtime unchanged | sanitized per-subcase JSON outside Git, commands/exits, correlation IDs; no credential/body capture |
-| BL-05 | Origin/host/proxy/runtime/DB/user mismatch | Focused live proxy E2E required for deployed trust composition | consume plus publication route | `open_as_fixture.py reset/inspect --case BL-05`; `open_as_probe.py run --case invalid-origin|direct-backend|wrong-host|runtime-changed|database-changed|publication-changed|user-ineligible`; header/model/Caddy CI tests | Run one controlled mutation per fresh ticket, resetting fixture state between subcases | refusal class; no session/start/reconfigure; ticket terminal where specified | sanitized per-subcase JSON outside Git and safe route/state before/after; no private hostname in Git |
-| BL-06 | Logout, MFA coexistence, unsupported extension | Live logout/MFA behavior is required. Unsupported-extension behavior is lower-level/source-backed because no safe repeatable incompatible live extension fixture is part of the MVP | Odoo logout/session-info and consume | `open_as_fixture.py reset/inspect --case BL-06`; source-backed `tests/integration/real_odoo/test_browser_session_login.py -k 'unsupported_session_extension'` | Select the compatible MFA-configured fixture user, verify audit/MFA state, perform normal logout, then retry safe session-info; do not install an extension live | old cookie unauthorized; MFA settings unchanged; audit says impersonation; source-backed unsupported case fails closed | `bl06-before-logout.png`, `bl06-after-logout.png`; safe audit/assertion text; CI link for unsupported case |
-| BL-07 | Secret handoff/projections/cleanup | No extra browser path: deterministic security tests plus independent file/state inspection are sufficient | SDK command/events/log/audit/evidence | `open_as_fixture.py reset/inspect --case BL-07`; exhaustive canary tests in normal/real-Odoo CI | Inspect owned temp root before/after one success and one forced failure; scan every permitted evidence output and run final slot/database cleanup checks | no temp secret; no canary/ticket/SID/token outside the issuance response/transient form; best-effort orphan cleanup result; no remaining slot/database | hashes and scan summary only; raw diagnostics attached only if secret-free |
+| BL-01 | Eligible discovery; Open as action/dialog | Live walkthrough is required for changed visible UI; SDK/HTTP semantics remain covered deterministically | `POST /api/v1/odoo/users/query`; panel card/dialog | Run the explicit baseline/candidate reset and inspect block below; CI mappings CI-01, CI-02, CI-04 | At 1440×900, `en-US`, light scheme and clean profile, open the same owner card on baseline and candidate; on candidate open the dialog, search, paginate, and select default | equivalent fixture/card state; baseline has existing Open Odoo only; candidate action/dialog, search/page/default are usable; no poll spawn | `bl01-baseline-card.png`, `bl01-candidate-card.png`, `bl01-candidate-dialog.png`; commands/exits and fixture hashes |
+| BL-02 | Successful consume and real identity | Local E2E required: only browser+proxy+Odoo proves cookie/session acceptance | ticket operation; form `POST /_odcli/auth/consume`; Odoo session-info | `open_as_fixture.py reset/inspect --case BL-02`; CI mappings CI-01, CI-02, CI-05, CI-06 | In candidate clean profile, open as user A, inspect safe session-info and one allowed action; reset browser/session, repeat as user B and observe denied/changed action | expected UID/db, no `su`, distinct rights, fixed `/odoo`, shared same-host behavior | `bl02-user-a-odoo.png`, `bl02-user-b-odoo.png`; safe session-info text; product/test SHA |
+| BL-03 | Host-only isolation | Local E2E required: cookie scoping is browser behavior | two published instance hosts | `open_as_fixture.py reset/inspect --case BL-03`; CI mappings CI-02, CI-03, CI-05 | Publish the fixture's two isolated hosts, open as on host A, then inspect host B with no prior host-B session | no `Domain`; host B receives no selected session; host A stays selected | `bl03-host-a-selected.png`, `bl03-host-b-isolated.png`; sanitized publication state |
+| BL-04 | Replay, expiry, concurrency, restart | Focused local API/proxy E2E required for atomic store integration; images add no evidence | consume form response/error | `open_as_fixture.py reset/inspect --case BL-04`; `open_as_probe.py run --case replay|expiry|concurrency|restart`; CI mappings CI-02, CI-05 | Run each probe subcase through the published proxy; restart only the isolated candidate backend for `restart` | one creator maximum; terminal 410; no second session; runtime unchanged | sanitized per-subcase JSON outside Git, commands/exits, correlation IDs; no credential/body capture |
+| BL-05 | Origin/host/proxy/runtime/DB/user mismatch | Focused live proxy E2E required for deployed trust composition | consume plus publication route | `open_as_fixture.py reset/inspect --case BL-05`; `open_as_probe.py run --case invalid-origin|direct-backend|wrong-host|runtime-changed|database-changed|publication-changed|user-ineligible`; CI mappings CI-01, CI-02, CI-03, CI-05 | Run one controlled mutation per fresh ticket, resetting fixture state between subcases | refusal class; no session/start/reconfigure; ticket terminal where specified | sanitized per-subcase JSON outside Git and safe route/state before/after; no private hostname in Git |
+| BL-06 | Logout, MFA coexistence, unsupported extension | Live logout/MFA behavior is required. Unsupported-extension behavior is lower-level/source-backed because no safe repeatable incompatible live extension fixture is part of the MVP | Odoo logout/session-info and consume | `open_as_fixture.py reset/inspect --case BL-06`; CI mappings CI-01, CI-05, CI-06, including `-k 'unsupported_session_extension'` | Select the compatible MFA-configured fixture user, verify audit/MFA state, perform normal logout, then retry safe session-info; do not install an extension live | old cookie unauthorized; MFA settings unchanged; audit says impersonation; source-backed unsupported case fails closed | `bl06-before-logout.png`, `bl06-after-logout.png`; safe audit/assertion text; CI link for unsupported case |
+| BL-07 | Secret handoff/projections/cleanup | No extra browser path: deterministic security tests plus independent file/state inspection are sufficient | SDK command/events/log/audit/evidence | `open_as_fixture.py reset/inspect --case BL-07`; CI mappings CI-01, CI-02, CI-05, CI-06 | Inspect owned temp root before/after one success and one forced failure; scan every permitted evidence output and run final slot/database cleanup checks | no temp secret; no canary/ticket/SID/token outside the issuance response/transient form; best-effort orphan cleanup result; no remaining slot/database | hashes and scan summary only; raw diagnostics attached only if secret-free |
+
+BL-01 is the one case that resets and inspects both slots. Run these commands immediately before the equivalent-state captures, and treat any non-zero result or unequal fixture hash/publication/card identity as a blocking failure:
+
+```bash
+python3 "$BASELINE_CHECKOUT/scripts/e2e/open_as_fixture.py" reset \
+  --project "$BASELINE_CHECKOUT" --environment-id "$BASELINE_ENV_ID" --case BL-01 \
+  --output "$EVIDENCE_DIR/bl-01-baseline-reset.json"
+python3 "$CANDIDATE_CHECKOUT/scripts/e2e/open_as_fixture.py" reset \
+  --project "$CANDIDATE_CHECKOUT" --environment-id "$CANDIDATE_ENV_ID" --case BL-01 \
+  --output "$EVIDENCE_DIR/bl-01-candidate-reset.json"
+python3 "$BASELINE_CHECKOUT/scripts/e2e/open_as_fixture.py" inspect \
+  --project "$BASELINE_CHECKOUT" --environment-id "$BASELINE_ENV_ID" --case BL-01 \
+  --output "$EVIDENCE_DIR/bl-01-baseline-inspect.json"
+python3 "$CANDIDATE_CHECKOUT/scripts/e2e/open_as_fixture.py" inspect \
+  --project "$CANDIDATE_CHECKOUT" --environment-id "$CANDIDATE_ENV_ID" --case BL-01 \
+  --output "$EVIDENCE_DIR/bl-01-candidate-inspect.json"
+```
+
+### Executable deterministic CI mapping
+
+These mappings extend the repository's existing jobs and test organization; they do not introduce a new runner or CI framework. Every focused command runs from the product repository root unless it explicitly changes directory. The exact published product revision must also pass the complete named job before acceptance.
+
+| ID / task | Existing workflow and job | Planned test path / fixture | Focused command | Required assertion |
+| --- | --- | --- | --- | --- |
+| CI-01 / 1.5 | `.github/workflows/ci.yml` → `offline-tests` (`make test`) | add `tests/unit/test_browser_session_login.py`; reuse existing project/runtime fakes and add local filesystem-session fixtures in that file | `uv run pytest -q -o addopts='' tests/unit/test_browser_session_login.py` | immutable fixed source/argv, eligible keyset pages, non-`su` session creation, extension refusal, owner-only no-follow SID handoff, honest actions, dry-run inertia, cleanup, and zero credential projections |
+| CI-02 / 2.7 | `.github/workflows/ci.yml` → `dashboard-tests` (`uv run pytest -q -o addopts='' -m dashboard`) | add `tests/unit/test_http_browser_session_login.py` marked `dashboard`; extend `tests/unit/test_http_contract.py` only for canonical OpenAPI/schema assertions; reuse `TestClient`, runtime-controller, fake clock and thread fixtures | `uv run pytest -q -o addopts='' -m dashboard tests/unit/test_http_browser_session_login.py tests/unit/test_http_contract.py -k 'browser_login or openapi'` | atomic one-shot consume, expiry/capacity/restart terminal states, same-origin/host/proxy checks, controller affinity, sanitized audit/errors, optional import, and no credential in logs/models/OpenAPI |
+| CI-03 / 3.3 | `.github/workflows/ci.yml` → `offline-tests` (`make test`) | extend `tests/unit/test_publication.py`; reuse publication snapshot, Caddy renderer and reload/rollback fixtures | `uv run pytest -q -o addopts='' tests/unit/test_publication.py -k 'browser_login or consume'` | exact POST-only consume branch precedes Odoo, dashboard APIs remain unreachable, Basic Auth and trusted forwarded headers are preserved, and failed reload rolls back deterministically |
+| CI-04 / 4.4 | `.github/workflows/ci.yml` → `dashboard-tests` (`make web-codegen-check`, `npm test`, `npm run build`) | extend `src/odoo_instance_sdk/web/src/App.test.tsx` and `src/odoo_instance_sdk/web/src/generated.contract.test.ts`; reuse Vitest/JSDOM fetch, popup and generated-client fixtures | `make web-codegen-check && (cd src/odoo_instance_sdk/web && npm test -- App.test.tsx generated.contract.test.ts && npm run build)` | availability gate, search/page/default selection, synchronous popup, exact transient form, duplicate prevention, cleanup, sanitized errors, unchanged Open Odoo, generated contract and production build |
+| CI-05 / 5.1 | `.github/workflows/ci.yml` → `offline-tests` (`make test`) | add `tests/integration/test_browser_session_login.py`; compose existing FastAPI `TestClient`, Caddy publication, fake SDK process and temp-root fixtures | `uv run pytest -q -o addopts='' tests/integration/test_browser_session_login.py` | end-to-end fake-process success plus replay/concurrency/expiry/restart, drift/ineligible/direct-backend refusal, Basic Auth, logout classification, and credential-canary absence |
+| CI-06 / 5.2 | `.github/workflows/real-odoo-full.yml` → `real-odoo-full`, calling `.github/workflows/real-odoo-tier.yml` → `real-odoo-tier` with `mode: full` | add `tests/integration/real_odoo/test_browser_session_login.py`; extend `tests/integration/real_odoo/conftest.py` and `tests/fixtures/real_odoo/` only with browser-session fixtures needed by that file; reuse source bootstrap, secret registry, timing and evidence packager | `uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo/test_browser_session_login.py` | Odoo 19 filesystem-session identity/logout, MFA-setting preservation and impersonation audit, compatible/unsupported extension behavior, and secret registry/evidence package rejection of credential canaries |
+
+Task 5.3 SHALL run the unmodified full commands of `offline-tests` and `dashboard-tests`, the full-mode `real-odoo-tier` command over `tests/integration/real_odoo`, and the other repository jobs named in that task on one exact revision; the focused commands above are fast diagnosis and pre-publication proof, not substitutes for those jobs. Task 5.4 SHALL inspect the same job artifacts and generated contracts rather than creating a separate CI path.
 
 Visible output changes are browser UI only. BL-01 SHALL capture the genuine baseline and candidate panel at the same 1440×900 viewport, `en-US` locale, light color scheme, owner fixture, publication state, card position, and clean browser profile after `reset --case BL-01`; it SHALL additionally capture the candidate dialog open with the same fixture. BL-02, BL-03, and BL-06 SHALL capture the post-login, host-isolation, and before/after logout states named in the matrix. Baseline and candidate use separate fresh numbered slots pinned to their exact product SHAs, the same test-repository SHA and equivalent seeded data. Missing any named image, unequal fixture state, unverified product SHA, or credential-bearing capture SHALL block acceptance. Do not manufacture renders. Mac terminal before/after PNGs are not required because CLI output does not change; if diagnostic terminal text is nevertheless cited, preserve the actual text and render it with the bundled `scripts/render_terminal.swift` from the testing tooling checkout, declaring ANSI/TTY limitations.
 
