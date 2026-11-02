@@ -1,17 +1,17 @@
 ## ADDED Requirements
 
-### Requirement: Non-database session-store effects are honest command mutations
+### Requirement: Browser-session commands expose honest effects without credentials
 
-An SDK command that creates or deletes an Odoo browser session SHALL declare `mutating=True` and SHALL expose honest secret-file/session-store create, read, and cleanup `ActionStep` values even when its PostgreSQL transaction uses `commit=False`. Its command sibling SHALL capture one immutable argv, environment, runtime identity, timeout, fixed script, and private handoff contract; its convenience method SHALL only delegate and run that snapshot.
+The SDK browser-session command SHALL reuse the shared immutable command and `internal/proc` boundary, SHALL declare filesystem session creation as mutating even with a rolled-back database transaction, and SHALL describe private-file create/read/delete actions without exposing SID or file contents in its plan, result, fingerprint, repr, events, recordings, stdout, stderr, or errors.
 
-#### Scenario: Preview browser session creation
+#### Scenario: Inspect without execution
 
 - **WHEN** a browser-session command is built or inspected without execution
-- **THEN** no child process, temporary file, session-store entry, database change, lock, or audit mutation occurs
-- **AND** the plan reports safe mutation categories without a SID, token, or secret-file content
+- **THEN** it reports fixed source, argv, runtime and safe mutation categories
+- **AND** it creates no process, file, database effect, session-store entry, or credential projection
 
-#### Scenario: Execute browser session creation
+#### Scenario: Execute through the shared boundary
 
-- **WHEN** the captured command is run
-- **THEN** its only process launch uses `internal/proc` with argv and `shell=False`
-- **AND** no HTTP module owns a parallel subprocess seam or rebuilds the command
+- **WHEN** the browser-session command runs
+- **THEN** its only process launch uses the existing captured argv with `shell=False`
+- **AND** the HTTP layer owns no subprocess or duplicate command implementation

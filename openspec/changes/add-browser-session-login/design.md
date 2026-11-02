@@ -1,104 +1,79 @@
 ## Context
 
-The dashboard currently opens `publication.external_url` in a new tab. FastAPI already resolves project/environment owners through `RuntimeController`, protects JSON mutations with exact-origin and double-submit CSRF checks, runs blocking SDK work away from the event loop, and generates a typed OpenAPI client. Publication already renders one validated, locked OdCLI-owned Caddy route file. `OdooInstance.run_shell_script_command()` provides the correct runtime Python/config/addons/OS context, but its generic JSON/stdout result is not safe for a session identifier.
+The current React card already opens `publication.external_url`. FastAPI already has typed msgspec/OpenAPI routes, same-origin CSRF protection, a single-worker SDK executor, and trusted Caddy proxy validation. `RuntimeController` already resolves project/environment owners, `run_shell_script_command()` already supplies the correct Odoo Python/config/addons/OS context, and publication already renders a locked OdCLI-owned route file containing both instance and panel routes.
 
-Odoo 19 stores browser sessions in `odoo.http.root.session_store`; a valid session binds the database, user, context, and computed session token. The browser can receive a host-only cookie only from the published instance host, not from the panel host. The design therefore separates panel authorization, a one-time cross-origin navigation credential, and session creation at consume time.
+A panel subdomain cannot set a host-only cookie for an instance subdomain. Therefore a narrow instance-host POST and a short-lived one-time handoff are unavoidable. Everything around that seam should reuse existing code.
 
 ## Goals / Non-Goals
 
 **Goals**
 
-- Let a trusted dashboard operator select an active internal user for a published project or environment and open `/odoo` as that user without passwords or an installed Odoo module.
-- Bind every handoff to the current owner, runtime, database, publication host, panel origin, and selected user; fail closed when any binding changes.
-- Expose the ticket only in the authenticated `POST /api/v1/odoo/login-tickets` no-store JSON response and the immediate transient form field required for handoff. Keep it out of every other JSON/result projection, URLs, plans, fingerprints, durable UI state, storage, events, recordings, logs, audit, and evidence; keep SID, session token, passwords, and cookie values out of all of those projections without exception.
-- Preserve the SDK-first immutable command boundary, optional dashboard dependencies, Caddy recovery semantics, and existing Open Odoo behavior.
+- Let a trusted panel operator search a bounded list of active internal users, select one, and open the published local Odoo 19 instance as that user.
+- Create the real Odoo session only when the instance-host handoff is consumed; set a host-only secure cookie and redirect to `/odoo`.
+- Keep passwords, SID, session token, and handoff value outside URLs, logs, retained UI state, ordinary JSON/results, Git, and evidence.
+- Preserve the existing SDK command, HTTP/OpenAPI, publication, generated-client, and React patterns.
 
 **Non-goals**
 
-- Remote Odoo without server-side session-store access, arbitrary Odoo versions/session stores, portal/public/superuser login, per-tab cookie isolation, automatic switch-back, SSO, or new RBAC.
-- Installing/updating an Odoo module, changing Odoo source or passwords/MFA settings, starting a stopped runtime, or choosing among ambiguous databases.
-- Redis, multiple FastAPI workers, a durable ticket database, a new daemon, a new CLI leaf, or fixing unrelated dashboard packaging/update behavior.
+- General SSO/RBAC, remote Odoo, portal/public/superuser users, multiple databases, non-filesystem session stores, arbitrary Odoo versions, per-tab cookie isolation, automatic switch-back, or auth-extension compatibility guarantees.
+- Server-side pagination, an admin-default heuristic, a new audit service, a distributed ticket store, multiple monitor workers, a new daemon/CLI command, an Odoo addon, or changes to passwords/MFA/modules/source/runtime state.
 
 ## Ponytail full gate
 
-| Proposed subsystem | Necessity | Existing alternative | Decision |
+| Concern | Why it is needed | Existing alternative | Decision |
 | --- | --- | --- | --- |
-| SDK user/session primitives | HTTP must not own fixed Odoo scripts or runtime resolution | Generic shell command leaks domain and secret transport concerns into HTTP | Keep two narrow primitives with delegating command siblings |
-| Closed SID handoff | SID cannot use stdout or normal command result projections | Existing owner-only temp-file/action-step patterns | Keep one scoped 0700 directory/0600 no-follow file, always cleaned in `finally` |
-| Login ticket store | A panel-host page cannot set a host-only instance cookie | URL/query SID, durable DB, Redis | Keep bounded locked in-memory store for the existing single-process monitor |
-| Consume transport | Cookie must originate on the instance host | CORS, `document.cookie`, query credentials | Keep one exact form POST path with dedicated checks |
-| Caddy route branch | The exact consume path must reach FastAPI on the instance host | Expose the whole panel API or add an Odoo module | Keep one mutually exclusive exact-path route before Odoo proxying |
-| UI dialog | Operator must select and confirm a user | Existing Open Odoo button has no selection state | Keep a focused dialog; no general component framework |
+| User query | The browser must choose an eligible user without receiving DB/config/source controls | Existing SDK shell runner | Keep one bounded query; remove keyset pagination and admin-default logic |
+| Session creation | Odoo has no suitable arbitrary-UID HTTP endpoint | Existing SDK shell runner in the runtime context | Keep one fixed SDK command and eligibility recheck |
+| Private SID transfer | SID cannot use normal stdout/result/event projections | Existing owner-only temporary-file patterns | Keep one scoped file and unconditional cleanup; no reusable credential framework |
+| Cross-host handoff | Only the instance host can set its host-only cookie | Query URL, panel cookie, or exposing SID are unsafe | Keep a tiny locked expiring map and exact form POST; remove capacity tiers, digests, and multi-worker machinery |
+| Caddy branch | The exact consume POST must reach FastAPI on the instance host | Existing route file already contains the panel endpoint | Reuse that endpoint during rendering; do not add another publication service/model layer |
+| UI | The operator needs selection and confirmation | Existing card/action and Mantine components | Keep one dialog with bounded search; no pagination framework or persistent state |
+| Verification | A real cookie/session needs one real boundary proof | Existing unit/dashboard/real-Odoo CI and numbered slot | Keep focused tests and one fixture helper; remove the probe framework and exhaustive live fault matrix |
 
-No generic runner, service layer, repository, credential framework, router registry, or authentication platform is introduced.
+Removed from R3 as unjustified scope: keyset pagination, `base.user_admin` defaulting, ticket-capacity policy, explicit multi-worker refusal, a dedicated audit subsystem/correlation model, exhaustive runtime/publication drift classifications, MFA/extension certification, a separate probe driver, repository-wide credential projection matrices, and the seven-WP DAG.
 
 ## Decisions
 
-### D1: SDK owns fixed scripts and eligibility
+### D1: Two narrow SDK operations reuse the shell runner
 
-Add immutable public models for `BrowserLoginUser`, `BrowserLoginUserPage`, and a secret-bearing `BrowserSessionGrant` whose public projection contains only user/database metadata. `OdooInstance.list_browser_login_users_command()` and `create_browser_session_command()` build one frozen command snapshot; convenience methods only call the sibling and `run()`.
+`list_browser_login_users_command(owner, query)` runs fixed SDK-owned source and returns at most 100 active non-share users excluding `SUPERUSER_ID`, with only ID, login, and display name. An empty or bounded query searches login/name; users can refine it instead of paging.
 
-The list script uses an ORM domain assembled inside SDK-owned source, accepts only typed argv values, sorts by ascending ID, reads `limit + 1`, and returns active non-share users excluding `SUPERUSER_ID`. `base.user_admin` marks the default only when it resolves to an eligible user. Session creation rechecks eligibility and runtime/session-store compatibility, constructs the Odoo 19 session without `su`, computes its token through Odoo APIs, and records an audit-safe outcome.
+`create_browser_session_command(user_id)` rechecks the user and the single resolved database, creates a non-`su` Odoo 19 filesystem session, and is always mutating because the session store is outside the rolled-back database transaction. The child writes SID only to an SDK-owned 0700 directory/0600 exclusive file; the parent reads it once and removes the directory in `finally`. No public model or ordinary command projection contains SID.
 
-Alternative: put scripts in FastAPI. Rejected because it duplicates runtime resolution and violates the SDK-first boundary.
+Alternative: implement Odoo scripts and subprocesses in HTTP. Rejected because the existing SDK already owns runtime resolution and immutable process plans.
 
-### D2: SID crosses the child boundary through an owned temporary file
+### D2: A minimal one-time handoff bridges panel and instance hosts
 
-The parent creates a private directory and exclusive regular file contract before execution. The child opens without following symlinks, writes only the SID with owner-only permissions, and emits safe metadata on the framed result channel. The SDK reads once and deletes in `finally`; creation, write expectation, read, deletion, and best-effort orphan-session cleanup are honest mutating action steps. Database `commit=False` remains correct, but the command is always `mutating=True` because the session store is external to the PostgreSQL rollback.
+The same-origin/CSRF-protected panel exposes `POST /api/v1/odoo/users/query` and `POST /api/v1/odoo/login-tickets`. Issuance stores a cryptographically random token in a process-local locked dictionary for 30 seconds with only owner, current runtime/database/publication host, selected user, and panel origin. It creates no Odoo session.
 
-The public plan, SDK result projection, fingerprint, repr, error, events, recordings, stdout, and stderr never contain the SID, secret-file contents, ticket, or session token. The only ticket projection in the system is the dedicated authenticated no-store issuance response followed by its immediate transient form field. Failed transfer attempts best-effort delete a created session when its SID is known. A server cannot prove that the browser received a `Set-Cookie`; this residual disconnect window is documented and tested to the observable boundary.
+`POST /_odcli/auth/consume` accepts exactly one form field, verifies the trusted proxy boundary, bound instance host and panel Origin, then atomically pops the token. It re-resolves the same owner/runtime/database and user before invoking session creation. Success sets `session_id` with `Path=/; Secure; HttpOnly; SameSite=Lax`, no `Domain`, and returns 303 to fixed `/odoo`. Any consume attempt is one-shot. Expired entries are removed lazily; restart invalidates the map. The shipped monitor is already one process, so no new worker-mode policy or distributed store is added.
 
-### D3: Ticket issuance is cheap; consume performs authoritative work
+Alternative: return SID or put it in a URL. Rejected because it creates a reusable browser credential in ordinary projections/history.
 
-`POST /api/v1/odoo/users/query` resolves the owner and executes the list primitive. `POST /api/v1/odoo/login-tickets` verifies authorization, current runtime/publication identity, one unambiguous database, positive user ID, and capacity, but does not create a session or run another user lookup. Its authenticated `Cache-Control: no-store` response is the sole JSON exception that carries the opaque ticket, only so React can immediately place it in the transient consume form.
+### D3: Publication reuses the existing panel route endpoint
 
-The store keeps only a cryptographically random secret digest/key and immutable bindings for 30 seconds. It is bounded, lock-protected, single-process, and restart-invalidated. Consume atomically moves `pending` to `consuming`; every attempted consume is terminal, including SDK failure. Capacity failure is 429. Multi-worker startup/configuration SHALL reject enabling this feature until a shared atomic store is deliberately designed.
+When rendering the one owned route file, the renderer finds the existing panel route's `local_endpoint` and adds an exact POST-only consume branch before each Odoo proxy. No new endpoint field is copied into every instance route. If no live panel route exists, the consume branch is absent and the UI reports the operation unavailable. All other instance paths still reach Odoo and retain current Basic Auth/proxy behavior.
 
-Alternative: create the session during ticket issue. Rejected because unused/popup-blocked tickets would create orphan sessions.
+### D4: React remains a small transient workflow
 
-### D4: Consume is a dedicated navigation boundary
+**Open as...** opens a dialog, performs a bounded user query, lets the operator refine the search and choose one user, then synchronously opens a blank tab, requests a handoff, and submits a hidden form to the returned action URL. The form/input and local token variable are removed immediately. The existing **Open Odoo** action is unchanged. The dialog states that tabs on one instance host share a cookie.
 
-`POST /_odcli/auth/consume` accepts an size-bounded `application/x-www-form-urlencoded` body with exactly one `ticket` field. It does not reuse or weaken JSON `request_is_safe()`. Before consuming it verifies an approved proxy peer, authoritative publication host and HTTPS projection, exact non-null panel `Origin`, expected ticket binding, and current owner/runtime/database/publication identity. Forwarded headers are trusted only from configured peers. GET/HEAD return 405 without consuming.
+### D5: Verification proves only irreducible boundaries
 
-On success FastAPI sets `session_id` without `Domain`, with `Path=/; Secure; HttpOnly; SameSite=Lax`, adds `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and returns 303 to the fixed `/odoo`. It never accepts a return URL, database, config path, source, executable, or host from the browser.
-
-### D5: Caddy exposes one exact path, not the dashboard API
-
-Each published instance route keeps its Basic Auth policy and contains a mutually exclusive exact `POST /_odcli/auth/consume` branch to the configured live monitor endpoint before the general Odoo branch. Other methods at that path and all other `/api` paths remain unavailable through the instance host. The branch forwards the authoritative host/proto and client address according to existing trusted-proxy rules. If the monitor endpoint is unavailable, the feature fails without rerouting to Odoo or changing publication state.
-
-The route model captures the monitor endpoint at publication/reconciliation time; candidate validation, lock, atomic replacement, reload, and rollback remain unchanged.
-
-### D6: Typed HTTP/OpenAPI and bounded execution
-
-Unknown fields are rejected. Panel endpoints use the existing exact-origin JSON/CSRF gate; consume uses its dedicated gate. `HttpErrorCode` gains the browser-login codes specified in the delta. Known failures map to bounded messages and no raw exception. SDK calls run in the existing bounded worker mechanism with a deadline and queue/capacity control; catalog access remains on its owning thread and no callback invokes a nested `Command.run()`.
-
-Audit records time, correlation ID, owner/runtime identity, database, selected numeric user ID, available verified actor or honest shared/local principal, and sanitized outcome. It excludes credential values and full headers.
-
-### D7: React submits a transient form to a synchronously opened tab
-
-The existing Open Odoo control remains. **Open as...** is enabled only for an available publication and live monitor capability. Opening/searching the dialog calls users/query with debouncing and keyset pagination; it displays name/login and preselects the eligible `base.user_admin` marker.
-
-Confirmation synchronously opens a blank named target to satisfy popup policy, requests a ticket, creates a transient hidden POST form targeted at that tab, submits it, then removes form/input and clears the ticket variable. Failure closes the blank tab when possible. Ticket/SID never enter URL, React state persisted beyond submission, storage, analytics, or console. UI explains that all tabs for one instance host share the resulting cookie.
-
-### D8: Verification separates deterministic coverage from live proof
-
-Unit/contract tests cover models, commands, redaction, temp-file safety/cleanup, ticket state/concurrency/time, trust headers, errors, Caddy rendering, OpenAPI/codegen, UI behavior, and package boundaries. Existing dashboard CI gains those deterministic tests; real Odoo CI gains source-backed session construction/logout and secret-registry assertions where its container boundary is sufficient.
-
-An independent Tester uses one fresh `odcli-N` checkout/database/port from the project-described GitLab test repository and the numbered profile. The live walkthrough uses the exact product SHA, a compatible Odoo 19 filesystem session store, two eligible users with different access rights, publication through the actual proxy, and a clean browser profile. Evidence records only identities, response status, safe session-info fields, sanitized audit outcomes, commands/exit codes, revisions, and images; credentials remain excluded.
+Focused tests cover filtering, session construction/private cleanup, one-shot expiry/replay, proxy/Origin/host checks, exact Caddy routing, OpenAPI/codegen, and UI cleanup. The existing full real-Odoo job gains one source-backed session test. An independent numbered-slot walkthrough uses one small fixture helper, captures equivalent panel before/after UI, opens one deliberately selected non-superuser, checks safe UID/database session info, verifies a second instance host remains unauthenticated, logs out, and cleans the slot. Replay and malformed-boundary cases remain deterministic tests because live repetitions add no new evidence.
 
 ## Risks / Trade-offs
 
-- Odoo session internals or auth/session extensions may differ. Detect the supported filesystem-store/runtime contract and return `browser_login_unsupported`; do not guess or bypass extensions.
-- Direct session creation intentionally bypasses password/MFA challenge. Limit it to an already trusted operator boundary and make impersonation explicit in audit.
-- The single-process store forbids horizontal monitor workers. This is an explicit MVP limitation instead of an unneeded distributed store.
-- A response disconnect after session creation can leave an orphan session. Delete best-effort on known pre-response failures and document the irreducible acknowledgement window.
-- Caddy route changes couple instance and monitor availability. Exact-path routing and existing atomic rollback contain the impact.
-- One host-only cookie means tabs on the same instance host switch together. The UI states this; per-tab isolation is out of scope.
+- **Odoo session internals differ** → support only the inspected Odoo 19 filesystem store and fail with one sanitized unsupported response.
+- **One-time map is process-local** → acceptable for the existing single-process monitor; distributed workers remain out of scope.
+- **Session created before response acknowledgement may remain** → clean known failures best-effort and document the irreducible disconnect window.
+- **One host cookie affects all tabs for that host** → disclose it in the dialog; per-tab isolation remains out of scope.
+- **Direct server impersonation bypasses password/MFA challenge** → restrict it to the already-protected operator panel and never claim password/MFA authentication occurred.
 
 ## Migration / Rollback
 
-The change is additive and requires no data migration. Existing publications are reconciled/republished to gain the consume branch. Rolling back removes the UI and route branch; backend restart invalidates outstanding tickets, and existing Odoo sessions remain governed by normal Odoo logout/expiry. No durable ticket state requires cleanup.
+No data migration is required. Starting the external monitor reconciles the owned route file with the consume branch. Rollback removes the UI/routes and restarts the monitor, invalidating pending handoffs; normal Odoo sessions retain their ordinary expiry/logout behavior.
 
 ## Open Questions
 
-None. Implementers SHALL use the contracts above; unsupported auth/session extensions fail closed rather than selecting a new mechanism.
+None. Unsupported Odoo/session layouts fail closed rather than selecting another mechanism.

@@ -1,26 +1,19 @@
 ## ADDED Requirements
 
-### Requirement: Real browser-login verification uses isolated disposable resources
+### Requirement: Selected-user browser verification uses one isolated disposable slot
 
-Verification SHALL use the exact product revision in a fresh numbered `odcli-N` checkout with its own copied database, port, project profile, and compatible Odoo 19 filesystem session store. It SHALL exercise the actual panel, Caddy publication, instance-host consume, SDK child process, Odoo session store, browser cookie, `/odoo`, and `/web/session/get_session_info` boundaries. Cleanup SHALL remove the disposable slot/database/service while preserving the evidence branch/MR/commits and SHALL NOT close, merge, or delete them without separate authorization.
+Verification SHALL use the exact candidate revision in a fresh numbered `odcli-N` checkout with its own copied database, port, and supported Odoo 19 filesystem session store. One fixture helper SHALL seed/reset/inspect/cleanup two synthetic eligible users. The walkthrough SHALL use the real panel, Caddy consume route, SDK child process, Odoo session store, browser cookie, `/odoo`, session-info, neighboring instance host, and logout. Cleanup SHALL remove the disposable slot/database while preserving the evidence branch/MR/commit.
 
-#### Scenario: Two users receive distinct real authorization
+#### Scenario: Deliberately selected user opens Odoo
 
-- **WHEN** an independent Tester opens as two eligible fixture users with deliberately different access rights using clean browser state
-- **THEN** safe session-info evidence confirms the expected UID/database for each and a real protected action demonstrates the rights difference
-- **AND** neither session is `SUPERUSER_ID` or `su=True`
+- **WHEN** an independent Tester chooses one of two fixture users in a clean browser
+- **THEN** safe session-info confirms the selected non-superuser UID/database, the neighboring instance host remains unauthenticated, and normal logout invalidates the selected session
 
-#### Scenario: Replay and trust failures are live
+### Requirement: Browser-login evidence contains no credentials
 
-- **WHEN** the Tester replays/expires a ticket or changes Origin, host, runtime, database, publication, or eligibility in an isolated scenario
-- **THEN** the live boundary refuses it without creating a second session, leaking credentials, or starting/reconfiguring the runtime
+Evidence SHALL record exact product/test revisions, commands/exit codes, safe UID/database observations, assertions, required panel/login/logout images, and cleanup/read-back. It SHALL NOT contain handoff, SID, session token, Cookie/Set-Cookie value, password/API key, private hostname, personal data, or secret-file content. Images and diagnostics SHALL remain Multica attachments rather than Git content.
 
-### Requirement: Browser-login evidence excludes credentials
+#### Scenario: Evidence is finalized
 
-Tester evidence SHALL record product/test revisions, safe commands and exit codes, response classifications, safe UID/database observations, sanitized audit outcomes, assertions, cleanup, and required images. It SHALL NOT record ticket, SID, session token, password/API key, Cookie/Set-Cookie value, secret-file content, private hostname, or personal data. Images and raw diagnostic artifacts SHALL be attached only to Multica and SHALL NOT be committed unless they are actual outputs of the tested product required by the repository contract.
-
-#### Scenario: Secret scan covers every evidence projection
-
-- **WHEN** automated and manual evidence is finalized
-- **THEN** assertions prove credentials are absent from Git, MR content, URLs, logs, plans, recordings, audit, screenshots/renders, and Multica explanatory text
-- **AND** any secret-bearing capture is rejected rather than redacted after publication
+- **WHEN** automatic and manual evidence is published
+- **THEN** credential absence and attachment read-back are verified and any credential-bearing capture blocks acceptance
