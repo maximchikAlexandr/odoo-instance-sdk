@@ -58,14 +58,21 @@ async for snapshot in monitor.watch(
 
 ### Requirement: Snapshot top-level contract
 
-`Snapshot.schema_version` MUST always be `5`. Version 5 is additive from version 4: `ProjectSummary` and `EnvironmentSnapshot` gain only `facts: tuple[EnvironmentFactsSummary, ...] = ()`; all version-4 fields, ordering, filtering, reconciliation, partial-result, and removed-row meanings remain unchanged. `generated_at` MUST be timezone-aware UTC. Projects SHALL be ordered by project ID and environments by environment ID. `GET /api/v1/snapshot` SHALL return default non-removed schema-v5 JSON. CLI envelope version remains `1` and independent of snapshot schema version.
+`Snapshot.schema_version` MUST always be `5`. Version 5 is an additive migration from version 4: every `ProjectSummary` and `EnvironmentSnapshot` gains only required `facts: tuple[EnvironmentFactsSummary, ...] = ()`; every version-4 project field including `runtime`, every environment field including `pgadmin`, required `observed_port` and `artifacts`, and all v4 collection/filter/removed-row meanings remain unchanged. `generated_at` MUST be tz-aware UTC. `projects` ordered by `project_id` ascending; `environments` ordered by `id` ascending. `GET /api/v1/snapshot` returns the default non-removed version-5 JSON (msgspec encode). `odcli env list --format json` wraps the frozen `CheckoutInventory` model in CLI envelope v1 `result`/`data` (`command="env.list"`); process/resource columns live in `odcli ps`, not in `env list`. CLI envelope version remains `1` and is independent of snapshot schema version.
 
-`project_id=None` SHALL select all discovered projects; a matching opaque ID SHALL select that project/environments; an unknown ID SHALL return empty tuples. `include_removed` governs environment rows only. `ProjectSummary.environment_count` SHALL count included rows. Facts SHALL be deterministically ordered by provider ID, SHALL contain no private binding fields, and SHALL default to empty for core-only installs, unbound owners, or provider failure.
+`project_id` filter: `None` MUST select all discovered projects; an opaque id matching a discovered project MUST select that project and its environments; an unknown id MUST return `projects == ()` and `environments == ()` without raising. A registered project exists even with no environment rows. `include_removed` SHALL govern environment rows only: with `include_removed=False`, removed rows are omitted while their registered project remains; with `include_removed=True`, a project containing only removed environments MUST appear with those rows, all from the single atomic catalog selection. `ProjectSummary.environment_count` MUST count the environments included in the returned snapshot; project counts and partial-result behavior remain unchanged. pgAdmin eligibility for an included removed row MUST be `environment_not_ready` without adding a database, port, health, or Docker probe.
+
+Facts SHALL be deterministically ordered by provider ID, SHALL contain no private binding fields, and SHALL default to empty for core-only installs, unbound owners, or provider failure. Facts SHALL be collected from the same selected owners and canonical sample as the version-4 fields, so they SHALL NOT change atomic selection, ordering, project filters, removed-row behavior, cache keys/TTL/single-flight, invalidation, redaction, or the existing CLI/API/generated-client/dashboard consumer contracts.
 
 #### Scenario: Full snapshot shape
 
-- **WHEN** `monitor.snapshot()` runs with linked and unlinked environments
-- **THEN** `schema_version==5`, every version-4 field is preserved, and only proven available fact summaries appear under their owners
+- **WHEN** `monitor.snapshot()` runs with two projects each having environments
+- **THEN** `schema_version==5`, `projects` contains two `ProjectSummary`, and `environments` contains all non-removed environments of both projects with every version-4 field plus pgAdmin eligibility and owner-scoped facts
+
+#### Scenario: Default full snapshot shape
+
+- **WHEN** `monitor.snapshot()` runs with two projects each having active environments
+- **THEN** `schema_version==5`, `projects` contains two `ProjectSummary`, and `environments` contains all non-removed environments with every version-4 field plus pgAdmin eligibility and owner-scoped facts
 
 #### Scenario: Core-only snapshot has empty facts
 
@@ -75,22 +82,37 @@ async for snapshot in monitor.watch(
 #### Scenario: Removed-only project is conditional
 
 - **WHEN** one project has only removed environments
-- **THEN** it is absent by default and present with unchanged stopped/null behavior under `include_removed=True`
+- **THEN** it is absent from `snapshot()` and present with those rows in `snapshot(include_removed=True)`; each included removed environment retains the v2 stopped/null runtime, artifact, and no-port-probe semantics, has `pgadmin.state=="environment_not_ready"`, and may carry only facts scoped to that selected owner
+
+#### Scenario: Removed environment keeps v2 behavior in v3
+
+- **WHEN** `monitor.snapshot(include_removed=True)` includes a removed environment
+- **THEN** its MYL-55 stopped/null runtime, artifact, and no-port-probe semantics are unchanged in the additive v5 snapshot, `observed_port is None`, `pgadmin.state=="environment_not_ready"`, and facts collection adds no database, port, health, or Docker probe
 
 #### Scenario: Project filter narrows result
 
-- **WHEN** a known project ID is requested
-- **THEN** projects, environments, and facts are restricted to that project from the same sample
+- **WHEN** `monitor.snapshot(project_id="project_comerta_7e3d8a01")` runs
+- **THEN** `projects` contains only the matching `ProjectSummary`, `environments` contains only that project's non-removed environments, and facts are restricted to those owners from the same sample
 
 #### Scenario: Unknown project filter returns empty
 
-- **WHEN** an unknown project ID is requested with removed rows enabled
-- **THEN** projects and environments are empty and no provider receives an out-of-scope owner
+- **WHEN** `monitor.snapshot(project_id="project_unknown", include_removed=True)` runs
+- **THEN** `projects == ()` and `environments == ()`, no exception is raised, and no provider receives an out-of-scope owner
 
 #### Scenario: Version 4 migrates additively to version 5
 
 - **WHEN** a version-4 fixture without optional facts is collected
 - **THEN** all prior fields/order are unchanged, schema version becomes 5, and each facts tuple is empty
+
+#### Scenario: Version 3 migrates additively through version 4 to version 5
+
+- **WHEN** a frozen version-3 fixture is collected with no project-owned runtime or optional facts
+- **THEN** schema version becomes 5, every version-3 field and ordering is unchanged, each project adds `runtime=null`, and each project/environment adds `facts==()`
+
+#### Scenario: Version 4 preserves cache, redaction, and consumers
+
+- **WHEN** live, stopped, null, mixed-owner, filtered, cached, or redacted snapshots pass through JSON/TOON, API, generated OpenAPI/client, and dashboard tests
+- **THEN** the same atomic selection, ordering, filter, partial-result, cache-key/TTL/single-flight, invalidation, and redaction contracts apply to the canonical version-5 field without a parallel DTO or endpoint, and facts expose no private binding fields
 
 ## ADDED Requirements
 

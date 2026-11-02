@@ -8,7 +8,7 @@
 
 - [ ] 2.1 Promote the existing environment-facts protocol to the supported public boundary while retaining the entry-point group, provider process isolation, hard deadline, large-response channel handling, deterministic IDs, and no core dependency on optional packages.
 - [ ] 2.2 Move provider invocation into `EnvironmentMonitor.snapshot_command()`, pass immutable rows/private bindings, attach summaries to schema-v5 project/environment facts, and prove missing/failed/timed-out/duplicate providers preserve core owners.
-- [ ] 2.3 Make `CheckoutInventory` copy facts from the captured snapshot without a second provider call; update one-shot/watch SDK and CLI fixtures for schema version 5, empty facts, project filters, removed rows, and per-sample call counts.
+- [ ] 2.3 Make `CheckoutInventory` copy facts from the captured snapshot without a second provider call; update one-shot/watch SDK and CLI fixtures for schema version 5, empty facts, registered empty projects, project filters, removed-row v2/pgAdmin behavior, cache/redaction/consumer invariants, and per-sample call counts.
 
 ## 3. Implement the optional Multica provider
 
