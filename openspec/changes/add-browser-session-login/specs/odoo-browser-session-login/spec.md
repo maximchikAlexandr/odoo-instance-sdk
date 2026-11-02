@@ -58,7 +58,7 @@ The session command SHALL transfer the SID only through an SDK-owned owner-only 
 
 ### Requirement: Panel APIs issue one-time bound login tickets
 
-`POST /api/v1/odoo/users/query` SHALL expose the SDK page through a typed unknown-field-forbidden request and response. `POST /api/v1/odoo/login-tickets` SHALL accept owner kind, owner ID, and positive user ID; SHALL require the existing panel authorization, exact-origin JSON and CSRF boundary; and SHALL return only an HTTPS action URL derived from current publication state, method `POST`, an opaque ticket with at least 256 bits of entropy, and an expiry 30 seconds after issuance. Responses and errors SHALL use `Cache-Control: no-store`.
+`POST /api/v1/odoo/users/query` SHALL expose the SDK page through a typed unknown-field-forbidden request and response. `POST /api/v1/odoo/login-tickets` SHALL accept owner kind, owner ID, and positive user ID; SHALL require the existing panel authorization, exact-origin JSON and CSRF boundary; and SHALL return only an HTTPS action URL derived from current publication state, method `POST`, an opaque ticket with at least 256 bits of entropy, and an expiry 30 seconds after issuance. Responses and errors SHALL use `Cache-Control: no-store`. The authenticated issuance response SHALL be the only JSON/result projection containing the ticket, which SHALL be used only for immediate transient form submission and SHALL be absent from every other JSON/result projection, URL, plan, fingerprint, durable UI state, storage, event, recording, log, audit record, and evidence artifact.
 
 #### Scenario: Issue a ticket for a current publication
 
@@ -75,6 +75,12 @@ The session command SHALL transfer the SID only through an SDK-owned owner-only 
 
 - **WHEN** the single supported FastAPI process restarts
 - **THEN** every previously issued ticket becomes invalid
+
+#### Scenario: Ticket projection is narrowly bounded
+
+- **WHEN** a ticket is issued and submitted to consume
+- **THEN** its clear value appears only in the authenticated no-store issuance response and the immediate transient form field
+- **AND** every other system projection and retained artifact omits the value
 
 ### Requirement: Ticket consumption is atomic and bound to the instance host
 
@@ -153,3 +159,12 @@ The created session SHALL obey normal Odoo logout and session-token validation. 
 
 - **WHEN** a compatible eligible user with MFA is selected through platform impersonation
 - **THEN** the operation leaves MFA settings unchanged and records the impersonation outcome without claiming a password/MFA login challenge occurred
+
+### Requirement: Operator documentation states the supported trust contract
+
+Operator documentation SHALL describe the Open as workflow, trusted panel/proxy boundary, required single-process monitor mode, supported local Odoo 19 filesystem session store, one-database rule, eligible-user restrictions, same-host shared-cookie behavior, audit fields and exclusions, failure codes, normal logout behavior, and the irreducible session-created/response-not-acknowledged window. It SHALL distinguish platform impersonation from password or MFA authentication and SHALL state that unsupported auth/session extensions fail closed.
+
+#### Scenario: Operator evaluates whether Open as is supported
+
+- **WHEN** an operator reads the published workflow and limitations before enabling or troubleshooting Open as
+- **THEN** the documentation provides every prerequisite, trust assumption, observable failure classification, privacy exclusion, and residual-risk statement needed to decide without inspecting implementation code

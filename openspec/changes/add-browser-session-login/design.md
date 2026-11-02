@@ -10,7 +10,7 @@ Odoo 19 stores browser sessions in `odoo.http.root.session_store`; a valid sessi
 
 - Let a trusted dashboard operator select an active internal user for a published project or environment and open `/odoo` as that user without passwords or an installed Odoo module.
 - Bind every handoff to the current owner, runtime, database, publication host, panel origin, and selected user; fail closed when any binding changes.
-- Keep ticket, SID, session token, passwords, and cookie values out of URLs, plans, fingerprints, ordinary JSON, events, recordings, logs, audit, and evidence.
+- Expose the ticket only in the authenticated `POST /api/v1/odoo/login-tickets` no-store JSON response and the immediate transient form field required for handoff. Keep it out of every other JSON/result projection, URLs, plans, fingerprints, durable UI state, storage, events, recordings, logs, audit, and evidence; keep SID, session token, passwords, and cookie values out of all of those projections without exception.
 - Preserve the SDK-first immutable command boundary, optional dashboard dependencies, Caddy recovery semantics, and existing Open Odoo behavior.
 
 **Non-goals**
@@ -46,11 +46,11 @@ Alternative: put scripts in FastAPI. Rejected because it duplicates runtime reso
 
 The parent creates a private directory and exclusive regular file contract before execution. The child opens without following symlinks, writes only the SID with owner-only permissions, and emits safe metadata on the framed result channel. The SDK reads once and deletes in `finally`; creation, write expectation, read, deletion, and best-effort orphan-session cleanup are honest mutating action steps. Database `commit=False` remains correct, but the command is always `mutating=True` because the session store is external to the PostgreSQL rollback.
 
-The public plan, result projection, fingerprint, repr, error, events, recordings, stdout, and stderr never contain the SID, secret-file contents, ticket, or session token. Failed transfer attempts best-effort delete a created session when its SID is known. A server cannot prove that the browser received a `Set-Cookie`; this residual disconnect window is documented and tested to the observable boundary.
+The public plan, SDK result projection, fingerprint, repr, error, events, recordings, stdout, and stderr never contain the SID, secret-file contents, ticket, or session token. The only ticket projection in the system is the dedicated authenticated no-store issuance response followed by its immediate transient form field. Failed transfer attempts best-effort delete a created session when its SID is known. A server cannot prove that the browser received a `Set-Cookie`; this residual disconnect window is documented and tested to the observable boundary.
 
 ### D3: Ticket issuance is cheap; consume performs authoritative work
 
-`POST /api/v1/odoo/users/query` resolves the owner and executes the list primitive. `POST /api/v1/odoo/login-tickets` verifies authorization, current runtime/publication identity, one unambiguous database, positive user ID, and capacity, but does not create a session or run another user lookup.
+`POST /api/v1/odoo/users/query` resolves the owner and executes the list primitive. `POST /api/v1/odoo/login-tickets` verifies authorization, current runtime/publication identity, one unambiguous database, positive user ID, and capacity, but does not create a session or run another user lookup. Its authenticated `Cache-Control: no-store` response is the sole JSON exception that carries the opaque ticket, only so React can immediately place it in the transient consume form.
 
 The store keeps only a cryptographically random secret digest/key and immutable bindings for 30 seconds. It is bounded, lock-protected, single-process, and restart-invalidated. Consume atomically moves `pending` to `consuming`; every attempted consume is terminal, including SDK failure. Capacity failure is 429. Multi-worker startup/configuration SHALL reject enabling this feature until a shared atomic store is deliberately designed.
 

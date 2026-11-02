@@ -6,6 +6,7 @@ Operators can open a published Odoo instance, but they cannot select an eligible
 
 - Add typed SDK operations that list eligible Odoo users and create an Odoo browser session through the selected runtime, with an inspectable command sibling and a secret-safe result boundary.
 - Add protected dashboard operations for querying users and issuing a short-lived, single-use login ticket.
+- Return the ticket only in the authenticated, `Cache-Control: no-store` issuance response for immediate transient form submission; forbid it from every other JSON/result/log/audit/evidence projection and from URLs or storage.
 - Add an instance-host `POST /_odcli/auth/consume` transport that validates the proxy, host, origin, ticket, and current runtime before setting a host-only Odoo session cookie and redirecting to `/odoo`.
 - Extend the owned Caddy route so only the exact consume path reaches the dashboard backend while all other instance traffic continues to reach Odoo.
 - Add an **Open as...** dialog beside the existing Open Odoo action, including search, keyset pagination, popup-safe POST form submission, and credential cleanup.
