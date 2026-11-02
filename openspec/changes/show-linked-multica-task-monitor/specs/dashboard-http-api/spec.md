@@ -16,7 +16,7 @@
 
 ### Requirement: Existing runtime card renders an accessible task block
 
-The existing `RuntimeCard` SHALL render a compact external-task block only when its owner has one proven summary. The block SHALL remain visible when Odoo is stopped. It SHALL include the task identifier/link, textual issue status or `Unknown`, and textual activity plus a green/red/gray indicator for `active`/`inactive`/`unknown`. Activity meaning SHALL NOT depend on color.
+The existing core `RuntimeCard` SHALL render a compact external-task block only when its owner has one proven `ExternalTaskSummary`. This is a provider-neutral typed capability: the browser SHALL NOT branch on provider ID, import an optional-provider package, load provider JavaScript/CSS, or accept provider-supplied renderables. Any provider satisfying the same core schema SHALL receive the same core-owned block; provider-specific fetching, mapping, and credentials SHALL remain behind the Python entry point. The block SHALL remain visible when Odoo is stopped. It SHALL include the task identifier/link, textual issue status or `Unknown`, and textual activity plus a green/red/gray indicator for `active`/`inactive`/`unknown`. Activity meaning SHALL NOT depend on color.
 
 The link SHALL open the verified HTTP(S) URL in a new tab with `noopener,noreferrer`. Activity help SHALL be available on hover and keyboard focus with an accessible name. On unavailable freshness the link SHALL remain, status and activity SHALL visibly become unknown, and a safe reason SHALL be available; a previous green value SHALL NOT be presented as current. Owners without a summary SHALL render no empty task block.
 
@@ -39,3 +39,8 @@ The link SHALL open the verified HTTP(S) URL in a new tab with `noopener,norefer
 
 - **WHEN** an environment is unbound or the optional extension is absent
 - **THEN** its existing card renders without an empty link, badge, dot, or placeholder
+
+#### Scenario: Card rendering is provider-neutral
+
+- **WHEN** a non-Multica test provider returns the same validated `ExternalTaskSummary` capability
+- **THEN** the existing core card renders the identical task block without provider-specific code, assets, routes, or dynamic UI loading

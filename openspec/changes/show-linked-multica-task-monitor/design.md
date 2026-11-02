@@ -41,6 +41,8 @@ Core promotes the existing environment-facts protocol and summary to a public, f
 - `active | inactive | unknown` activity;
 - observation time, `current | unavailable` freshness, and one safe bounded unavailability reason.
 
+This typed `ExternalTaskSummary` is the one provider-neutral capability slot owned by core. Core owns its validation, conflict rule, snapshot/OpenAPI/generated-client schema, CLI/process projections, and the existing `RuntimeCard` renderer. Providers own only translation from an external system into this slot. They cannot supply React/TypeScript/CSS, Click/Rich renderers, HTTP routes, alternate models, or provider-specific browser behavior. Consequently `odcli-multica` contains no copy of the card, activity indicator, serialization, provider runner, cache, or downstream projection logic.
+
 Provider collection moves into `EnvironmentMonitor.snapshot_command()` after core catalogue/runtime collection and before the final result is returned. `ProjectSummary` and `EnvironmentSnapshot` gain `facts`, and snapshot schema version advances additively from 4 to 5. `CheckoutInventory` copies those facts to its rows instead of invoking providers again; `ProcessInventory` extracts the single external-task value as a compact annotation. Thus one monitor refresh invokes each provider once and every downstream surface observes the same result.
 
 Facts from missing, incompatible, failed, or timed-out providers remain empty and never hide a project/environment or fail the snapshot. Duplicate provider IDs and more than one external-task result for an owner are rejected for that owner. The existing hard provider deadline remains the outer bound; providers must also bound their own remote calls and concurrency.
@@ -67,13 +69,13 @@ Alternative considered: call `issues.runs(active=True)`. The current public CLI 
 
 `odcli env list` Rich adds one provider column/cell derived from `ExternalTaskSummary`; JSON and TOON serialize the same schema-v5-derived `CheckoutInventory` without format-specific collection. Watch mode repeats the same one-sample path. `odcli ps` adds `Task <identifier> · <status-or-unknown> · <activity>` only to the Details cell of the existing linked checkout section; it creates no new process group and performs no second query.
 
-The existing `GET /api/v1/snapshot` returns schema v5 with facts, OpenAPI is regenerated from the model, and the checked-in TypeScript client is regenerated through the existing script. The React app finds the `multica` external-task fact for each existing card. No facts means no block.
+The existing `GET /api/v1/snapshot` returns schema v5 with facts, OpenAPI is regenerated from the model, and the checked-in TypeScript client is regenerated through the existing script. Core selects the owner's single validated `ExternalTaskSummary` capability without branching on provider ID and passes it to the existing card. `multica` is data provenance, not a UI plugin key. No external-task capability means no block.
 
 Alternative considered: add task fields independently to every SDK/CLI/HTTP model. That duplicates semantics and allows surfaces to drift; all projections instead retain one nested typed result.
 
 ### D5. The card communicates state independently of color
 
-The existing `RuntimeCard` receives the external-task summary and renders a compact block independent of Odoo runtime visibility. The task action includes the identifier and opens the verified URL in a new tab with `noopener,noreferrer`. The issue status is text. Activity uses green/red/gray form plus visible text and a focusable control or element whose accessible name and tooltip are respectively:
+The existing core `RuntimeCard` receives the provider-neutral external-task summary and renders a compact block independent of Odoo runtime visibility. It neither imports `odcli-multica` nor checks `provider == "multica"`; any installed provider that satisfies the same typed capability gets identical core rendering. The task action includes the identifier and opens the verified URL in a new tab with `noopener,noreferrer`. The issue status is text. Activity uses green/red/gray form plus visible text and a focusable control or element whose accessible name and tooltip are respectively:
 
 - active: “The task has an active agent run”;
 - inactive: “The task has no active agent runs”;
@@ -85,13 +87,13 @@ Alternative considered: encode activity only as a colored dot. That is inaccessi
 
 ### D6. Optional installation remains explicit
 
-`odcli-multica` declares its provider entry point and documents that the extension must be installed into the same Python environment that runs `odcli monitor`; finding an executable elsewhere on `PATH` is not sufficient for Python entry-point discovery. Core has no `multica-py` import or dependency. There is no auto-install, subprocess bridge, RPC, daemon, or dynamic JavaScript loading.
+`odcli-multica` declares its provider entry point and documents that the extension must be installed into the same Python environment that runs `odcli monitor`; finding an executable elsewhere on `PATH` is not sufficient for Python entry-point discovery. Core has no `multica-py` import or dependency, and the optional package owns no frontend bundle, card component, HTTP route, core-model fork, or CLI renderer. Without the package, discovery returns no Multica provider, facts remain empty, no task block is rendered, and every pre-existing core monitor/CLI/HTTP/dashboard path behaves normally. There is no auto-install, subprocess bridge, RPC, daemon, or dynamic JavaScript loading.
 
 Alternative considered: invoke the companion executable from core when the package is absent. That introduces a second transport and credential boundary and is not needed for the three requested values.
 
 ### Ponytail full gate
 
-No new subsystem is introduced. A separate binding store is unnecessary because the environment catalogue already owns durable environment metadata, so it is removed in favor of nullable row fields. A second Multica collector/polling loop is unnecessary because the canonical monitor refresh already feeds every surface, so provider execution is moved into that sample. A React plugin loader and companion daemon/RPC are unnecessary because the typed snapshot and existing card renderer are sufficient; both are omitted. The only retained additions are the binding fields, one typed nested result, and the optional provider required to cross the package boundary safely.
+No new subsystem is introduced. A separate binding store is unnecessary because the environment catalogue already owns durable environment metadata, so it is removed in favor of nullable row fields. A second Multica collector/polling loop is unnecessary because the canonical monitor refresh already feeds every surface, so provider execution is moved into that sample. A React plugin loader and companion daemon/RPC are unnecessary because the provider-neutral typed capability and existing core card renderer are sufficient; both are omitted. The only retained additions are the binding fields, one typed nested result/rendering path in core, and the optional data adapter required to cross the package boundary safely.
 
 ## Risks / Trade-offs
 

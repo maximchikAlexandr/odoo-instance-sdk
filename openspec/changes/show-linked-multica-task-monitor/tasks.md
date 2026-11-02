@@ -15,7 +15,7 @@
 - [ ] 3.1 Extend `odcli-multica` prepare planning to build a safe binding from verified context, public Issue/permalink, and daemon evidence and pass it to core adoption; cover successful create/reuse, rollback, unsafe URL, missing permalink context, and identity conflict.
 - [ ] 3.2 Implement and register the `multica` facts provider with exact path/server/workspace/runtime/daemon revalidation, grouping by unique issue, concurrency ceiling four, bounded public `multica-py` operations, and one observation shared across matching environments.
 - [ ] 3.3 Implement the closed run-status mapping and completeness rules: exact `running` is active; complete known non-running/no-run pages are inactive; incomplete, unknown, unauthorized, timed-out, or malformed negatives are unknown; preserve only the verified identifier/link on dynamic failure.
-- [ ] 3.4 Add extension unit/integration tests for issue status, public permalink refresh, all known run states, future status, pagination, timeout/error sanitization, deduplication, wrong host/path, restart reconstruction, absent binding, and no raw CLI/private core import.
+- [ ] 3.4 Add extension unit/integration tests for issue status, public permalink refresh, all known run states, future status, pagination, timeout/error sanitization, deduplication, wrong host/path, restart reconstruction, absent binding, and no raw CLI/private core import or duplicated core model/collector/serializer/CLI/HTTP/UI renderer.
 
 ## 4. Project the same result through CLI and process inventory
 
@@ -26,12 +26,12 @@
 ## 5. Carry facts through HTTP and the existing card
 
 - [ ] 5.1 Update `Snapshot` OpenAPI components and the generated TypeScript client using the existing generation path; extend Python schema/response contract tests for schema v5, enums, nullable status, and absence of private binding fields.
-- [ ] 5.2 Add the task block to the existing `RuntimeCard` with verified new-tab link, status text, green/red/gray plus textual activity, hover/focus help, accessible names, safe unavailable reason, stopped-Odoo visibility, and no block when facts are absent.
-- [ ] 5.3 Extend Vitest/Testing Library and CSS/package artifact tests for active/inactive/unknown transitions, API failure, keyboard focus, `noopener,noreferrer`, core-only/unbound cards, and unchanged runtime controls.
+- [ ] 5.2 Add one provider-neutral external-task capability block to the existing core `RuntimeCard` with no provider-ID branch or optional frontend import; include the verified new-tab link, status text, green/red/gray plus textual activity, hover/focus help, accessible names, safe unavailable reason, stopped-Odoo visibility, and no block when facts are absent.
+- [ ] 5.3 Extend Vitest/Testing Library and CSS/package artifact tests for active/inactive/unknown transitions, API failure, keyboard focus, `noopener,noreferrer`, provider-neutral rendering with a non-Multica fixture, core-only/unbound cards, absence of optional UI assets, and unchanged runtime controls.
 
 ## 6. Packaging, repeatable verification, and documentation
 
-- [ ] 6.1 Declare the single extension entry point and document same-interpreter co-installation, compatibility pins, core-only behavior, and the PATH-only non-discovery case without auto-install or companion RPC.
+- [ ] 6.1 Declare the single extension entry point and document same-interpreter co-installation, compatibility pins, the core-owned generic rendering boundary, prohibited duplication in `odcli-multica`, core-only behavior, and the PATH-only non-discovery case without auto-install or companion RPC.
 - [ ] 6.2 Add focused Python CI coverage for catalogue migration/adoption, provider isolation/activity/deduplication, monitor→checkout/process projections, HTTP/OpenAPI contracts, and the existing `offline-tests` job; add frontend coverage to the existing web test/build steps without a new CI framework.
 - [ ] 6.3 Add `scripts/e2e_linked_task_monitor.py` as the repeatable local harness that accepts explicit baseline/candidate SHAs, isolated catalogue/profile/root/ports, deterministic provider fixtures, exact product/test revisions, failure-safe cleanup, and emits only sanitized assertions/provenance for Multica publication.
 - [ ] 6.4 Add the focused E2E fixture/actions needed to capture actual baseline/candidate `env list` and `ps` text plus the existing monitor card in a browser, while keeping raw logs, screenshots, diagnostic JSON, and private hosts outside Git.
