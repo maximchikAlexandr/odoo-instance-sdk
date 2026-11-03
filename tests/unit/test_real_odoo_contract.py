@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,72 @@ from tests.integration.real_odoo.contracts import (
     check_matrix_document,
 )
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+
+
+def test_odoo19_probe_tags_are_class_level_selectors() -> None:
+    fixture = Path("tests/fixtures/addons/odcli_e2e_probe/tests/test_probe.py").read_text(
+        encoding="utf-8"
+    )
+    module = ast.parse(fixture)
+    tagged_classes: dict[str, ast.ClassDef] = {}
+
+    def is_tagged(decorator: ast.expr) -> bool:
+        return (
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Name)
+            and decorator.func.id == "tagged"
+        )
+
+    for node in ast.walk(module):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            assert not any(map(is_tagged, node.decorator_list)), (
+                "Odoo 19 tagged selectors must not decorate methods"
+            )
+    for node in module.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for decorator in node.decorator_list:
+            if not is_tagged(decorator):
+                continue
+            assert isinstance(decorator, ast.Call)
+            values = [arg.value for arg in decorator.args if isinstance(arg, ast.Constant)]
+            custom_tags = [
+                value
+                for value in values
+                if isinstance(value, str) and value.startswith("odcli_e2e_")
+            ]
+            assert values[0] == "-standard"
+            assert len(custom_tags) == 1
+            tagged_classes[custom_tags[0]] = node
+
+    assert set(tagged_classes) == {
+        "odcli_e2e_pass",
+        "odcli_e2e_fail",
+        "odcli_e2e_error",
+    }
+    assert [
+        node.name
+        for node in module.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "TestOdcliE2eProbe"
+        and any(
+            isinstance(member, ast.FunctionDef)
+            and member.name == "test_deterministic_record_and_filestore_attachment"
+            for member in node.body
+        )
+    ] == ["TestOdcliE2eProbe"]
+    assert {
+        tag: [
+            member.name
+            for member in cls.body
+            if isinstance(member, ast.FunctionDef) and member.name.startswith("test_")
+        ]
+        for tag, cls in tagged_classes.items()
+    } == {
+        "odcli_e2e_pass": ["test_result_pass"],
+        "odcli_e2e_fail": ["test_result_fail"],
+        "odcli_e2e_error": ["test_result_error"],
+    }
 
 
 def test_generated_matrix_matches_canonical_inventory() -> None:

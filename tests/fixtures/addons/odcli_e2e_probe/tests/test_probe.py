@@ -15,14 +15,20 @@ class TestOdcliE2eProbe(TransactionCase):
         self.assertTrue(attachment.store_fname)
         self.assertEqual(base64.b64decode(attachment.datas), b"OdCLI filestore probe\n")
 
-    @tagged("-standard", "odcli_e2e_pass")
+
+@tagged("-standard", "odcli_e2e_pass")
+class TestOdcliE2eProbePass(TransactionCase):
     def test_result_pass(self):
         self.assertTrue(True)
 
-    @tagged("-standard", "odcli_e2e_fail")
+
+@tagged("-standard", "odcli_e2e_fail")
+class TestOdcliE2eProbeFail(TransactionCase):
     def test_result_fail(self):
         self.fail("ODCLI_EXPECTED_FAILURE")
 
-    @tagged("-standard", "odcli_e2e_error")
+
+@tagged("-standard", "odcli_e2e_error")
+class TestOdcliE2eProbeError(TransactionCase):
     def test_result_error(self):
         raise RuntimeError("ODCLI_EXPECTED_ERROR")
