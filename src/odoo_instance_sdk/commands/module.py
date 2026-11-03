@@ -27,6 +27,7 @@ from odoo_instance_sdk.commands.output import (
     render_rich_text,
     resolve_output_mode,
     run_or_preview,
+    sanitize_diagnostic,
     success_document,
 )
 from odoo_instance_sdk.commands.test import (
@@ -647,6 +648,8 @@ def module_test(
         raise
     except Exception as e:
         fail(output_mode, "module.test", e, dry_run=dry_run)
+    if outcome is not None and outcome[1]:
+        click.echo(sanitize_diagnostic(outcome[1]), err=True)
     raise click.exceptions.Exit(
         outcome[0].exit_code if outcome is not None and not dry_run else status
     )

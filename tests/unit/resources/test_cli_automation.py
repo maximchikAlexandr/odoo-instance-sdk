@@ -7,9 +7,11 @@ import json
 import shutil
 import socket
 import struct
+import sys
 import textwrap
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +22,7 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.automation import (
+    _test_runner_source,
     _update_modules_source,
     eval_expression,
     exec_script,
@@ -389,6 +392,100 @@ class TestModuleUpdate:
 
 
 class TestOdooTestRunner:
+    @pytest.mark.parametrize(
+        ("report", "expected"),
+        [
+            pytest.param(
+                SimpleNamespace(testsRun=1, failures_count=1, errors_count=0, skipped=0),
+                {"tests": 1, "successful": 0, "failed": 1, "errors": 0, "skipped": 0},
+                id="odoo19-failure",
+            ),
+            pytest.param(
+                SimpleNamespace(testsRun=1, failures_count=0, errors_count=1, skipped=0),
+                {"tests": 1, "successful": 0, "failed": 0, "errors": 1, "skipped": 0},
+                id="odoo19-error",
+            ),
+            pytest.param(
+                SimpleNamespace(testsRun=3, failures_count=1, errors_count=1, skipped=0),
+                {"tests": 3, "successful": 1, "failed": 1, "errors": 1, "skipped": 0},
+                id="odoo19-mixed",
+            ),
+            pytest.param(
+                SimpleNamespace(testsRun=1, failures_count=0, errors_count=0, skipped=0),
+                {"tests": 1, "successful": 1, "failed": 0, "errors": 0, "skipped": 0},
+                id="odoo19-pass-only",
+            ),
+            pytest.param(
+                SimpleNamespace(
+                    testsRun=5,
+                    failures_count=1,
+                    failures=["legacy failure", "ignored by precedence"],
+                    tests_failed=3,
+                    errors_count=2,
+                    errors=["ignored by precedence"],
+                    tests_errors=4,
+                    skipped=0,
+                ),
+                {"tests": 5, "successful": 2, "failed": 1, "errors": 2, "skipped": 0},
+                id="odoo19-fields-take-precedence",
+            ),
+            pytest.param(
+                SimpleNamespace(
+                    testsRun=5,
+                    failures=2,
+                    errors=["error one"],
+                    skipped=["skipped"],
+                ),
+                {"tests": 5, "successful": 1, "failed": 2, "errors": 1, "skipped": 1},
+                id="legacy-integer-and-list-fallbacks",
+            ),
+            pytest.param(
+                SimpleNamespace(
+                    testsRun=0,
+                    failures_count=0,
+                    errors_count=0,
+                    skipped=["skipped"],
+                ),
+                {"tests": 0, "successful": 0, "failed": 0, "errors": 0, "skipped": 1},
+                id="zero-tests-and-skipped-preserved",
+            ),
+        ],
+    )
+    def test_generated_runner_normalizes_native_report_shapes(
+        self, report: SimpleNamespace, expected: dict[str, int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[object, dict[str, object]]] = []
+        config: dict[str, int] = {}
+        shell = ModuleType("odoo.tests.shell")
+
+        def run_tests(env: object, **kwargs: object) -> SimpleNamespace:
+            calls.append((env, kwargs))
+            return report
+
+        shell.run_tests = run_tests  # type: ignore[attr-defined]
+        odoo = ModuleType("odoo")
+        odoo.__path__ = []
+        tools = ModuleType("odoo.tools")
+        tools.config = config  # type: ignore[attr-defined]
+        tests = ModuleType("odoo.tests")
+        tests.__path__ = []
+        tests.shell = shell  # type: ignore[attr-defined]
+        odoo.tools = tools  # type: ignore[attr-defined]
+        odoo.tests = tests  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "odoo", odoo)
+        monkeypatch.setitem(sys.modules, "odoo.tools", tools)
+        monkeypatch.setitem(sys.modules, "odoo.tests", tests)
+        monkeypatch.setitem(sys.modules, "odoo.tests.shell", shell)
+
+        namespace = {"env": object()}
+        exec(_test_runner_source(("sale",), "/sale", True), namespace)
+
+        assert namespace["result"] == expected
+        assert calls == [
+            (namespace["env"], {"test_tags": "/sale", "modules": ("sale",), "reload_tests": True})
+        ]
+        assert config == {"workers": 0}
+
     def test_native_counts_and_single_locked_shell_call(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
         payload = {
@@ -466,6 +563,49 @@ class TestOdooTestRunner:
         assert type(arguments["modules"]) is tuple
         assert type(arguments["test_tags"]) is str
         assert type(arguments["reload_tests"]) is bool
+
+    @pytest.mark.parametrize(
+        ("counts", "diagnostic"),
+        [
+            pytest.param(
+                {"tests": 1, "successful": 0, "failed": 1, "errors": 0, "skipped": 0},
+                "native failure diagnostic",
+                id="failure",
+            ),
+            pytest.param(
+                {"tests": 1, "successful": 0, "failed": 0, "errors": 1, "skipped": 0},
+                "native error diagnostic",
+                id="error",
+            ),
+        ],
+    )
+    def test_native_failure_and_error_counts_drive_sdk_result(
+        self, tmp_path: Path, counts: dict[str, int], diagnostic: str
+    ) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {"result": counts}
+        with (
+            patch.object(
+                type(inst),
+                "_shell_script_command",
+                _stub_run_shell_script(payload, stderr_override=diagnostic),
+            ),
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.FREE,
+            ),
+        ):
+            result, stderr = run_odoo_tests(
+                inst,
+                OdooTestSpec(modules=("sale",), test_tags="/sale"),
+                http_interface="127.0.0.1",
+                http_port=18084,
+            )
+
+        assert result.counts == counts
+        assert result.failures is True
+        assert result.exit_code == 1
+        assert stderr == diagnostic
 
     @pytest.mark.parametrize("allow_empty, expected_exit", [(False, 1), (True, 0)])
     def test_native_zero_tests_respects_allow_empty(
