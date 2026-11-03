@@ -426,8 +426,8 @@ def test_changed_no_addon_is_successful_noop_without_runner(tmp_path: Path) -> N
     payload = json.loads(result.stdout)["result"]
     assert payload["reason"] == "no_addon_changes"
     assert payload["modules"] == []
-    assert "counts" not in payload
-    assert "test_tags" not in payload
+    for key in ("test_tags", "reload_tests", "allow_empty", "counts", "failures", "zero_tests"):
+        assert key not in payload
     preflight.assert_not_called()
     runner.assert_not_called()
 
@@ -669,3 +669,67 @@ def test_direct_and_module_test_share_owner_and_format_contracts(
     assert payload["selection"]["kind"] == "module"
     assert payload["modules"] == ["sale"]
     assert payload["test_tags"] == "/sale"
+
+
+@pytest.mark.parametrize(
+    ("counts", "diagnostic"),
+    [
+        pytest.param(
+            {"tests": 1, "successful": 0, "failed": 1, "errors": 0, "skipped": 0},
+            "native failure diagnostic",
+            id="failure",
+        ),
+        pytest.param(
+            {"tests": 1, "successful": 0, "failed": 0, "errors": 1, "skipped": 0},
+            "native error diagnostic",
+            id="error",
+        ),
+    ],
+)
+def test_test_commands_serialize_native_failure_and_error_results(
+    tmp_path: Path, counts: dict[str, int], diagnostic: str
+) -> None:
+    _addon(tmp_path, "sale")
+    env = _environment(tmp_path)
+    instance = _instance(tmp_path)
+    selection = SimpleNamespace(
+        modules=("sale",),
+        test_tags="/sale",
+        provenance=SimpleNamespace(
+            kind="module",
+            value="sale",
+            module_path=tmp_path / "addons" / "sale",
+            file_path=None,
+        ),
+    )
+    typed = OdooTestResult(counts=counts, failures=True, zero_tests=False, exit_code=1)
+    command = _result_command((typed, diagnostic))
+
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=_resolved_context(env, instance),
+        ),
+        patch("odoo_instance_sdk.cli.resolve_module_test_selection", return_value=(selection,)),
+        patch("odoo_instance_sdk.commands.test.resolve_test_selection", return_value=selection),
+        patch("odoo_instance_sdk.commands.test.preflight_installed_modules"),
+        patch("odoo_instance_sdk.commands.test.run_odoo_tests_command", return_value=command),
+        patch("odoo_instance_sdk.commands.module.run_odoo_tests_command", return_value=command),
+    ):
+        direct = CliRunner().invoke(cli, ["test", "sale", "--tags", "/sale", "--format", "json"])
+        alias = CliRunner().invoke(
+            cli,
+            ["module", "test", "sale", "--test-tags", "/sale", "--format", "json"],
+        )
+
+    assert direct.exit_code == alias.exit_code == 1
+    direct_result = json.loads(direct.stdout)["result"]
+    alias_result = json.loads(alias.stdout)["result"]
+    for payload in (direct_result, alias_result):
+        assert payload["counts"] == counts
+        assert payload["failures"] is True
+        assert payload["exit_code"] == 1
+    assert direct_result["counts"] == alias_result["counts"]
+    assert direct_result["failures"] == alias_result["failures"]
+    assert diagnostic in direct.stderr
+    assert diagnostic in alias.stderr
