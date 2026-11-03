@@ -614,7 +614,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         sdk_primitive="run_odoo_tests_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-08",),
-        e2e_rationale="compatibility alias equals top-level test",
+        e2e_rationale="alias equivalence and tagged Odoo 19 pass/fail/error result counts",
     ),
     PublicLeafCase(
         ("module", "info"),

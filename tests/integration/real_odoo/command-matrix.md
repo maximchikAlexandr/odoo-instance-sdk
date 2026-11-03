@@ -41,7 +41,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `test` | process-previewable-read-only | yes | critical | E2E-CP-07: probe module native runner report |
 | `module ls` | process-previewable-read-only | yes | critical | E2E-CP-05: probe discovery/install state |
 | `module update` | mutating-or-spawning | yes | critical | E2E-CP-06: deterministic update and repeat |
-| `module test` | mutating-or-spawning | yes | focused | E2E-FC-08: compatibility alias equals top-level test |
+| `module test` | mutating-or-spawning | yes | focused | E2E-FC-08: alias equivalence and tagged Odoo 19 pass/fail/error result counts |
 | `module info` | bounded-read-only | no | not-applicable | upstream module inspection is covered by focused command tests |
 | `module context` | bounded-read-only | no | not-applicable | repository-aware read-only module facts are covered offline |
 | `module where` | bounded-read-only | no | not-applicable | upstream filesystem inspection is outside the lifecycle fixture |

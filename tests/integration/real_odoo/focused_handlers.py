@@ -137,6 +137,77 @@ def _module_test(state: _State) -> tuple[Result, dict[str, Any]]:
     top_document = json.loads(top_level.stdout)
     assert module_document["ok"] is True and top_document["ok"] is True
     assert module_document["result"]["modules"] == top_document["result"]["modules"]
+
+    expected = {
+        "fail": ("+odcli_e2e_fail", 1, 0, 1, 0, 0, 1),
+        "error": ("+odcli_e2e_error", 1, 0, 0, 1, 0, 1),
+        "mixed": (
+            "+odcli_e2e_pass,+odcli_e2e_fail,+odcli_e2e_error",
+            3,
+            1,
+            1,
+            1,
+            0,
+            1,
+        ),
+    }
+    for outcome, (tags, tests, successful, failed, errors, skipped, exit_code) in expected.items():
+        result = _invoke(
+            state,
+            [
+                "test",
+                "odcli_e2e_probe",
+                "--tags",
+                tags,
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 1, f"{outcome}: {result.output}"
+        payload = json.loads(result.stdout)["result"]
+        assert payload["counts"] == {
+            "tests": tests,
+            "successful": successful,
+            "failed": failed,
+            "errors": errors,
+            "skipped": skipped,
+        }
+        assert payload["failures"] is True
+        assert payload["exit_code"] == exit_code
+
+    pass_tags = "+odcli_e2e_pass"
+    passed_alias = _invoke(
+        state,
+        [
+            "module",
+            "test",
+            "odcli_e2e_probe",
+            "--test-tags",
+            pass_tags,
+            "--format",
+            "json",
+        ],
+    )
+    passed_top_level = _invoke(
+        state,
+        ["test", "odcli_e2e_probe", "--tags", pass_tags, "--format", "json"],
+    )
+    assert passed_alias.exit_code == passed_top_level.exit_code == 0
+    passed_alias_result = json.loads(passed_alias.stdout)["result"]
+    passed_top_result = json.loads(passed_top_level.stdout)["result"]
+    assert (
+        passed_alias_result["counts"]
+        == passed_top_result["counts"]
+        == {
+            "tests": 1,
+            "successful": 1,
+            "failed": 0,
+            "errors": 0,
+            "skipped": 0,
+        }
+    )
+    assert passed_alias_result["failures"] is passed_top_result["failures"] is False
+    assert passed_alias_result["exit_code"] == passed_top_result["exit_code"] == 0
     return module, module_document
 
 
