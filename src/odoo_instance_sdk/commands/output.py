@@ -519,10 +519,7 @@ def _rich_rendered(
     projection: Callable[[OutputDocument], str] | None,
 ) -> str:
     """Add the one common completion line to a successful Rich document."""
-    # Every dry-run process plan uses the same semantic projection.  Command
-    # adapters may keep their execution-result renderer for normal runs, but
-    # must not replace captured process displays with a result-shaped summary
-    # while previewing the immutable plan.
+    # Preserve captured output in dry-run's shared semantic projection.
     if (
         document.ok
         and document.dry_run
@@ -776,12 +773,12 @@ def run_or_preview(  # noqa: C901
     observer: StepObserver | None = None,
     observe_output: bool = False,
     progress: bool = False,
+    diagnostic: Callable[[_ResultT], str | None] | None = None,
     on_interrupt: Callable[[KeyboardInterrupt], None] | None = None,
 ) -> tuple[int, _ResultT | None]:
-    """Build one command, then either inspect it or run that same instance.
+    """Build one command snapshot, then inspect or execute it.
 
-    Confirmation is deliberately invoked after construction, so a caller can
-    present or validate the complete snapshot before asking for consent.
+    Confirmation follows construction so callers can inspect the complete snapshot.
     """
     command = build_command()
     if dry_run:
@@ -830,6 +827,9 @@ def run_or_preview(  # noqa: C901
     if not emit_normal:
         return 0, value
     payload = result(value) if result is not None else {}
+    diagnostic_message = None
+    if diagnostic is not None:
+        diagnostic_message = diagnostic(value)
     status = emit(
         success_document(
             command=command_name,
@@ -839,6 +839,7 @@ def run_or_preview(  # noqa: C901
         ),
         mode,
         rich=rich,
+        diagnostic=diagnostic_message,
     )
     return status, value
 

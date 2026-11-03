@@ -19,7 +19,7 @@ class TestOdcliE2eProbe(TransactionCase):
 @tagged("-standard", "odcli_e2e_pass")
 class TestOdcliE2eProbePass(TransactionCase):
     def test_result_pass(self):
-        self.assertTrue(True)
+        self.assertGreater(self.env["ir.model"].search_count([("model", "=", "res.partner")]), 0)
 
 
 @tagged("-standard", "odcli_e2e_fail")
@@ -31,4 +31,5 @@ class TestOdcliE2eProbeFail(TransactionCase):
 @tagged("-standard", "odcli_e2e_error")
 class TestOdcliE2eProbeError(TransactionCase):
     def test_result_error(self):
+        self.assertGreater(self.env["ir.model"].search_count([("model", "=", "res.partner")]), 0)
         raise RuntimeError("ODCLI_EXPECTED_ERROR")

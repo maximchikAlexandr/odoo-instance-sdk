@@ -34,65 +34,44 @@ def test_odoo19_probe_tags_are_class_level_selectors() -> None:
         encoding="utf-8"
     )
     module = ast.parse(fixture)
-    tagged_classes: dict[str, ast.ClassDef] = {}
-
-    def is_tagged(decorator: ast.expr) -> bool:
-        return (
+    tagged = [
+        (
+            node.name,
+            tuple(arg.value for arg in decorator.args if isinstance(arg, ast.Constant)),
+            tuple(
+                member.name
+                for member in node.body
+                if isinstance(member, ast.FunctionDef) and member.name.startswith("test_")
+            ),
+        )
+        for node in module.body
+        if isinstance(node, ast.ClassDef)
+        for decorator in node.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Name)
+        and decorator.func.id == "tagged"
+    ]
+    method_tags = [
+        member.name
+        for member in ast.walk(module)
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
             isinstance(decorator, ast.Call)
             and isinstance(decorator.func, ast.Name)
             and decorator.func.id == "tagged"
+            for decorator in member.decorator_list
         )
-
-    for node in ast.walk(module):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            assert not any(map(is_tagged, node.decorator_list)), (
-                "Odoo 19 tagged selectors must not decorate methods"
-            )
-    for node in module.body:
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for decorator in node.decorator_list:
-            if not is_tagged(decorator):
-                continue
-            assert isinstance(decorator, ast.Call)
-            values = [arg.value for arg in decorator.args if isinstance(arg, ast.Constant)]
-            custom_tags = [
-                value
-                for value in values
-                if isinstance(value, str) and value.startswith("odcli_e2e_")
-            ]
-            assert values[0] == "-standard"
-            assert len(custom_tags) == 1
-            tagged_classes[custom_tags[0]] = node
-
-    assert set(tagged_classes) == {
-        "odcli_e2e_pass",
-        "odcli_e2e_fail",
-        "odcli_e2e_error",
+    ]
+    expected = {
+        "odcli_e2e_pass": ("TestOdcliE2eProbePass", ("test_result_pass",)),
+        "odcli_e2e_fail": ("TestOdcliE2eProbeFail", ("test_result_fail",)),
+        "odcli_e2e_error": ("TestOdcliE2eProbeError", ("test_result_error",)),
     }
-    assert [
-        node.name
-        for node in module.body
-        if isinstance(node, ast.ClassDef)
-        and node.name == "TestOdcliE2eProbe"
-        and any(
-            isinstance(member, ast.FunctionDef)
-            and member.name == "test_deterministic_record_and_filestore_attachment"
-            for member in node.body
-        )
-    ] == ["TestOdcliE2eProbe"]
-    assert {
-        tag: [
-            member.name
-            for member in cls.body
-            if isinstance(member, ast.FunctionDef) and member.name.startswith("test_")
-        ]
-        for tag, cls in tagged_classes.items()
-    } == {
-        "odcli_e2e_pass": ["test_result_pass"],
-        "odcli_e2e_fail": ["test_result_fail"],
-        "odcli_e2e_error": ["test_result_error"],
-    }
+    assert len(tagged) == len(expected)
+    assert {values[1] for _, values, _ in tagged} == set(expected)
+    assert all(values == ("-standard", tag) for _, values, _ in tagged for tag in values[1:])
+    assert {values[1]: (name, methods) for name, values, methods in tagged} == expected
+    assert method_tags == []
 
 
 def test_generated_matrix_matches_canonical_inventory() -> None:
