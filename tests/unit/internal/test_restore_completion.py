@@ -4,7 +4,7 @@ import contextlib
 import json
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -315,13 +315,34 @@ def test_public_cli_completion_revalidation_uses_captured_inventory_and_reset_pr
 
 
 @pytest.mark.parametrize(
-    "drift",
-    ["source_sha256", "database_oid", "data_directory", "sequence", "claim"],
+    "mutate_catalog",
+    [
+        pytest.param(
+            lambda catalog: catalog.row.__setitem__("source_sha256", "b" * 64),
+            id="source-sha256",
+        ),
+        pytest.param(
+            lambda catalog: catalog.row.__setitem__("database_oid", "changed-database-oid"),
+            id="database-oid",
+        ),
+        pytest.param(
+            lambda catalog: catalog.row.__setitem__("data_directory", "/foreign/filestore"),
+            id="data-directory",
+        ),
+        pytest.param(
+            lambda catalog: catalog.row.__setitem__("sequence", catalog.row["sequence"] + 1),
+            id="sequence",
+        ),
+        pytest.param(
+            lambda catalog: setattr(catalog.claim, "project_id", "foreign-project"),
+            id="claim",
+        ),
+    ],
 )
 def test_public_completion_revalidates_all_evidence_after_module_mutation(
     completion_setup: tuple[Path, str, ProjectConfig, _CompletionCatalog, EnvironmentResource],
     monkeypatch: pytest.MonkeyPatch,
-    drift: str,
+    mutate_catalog: Callable[[_CompletionCatalog], None],
 ) -> None:
     from odoo_instance_sdk.resources.database import DatabaseResource
     from odoo_instance_sdk.resources.module import ModuleResource
@@ -332,16 +353,7 @@ def test_public_completion_revalidates_all_evidence_after_module_mutation(
     def update_modules(_self: object, _modules: object) -> Command[None]:
         def mutate(_context: object) -> None:
             executed.append("module_update")
-            if drift == "claim":
-                catalog.claim.project_id = "foreign-project"
-            elif drift == "sequence":
-                catalog.row["sequence"] += 1
-            elif drift == "data_directory":
-                catalog.row["data_directory"] = "/foreign/filestore"
-            elif drift == "database_oid":
-                catalog.row["database_oid"] = "changed-database-oid"
-            else:
-                catalog.row["source_sha256"] = "b" * 64
+            mutate_catalog(catalog)
 
         return Command.create(ExecutionPlan(), mutate)
 
@@ -534,25 +546,115 @@ def test_completion_revalidates_after_reset_before_checkpoint_advance(
     assert ProjectConfig.load(root).default_source_database == project.default_source_database
 
 
-@pytest.mark.parametrize("owner_case", ["missing", "foreign"])
-def test_completion_refuses_missing_or_foreign_restore_ownership(
+def _assert_completion_refuses_ownership_case(
     completion_setup: tuple[Path, str, ProjectConfig, _CompletionCatalog, EnvironmentResource],
-    monkeypatch: pytest.MonkeyPatch,
-    owner_case: str,
+    expected_error: str,
 ) -> None:
-    root, target, project, catalog, resource = completion_setup
+    root, target, project, _catalog, resource = completion_setup
     before = (root / ".odcli" / "project.toml").read_bytes()
-    if owner_case == "missing":
-        monkeypatch.setattr(catalog, "_latest_restore_binding", lambda *_args: None)
-        message = "no tracked restore binding"
-    else:
-        catalog.claim = SimpleNamespace(state="active", project_id="foreign")
-        message = "not owned"
-
-    with pytest.raises(BackupCatalogError, match=message):
+    with pytest.raises(BackupCatalogError, match=expected_error):
         resource.complete_restore_command(root, target)
 
     assert (root / ".odcli" / "project.toml").read_bytes() == before
+    assert ProjectConfig.load(root).default_source_database == project.default_source_database
+
+
+def test_completion_refuses_missing_restore_binding(
+    completion_setup: tuple[Path, str, ProjectConfig, _CompletionCatalog, EnvironmentResource],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, _target, _project, catalog, _resource = completion_setup
+    monkeypatch.setattr(catalog, "_latest_restore_binding", lambda *_args: None)
+    _assert_completion_refuses_ownership_case(completion_setup, "no tracked restore binding")
+
+
+def test_completion_refuses_foreign_restore_ownership(
+    completion_setup: tuple[Path, str, ProjectConfig, _CompletionCatalog, EnvironmentResource],
+) -> None:
+    _root, _target, _project, catalog, _resource = completion_setup
+    catalog.claim = SimpleNamespace(state="active", project_id="foreign")
+    _assert_completion_refuses_ownership_case(completion_setup, "not owned")
+
+
+def test_public_completion_refuses_generated_config_appearing_after_plan_capture(
+    completion_setup: tuple[Path, str, ProjectConfig, _CompletionCatalog, EnvironmentResource],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import msgspec
+
+    from odoo_instance_sdk.internal import git_worktree
+    from odoo_instance_sdk.internal.dbprep import completion
+    from odoo_instance_sdk.internal.generated_config import project_generated_config_path
+    from odoo_instance_sdk.project import PostgresProjectConfig
+
+    root, target, project, catalog, resource = completion_setup
+    compose_project = msgspec.structs.replace(
+        project,
+        postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5432),
+    )
+    monkeypatch.setattr(completion, "_load_project", lambda _project: (compose_project, root))
+    monkeypatch.setattr(
+        ProjectConfig,
+        "load",
+        classmethod(lambda _cls, _root: compose_project),
+    )
+    generated_config = project_generated_config_path(root)
+    assert not generated_config.exists()
+    command = resource.complete_restore_command(root, target)
+    assert command.plan.process_steps == ()
+
+    generated_config.write_text("[options]\n", encoding="utf-8")
+    git_probes: list[Path] = []
+
+    def record_unplanned_git_probe(path: Path, *, step_prefix: str | None = None) -> bool:
+        git_probes.append(path)
+        pytest.fail("stale completion must refuse before an unplanned Git probe")
+
+    monkeypatch.setattr(git_worktree, "is_tracked_path", record_unplanned_git_probe)
+    with pytest.raises(BackupCatalogError, match="plan is stale"):
+        command.run()
+
+    assert git_probes == []
+    assert generated_config.read_text(encoding="utf-8") == "[options]\n"
+    assert catalog.row["state"] == "incomplete"
+    assert ProjectConfig.load(root).default_source_database == project.default_source_database
+
+
+def test_public_completion_refuses_generated_config_identity_drift_before_publication(
+    completion_setup: tuple[Path, str, ProjectConfig, _CompletionCatalog, EnvironmentResource],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import msgspec
+
+    from odoo_instance_sdk.internal import git_worktree
+    from odoo_instance_sdk.internal.dbprep import completion
+    from odoo_instance_sdk.internal.generated_config import project_generated_config_path
+    from odoo_instance_sdk.project import PostgresProjectConfig
+
+    root, target, project, catalog, resource = completion_setup
+    compose_project = msgspec.structs.replace(
+        project,
+        postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5432),
+    )
+    monkeypatch.setattr(completion, "_load_project", lambda _project: (compose_project, root))
+    monkeypatch.setattr(ProjectConfig, "load", classmethod(lambda _cls, _root: compose_project))
+    generated_config = project_generated_config_path(root)
+    generated_config.write_text("[options]\ndb_name = initial\n", encoding="utf-8")
+    command = resource.complete_restore_command(root, target)
+    generated_config.write_text("[options]\ndb_name = changed\n", encoding="utf-8")
+    git_probes: list[Path] = []
+
+    def record_git_probe(path: Path, *, step_prefix: str | None = None) -> bool:
+        git_probes.append(path)
+        pytest.fail("stale completion must refuse before generated-config tracking")
+
+    monkeypatch.setattr(git_worktree, "is_tracked_path", record_git_probe)
+    with pytest.raises(BackupCatalogError, match="plan is stale"):
+        command.run()
+
+    assert git_probes == []
+    assert generated_config.read_text(encoding="utf-8") == "[options]\ndb_name = changed\n"
+    assert catalog.row["state"] == "incomplete"
     assert ProjectConfig.load(root).default_source_database == project.default_source_database
 
 

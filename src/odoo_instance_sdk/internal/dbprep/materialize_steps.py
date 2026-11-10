@@ -491,7 +491,7 @@ def _default_switch_git_steps(root: Path, mode: str) -> tuple[PreparedStep, ...]
     from odoo_instance_sdk.internal.proc import PreparedStep
 
     generated = project_generated_config_path(root)
-    if mode != "compose" or not (root / ".git").exists() or not generated.is_file():
+    if mode != "compose" or not (root / ".git").exists() or not generated.exists():
         return ()
     return tuple(
         PreparedStep(
