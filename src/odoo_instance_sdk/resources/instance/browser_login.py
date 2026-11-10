@@ -46,9 +46,10 @@ def list_browser_login_users_command(
         raise ValueError("browser login search is too long")
     source = """import json, sys
 query = sys.argv[1].strip()
-domain = [('active', '=', True), ('share', '=', False), ('id', '!=', SUPERUSER_ID)]
+superuser_id = odoo.api.SUPERUSER_ID
+domain = [('active', '=', True), ('share', '=', False), ('id', '!=', superuser_id)]
 if query:
-    domain = ['&', '&', '&', ('active', '=', True), ('share', '=', False), ('id', '!=', SUPERUSER_ID), '|', ('login', 'ilike', query), ('name', 'ilike', query)]
+    domain = ['&', '&', '&', ('active', '=', True), ('share', '=', False), ('id', '!=', superuser_id), '|', ('login', 'ilike', query), ('name', 'ilike', query)]
 users = env['res.users'].sudo().search(domain, limit=100, order='id')
 print(json.dumps([{'id': user.id, 'login': user.login, 'name': user.name} for user in users[:100]]))
 """
@@ -88,7 +89,7 @@ def create_browser_session_command(  # noqa: C901
     source = """import os, sys
 from odoo.http import root
 user = env['res.users'].sudo().browse(int(sys.argv[2])).exists()
-if not user or not user.active or user.share or user.id == SUPERUSER_ID:
+if not user or not user.active or user.share or user.id == odoo.api.SUPERUSER_ID:
     raise RuntimeError('selected user is not eligible')
 store = root.session_store
 if type(store).__name__ != 'FilesystemSessionStore':

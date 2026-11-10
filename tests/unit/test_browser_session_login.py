@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import uuid
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -82,6 +84,52 @@ def test_browser_user_search_accepts_128_and_orders_by_stable_id(
     assert "order='id'" in source
     assert "order='name, id'" not in source
     assert captured["argv"] == ("x" * 128,)
+
+
+def test_browser_user_query_uses_odoo_shell_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = _instance(tmp_path)
+    captured: dict[str, object] = {}
+
+    class User:
+        id = 14
+        login = "fixture"
+        name = "Fixture User"
+
+    class Users:
+        def sudo(self) -> Users:
+            return self
+
+        def search(self, domain: object, *, limit: int, order: str) -> list[User]:
+            captured.update(domain=domain, limit=limit, order=order)
+            return [User()]
+
+    class Env:
+        def __getitem__(self, _key: str) -> Users:
+            return Users()
+
+    fake_odoo = ModuleType("odoo")
+    setattr(fake_odoo, "api", SimpleNamespace(SUPERUSER_ID=1))
+
+    def capture_shell_script(_self: OdooInstance, source: str, **_kwargs: object) -> object:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["odoo-shell", "fixture"]), redirect_stdout(output):
+            exec(source, {"env": Env(), "odoo": fake_odoo, "sys": sys, "json": json})
+        captured["output"] = output.getvalue()
+        return object()
+
+    monkeypatch.setattr(OdooInstance, "_shell_script_command", capture_shell_script)
+    instance.list_browser_login_users_command("fixture")
+
+    assert json.loads(str(captured["output"])) == [
+        {"id": 14, "login": "fixture", "name": "Fixture User"}
+    ]
+    domain = captured["domain"]
+    assert isinstance(domain, list)
+    assert ("id", "!=", 1) in domain
+    assert captured["limit"] == 100
+    assert captured["order"] == "id"
 
 
 def test_session_command_plan_never_contains_a_sid(tmp_path: Path) -> None:
@@ -180,6 +228,7 @@ def _browser_session_harness(  # noqa: C901
     session_root = SimpleNamespace(session_store=store)
     setattr(fake_http, "root", session_root)
     fake_odoo = ModuleType("odoo")
+    setattr(fake_odoo, "api", SimpleNamespace(SUPERUSER_ID=1))
     setattr(fake_odoo, "http", fake_http)
 
     class BrowserSessionExecutor:
@@ -215,7 +264,7 @@ def _browser_session_harness(  # noqa: C901
             ):
                 exec(
                     (step.stdin or b"").decode("utf-8"),
-                    {"env": Env(), "SUPERUSER_ID": 1},
+                    {"env": Env(), "odoo": fake_odoo},
                 )
             if step.step_id == "instance.shell_script":
                 if self.outcome in {"timeout", "cleanup-failure"}:

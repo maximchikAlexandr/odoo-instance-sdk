@@ -666,7 +666,8 @@ def test_source_backed_full_critical_path(  # noqa: C901
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     assert os.environ["ODCLI_E2E_CATALOG"] == runtime.environment["ODCLI_E2E_CATALOG"]
     assert Path(cli_environment["ODCLI_E2E_CATALOG"]).resolve() == catalogue_path
-    sdk_catalogue = client.get_catalog().db_path.resolve()
+    catalog = client.get_catalog()
+    sdk_catalogue = catalog.db_path.resolve()
     assert sdk_catalogue == catalogue_path
     backup_catalogue = backup_commands._catalog_path_provider.provider
     resource_catalogue = resource_commands._catalog_path_provider.provider
@@ -694,10 +695,17 @@ def test_source_backed_full_critical_path(  # noqa: C901
         repeated_stop_result = _invoke(
             runner, project, cli_environment, "--env", environment_id, "stop"
         )
+        registered_project = next(
+            row
+            for row in catalog.list_projects()
+            if Path(str(row["repository_root"])).resolve() == project.resolve()
+        )
+        expected_project_id = str(registered_project["project_id"])
+        assert environment["project_id"] in (None, expected_project_id)
         expected_stop_context = {
             "owner_kind": "environment",
             "owner_id": environment_id,
-            "project_id": environment["project_id"],
+            "project_id": expected_project_id,
             "environment_id": environment_id,
             "environment_name": environment["name"],
             "worktree_path": environment["worktree_path"],
