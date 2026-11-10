@@ -161,6 +161,8 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
         effective_default=target,
         no_op=no_op,
     )
+    generated_config = project_generated_config_path(root)
+    generated_config_identity = _generated_config_identity(generated_config)
 
     module_command = None
     reset_command = None
@@ -250,9 +252,11 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                         proven_data_directory = root / proven_data_directory
                     proven_data_directory = proven_data_directory.resolve(strict=True)
                     live_filestore.relative_to(root.resolve(strict=True))
+                    live_generated_config_identity = _generated_config_identity(generated_config)
                 except (OSError, ValueError) as error:
+                    _skip_default_switch_git_probes(context)
                     raise BackupCatalogError("restore completion plan is stale") from error
-                if (
+                stale = (
                     live_row is None
                     or live_row["sequence"] != expected_sequence
                     or live_row["state"] != expected_state
@@ -279,7 +283,10 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                     or live_claim.project_id != project_id
                     or live_filestore != proven_data_directory
                     or live_config != config
-                ):
+                    or live_generated_config_identity != generated_config_identity
+                )
+                if stale:
+                    _skip_default_switch_git_probes(context)
                     raise BackupCatalogError("restore completion plan is stale")
                 current_inventory = instance.databases.list_inventory(root)
                 current_item = next(
@@ -333,103 +340,98 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                     ),
                 )
 
-            try:
-                if modules:
-                    revalidate()
-                    context.action("database.restore.complete.modules")
-                    if module_command is None:
-                        raise ConfigError("module update plan is unavailable")
-                    try:
-                        module_command.run()
-                    except BaseException as error:
-                        attach_failure(error, "module_update")
-                        raise
-                    context.complete_action("database.restore.complete.modules")
-                    completed.append("module_update")
-                if checkpoint is PostRestoreCheckpoint.RESET_PENDING:
-                    revalidate()
-                    context.action("database.restore.complete.admin-reset")
-                    if reset_command is None:
-                        raise ConfigError("administrator reset plan is unavailable")
-                    try:
-                        reset_command.run()
-                    except BaseException as error:
-                        attach_failure(error, "admin_reset")
-                        raise
-                    context.complete_action("database.restore.complete.admin-reset")
-                    completed.append("admin_reset")
-                    revalidate()
-                    context.action("database.restore.complete.checkpoint")
-                    try:
-                        expected_sequence = catalog._advance_restore_checkpoint(
-                            cluster.endpoint_host,
-                            cluster.endpoint_port,
-                            target,
-                            expected_sequence=expected_sequence,
-                            expected_checkpoint=PostRestoreCheckpoint.RESET_PENDING,
-                            checkpoint=PostRestoreCheckpoint.RESET_COMPLETE,
-                        )
-                    except BaseException as error:
-                        attach_failure(error, "checkpoint_advance")
-                        raise
-                    context.complete_action("database.restore.complete.checkpoint")
-                    current_checkpoint = PostRestoreCheckpoint.RESET_COMPLETE
-                    expected_checkpoint = current_checkpoint.value
+            if modules:
                 revalidate()
-                context.action("database.restore.complete.default-switch")
-                latest_config = type(config).load(root)
-                switched = msgspec.structs.replace(
-                    latest_config,
-                    default_source_database=target,
-                    managed_filestore=latest_config.managed_filestore
-                    or filestore.relative_to(root),
-                )
-                generated_path = project_generated_config_path(root)
-                manifest_file = manifest_path(root)
-                if config.postgres is None or config.postgres.mode != "compose":
-                    validate_generated_config_target(
-                        generated_path,
-                        project_root=root,
-                        allow_untracked_without_git=True,
-                    )
-                generated_snapshot = _snapshot_owned_file(generated_path)
-                manifest_snapshot = _snapshot_owned_file(manifest_file)
+                context.action("database.restore.complete.modules")
+                if module_command is None:
+                    raise ConfigError("module update plan is unavailable")
                 try:
-                    switch_project_default(root, switched)
+                    module_command.run()
                 except BaseException as error:
-                    attach_failure(error, "default_switch")
+                    attach_failure(error, "module_update")
                     raise
+                context.complete_action("database.restore.complete.modules")
+                completed.append("module_update")
+            if checkpoint is PostRestoreCheckpoint.RESET_PENDING:
+                revalidate()
+                context.action("database.restore.complete.admin-reset")
+                if reset_command is None:
+                    raise ConfigError("administrator reset plan is unavailable")
                 try:
-                    catalog._complete_restore_binding(
+                    reset_command.run()
+                except BaseException as error:
+                    attach_failure(error, "admin_reset")
+                    raise
+                context.complete_action("database.restore.complete.admin-reset")
+                completed.append("admin_reset")
+                revalidate()
+                context.action("database.restore.complete.checkpoint")
+                try:
+                    expected_sequence = catalog._advance_restore_checkpoint(
                         cluster.endpoint_host,
                         cluster.endpoint_port,
                         target,
                         expected_sequence=expected_sequence,
-                        expected_checkpoint=current_checkpoint,
+                        expected_checkpoint=PostRestoreCheckpoint.RESET_PENDING,
+                        checkpoint=PostRestoreCheckpoint.RESET_COMPLETE,
                     )
                 except BaseException as error:
-                    try:
-                        _restore_owned_snapshot(manifest_file, manifest_snapshot)
-                        _restore_owned_snapshot(generated_path, generated_snapshot)
-                    except BaseException:
-                        attach_failure(error, "catalogue_completion", published=True)
-                        raise
-                    attach_failure(error, "catalogue_completion", published=False)
+                    attach_failure(error, "checkpoint_advance")
                     raise
-                context.complete_action("database.restore.complete.default-switch")
-                completed.append("default_switch")
-                return RestoreCompletionResult(
-                    target_database=target,
-                    checkpoint=current_checkpoint,
-                    completed_stages=tuple(completed),
-                    pending_stage=None,
-                    requested_modules=modules,
-                    previous_default=config.default_source_database,
-                    effective_default=target,
-                    published=True,
+                context.complete_action("database.restore.complete.checkpoint")
+                current_checkpoint = PostRestoreCheckpoint.RESET_COMPLETE
+                expected_checkpoint = current_checkpoint.value
+            revalidate()
+            context.action("database.restore.complete.default-switch")
+            latest_config = type(config).load(root)
+            switched = msgspec.structs.replace(
+                latest_config,
+                default_source_database=target,
+                managed_filestore=latest_config.managed_filestore or filestore.relative_to(root),
+            )
+            manifest_file = manifest_path(root)
+            if config.postgres is None or config.postgres.mode != "compose":
+                validate_generated_config_target(
+                    generated_config,
+                    project_root=root,
+                    allow_untracked_without_git=True,
                 )
-            finally:
-                pass
+            generated_snapshot = _snapshot_owned_file(generated_config)
+            manifest_snapshot = _snapshot_owned_file(manifest_file)
+            try:
+                switch_project_default(root, switched)
+            except BaseException as error:
+                attach_failure(error, "default_switch")
+                raise
+            try:
+                catalog._complete_restore_binding(
+                    cluster.endpoint_host,
+                    cluster.endpoint_port,
+                    target,
+                    expected_sequence=expected_sequence,
+                    expected_checkpoint=current_checkpoint,
+                )
+            except BaseException as error:
+                try:
+                    _restore_owned_snapshot(manifest_file, manifest_snapshot)
+                    _restore_owned_snapshot(generated_config, generated_snapshot)
+                except BaseException:
+                    attach_failure(error, "catalogue_completion", published=True)
+                    raise
+                attach_failure(error, "catalogue_completion", published=False)
+                raise
+            context.complete_action("database.restore.complete.default-switch")
+            completed.append("default_switch")
+            return RestoreCompletionResult(
+                target_database=target,
+                checkpoint=current_checkpoint,
+                completed_stages=tuple(completed),
+                pending_stage=None,
+                requested_modules=modules,
+                previous_default=config.default_source_database,
+                effective_default=target,
+                published=True,
+            )
 
     public_plan = ExecutionPlan(
         steps=tuple(step.public_projection() for step in steps),
@@ -449,6 +451,47 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
     )
     prepared = prepared_command(run, steps, executor=executor or SubprocessExecutor())
     return Command.from_prepared(public_plan, prepared)
+
+
+def _generated_config_identity(path: Path) -> tuple[int, ...] | None:
+    """Capture filesystem identity without retaining generated config contents."""
+    try:
+        link_metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    try:
+        target_metadata = path.stat()
+    except FileNotFoundError:
+        target_identity = (-1, -1, -1, -1, -1, -1, -1)
+    else:
+        target_identity = (
+            target_metadata.st_dev,
+            target_metadata.st_ino,
+            target_metadata.st_mode,
+            target_metadata.st_uid,
+            target_metadata.st_size,
+            target_metadata.st_mtime_ns,
+            target_metadata.st_ctime_ns,
+        )
+    return (
+        link_metadata.st_dev,
+        link_metadata.st_ino,
+        link_metadata.st_mode,
+        link_metadata.st_uid,
+        link_metadata.st_size,
+        link_metadata.st_mtime_ns,
+        link_metadata.st_ctime_ns,
+        *target_identity,
+    )
+
+
+def _skip_default_switch_git_probes(context: RunContext[RestoreCompletionResult]) -> None:
+    for step_id in (
+        "database.prepare.default-switch.git.toplevel",
+        "database.prepare.default-switch.git.tracked",
+    ):
+        if context.planned(step_id) and not context.consumed(step_id):
+            context.skip(step_id)
 
 
 def _restore_data_directory(
