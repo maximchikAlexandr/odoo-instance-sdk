@@ -7,9 +7,10 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import msgspec
@@ -17,12 +18,17 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.models import OdooProcess
+from odoo_instance_sdk.resources.environment.checkout_planning import DevelopmentEnvironment
+from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 from scripts.real_odoo_pins import E2E_PINS
 from tests.fixtures.xmlrpc_probe import xmlrpc_probe
 
 from .archive import ArchiveIdentity
-from .cleanup import audit_no_leaks, compose_down, write_odoo_config
+from .cleanup import LeakReport, audit_no_leaks, compose_down, write_odoo_config
 from .compose import ComposeLifecycle, wait_for_http
 from .conftest import E2ERuntime, odoo_runtime_python
 
@@ -349,6 +355,61 @@ def _release_owned_cluster(cluster: Any) -> None:
         raise last_error
 
 
+@dataclass(frozen=True, slots=True)
+class _CriticalPathSetup:
+    runner: CliRunner
+    runtime: E2ERuntime
+    source_server: E2ERuntime
+    source_backup: ArchiveIdentity
+    record_property: Any
+    monkeypatch: pytest.MonkeyPatch
+    catalogue_path: Path
+    cli_environment: dict[str, str]
+    project: Path
+    environment_id: str
+    registered_worktree: Path
+    probe_destination: Path
+    generated_config: Path
+    cluster: PostgresCluster
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimePhaseResult:
+    client: OdooClient
+    environment: DevelopmentEnvironment
+    instance: OdooInstance
+
+
+@dataclass(frozen=True, slots=True)
+class _BackupPhaseResult:
+    process: OdooProcess
+    restored_database: str
+    backup: _BackupMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class _BackupMetadata:
+    id: str
+    size_bytes: int
+    sha256: str
+    source_base_url: str
+    database_name: str
+    source_git_branch: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanupPhaseResult:
+    removed: Mapping[str, object]
+    removed_again: Mapping[str, object]
+    postgres_stop: Mapping[str, object]
+    repeated_postgres_stop: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditPhaseResult:
+    audit: LeakReport
+
+
 def _prepare_source_backed_scenario(
     target_runtime: E2ERuntime,
     source_server: E2ERuntime,
@@ -356,7 +417,7 @@ def _prepare_source_backed_scenario(
     record_property: Any,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
-) -> Any:
+) -> _CriticalPathSetup:
     source_repository, odoo_bin_relative = _source_repository()
     runner = CliRunner()
     runtime = target_runtime
@@ -659,43 +720,25 @@ def _prepare_source_backed_scenario(
         },
     )
 
-    return SimpleNamespace(
+    return _CriticalPathSetup(
         runner=runner,
         runtime=runtime,
         source_server=source_server,
         source_backup=source_backup,
         record_property=record_property,
         monkeypatch=monkeypatch,
-        request=request,
         catalogue_path=catalogue_path,
         cli_environment=cli_environment,
         project=project,
-        addon_root=addon_root,
-        environment=environment,
         environment_id=environment_id,
         registered_worktree=registered_worktree,
         probe_destination=probe_destination,
         generated_config=generated_config,
         cluster=cluster,
-        client=None,
-        env_obj=None,
-        instance=None,
-        second_process=None,
-        restored_database="",
-        refresh=None,
-        backup=None,
-        backup_id="",
-        shown=None,
-        validated=None,
-        removed=None,
-        removed_again=None,
-        postgres_stop=None,
-        repeated_postgres_stop=None,
-        audit=None,
     )
 
 
-def _exercise_runtime_bootstrap(scenario: Any) -> None:
+def _exercise_runtime_bootstrap(scenario: _CriticalPathSetup) -> _RuntimePhaseResult:
     runner = scenario.runner
     project = scenario.project
     cli_environment = scenario.cli_environment
@@ -748,12 +791,10 @@ def _exercise_runtime_bootstrap(scenario: Any) -> None:
     )
     assert _PROBE in json.dumps(modules)
     _record(record_property, "E2E-CP-05", modules)
-    scenario.client = client
-    scenario.env_obj = env_obj
-    scenario.instance = instance
+    return _RuntimePhaseResult(client, env_obj, instance)
 
 
-def _exercise_module_update_and_tests(scenario: Any) -> None:
+def _exercise_module_update_and_tests(scenario: _CriticalPathSetup) -> None:
     runner = scenario.runner
     project = scenario.project
     cli_environment = scenario.cli_environment
@@ -813,7 +854,9 @@ def _exercise_module_update_and_tests(scenario: Any) -> None:
     _record(record_property, "E2E-CP-07", tests)
 
 
-def _capture_and_validate_source_backup(scenario: Any) -> None:
+def _capture_and_validate_source_backup(
+    scenario: _CriticalPathSetup, runtime_phase: _RuntimePhaseResult
+) -> _BackupPhaseResult:
     runner = scenario.runner
     project = scenario.project
     cli_environment = scenario.cli_environment
@@ -821,7 +864,7 @@ def _capture_and_validate_source_backup(scenario: Any) -> None:
     runtime = scenario.runtime
     source_backup = scenario.source_backup
     source_server = scenario.source_server
-    instance = scenario.instance
+    instance = runtime_phase.instance
     second_process = _start_owned(instance, runtime)
     wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
     refresh = _invoke(
@@ -836,12 +879,23 @@ def _capture_and_validate_source_backup(scenario: Any) -> None:
     )
     restored_database = str(refresh["restored_database"])
     backup = refresh.get("backup")
-    assert isinstance(backup, dict) and backup.get("id")
+    assert isinstance(backup, dict) and isinstance(backup.get("id"), str)
     assert isinstance(backup.get("sha256"), str) and len(backup["sha256"]) == 64
     assert isinstance(backup.get("size_bytes"), int) and backup["size_bytes"] > 0
+    assert isinstance(backup.get("source_base_url"), str)
+    assert isinstance(backup.get("database_name"), str)
+    assert isinstance(backup.get("source_git_branch"), str)
+    backup_metadata = _BackupMetadata(
+        id=backup["id"],
+        size_bytes=backup["size_bytes"],
+        sha256=backup["sha256"],
+        source_base_url=backup["source_base_url"],
+        database_name=backup["database_name"],
+        source_git_branch=backup["source_git_branch"],
+    )
     assert source_backup.size_bytes > 0 and len(source_backup.sha256) == 64
     _record(record_property, "E2E-CP-08", {"database": restored_database, "backup": backup["id"]})
-    backup_id = str(backup["id"])
+    backup_id = backup_metadata.id
     _invoke(runner, project, cli_environment, "backup", "list")
     shown = _invoke(runner, project, cli_environment, "backup", "show", backup_id)
     assert str(shown.get("id", shown.get("backup", {}).get("id", ""))) == backup_id
@@ -873,27 +927,29 @@ def _capture_and_validate_source_backup(scenario: Any) -> None:
             "shown": shown,
         },
     )
-    scenario.second_process = second_process
-    scenario.refresh = refresh
-    scenario.restored_database = restored_database
-    scenario.backup = backup
-    scenario.backup_id = backup_id
-    scenario.shown = shown
-    scenario.validated = validated
+    return _BackupPhaseResult(
+        process=second_process,
+        restored_database=restored_database,
+        backup=backup_metadata,
+    )
 
 
-def _verify_restored_database_and_runtime(scenario: Any) -> None:
+def _verify_restored_database_and_runtime(
+    scenario: _CriticalPathSetup,
+    runtime_phase: _RuntimePhaseResult,
+    backup_phase: _BackupPhaseResult,
+) -> _RuntimePhaseResult:
     runner = scenario.runner
     project = scenario.project
     cli_environment = scenario.cli_environment
     environment_id = scenario.environment_id
     record_property = scenario.record_property
     runtime = scenario.runtime
-    client = scenario.client
-    env_obj = scenario.env_obj
-    instance = scenario.instance
-    second_process = scenario.second_process
-    restored_database = scenario.restored_database
+    client = runtime_phase.client
+    env_obj = runtime_phase.environment
+    instance = runtime_phase.instance
+    second_process = backup_phase.process
+    restored_database = backup_phase.restored_database
     _stop_owned(instance, second_process)
     _switch_database_config(Path(env_obj.generated_config_path), restored_database)
     env_obj = client.environments.get(environment_id)
@@ -955,23 +1011,25 @@ def _verify_restored_database_and_runtime(scenario: Any) -> None:
     repeated_doctor = _invoke(runner, project, cli_environment, "doctor")
     assert doctor == repeated_doctor
     _record(record_property, "E2E-CP-14", {"doctor": doctor, "repeated": repeated_doctor})
-    scenario.env_obj = env_obj
-    scenario.instance = instance
+    return _RuntimePhaseResult(client, env_obj, instance)
 
 
-def _cleanup_owned_resources(scenario: Any) -> None:
+def _cleanup_owned_resources(
+    scenario: _CriticalPathSetup,
+    runtime_phase: _RuntimePhaseResult,
+    backup_phase: _BackupPhaseResult,
+) -> _CleanupPhaseResult:
     runner = scenario.runner
     project = scenario.project
     cli_environment = scenario.cli_environment
     environment_id = scenario.environment_id
     record_property = scenario.record_property
     cluster = scenario.cluster
-    environment = scenario.environment
     monkeypatch = scenario.monkeypatch
     probe_destination = scenario.probe_destination
     registered_worktree = scenario.registered_worktree
-    restored_database = scenario.restored_database
-    client = scenario.client
+    restored_database = backup_phase.restored_database
+    client = runtime_phase.client
     _invoke(
         runner,
         project,
@@ -1014,8 +1072,8 @@ def _cleanup_owned_resources(scenario: Any) -> None:
         )
         == 1
     )
-    assert not Path(str(environment["worktree_path"])).exists()
-    assert not Path(str(environment["generated_config_path"])).exists()
+    assert not scenario.registered_worktree.exists()
+    assert not scenario.generated_config.exists()
     postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     repeated_postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     assert postgres_stop == repeated_postgres_stop == {}
@@ -1024,20 +1082,19 @@ def _cleanup_owned_resources(scenario: Any) -> None:
         cluster.compose_project_name,
         ports=(cluster.endpoint_port,),
     )
-    scenario.removed = removed
-    scenario.removed_again = removed_again
-    scenario.postgres_stop = postgres_stop
-    scenario.repeated_postgres_stop = repeated_postgres_stop
+    return _CleanupPhaseResult(removed, removed_again, postgres_stop, repeated_postgres_stop)
 
 
-def _audit_cleanup_and_record(scenario: Any) -> None:
+def _audit_cleanup_and_record(
+    scenario: _CriticalPathSetup, cleanup_phase: _CleanupPhaseResult
+) -> _AuditPhaseResult:
     cluster = scenario.cluster
     runtime = scenario.runtime
     record_property = scenario.record_property
-    removed = scenario.removed
-    removed_again = scenario.removed_again
-    postgres_stop = scenario.postgres_stop
-    repeated_postgres_stop = scenario.repeated_postgres_stop
+    removed = cleanup_phase.removed
+    removed_again = cleanup_phase.removed_again
+    postgres_stop = cleanup_phase.postgres_stop
+    repeated_postgres_stop = cleanup_phase.repeated_postgres_stop
     audit = audit_no_leaks(
         runtime.run_id,
         # The module-scoped fixture is still needed by focused leaves.  Audit
@@ -1059,15 +1116,18 @@ def _audit_cleanup_and_record(scenario: Any) -> None:
             "cleanup_audit": audit.leaks,
         },
     )
-    scenario.audit = audit
+    return _AuditPhaseResult(audit)
 
 
-def _write_final_evidence(scenario: Any) -> None:
+def _write_final_evidence(
+    scenario: _CriticalPathSetup,
+    backup_phase: _BackupPhaseResult,
+    audit_phase: _AuditPhaseResult,
+) -> None:
     runtime = scenario.runtime
-    audit = scenario.audit
-    backup = scenario.backup
-    backup_id = scenario.backup_id
-    restored_database = scenario.restored_database
+    audit = audit_phase.audit
+    backup = backup_phase.backup
+    restored_database = backup_phase.restored_database
     evidence = runtime.artifact_root / "critical-path.json"
     evidence.write_text(
         json.dumps(
@@ -1077,12 +1137,12 @@ def _write_final_evidence(scenario: Any) -> None:
                 "python": E2E_PINS.cpython,
                 "uv": E2E_PINS.uv,
                 "backup": {
-                    "id": backup_id,
-                    "size_bytes": backup["size_bytes"],
-                    "sha256": backup["sha256"],
-                    "source_base_url": backup["source_base_url"],
-                    "database_name": backup["database_name"],
-                    "source_git_branch": backup["source_git_branch"],
+                    "id": backup.id,
+                    "size_bytes": backup.size_bytes,
+                    "sha256": backup.sha256,
+                    "source_base_url": backup.source_base_url,
+                    "database_name": backup.database_name,
+                    "source_git_branch": backup.source_git_branch,
                 },
                 "restored_database": restored_database,
                 "cleanup": {"clean": audit.clean, "leaks": audit.leaks},
@@ -1111,10 +1171,10 @@ def test_source_backed_full_critical_path(
     scenario = _prepare_source_backed_scenario(
         target_runtime, source_server, source_backup, record_property, monkeypatch, request
     )
-    _exercise_runtime_bootstrap(scenario)
+    runtime_phase = _exercise_runtime_bootstrap(scenario)
     _exercise_module_update_and_tests(scenario)
-    _capture_and_validate_source_backup(scenario)
-    _verify_restored_database_and_runtime(scenario)
-    _cleanup_owned_resources(scenario)
-    _audit_cleanup_and_record(scenario)
-    _write_final_evidence(scenario)
+    backup_phase = _capture_and_validate_source_backup(scenario, runtime_phase)
+    restored_runtime = _verify_restored_database_and_runtime(scenario, runtime_phase, backup_phase)
+    cleanup_phase = _cleanup_owned_resources(scenario, restored_runtime, backup_phase)
+    audit_phase = _audit_cleanup_and_record(scenario, cleanup_phase)
+    _write_final_evidence(scenario, backup_phase, audit_phase)
