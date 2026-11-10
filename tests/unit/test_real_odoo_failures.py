@@ -141,3 +141,61 @@ def test_recovery_input_is_removed_while_diagnostics_are_retained(
     fixtures._remove_runtime_files(runtime)
     assert not staged_archive.exists()
     assert set(runtime.artifact_root.iterdir()) == set(diagnostics)
+
+
+def test_partial_recovery_seed_is_disposable_and_keeps_newest_backup_protected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.integration.real_odoo import conftest as fixtures, test_focused_recovery as recovery
+    from tests.integration.real_odoo.archive import SourceBackupPlan, archive_identity
+
+    run_id = "c" * 32
+    runtime = Mock(
+        spec=fixtures.E2ERuntime,
+        run_id=run_id,
+        root=tmp_path / f"runtime-{run_id}",
+        environment={"HOME": str(tmp_path / "target-home")},
+    )
+    runtime.root.mkdir()
+    source = tmp_path / "source.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("dump.sql", "SELECT 1;")
+        archive.writestr("filestore/blob", "fixture")
+    project = tmp_path / "partial-project"
+    project.mkdir()
+    isolated_catalog = tmp_path / "partial-home" / ".odcli" / "catalog.sqlite3"
+    isolated_catalog.parent.mkdir(parents=True)
+    seed = Mock()
+    monkeypatch.setattr(recovery, "_project", Mock(return_value=project))
+    monkeypatch.setattr(recovery, "_catalog_for_project", Mock(return_value=tmp_path / "base.db"))
+    monkeypatch.setattr(recovery, "_isolated_catalog", Mock(return_value=isolated_catalog))
+    monkeypatch.setattr(recovery, "_ensure_isolated_environment", Mock())
+    monkeypatch.setattr(recovery, "registered_project_id", Mock(return_value="project-owned"))
+    monkeypatch.setattr(recovery, "_seed_backup", seed)
+    monkeypatch.setattr(recovery, "_approve_project_postgres", Mock())
+
+    run_id_result, archive_path, backup_id, _, environment = recovery._prepare_recovery_case(
+        tmp_path,
+        runtime,
+        archive_identity(source),
+        SourceBackupPlan("http://127.0.0.1:8069", "source-db", source),
+        FailureEvidence(run_id, "canary", tmp_path / "evidence"),
+        "partial",
+    )
+
+    assert run_id_result == run_id
+    assert backup_id == recovery._RECOVERY_BACKUP_IDS["partial"]
+    assert archive_path.is_file()
+    assert environment["ODCLI_E2E_CATALOG"] == str(isolated_catalog)
+    assert seed.call_count == 2
+    primary, newer = seed.call_args_list
+    assert primary.args[0] == newer.args[0] == isolated_catalog
+    assert Path(primary.args[1]).is_relative_to(tmp_path)
+    assert primary.kwargs["backup_id"] == backup_id
+    assert newer.kwargs["backup_id"] == recovery._PARTIAL_NEWER_BACKUP_ID
+    assert newer.kwargs["backup_id"] < backup_id
+    assert primary.kwargs["project_id"] == newer.kwargs["project_id"] == "project-owned"
+    assert primary.kwargs["database"] == newer.kwargs["database"] == "source-db"
+    newer_archive = Path(newer.args[1])
+    assert newer_archive.is_file()
+    assert newer_archive.is_relative_to(tmp_path)

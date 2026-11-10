@@ -73,16 +73,20 @@ def _invoke(state: _State, args: list[str], *, input: str | None = None) -> Resu
 def _backup_delete(state: _State) -> tuple[Result, dict[str, Any]]:
     first = _invoke(state, state.args)
     second = _invoke(state, state.args)
-    assert first.exit_code == second.exit_code == 0
+    assert first.exit_code == second.exit_code == 0, first.output + second.output
     first_document = json.loads(first.stdout)
     second_document = json.loads(second.stdout)
     assert first_document["ok"] is True and second_document["ok"] is True
     assert first_document["result"]["already_deleted"] is False
     assert second_document["result"]["already_deleted"] is True
     assert catalog_state(Path(state.environment["ODCLI_E2E_CATALOG"])) is BackupState.DELETED
-    assert not (
-        state.runtime.artifact_root / f"leaf-{state.runtime.run_id}-{state.case.path[-1]}.zip"
-    ).exists()
+    backup_path = (
+        Path(state.environment["HOME"])
+        / ".odcli"
+        / "backups"
+        / f"leaf-{state.runtime.run_id}-{state.case.path[-1]}.zip"
+    )
+    assert not backup_path.exists()
     return first, first_document
 
 
@@ -356,6 +360,8 @@ def invoke_case(
         args[args.index("demo")] = runtime.topology.target_sentinel_database
     if case.requires_dry_run and "--dry-run" not in args:
         args.append("--dry-run")
+    if case.success_path_argument and case.path == ("prepare-venv",):
+        args.append(str(project))
     if case.path == ("logs",):
         args = ["logs", "--tail", "1"]
     if case.path in {("db", "drop"), ("db", "rm")}:
@@ -380,7 +386,7 @@ def invoke_case(
             backup_path,
             project_id=registered_project_id(active_catalog, project),
         )
-        args = ["backup", "delete", BACKUP_ID, "--yes"]
+        args = ["backup", "rm", BACKUP_ID, "--yes"]
     if case.path != ("prepare-venv",) and case.classification not in {
         "native-passthrough",
         "jsonl-stream",

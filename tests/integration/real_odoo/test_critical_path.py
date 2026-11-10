@@ -279,30 +279,18 @@ def _switch_database_config(path: Path, database: str) -> None:
 
 
 def _start_owned(instance: Any, runtime: E2ERuntime) -> Any:
-    process = instance.start()
-    instance.wait_ready(process, timeout=180.0)
-    instance._persist_runtime_identity(
-        process.pid,
-        instance.config.start_config,
-        instance.config.default_cwd,
-    )
+    process = instance.run_detached(wait_ready=True, readiness_timeout=180.0)
     runtime.ledger.record(
         "process",
         f"{runtime.run_id}-odoo-{process.pid}",
-        lambda: (
-            instance.stop(process) if instance._client.get_handle(process.id) is not None else None
-        ),
+        instance.stop_environment,
     )
     return process
 
 
 def _stop_owned(instance: Any, process: Any) -> None:
-    handle = instance._client.get_handle(process.id)
-    if handle is not None and handle.poll() is None:
-        instance.stop(process)
-    elif handle is not None:
-        instance._client.unregister_process(process.id)
-    instance._clear_runtime_identity()
+    result = instance.stop_environment()
+    assert result.status in {"stopped", "already_stopped"}, result
 
 
 @pytest.mark.timeout(600)

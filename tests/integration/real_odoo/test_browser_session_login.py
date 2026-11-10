@@ -14,6 +14,9 @@ from odoo_instance_sdk.project import ProjectConfig
 from scripts.real_odoo_pins import E2E_PINS
 
 from .conftest import E2ERuntime
+from .focused_support import focused_project as _focused_project_fixture
+
+focused_project = _focused_project_fixture
 
 pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
 

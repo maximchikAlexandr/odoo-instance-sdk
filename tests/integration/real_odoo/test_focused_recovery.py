@@ -60,6 +60,7 @@ _RECOVERY_BACKUP_IDS = {
     "recovery-timeout": "00000000-0000-0000-0000-00000000000a",
     "partial": "00000000-0000-0000-0000-00000000000b",
 }
+_PARTIAL_NEWER_BACKUP_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def _prepare_recovery_case(
@@ -101,6 +102,20 @@ def _prepare_recovery_case(
         database=source_backup_plan.database,
         project_id=project_id,
     )
+    if name == "partial":
+        # The public policy protects the newest available backup in a source
+        # group. Seed a newer disposable peer so cleanup can delete this
+        # scenario's older backup through the public command without weakening
+        # that policy. Both files and the isolated catalog live under tmp_path.
+        newer_archive = backup_home / f"partial-newer-{run_id}.zip"
+        shutil.copy2(source_backup.path, newer_archive)
+        _seed_backup(
+            catalog_path,
+            newer_archive,
+            backup_id=_PARTIAL_NEWER_BACKUP_ID,
+            database=source_backup_plan.database,
+            project_id=project_id,
+        )
     environment = {
         **os.environ,
         **target_runtime.environment,
