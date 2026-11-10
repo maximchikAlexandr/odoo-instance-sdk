@@ -244,7 +244,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
             result, runtime=target_runtime, evidence=failure_evidence, name="archive-truncated"
         )
         assert document is not None
-        assert document["error"]["code"] == "backup_validate_invalid"
+        assert document["error"]["code"] == "backup_corrupt"
     assert _catalog_state(catalog_path) is BackupState.AVAILABLE
     assert not (tmp_path / "database").exists()
     assert not (tmp_path / "filestore").exists()
@@ -338,11 +338,24 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
 
 
 def _assert_post_restore_failure(
-    failed: Result, project: Path, previous_default: str | None
+    failed: Result,
+    project: Path,
+    previous_default: str | None,
+    failure_evidence: FailureEvidence,
 ) -> dict[str, object]:
     from odoo_instance_sdk.project import ProjectConfig
 
-    assert failed.exit_code != 0, failed.output
+    diagnostic = {
+        "exit_code": failed.exit_code,
+        "stderr": failed.stderr,
+        "output": failed.output,
+        "exception": failed.exception,
+    }
+    assert_secret_free(diagnostic, failure_evidence.secret_canary)
+    assert failed.exit_code != 0, diagnostic
+    assert failed.stdout.strip(), (
+        f"reset failure must emit its JSON checkpoint on stdout; result={diagnostic!r}"
+    )
     failure = json.loads(failed.stdout)
     assert failure["ok"] is False
     assert failure["context"]["post_restore_checkpoint"] == "reset_pending"
@@ -414,6 +427,7 @@ def test_complete_post_restore_without_reimport(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
+    failure_evidence: FailureEvidence,
     monkeypatch: pytest.MonkeyPatch,
     focused_project: Path,
     focused_catalog: Path,
@@ -479,7 +493,7 @@ def test_complete_post_restore_without_reimport(
         ],
         environment,
     )
-    failure = _assert_post_restore_failure(failed, project, previous_default)
+    failure = _assert_post_restore_failure(failed, project, previous_default, failure_evidence)
     filestore = project_filestore(project, target)
     assert filestore.is_dir()
     cluster = PostgresCluster.from_project(project)

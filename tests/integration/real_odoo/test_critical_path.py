@@ -226,30 +226,34 @@ def _remove_owned_fixture_tree(
 
 
 def _environment_state(payload: dict[str, Any], environment_id: str) -> dict[str, Any]:
-    environments = payload.get("environments")
-    assert isinstance(environments, list)
+    rows = payload.get("rows")
+    assert isinstance(rows, list)
     row = next(
         (
             item
-            for item in environments
-            if isinstance(item, dict) and item.get("id") == environment_id
+            for item in rows
+            if isinstance(item, dict) and item.get("environment_id") == environment_id
         ),
         None,
     )
     assert isinstance(row, dict), payload
+    git = row.get("git")
     return {
         key: row.get(key)
         for key in (
-            "id",
+            "kind",
+            "project_id",
+            "environment_id",
             "name",
-            "branch",
+            "worktree_path",
+            "odoo_status",
             "db_mode",
             "database",
             "lifecycle_state",
-            "allocated_http_port",
-            "artifacts",
-            "runtime",
         )
+    } | {
+        "branch": git.get("branch") if isinstance(git, dict) else None,
+        "short_sha": git.get("short_sha") if isinstance(git, dict) else None,
     }
 
 
