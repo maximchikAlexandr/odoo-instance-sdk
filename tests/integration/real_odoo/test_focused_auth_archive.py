@@ -293,7 +293,6 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
         "HOME": str(catalog_path.parent.parent),
         "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_E2E_KEEP_FAILED": "1",
-        "ODCLI_ADMIN_PASSWORD": failure_evidence.secret_canary,
     }
     _ensure_isolated_environment(catalog_path, project)
     _approve_project_postgres(project, environment)
@@ -461,6 +460,7 @@ def test_complete_post_restore_without_reimport(
         "HOME": str(catalog_path.parent.parent),
         "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_E2E_KEEP_FAILED": "1",
+        "ODCLI_ADMIN_PASSWORD": failure_evidence.secret_canary,
     }
     _ensure_isolated_environment(catalog_path, project)
     _approve_project_postgres(project, environment)
