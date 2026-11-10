@@ -88,11 +88,12 @@ def completion_setup(
     project = ProjectConfig.load(root)
     target = "restored_db"
     cluster_id = "cluster-id"
-    project_id = "project_restore-test"
+    project_id = "restore-test"
     catalog = _CompletionCatalog(project_id, root, target, "reset_not_requested")
     cluster = MagicMock(spec=PostgresCluster)
     cluster.endpoint_host = "127.0.0.1"
     cluster.endpoint_port = 5432
+    cluster._project_id = project_id
     cluster._restore_provenance.return_value = (cluster_id, str(filestore))
 
     client = MagicMock()
@@ -111,7 +112,6 @@ def completion_setup(
     client.instance.from_project.return_value = instance
 
     monkeypatch.setattr(completion, "_load_project", lambda _project: (project, root))
-    monkeypatch.setattr(completion, "repo_key", lambda *_args: "restore-test")
     monkeypatch.setattr(
         completion, "_wait_for_preparation_lock", lambda *_a, **_kw: contextlib.nullcontext()
     )
