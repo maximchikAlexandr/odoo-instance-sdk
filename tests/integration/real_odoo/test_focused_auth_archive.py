@@ -26,6 +26,7 @@ from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPla
 from tests.integration.real_odoo.cleanup import FailureEvidence
 from tests.integration.real_odoo.conftest import E2ERuntime
 from tests.integration.real_odoo.credential_binding_diagnostics import (
+    CredentialBinding,
     capture_binding,
     capture_project_binding,
     compare_bindings,
@@ -460,7 +461,7 @@ def _assert_post_restore_completion(
     live_oid_before: int,
     home: str,
     filestore: Path,
-    filestore_before: list[str],
+    filestore_before: tuple[str, ...],
     catalog_path: Path,
     cluster: PostgresCluster,
     oid_before: int,
@@ -476,8 +477,9 @@ def _assert_post_restore_completion(
     assert result["result"]["completed_stages"] == ["admin_reset", "default_switch"]
     assert ProjectConfig.load(project).default_source_database == target
     assert project_database_oid(project, target, home=home) == live_oid_before
-    assert sorted(path.relative_to(filestore).as_posix() for path in filestore.rglob("*")) == (
-        filestore_before
+    assert (
+        tuple(sorted(path.relative_to(filestore).as_posix() for path in filestore.rglob("*")))
+        == filestore_before
     )
     catalog = BackupCatalog(db_path=catalog_path)
     try:
@@ -524,7 +526,7 @@ class _PostRestoreScenario:
     previous_default: str | None
     environment: dict[str, str]
     inventory_diagnostics: list[InventoryDiagnostic]
-    credential_bindings: list[object]
+    credential_bindings: list[CredentialBinding]
     publication_binding_traces: list[dict[str, object]]
     reset_failures: list[bool]
 
@@ -533,8 +535,8 @@ class _PostRestoreScenario:
 class _PostRestoreFailureEvidence:
     failure: dict[str, object]
     cluster: PostgresCluster
-    live_oid: str
-    captured_oid: str
+    live_oid: int
+    captured_oid: int
     restored_events: int
     filestore: Path
     filestore_contents: tuple[str, ...]
@@ -654,25 +656,28 @@ def _run_post_restore_with_reset_failure(
 
     with monkeypatch.context() as injected:
         injected.setattr(DatabaseResource, "reset_admin_password", fail_reset_once)
-        return _invoke_in_registered_worktree(
-            CliRunner(),
-            cli,
-            scenario.project,
-            scenario.catalog_path,
-            [
-                "--project",
-                str(scenario.project),
-                "db",
-                "restore",
-                scenario.backup_id,
-                "--target",
-                scenario.target,
-                "--reset-admin-password",
-                "--yes",
-                "--format",
-                "json",
-            ],
-            scenario.environment,
+        return cast(
+            "Result",
+            _invoke_in_registered_worktree(
+                CliRunner(),
+                cli,
+                scenario.project,
+                scenario.catalog_path,
+                [
+                    "--project",
+                    str(scenario.project),
+                    "db",
+                    "restore",
+                    scenario.backup_id,
+                    "--target",
+                    scenario.target,
+                    "--reset-admin-password",
+                    "--yes",
+                    "--format",
+                    "json",
+                ],
+                scenario.environment,
+            ),
         )
 
 
@@ -722,7 +727,7 @@ def _assert_reset_failure_checkpoint(
         sorted(path.relative_to(filestore).as_posix() for path in filestore.rglob("*"))
     )
     return _PostRestoreFailureEvidence(
-        failure=cast("dict[str, object]", failure),
+        failure=failure,
         cluster=cluster,
         live_oid=live_oid_before,
         captured_oid=oid_before,
@@ -733,23 +738,26 @@ def _assert_reset_failure_checkpoint(
 
 
 def _invoke_post_restore_completion(scenario: _PostRestoreScenario) -> Result:
-    return _invoke_in_registered_worktree(
-        CliRunner(),
-        cli,
-        scenario.project,
-        scenario.catalog_path,
-        [
-            "--project",
-            str(scenario.project),
-            "db",
-            "restore",
-            "--complete",
-            scenario.target,
-            "--yes",
-            "--format",
-            "json",
-        ],
-        scenario.environment,
+    return cast(
+        "Result",
+        _invoke_in_registered_worktree(
+            CliRunner(),
+            cli,
+            scenario.project,
+            scenario.catalog_path,
+            [
+                "--project",
+                str(scenario.project),
+                "db",
+                "restore",
+                "--complete",
+                scenario.target,
+                "--yes",
+                "--format",
+                "json",
+            ],
+            scenario.environment,
+        ),
     )
 
 
