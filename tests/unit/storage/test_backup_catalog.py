@@ -941,6 +941,25 @@ def test_restore_state_rejects_unknown_value(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_restore_checkpoint_rejects_unknown_value_without_recording_history(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "invalid-restore-checkpoint.db")
+
+    with pytest.raises(BackupCatalogError, match="post-restore checkpoint is invalid"):
+        catalog.record_restore(
+            "localhost",
+            5432,
+            "invalid_db",
+            source_kind="local_archive",
+            source_sha256="b" * 64,
+            state="incomplete",
+            post_restore_checkpoint="unknown",
+        )
+
+    assert catalog._conn.execute("SELECT COUNT(*) FROM restores").fetchone()[0] == 0
+    assert catalog._conn.execute("SELECT COUNT(*) FROM database_events").fetchone()[0] == 0
+    catalog.close()
+
+
 def test_incomplete_restore_is_not_a_successful_latest_restore_and_is_retired_on_drop(
     tmp_path: Path,
 ) -> None:
