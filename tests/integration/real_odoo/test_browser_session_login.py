@@ -61,7 +61,12 @@ def test_source_backed_selected_user_session_and_logout(
     assert start_config is not None
     assert project.python is not None and Path(project.python).is_file()
     assert project.odoo_bin is not None and Path(project.odoo_bin).is_file()
-    assert instance.config.command_prefix == (str(project.python), str(project.odoo_bin))
+    command_prefix = instance.config.command_prefix
+    assert command_prefix is not None and len(command_prefix) == 2
+    assert command_prefix[0] == str(project.python)
+    bound_odoo_bin = Path(command_prefix[1]).resolve()
+    assert bound_odoo_bin == (focused_project / "odoo-bin").resolve()
+    assert Path(project.odoo_bin).resolve().parent == Path(environment.worktree_path).resolve()
     assert start_config.db_name == database
     assert start_config.data_dir is not None
     session_store = Path(start_config.data_dir) / "sessions"
@@ -74,6 +79,31 @@ def test_source_backed_selected_user_session_and_logout(
         check=True,
     ).stdout.strip()
     assert pinned_source == E2E_PINS.odoo_source_commit
+    bound_source = subprocess.run(
+        ["git", "-C", str(bound_odoo_bin.parent), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert bound_source == E2E_PINS.odoo_source_commit
+    runtime_probe = subprocess.run(
+        [
+            *command_prefix,
+            "-c",
+            (
+                "import json, sys; from odoo.release import version_info; "
+                "print(json.dumps({'python': list(sys.version_info[:3]), "
+                "'odoo_major': version_info[0]}))"
+            ),
+        ],
+        cwd=environment.worktree_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    runtime_identity = json.loads(runtime_probe.stdout)
+    assert runtime_identity["python"] == [int(part) for part in E2E_PINS.cpython.split(".")]
+    assert runtime_identity["odoo_major"] == 19
     login = f"odcli_open_as_{runtime.run_id[:12]}"
     create_user = """import sys
 login = sys.argv[1]

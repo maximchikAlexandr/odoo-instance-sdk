@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from inspect import unwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.conftest import isolated_cli_catalogue
 from tests.integration.real_odoo.focused_handlers import _stable_plan
+from tests.integration.real_odoo.test_critical_path import _reap_owned_child
 
 
 def test_real_odoo_catalogue_follows_runtime_home_in_sdk_and_child(
@@ -122,3 +124,19 @@ def test_database_probe_uses_cluster_home_and_restores_caller_home(
     assert result.returncode == 0
     assert result.stdout == "demo\n"
     assert Path.home() == caller_home
+
+
+def test_owned_detached_child_is_reaped_by_its_parent(tmp_path: Path) -> None:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.05)"],
+        cwd=tmp_path,
+        start_new_session=True,
+    )
+    result: list[int | None] = []
+    reaper = threading.Thread(target=_reap_owned_child, args=(child.pid, result))
+
+    reaper.start()
+    reaper.join(timeout=2.0)
+
+    assert not reaper.is_alive()
+    assert len(result) == 1 and result[0] not in (None, -1)

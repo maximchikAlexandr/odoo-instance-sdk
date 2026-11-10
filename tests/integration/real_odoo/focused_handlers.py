@@ -9,6 +9,7 @@ import selectors
 import shutil
 import signal
 import subprocess
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -87,6 +88,29 @@ def _backup_delete(state: _State) -> tuple[Result, dict[str, Any]]:
         / f"leaf-{state.runtime.run_id}-{state.case.path[-1]}.zip"
     )
     assert not backup_path.exists()
+    catalog_path = Path(state.environment["ODCLI_E2E_CATALOG"])
+    newest_id = "00000000-0000-0000-0000-000000000008"
+    newest_path = backup_path.with_name(f"leaf-{state.runtime.run_id}-protected.zip")
+    assert catalog_state(catalog_path, newest_id) is BackupState.AVAILABLE
+    assert newest_path.is_file()
+    protected_args = ["backup", "rm", newest_id, "--yes", "--format", "json"]
+    protected = _invoke(state, protected_args)
+    assert protected.exit_code != 0
+    protected_document, _ = observe_failure(
+        protected,
+        runtime=state.runtime,
+        evidence=state.evidence,
+        name="leaf-backup-protected-newest",
+        argv=protected_args,
+    )
+    assert protected_document is not None
+    assert protected_document["error"]["code"] == "backup_delete_failed"
+    assert (
+        "newest available backup in historical source group"
+        in protected_document["error"]["message"]
+    )
+    assert catalog_state(catalog_path, newest_id) is BackupState.AVAILABLE
+    assert newest_path.is_file()
     return first, first_document
 
 
@@ -384,6 +408,17 @@ def invoke_case(
         seed_backup(
             active_catalog,
             backup_path,
+            project_id=registered_project_id(active_catalog, project),
+        )
+        time.sleep(1.05)  # Catalog timestamps have one-second precision.
+        protected_path = backup_path.with_name(f"leaf-{runtime.run_id}-protected.zip")
+        shutil.copy2(backup_path, protected_path)
+        seed_backup(
+            active_catalog,
+            protected_path,
+            backup_id="00000000-0000-0000-0000-000000000008",
+            database="demo",
+            source_base_url="http://127.0.0.1:8069",
             project_id=registered_project_id(active_catalog, project),
         )
         args = ["backup", "rm", BACKUP_ID, "--yes"]

@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -279,13 +281,30 @@ def _switch_database_config(path: Path, database: str) -> None:
 
 
 def _start_owned(instance: Any, runtime: E2ERuntime) -> Any:
-    process = instance.run_detached(wait_ready=True, readiness_timeout=180.0)
+    # Register owner cleanup before launch so any later setup assertion still
+    # has a public lifecycle path to stop the process.
     runtime.ledger.record(
         "process",
-        f"{runtime.run_id}-odoo-{process.pid}",
+        f"{runtime.run_id}-odoo",
         instance.stop_environment,
     )
-    return process
+    return instance.run_detached(wait_ready=True, readiness_timeout=180.0)
+
+
+def _reap_owned_child(pid: int, result: list[int | None]) -> None:
+    """Reap only the direct child returned by this test's public launch."""
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            result.append(None)  # Python's Popen cleanup already reaped this child.
+            return
+        if waited_pid == pid:
+            result.append(status)
+            return
+        time.sleep(0.02)
+    result.append(-1)
 
 
 def _stop_owned(instance: Any, process: Any) -> None:
@@ -661,6 +680,14 @@ def test_source_backed_full_critical_path(  # noqa: C901
     )
     _invoke(runner, project, cli_environment, "--env", environment_id, "module", "list", _PROBE)
     first_process = _start_owned(instance, runtime)
+    reap_result: list[int | None] = []
+    reaper = threading.Thread(
+        target=_reap_owned_child,
+        args=(first_process.pid, reap_result),
+        name=f"reap-odoo-{first_process.pid}",
+        daemon=True,
+    )
+    reaper.start()
     try:
         wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
         stop_result = _invoke(runner, project, cli_environment, "--env", environment_id, "stop")
@@ -673,7 +700,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
             "environment_id": environment_id,
         }
     finally:
-        _stop_owned(instance, first_process)
+        try:
+            _stop_owned(instance, first_process)
+        finally:
+            reaper.join(timeout=35.0)
+    assert not reaper.is_alive(), "owned Odoo child reaper did not finish"
+    assert reap_result and reap_result[0] != -1, "owned Odoo leader was not reaped"
     assert (
         instance.run_foreground(
             args=(f"--init={_PROBE}", "--without-demo=all", "--stop-after-init")
