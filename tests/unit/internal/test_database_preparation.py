@@ -1646,7 +1646,7 @@ def test_production_restore_reset_uses_python_selector_from_path(
     assert executor.executed[-1].argv[0] == str(Path(resolved_python).absolute())
 
 
-def test_production_restore_command_rolls_back_after_odoo_child_failure(
+def test_production_restore_reset_failure_without_proof_does_not_claim_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     command, executor, project, backup, write = _production_restore_command(
@@ -1657,7 +1657,9 @@ def test_production_restore_command_rolls_back_after_odoo_child_failure(
         command.run()
 
     assert getattr(failure.value, "failure_context").retained_backup_id == backup.id
-    assert getattr(failure.value, "failure_context").retained_database is None
+    context = getattr(failure.value, "failure_context")
+    assert context.database_confirmed is False
+    assert context.retained_database is None
     assert project.default_source_database == "old"
     write.assert_not_called()
     assert tuple(step.step_id for step in executor.executed) == tuple(
@@ -2990,6 +2992,9 @@ def test_restore_admin_reset_failure_does_not_claim_target_without_proof(
             admin_password="test-secret",
         )
 
+    context = getattr(failure.value, "failure_context")
+    assert context.database_confirmed is False
+    assert context.retained_database is None
     assert "retained database" not in " ".join(failure.value.__notes__ or ())
     assert not list(tmp_path.glob(".odcli-refresh-*.conf"))
     assert project.default_source_database == "old"

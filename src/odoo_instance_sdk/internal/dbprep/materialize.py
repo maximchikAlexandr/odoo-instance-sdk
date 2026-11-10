@@ -705,7 +705,11 @@ def prepare_restore(  # noqa: C901
                         post_restore_checkpoint=checkpoint,
                         database_oid=database_oid,
                     )
-                database_confirmed = database_confirmed or retained_incomplete
+                database_confirmed = (
+                    retained_incomplete
+                    if checkpoint is PostRestoreCheckpoint.RESET_PENDING
+                    else database_confirmed or retained_incomplete
+                )
                 _annotate_retained_failure(
                     error=exc,
                     backup=backup,
