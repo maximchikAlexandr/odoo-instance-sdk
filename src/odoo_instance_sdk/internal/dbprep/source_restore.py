@@ -25,7 +25,12 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.project_runtime import uv_run_prefix
-from odoo_instance_sdk.models import Backup, BackupFormat, LocalArchiveRestoreSource
+from odoo_instance_sdk.models import (
+    Backup,
+    BackupFormat,
+    LocalArchiveRestoreSource,
+    PostRestoreCheckpoint,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +100,9 @@ class DatabasePreparationFailureContext(
     effective_config: str | None = None
     managed_filestore: str | None = None
     binding_published: bool | None = None
+    post_restore_checkpoint: PostRestoreCheckpoint | None = None
+    completed_stages: tuple[str, ...] = ()
+    pending_stage: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

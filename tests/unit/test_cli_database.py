@@ -81,8 +81,36 @@ def test_restore_is_registered_with_exact_uuid_and_target_options() -> None:
     assert "--dry-run" in result.output
     assert "--yes" in result.output
     assert "--replace" in result.output
+    assert "--complete" in result.output
+    assert "--update-module" in result.output
     restore_text = " ".join(result.output.replace("│", " ").split())
     assert "process, project .odcli/.env, then <ODCLI_USER_ROOT>/.env" in restore_text
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(["--complete", "target", "--file", "archive.zip"], id="file-source"),
+        pytest.param(["--complete", "target", "--target", "other"], id="target-option"),
+        pytest.param(["--complete", "target", "--replace"], id="replace"),
+        pytest.param(["--complete", "target", "--reset-admin-password"], id="reset-option"),
+        pytest.param(["--update-module", "base"], id="module-without-complete"),
+    ],
+)
+def test_restore_completion_options_reject_conflicts_before_client_creation(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str]
+) -> None:
+    created: list[bool] = []
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.OdooClient",
+        lambda **_: created.append(True),
+    )
+
+    result = CliRunner().invoke(cli, ["db", "restore", *arguments])
+
+    assert result.exit_code == 2
+    assert "--complete" in result.output or "--update-module" in result.output
+    assert created == []
 
 
 def _assert_catalogue_source(source: object) -> None:

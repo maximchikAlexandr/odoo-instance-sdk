@@ -34,6 +34,7 @@ from tests.integration.real_odoo.focused_support import (
     focused_project as _focused_project_fixture,
     invoke_in_registered_worktree as _invoke_in_registered_worktree,
     observe_failure as _observe_failure,
+    project_database_oid,
     project_filestore,
     record as _record,
     seed_backup as _seed_backup,
@@ -331,4 +332,185 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
         record_property,
         "E2E-FC-05",
         {"success": success_document, "occupied": first_doc, "repeated": second_doc},
+    )
+
+
+def test_complete_post_restore_without_reimport(
+    tmp_path: Path,
+    source_backup: ArchiveIdentity,
+    source_backup_plan: SourceBackupPlan,
+    target_runtime: E2ERuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    focused_project: Path,
+    focused_catalog: Path,
+    record_property: object,
+) -> None:
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.models import PostRestoreCheckpoint
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.resources.database import DatabaseResource
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    archive = tmp_path / "post-restore.zip"
+    shutil.copy2(source_backup.path, archive)
+    catalog_path = _isolated_catalog(focused_catalog, tmp_path)
+    backup_id = "00000000-0000-0000-0000-000000000009"
+    _seed_backup(
+        catalog_path,
+        archive,
+        backup_id=backup_id,
+        database=source_backup_plan.database,
+        source_base_url=source_backup_plan.endpoint,
+    )
+    _bind_catalog_path(monkeypatch, catalog_path)
+    project = focused_project
+    previous_default = ProjectConfig.load(project).default_source_database
+    target = f"odcli_postrestore_{target_runtime.run_id.replace('-', '')[:22]}"
+    environment = {
+        **target_runtime.environment,
+        "HOME": str(catalog_path.parent.parent),
+        "ODCLI_E2E_CATALOG": str(catalog_path),
+        "ODCLI_E2E_KEEP_FAILED": "1",
+    }
+    _ensure_isolated_environment(catalog_path, project)
+    _approve_project_postgres(project, environment)
+
+    original_reset_command = DatabaseResource.reset_admin_password_command
+
+    def fail_reset_once(self: DatabaseResource, **kwargs: object) -> Command[object]:
+        def fail(_context: object) -> object:
+            raise RuntimeError("injected administrator reset failure")
+
+        return Command.create(ExecutionPlan(), fail)
+
+    monkeypatch.setattr(DatabaseResource, "reset_admin_password_command", fail_reset_once)
+    failed = _invoke_in_registered_worktree(
+        CliRunner(),
+        cli,
+        project,
+        catalog_path,
+        [
+            "--project",
+            str(project),
+            "db",
+            "restore",
+            backup_id,
+            "--target",
+            target,
+            "--reset-admin-password",
+            "--yes",
+            "--format",
+            "json",
+        ],
+        environment,
+    )
+    assert failed.exit_code != 0, failed.output
+    failure = json.loads(failed.stdout)
+    assert failure["ok"] is False
+    assert failure["context"]["post_restore_checkpoint"] == "reset_pending"
+    assert failure["context"]["pending_stage"] == "admin_reset"
+    assert ProjectConfig.load(project).default_source_database == previous_default
+    filestore = project_filestore(project, target)
+    assert filestore.is_dir()
+    cluster = PostgresCluster.from_project(project)
+    live_oid_before = project_database_oid(project, target, home=environment["HOME"])
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        binding = catalog._latest_restore_binding(
+            cluster.endpoint_host, cluster.endpoint_port, target
+        )
+        assert binding is not None
+        assert binding["state"] == "incomplete"
+        assert binding["post_restore_checkpoint"] == PostRestoreCheckpoint.RESET_PENDING.value
+        assert binding["database_oid"] is not None
+        assert binding["database_oid"] == live_oid_before
+        restored_events_before = catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE database_name=? AND event_type='restored'",
+            (target,),
+        ).fetchone()[0]
+        assert restored_events_before == 1
+        oid_before = binding["database_oid"]
+    finally:
+        catalog.close()
+    filestore_before = sorted(
+        path.relative_to(filestore).as_posix() for path in filestore.rglob("*")
+    )
+    monkeypatch.setattr(DatabaseResource, "reset_admin_password_command", original_reset_command)
+
+    completed = _invoke_in_registered_worktree(
+        CliRunner(),
+        cli,
+        project,
+        catalog_path,
+        [
+            "--project",
+            str(project),
+            "db",
+            "restore",
+            "--complete",
+            target,
+            "--yes",
+            "--format",
+            "json",
+        ],
+        environment,
+    )
+    assert completed.exit_code == 0, completed.output
+    result = json.loads(completed.stdout)
+    assert result["ok"] is True
+    assert result["result"]["target_database"] == target
+    assert result["result"]["completed_stages"] == ["admin_reset", "default_switch"]
+    assert ProjectConfig.load(project).default_source_database == target
+    assert project_database_oid(project, target, home=environment["HOME"]) == live_oid_before
+    assert (
+        sorted(path.relative_to(filestore).as_posix() for path in filestore.rglob("*"))
+        == filestore_before
+    )
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        binding = catalog._latest_restore_binding(
+            cluster.endpoint_host, cluster.endpoint_port, target
+        )
+        assert binding is not None
+        assert binding["state"] == "complete"
+        assert binding["database_oid"] == oid_before
+        assert binding["post_restore_checkpoint"] is None
+        assert (
+            catalog._conn.execute(
+                "SELECT COUNT(*) FROM database_events WHERE database_name=? AND event_type='restored'",
+                (target,),
+            ).fetchone()[0]
+            == restored_events_before
+        )
+    finally:
+        catalog.close()
+
+    repeated = _invoke_in_registered_worktree(
+        CliRunner(),
+        cli,
+        project,
+        catalog_path,
+        [
+            "--project",
+            str(project),
+            "db",
+            "restore",
+            "--complete",
+            target,
+            "--yes",
+            "--format",
+            "json",
+        ],
+        environment,
+    )
+    assert repeated.exit_code == 0, repeated.output
+    assert json.loads(repeated.stdout)["result"]["no_op"] is True
+    assert (
+        _project_database_probe(project, target, home=environment["HOME"]).stdout.strip() == target
+    )
+    _record(
+        record_property,
+        "COMP-HAPPY",
+        {"failure": failure, "completed": result, "repeat": json.loads(repeated.stdout)},
     )

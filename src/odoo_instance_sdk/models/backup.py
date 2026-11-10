@@ -45,6 +45,12 @@ class RestoreState(enum.StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class PostRestoreCheckpoint(enum.StrEnum):
+    RESET_PENDING = "reset_pending"
+    RESET_COMPLETE = "reset_complete"
+    RESET_NOT_REQUESTED = "reset_not_requested"
+
+
 class BackupEventType(enum.StrEnum):
     DOWNLOAD_STARTED = "download_started"
     DOWNLOAD_SUCCEEDED = "download_succeeded"
@@ -245,6 +251,50 @@ class DatabasePreparationResult(
     effective_default: str | None = None
     retained_artifacts: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+
+class RestoreCompletionAction(enum.StrEnum):
+    UPDATE_MODULE = "update_module"
+    RESET_ADMIN = "reset_admin"
+    ADVANCE_CHECKPOINT = "advance_checkpoint"
+    SWITCH_DEFAULT = "switch_default"
+
+
+class RestoreCompletionPlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    target_database: str
+    checkpoint: PostRestoreCheckpoint | None
+    modules: tuple[str, ...]
+    actions: tuple[RestoreCompletionAction, ...]
+    previous_default: str | None
+    effective_default: str | None
+    no_op: bool = False
+
+
+class RestoreCompletionFailureContext(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True, omit_defaults=True
+):
+    target_database: str
+    checkpoint: PostRestoreCheckpoint | None
+    completed_stages: tuple[str, ...] = ()
+    pending_stage: str | None = None
+    requested_modules: tuple[str, ...] = ()
+    previous_default: str | None = None
+    effective_default: str | None = None
+    published: bool = False
+
+
+class RestoreCompletionResult(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    target_database: str
+    checkpoint: PostRestoreCheckpoint | None
+    completed_stages: tuple[str, ...]
+    pending_stage: str | None
+    requested_modules: tuple[str, ...]
+    previous_default: str | None
+    effective_default: str
+    published: bool
+    no_op: bool = False
 
 
 class AdminPasswordResetResult(

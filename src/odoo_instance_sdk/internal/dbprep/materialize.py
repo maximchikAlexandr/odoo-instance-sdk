@@ -62,6 +62,7 @@ from odoo_instance_sdk.internal.dbprep.source_binding import (
 from odoo_instance_sdk.internal.dbprep.materialize_steps import (
     _captured_restore_exists as _captured_restore_exists,
     _restore_failure_probe_evidence as _restore_failure_probe_evidence,
+    _post_restore_failure_checkpoint as _post_restore_failure_checkpoint,
 )
 from odoo_instance_sdk.internal.dbprep.result_projection import (
     coalesced_restore_result,
@@ -94,6 +95,7 @@ from odoo_instance_sdk.models import (
     BackupFreshness,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
+    PostRestoreCheckpoint,
     RestoreState,
     StartConfig,
 )
@@ -132,6 +134,8 @@ def _record_incomplete_restore(  # noqa: C901
     exists_after: bool | None,
     backup: Backup | None,
     local_restore: SelectedBackupRestorePayload | None,
+    post_restore_checkpoint: PostRestoreCheckpoint | None = None,
+    database_oid: int | None = None,
 ) -> bool:
     """Record exact recovery evidence, returning false for any missing proof."""
     if exists_before is not False or exists_after is not True:
@@ -181,7 +185,9 @@ def _record_incomplete_restore(  # noqa: C901
             source_sha256=source_sha256,
             cluster_id=cluster_id,
             data_directory=data_directory,
+            database_oid=database_oid,
             state=RestoreState.INCOMPLETE,
+            post_restore_checkpoint=post_restore_checkpoint,
         )
     except Exception:
         return False
@@ -564,6 +570,7 @@ def prepare_restore(  # noqa: C901
             local_restore = selected_restore or preflight.selected_restore
             database_confirmed = False
             default_switch_confirmed = False
+            reset_completed = False
             try:
                 if isinstance(preflight.restore_source, _RemoteRestoreSource):
                     assert source is not None and remote_password is not None
@@ -665,7 +672,6 @@ def prepare_restore(  # noqa: C901
                             neutralize_database=True,
                         )
                 database_confirmed = True
-                reset_completed = False
                 if options.reset_admin_password:
                     _consume_action_if_planned("database.prepare.odoo-reset")
                     from odoo_instance_sdk.internal.restore_stages import (
@@ -724,7 +730,13 @@ def prepare_restore(  # noqa: C901
                 )
             except BaseException as exc:
                 _consume_action_if_planned("database.prepare.rollback")
-                exists_before, exists_after = _restore_failure_probe_evidence()
+                exists_before, exists_after, database_oid = _restore_failure_probe_evidence()
+                failed_stage = getattr(exc, "restore_stage_id", None)
+                checkpoint = _post_restore_failure_checkpoint(
+                    database_confirmed=database_confirmed,
+                    failed_stage=failed_stage,
+                    reset_completed=reset_completed,
+                )
                 retained_incomplete = _record_incomplete_restore(
                     client,
                     preflight,
@@ -732,6 +744,8 @@ def prepare_restore(  # noqa: C901
                     exists_after=exists_after,
                     backup=backup,
                     local_restore=local_restore,
+                    post_restore_checkpoint=checkpoint,
+                    database_oid=database_oid,
                 )
                 database_confirmed = retained_incomplete
                 _annotate_retained_failure(
@@ -765,6 +779,7 @@ def prepare_restore(  # noqa: C901
                         else None
                     ),
                     binding_published=False,
+                    post_restore_checkpoint=checkpoint if retained_incomplete else None,
                 )
                 raise
             finally:

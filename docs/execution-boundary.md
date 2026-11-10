@@ -263,15 +263,15 @@ documented by `OUTPUT_WRITE_REASONS`:
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:115` — in-memory Rich serialization
   boundary; it writes only to an in-memory buffer and never to terminal output.
-- `src/odoo_instance_sdk/commands/output.py:287` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:288` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:502` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:503` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:504` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:505` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:511` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:512` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:513` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:514` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/internal/self_update.py:822-824` — maintenance child
   JSON stdout transport.

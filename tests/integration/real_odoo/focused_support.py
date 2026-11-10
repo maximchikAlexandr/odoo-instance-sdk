@@ -693,6 +693,33 @@ def _project_database_probe(
     )
 
 
+def project_database_oid(project: Path, database: str, *, home: str) -> int:
+    """Read one exact PostgreSQL OID from the project-owned cluster."""
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    with pytest.MonkeyPatch.context() as paths:
+        paths.setenv("HOME", home)
+        cluster = PostgresCluster.from_project(project)
+        lifecycle = ComposeLifecycle(cluster.compose_file, cluster.compose_project_name)
+    result = lifecycle.run(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "odoo",
+        "-d",
+        "postgres",
+        "-At",
+        "-c",
+        f"SELECT oid FROM pg_database WHERE datname = '{database}';",
+        timeout=30.0,
+    )
+    if result.returncode != 0 or not result.stdout.strip().isdigit():
+        raise AssertionError(f"database OID query failed with status {result.returncode}")
+    return int(result.stdout.strip())
+
+
 def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> None:
     """Bind every already-imported public command catalog provider for a run."""
 

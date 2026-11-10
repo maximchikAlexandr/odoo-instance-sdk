@@ -306,6 +306,23 @@ remains available only with a retained backup UUID. At the SDK boundary, pass
 `EnvironmentResource.refresh_database_command()` method. The archive is
 validated and consumed through a private snapshot without creating a catalogue
 backup row or exposing the source path in output.
+
+When import, verification, filestore restore, and neutralization succeeded but
+an administrator reset or default publication failed, inspect the retained
+target before retrying:
+
+```bash
+odcli db restore --complete restored_db --dry-run
+odcli db restore --complete restored_db --update-module base --yes
+```
+
+Completion requires the exact project-owned target and a non-null checkpoint;
+legacy incomplete bindings remain ineligible and continue through the guarded
+ordinary restore retry. Module updates are optional and explicitly named; the
+command never infers modules or runs `-u all`. Repeated completion after
+publication is a no-op. The SDK exposes the same inspectable boundary through
+`EnvironmentResource.complete_restore_command(project, target_database,
+update_modules=(...))`.
 The default changes only after restore, neutralization, postcondition, audit,
 and optional admin reset complete. Ctrl-C returns exit `130`; JSON/TOON keep
 one progress-free document on stdout and put sanitized diagnostics on stderr.

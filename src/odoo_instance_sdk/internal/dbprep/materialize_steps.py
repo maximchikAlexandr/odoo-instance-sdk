@@ -25,7 +25,7 @@ from odoo_instance_sdk.internal.dbprep.source_binding import (
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.project_env import load_project_environment
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
-from odoo_instance_sdk.models import DatabaseRefreshOptions, StartConfig
+from odoo_instance_sdk.models import DatabaseRefreshOptions, PostRestoreCheckpoint, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -77,13 +77,54 @@ def _captured_restore_exists(step_id: str) -> bool | None:
     }.get(output.strip().lower())
 
 
-def _restore_failure_probe_evidence() -> tuple[bool | None, bool | None]:
+def _restore_failure_probe_evidence() -> tuple[bool | None, bool | None, int | None]:
     if not _restore_probe_consumed("database.restore.exists-before"):
-        return None, None
+        return None, None, None
+    from odoo_instance_sdk.internal.proc import ProcessResult, active_context
+
+    context = active_context()
+    try:
+        raw = (
+            context.process("database.restore.exists-after")
+            if context is not None
+            and context.planned("database.restore.exists-after")
+            and not context.consumed("database.restore.exists-after")
+            else context.results.get("database.restore.exists-after")
+            if context is not None
+            else None
+        )
+    except BaseException:
+        raw = None
+    if not isinstance(raw, ProcessResult) or raw.returncode != 0:
+        oid = None
+    else:
+        output = (
+            raw.stdout.decode(errors="replace") if isinstance(raw.stdout, bytes) else raw.stdout
+        )
+        try:
+            parsed = int(output.strip()) if isinstance(output, str) else 0
+            oid = parsed if parsed > 0 else None
+        except ValueError:
+            oid = None
     return (
         _captured_restore_exists("database.restore.exists-before"),
-        _captured_restore_exists("database.restore.exists-after"),
+        oid is not None,
+        oid,
     )
+
+
+def _post_restore_failure_checkpoint(
+    *, database_confirmed: bool, failed_stage: str | None, reset_completed: bool
+) -> PostRestoreCheckpoint | None:
+    if database_confirmed and failed_stage == "admin_reset":
+        return PostRestoreCheckpoint.RESET_PENDING
+    if failed_stage == "default_switch":
+        return (
+            PostRestoreCheckpoint.RESET_COMPLETE
+            if reset_completed
+            else PostRestoreCheckpoint.RESET_NOT_REQUESTED
+        )
+    return None
 
 
 def _preparation_process_steps(
