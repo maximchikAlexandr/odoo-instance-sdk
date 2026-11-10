@@ -358,7 +358,12 @@ def _assert_post_restore_failure(
     )
     failure = json.loads(failed.stdout)
     assert failure["ok"] is False
-    assert failure["context"].get("post_restore_checkpoint") == "reset_pending", failure
+    context = failure.get("context")
+    assert isinstance(context, dict)
+    assert context.get("post_restore_checkpoint") == "reset_pending", {
+        "error": failure.get("error"),
+        "context": context,
+    }
     assert failure["context"]["pending_stage"] == "admin_reset"
     assert ProjectConfig.load(project).default_source_database == previous_default
     return cast("dict[str, object]", failure)
@@ -494,8 +499,15 @@ def test_complete_post_restore_without_reimport(
             ],
             environment,
         )
-    failure = _assert_post_restore_failure(failed, project, previous_default, failure_evidence)
+    failed_diagnostic = {
+        "exit_code": failed.exit_code,
+        "stderr": failed.stderr,
+        "stdout": failed.stdout,
+        "exception": failed.exception,
+    }
+    assert_secret_free(failed_diagnostic, failure_evidence.secret_canary)
     assert reset_failure_injected
+    failure = _assert_post_restore_failure(failed, project, previous_default, failure_evidence)
     filestore = project_filestore(project, target)
     assert filestore.is_dir()
     cluster = PostgresCluster.from_project(project)
