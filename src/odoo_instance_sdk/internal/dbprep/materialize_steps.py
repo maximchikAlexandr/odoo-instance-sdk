@@ -200,7 +200,7 @@ class _ResetPendingRetention:
 
 
 def _reset_pending_binding_failures(
-    row: Mapping[str, object] | sqlite3.Row,
+    row: Mapping[str, str | int | None] | sqlite3.Row,
     *,
     preflight: RestorePreflight,
     cluster_id: str,
