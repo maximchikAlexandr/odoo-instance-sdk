@@ -100,9 +100,10 @@ def test_source_backed_selected_user_session_and_logout(
             "-c",
             (
                 "import json, pathlib, sys, odoo; "
+                "import odoo.release as odoo_release; "
                 "from odoo.release import version_info; "
                 "print(json.dumps({'python': list(sys.version_info[:3]), "
-                "'odoo_major': version_info[0], 'odoo_file': str(pathlib.Path(odoo.__file__).resolve())}))"
+                "'odoo_major': version_info[0], 'odoo_file': str(pathlib.Path(odoo_release.__file__).resolve())}))"
             ),
         ],
         cwd=bound_source_root,
@@ -116,7 +117,13 @@ def test_source_backed_selected_user_session_and_logout(
     assert runtime_identity["odoo_major"] == 19
     assert Path(runtime_identity["odoo_file"]).is_relative_to(bound_source_root)
     cli_probe = subprocess.run(
-        [*command_prefix, "--config", environment.generated_config_path, "--help"],
+        [
+            *command_prefix,
+            "server",
+            "--config",
+            environment.generated_config_path,
+            "--help",
+        ],
         cwd=bound_source_root,
         env=probe_environment,
         capture_output=True,
