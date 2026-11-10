@@ -528,6 +528,68 @@ class _RestoreMixin:
         )
 
     @_translate_sqlite_error
+    def _retain_reset_pending_restore(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+        *,
+        expected_sequence: int,
+        backup_id: str | None,
+        source_kind: str,
+        source_sha256: str | None,
+        cluster_id: str,
+        data_directory: str,
+        database_oid: int,
+    ) -> bool:
+        """Append a reset checkpoint to the exact completed restore, without a second event."""
+        host = normalize_db_host(db_host)
+        if type(database_oid) is not int or database_oid <= 0:
+            return False
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT * FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (host, db_port, database_name),
+            ).fetchone()
+            claim = self._get_postgres_cluster_by_id(cluster_id)
+            if (
+                row is None
+                or claim is None
+                or claim.state != "active"
+                or row["sequence"] != expected_sequence
+                or row["state"] != RestoreState.COMPLETE.value
+                or row["post_restore_checkpoint"] is not None
+                or row["backup_id"] != backup_id
+                or row["source_kind"] != source_kind
+                or row["source_sha256"] != source_sha256
+                or row["cluster_id"] != cluster_id
+                or row["data_directory"] != data_directory
+                or row["database_oid"] != database_oid
+            ):
+                return False
+            cursor = self._conn.execute(
+                "INSERT INTO restores "
+                "(db_host, db_port, database_name, backup_id, source_kind, source_sha256, "
+                "restored_at, cluster_id, data_directory, database_oid, state, "
+                "post_restore_checkpoint) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, 'incomplete', 'reset_pending')",
+                (
+                    host,
+                    db_port,
+                    database_name,
+                    backup_id,
+                    source_kind,
+                    source_sha256,
+                    cluster_id,
+                    data_directory,
+                    database_oid,
+                ),
+            )
+            return cursor.lastrowid is not None
+
+    @_translate_sqlite_error
     def _advance_restore_checkpoint(
         self,
         db_host: str | None,

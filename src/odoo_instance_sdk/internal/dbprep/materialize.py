@@ -62,6 +62,8 @@ from odoo_instance_sdk.internal.dbprep.source_binding import (
 from odoo_instance_sdk.internal.dbprep.materialize_steps import (
     _captured_restore_exists as _captured_restore_exists,
     _restore_failure_probe_evidence as _restore_failure_probe_evidence,
+    _record_incomplete_restore as _record_incomplete_restore,
+    _retain_reset_pending_restore as _retain_reset_pending_restore,
     _post_restore_failure_checkpoint as _post_restore_failure_checkpoint,
 )
 from odoo_instance_sdk.internal.dbprep.result_projection import (
@@ -124,74 +126,6 @@ def _wait_for_preparation_lock(project_id: str, *, timeout: float = 300.0) -> It
         database_preparation_lock_path(project_id), time.monotonic() + timeout
     ):
         yield
-
-
-def _record_incomplete_restore(  # noqa: C901
-    client: OdooClient,
-    preflight: RestorePreflight,
-    *,
-    exists_before: bool | None,
-    exists_after: bool | None,
-    backup: Backup | None,
-    local_restore: SelectedBackupRestorePayload | None,
-    post_restore_checkpoint: PostRestoreCheckpoint | None = None,
-    database_oid: int | None = None,
-) -> bool:
-    """Record exact recovery evidence, returning false for any missing proof."""
-    if exists_before is not False or exists_after is not True:
-        return False
-    provenance = getattr(preflight.postgres_cluster, "_restore_provenance", None)
-    if not callable(provenance):
-        return False
-    try:
-        cluster_id, data_directory = provenance()
-    except Exception:
-        return False
-    if not isinstance(cluster_id, str) or not cluster_id:
-        return False
-    if data_directory is None:
-        try:
-            start_config = StartConfig.from_odoo_config(preflight.source_config)
-            if isinstance(start_config.data_dir, str) and start_config.data_dir:
-                data_directory = str(
-                    _resolve_data_dir(start_config.data_dir, preflight.source_config)
-                )
-        except (ConfigError, OSError, ValueError, InstanceConfigurationError):
-            return False
-    source = preflight.restore_source
-    source_kind: str
-    source_sha256: str | None = None
-    backup_id: str | None = None
-    if isinstance(source, _LocalArchiveRestoreSource):
-        if local_restore is None:
-            return False
-        source_kind = "local_archive"
-        source_sha256 = local_restore.verified_sha256
-    else:
-        if backup is None:
-            return False
-        source_kind = "catalogue"
-        backup_id = str(backup.id)
-    if data_directory is not None and not isinstance(data_directory, str | Path):
-        data_directory = None
-    try:
-        catalog = client.get_catalog()
-        catalog.record_restore(
-            preflight.postgres_cluster.endpoint_host,
-            preflight.postgres_cluster.endpoint_port,
-            preflight.target_database,
-            backup_id,
-            source_kind=source_kind,
-            source_sha256=source_sha256,
-            cluster_id=cluster_id,
-            data_directory=data_directory,
-            database_oid=database_oid,
-            state=RestoreState.INCOMPLETE,
-            post_restore_checkpoint=post_restore_checkpoint,
-        )
-    except Exception:
-        return False
-    return True
 
 
 def _matches_incomplete_restore(  # noqa: C901
@@ -730,24 +664,48 @@ def prepare_restore(  # noqa: C901
                 )
             except BaseException as exc:
                 _consume_action_if_planned("database.prepare.rollback")
-                exists_before, exists_after, database_oid = _restore_failure_probe_evidence()
                 failed_stage = getattr(exc, "restore_stage_id", None)
                 checkpoint = _post_restore_failure_checkpoint(
                     database_confirmed=database_confirmed,
                     failed_stage=failed_stage,
                     reset_completed=reset_completed,
                 )
-                retained_incomplete = _record_incomplete_restore(
-                    client,
-                    preflight,
-                    exists_before=exists_before,
-                    exists_after=exists_after,
-                    backup=backup,
-                    local_restore=local_restore,
-                    post_restore_checkpoint=checkpoint,
-                    database_oid=database_oid,
-                )
-                database_confirmed = retained_incomplete
+                retained_incomplete = False
+                if checkpoint is PostRestoreCheckpoint.RESET_PENDING:
+                    retained = _retain_reset_pending_restore(
+                        client,
+                        preflight,
+                        backup=backup,
+                        local_restore=local_restore,
+                    )
+                    retained_incomplete = retained is True
+                    if retained is None:
+                        exists_before, exists_after, database_oid = (
+                            _restore_failure_probe_evidence()
+                        )
+                        retained_incomplete = _record_incomplete_restore(
+                            client,
+                            preflight,
+                            exists_before=exists_before,
+                            exists_after=exists_after,
+                            backup=backup,
+                            local_restore=local_restore,
+                            post_restore_checkpoint=checkpoint,
+                            database_oid=database_oid,
+                        )
+                else:
+                    exists_before, exists_after, database_oid = _restore_failure_probe_evidence()
+                    retained_incomplete = _record_incomplete_restore(
+                        client,
+                        preflight,
+                        exists_before=exists_before,
+                        exists_after=exists_after,
+                        backup=backup,
+                        local_restore=local_restore,
+                        post_restore_checkpoint=checkpoint,
+                        database_oid=database_oid,
+                    )
+                database_confirmed = database_confirmed or retained_incomplete
                 _annotate_retained_failure(
                     error=exc,
                     backup=backup,
@@ -778,7 +736,7 @@ def prepare_restore(  # noqa: C901
                         if preflight.project.managed_filestore is not None
                         else None
                     ),
-                    binding_published=False,
+                    binding_published=retained_incomplete,
                     post_restore_checkpoint=checkpoint if retained_incomplete else None,
                 )
                 raise
