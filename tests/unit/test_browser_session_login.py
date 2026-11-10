@@ -91,7 +91,9 @@ def test_session_command_plan_never_contains_a_sid(tmp_path: Path) -> None:
     assert command.plan.process_steps[0].input_preview == "<redacted>"
 
 
-@pytest.mark.parametrize("failure", ["process", "timeout", "invalid-file", "cleanup-failure"])
+@pytest.mark.parametrize(
+    "failure", ["success", "process", "timeout", "invalid-file", "cleanup-failure"]
+)
 def test_session_command_cleans_private_file_and_known_session_best_effort(  # noqa: C901
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -230,26 +232,34 @@ def test_session_command_cleans_private_file_and_known_session_best_effort(  # n
         "instance.browser_session.cleanup",
     ]
 
-    expected_exception: type[Exception] = (
-        TimeoutError if failure in {"timeout", "cleanup-failure"} else RuntimeError
-    )
-    expected_message = {
-        "process": "session creation failed",
-        "timeout": "session creation timed out",
-        "invalid-file": "handoff is invalid",
-        "cleanup-failure": "session creation timed out",
-    }[failure]
     observer_events: list[StepEvent] = []
-    with pytest.raises(expected_exception, match=expected_message) as error:
-        command.run(observer=observer_events.append)
+    if failure == "success":
+        credential = command.run(observer=observer_events.append)
+        assert credential.sid == "private-sid"
+        assert "private-sid" not in repr(credential)
+        assert store.get("private-sid") is not None
+        assert executor.step_ids == ["instance.shell_script"]
+        assert removed_sessions == []
+    else:
+        expected_exception: type[Exception] = (
+            TimeoutError if failure in {"timeout", "cleanup-failure"} else RuntimeError
+        )
+        expected_message = {
+            "process": "session creation failed",
+            "timeout": "session creation timed out",
+            "invalid-file": "handoff is invalid",
+            "cleanup-failure": "session creation timed out",
+        }[failure]
+        with pytest.raises(expected_exception, match=expected_message) as error:
+            command.run(observer=observer_events.append)
 
-    assert str(handoff_file) not in str(error.value)
-    assert "private-sid" not in str(error.value)
+        assert str(handoff_file) not in str(error.value)
+        assert "private-sid" not in str(error.value)
+        assert executor.step_ids == ["instance.shell_script", "instance.browser_session.cleanup"]
+        assert removed_sessions == (
+            [session] if failure not in {"invalid-file", "cleanup-failure"} else []
+        )
     assert not handoff_dir.exists()
-    assert executor.step_ids == ["instance.shell_script", "instance.browser_session.cleanup"]
-    assert removed_sessions == (
-        [session] if failure not in {"invalid-file", "cleanup-failure"} else []
-    )
     event_text = repr(observer_events)
     assert str(handoff_file) not in event_text
     assert "private-sid" not in event_text

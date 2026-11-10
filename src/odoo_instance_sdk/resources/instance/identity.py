@@ -1193,7 +1193,7 @@ finally:
 
         def execute(context: RunContext[_BrowserSessionCredential]) -> _BrowserSessionCredential:
             try:
-                return run_creation(context)
+                credential = run_creation(context)
             except Exception as exc:
                 sid = read_private_handoff()
                 if cleanup_step is not None:
@@ -1209,6 +1209,10 @@ finally:
                         raise TimeoutError("browser login session creation timed out") from None
                     raise RuntimeError("browser login session creation failed") from None
                 raise
+            else:
+                if cleanup_step is not None:
+                    context.skip(cleanup_step.step_id)
+                return credential
             finally:
                 shutil.rmtree(handoff_dir, ignore_errors=True)
 
