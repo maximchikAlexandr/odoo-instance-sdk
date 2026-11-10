@@ -483,12 +483,18 @@ def db_restore(  # noqa: C901
             DatabasePreparationFailureContext,
         )
         from odoo_instance_sdk.internal.dbreplace.planning import CopyReplacementFailureContext
+        from odoo_instance_sdk.models import RestoreCompletionFailureContext
 
         context = getattr(error, "failure_context", None)
         safe_context: dict[str, JsonValue] = (
             model_to_dict(context)
             if isinstance(
-                context, (DatabasePreparationFailureContext, CopyReplacementFailureContext)
+                context,
+                (
+                    DatabasePreparationFailureContext,
+                    CopyReplacementFailureContext,
+                    RestoreCompletionFailureContext,
+                ),
             )
             else cast(
                 "dict[str, JsonValue]",

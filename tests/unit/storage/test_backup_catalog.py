@@ -751,9 +751,7 @@ def test_restore_state_defaults_to_complete_and_accepts_incomplete(
     catalog.close()
 
 
-def test_restore_checkpoint_transitions_compare_latest_binding_without_duplicate_event(
-    tmp_path: Path,
-) -> None:
+def _restore_checkpoint_catalog(tmp_path: Path) -> tuple[BackupCatalog, int, int]:
     from odoo_instance_sdk.models import PostRestoreCheckpoint
 
     catalog = BackupCatalog(db_path=tmp_path / "restore-checkpoint.db")
@@ -772,12 +770,19 @@ def test_restore_checkpoint_transitions_compare_latest_binding_without_duplicate
     event_count = catalog._conn.execute(
         "SELECT COUNT(*) FROM database_events WHERE database_name='retry_db'"
     ).fetchone()[0]
+    return catalog, first["sequence"], event_count
+
+
+def test_restore_checkpoint_advancement_rejects_stale_latest_binding(tmp_path: Path) -> None:
+    from odoo_instance_sdk.models import PostRestoreCheckpoint
+
+    catalog, first_sequence, _event_count = _restore_checkpoint_catalog(tmp_path)
 
     second_sequence = catalog._advance_restore_checkpoint(
         "localhost",
         5432,
         "retry_db",
-        expected_sequence=first["sequence"],
+        expected_sequence=first_sequence,
         expected_checkpoint=PostRestoreCheckpoint.RESET_PENDING,
         checkpoint=PostRestoreCheckpoint.RESET_COMPLETE,
     )
@@ -791,10 +796,28 @@ def test_restore_checkpoint_transitions_compare_latest_binding_without_duplicate
             "localhost",
             5432,
             "retry_db",
-            expected_sequence=first["sequence"],
+            expected_sequence=first_sequence,
             expected_checkpoint=PostRestoreCheckpoint.RESET_PENDING,
             checkpoint=PostRestoreCheckpoint.RESET_COMPLETE,
         )
+
+    catalog.close()
+
+
+def test_restore_completion_preserves_history_and_does_not_add_restore_event(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.models import PostRestoreCheckpoint
+
+    catalog, first_sequence, event_count = _restore_checkpoint_catalog(tmp_path)
+    second_sequence = catalog._advance_restore_checkpoint(
+        "localhost",
+        5432,
+        "retry_db",
+        expected_sequence=first_sequence,
+        expected_checkpoint=PostRestoreCheckpoint.RESET_PENDING,
+        checkpoint=PostRestoreCheckpoint.RESET_COMPLETE,
+    )
 
     catalog._complete_restore_binding(
         "localhost",

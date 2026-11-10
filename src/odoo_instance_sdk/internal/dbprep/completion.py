@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import stat
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -18,12 +20,16 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.dbprep.source import (
     _load_project,
     _resolve_source_config,
-    _target_config_path,
     _wait_for_preparation_lock,
-    _write_target_config,
 )
+from odoo_instance_sdk.internal.generated_config import project_generated_config_path
 from odoo_instance_sdk.internal.odoo_config import _resolve_data_dir
-from odoo_instance_sdk.internal.project_init import switch_project_default
+from odoo_instance_sdk.internal.project_init import (
+    _restore_owned_snapshot,
+    switch_project_default,
+    validate_generated_config_target,
+)
+from odoo_instance_sdk.internal.project_manifest import manifest_path
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import (
     PostRestoreCheckpoint,
@@ -115,6 +121,18 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
         ) from exc
     if not filestore.is_dir():
         raise BackupCatalogError("target managed filestore is unavailable")
+    try:
+        restore_data_path = Path(data_directory or "")
+        if not restore_data_path.is_absolute():
+            restore_data_path = root / restore_data_path
+        if data_directory is None or restore_data_path.resolve(strict=True) != filestore.resolve(
+            strict=True
+        ):
+            raise BackupCatalogError(
+                "target managed filestore does not match the recorded restore data directory"
+            )
+    except OSError as exc:
+        raise BackupCatalogError("target restore data directory is unavailable") from exc
 
     if checkpoint is PostRestoreCheckpoint.RESET_PENDING and admin_password is None:
         raise AdminPasswordRequiredError(
@@ -141,42 +159,36 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
 
     module_command = None
     reset_command = None
-    target_config_path: Path | None = None
     if not no_op and (modules or checkpoint is PostRestoreCheckpoint.RESET_PENDING):
         source_config = _resolve_source_config(config, root)
-        target_config_path = _target_config_path(source_config)
-        try:
-            _write_target_config(source_config, target_config_path, target)
-            start_config = (
-                msgspec.structs.replace(
-                    instance.config.start_config,
-                    config_path=str(target_config_path),
-                    db_name=target,
-                    dbfilter=target,
-                    data_dir=str(filestore),
-                )
-                if instance.config.start_config is not None
-                else None
+        start_config = (
+            msgspec.structs.replace(
+                instance.config.start_config,
+                config_path=str(source_config),
+                db_name=target,
+                dbfilter=target,
+                data_dir=str(filestore),
             )
-            if start_config is None:
-                raise ConfigError("project Odoo config is unavailable")
-            target_instance = replace(
-                instance,
-                config=replace(
-                    instance.config,
-                    configured_database_names=(target,),
-                    start_config=start_config,
-                ),
+            if instance.config.start_config is not None
+            else None
+        )
+        if start_config is None:
+            raise ConfigError("project Odoo config is unavailable")
+        target_instance = replace(
+            instance,
+            config=replace(
+                instance.config,
+                configured_database_names=(target,),
+                start_config=start_config,
+            ),
+        )
+        if modules:
+            module_command = target_instance.modules.update_command(modules)
+        if checkpoint is PostRestoreCheckpoint.RESET_PENDING:
+            reset_command = target_instance.databases.reset_admin_password_command(
+                admin_password=admin_password or "",
+                provenance=admin_password_provenance,
             )
-            if modules:
-                module_command = target_instance.modules.update_command(modules)
-            if checkpoint is PostRestoreCheckpoint.RESET_PENDING:
-                reset_command = target_instance.databases.reset_admin_password_command(
-                    admin_password=admin_password or "",
-                    provenance=admin_password_provenance,
-                )
-        finally:
-            target_config_path.unlink(missing_ok=True)
 
     step_ids = ["database.restore.complete.lock", "database.restore.complete.revalidate"]
     if not no_op and modules:
@@ -203,52 +215,71 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
         with _wait_for_preparation_lock(project_id, timeout=300.0):
             context.complete_action("database.restore.complete.lock")
             context.action("database.restore.complete.revalidate")
-            live_config = type(config).load(root)
-            live_cluster = PostgresCluster.from_project(root)
-            live_cluster_id, live_data_directory = live_cluster._restore_provenance()
-            live_data_directory = _restore_data_directory(live_config, root, live_data_directory)
-            live_row = catalog._latest_restore_binding(
-                cluster.endpoint_host, cluster.endpoint_port, target
-            )
-            live_claim = (
-                None
-                if live_cluster_id is None
-                else catalog._get_postgres_cluster_by_id(live_cluster_id)
-            )
-            if (
-                live_row is None
-                or live_row["sequence"] != row["sequence"]
-                or any(
-                    live_row[field] != row[field]
-                    for field in (
-                        "database_name",
-                        "backup_id",
-                        "source_kind",
-                        "source_sha256",
-                        "cluster_id",
-                        "data_directory",
-                        "database_oid",
-                        "state",
-                        "post_restore_checkpoint",
-                    )
+            expected_sequence = row["sequence"]
+            expected_state = row["state"]
+            expected_checkpoint = row["post_restore_checkpoint"]
+
+            def revalidate() -> None:
+                live_config = type(config).load(root)
+                live_cluster = PostgresCluster.from_project(root)
+                live_cluster_id, live_data_directory = live_cluster._restore_provenance()
+                live_data_directory = _restore_data_directory(
+                    live_config, root, live_data_directory
                 )
-                or live_cluster.endpoint_host != cluster.endpoint_host
-                or live_cluster.endpoint_port != cluster.endpoint_port
-                or live_cluster_id != cluster_id
-                or live_data_directory != data_directory
-                or live_claim is None
-                or live_claim.state != "active"
-                or live_claim.project_id != project_id
-                or managed_filestore_path(live_config) != filestore
-                or live_config != config
-            ):
-                raise BackupCatalogError("restore completion plan is stale")
-            current_inventory = instance.databases.list_inventory(root)
-            current_item = next(
-                (item for item in current_inventory.databases if item.name == target), None
-            )
-            if current_item is None or current_item.database_oid != row["database_oid"]:
-                raise BackupCatalogError("target PostgreSQL identity changed")
+                live_row = catalog._latest_restore_binding(
+                    cluster.endpoint_host, cluster.endpoint_port, target
+                )
+                live_claim = (
+                    None
+                    if live_cluster_id is None
+                    else catalog._get_postgres_cluster_by_id(live_cluster_id)
+                )
+                try:
+                    live_filestore = managed_filestore_path(live_config).resolve(strict=True)
+                    proven_data_directory = Path(data_directory or "")
+                    if not proven_data_directory.is_absolute():
+                        proven_data_directory = root / proven_data_directory
+                    proven_data_directory = proven_data_directory.resolve(strict=True)
+                    live_filestore.relative_to(root.resolve(strict=True))
+                except (OSError, ValueError) as error:
+                    raise BackupCatalogError("restore completion plan is stale") from error
+                if (
+                    live_row is None
+                    or live_row["sequence"] != expected_sequence
+                    or live_row["state"] != expected_state
+                    or live_row["post_restore_checkpoint"] != expected_checkpoint
+                    or any(
+                        live_row[field] != row[field]
+                        for field in (
+                            "database_name",
+                            "backup_id",
+                            "source_kind",
+                            "source_sha256",
+                            "cluster_id",
+                            "data_directory",
+                            "database_oid",
+                        )
+                    )
+                    or live_cluster.endpoint_host != cluster.endpoint_host
+                    or live_cluster.endpoint_port != cluster.endpoint_port
+                    or live_cluster_id != cluster_id
+                    or live_data_directory != data_directory
+                    or live_claim is None
+                    or live_claim != claim
+                    or live_claim.state != "active"
+                    or live_claim.project_id != project_id
+                    or live_filestore != proven_data_directory
+                    or live_config != config
+                ):
+                    raise BackupCatalogError("restore completion plan is stale")
+                current_inventory = instance.databases.list_inventory(root)
+                current_item = next(
+                    (item for item in current_inventory.databases if item.name == target), None
+                )
+                if current_item is None or current_item.database_oid != row["database_oid"]:
+                    raise BackupCatalogError("target PostgreSQL identity changed")
+
+            revalidate()
             context.complete_action("database.restore.complete.revalidate")
             if no_op:
                 return RestoreCompletionResult(
@@ -266,11 +297,18 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                 raise BackupCatalogError("restore completion checkpoint changed")
             completed: list[str] = []
             current_checkpoint = checkpoint
-            expected_sequence = row["sequence"]
 
             def attach_failure(
                 error: BaseException, pending: str, *, published: bool = False
             ) -> None:
+                effective_default = config.default_source_database
+                with contextlib.suppress(Exception):
+                    latest_binding = catalog._latest_restore_binding(
+                        cluster.endpoint_host, cluster.endpoint_port, target
+                    )
+                    published = latest_binding is not None and latest_binding["state"] == "complete"
+                with contextlib.suppress(Exception):
+                    effective_default = type(config).load(root).default_source_database
                 setattr(
                     error,
                     "failure_context",
@@ -281,17 +319,14 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                         pending_stage=pending,
                         requested_modules=modules,
                         previous_default=config.default_source_database,
-                        effective_default=live_config.default_source_database,
+                        effective_default=effective_default,
                         published=published,
                     ),
                 )
 
-            if target_config_path is not None:
-                _write_target_config(
-                    _resolve_source_config(config, root), target_config_path, target
-                )
             try:
                 if modules:
+                    revalidate()
                     context.action("database.restore.complete.modules")
                     if module_command is None:
                         raise ConfigError("module update plan is unavailable")
@@ -303,6 +338,7 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                     context.complete_action("database.restore.complete.modules")
                     completed.append("module_update")
                 if checkpoint is PostRestoreCheckpoint.RESET_PENDING:
+                    revalidate()
                     context.action("database.restore.complete.admin-reset")
                     if reset_command is None:
                         raise ConfigError("administrator reset plan is unavailable")
@@ -313,6 +349,7 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                         raise
                     context.complete_action("database.restore.complete.admin-reset")
                     completed.append("admin_reset")
+                    revalidate()
                     context.action("database.restore.complete.checkpoint")
                     try:
                         expected_sequence = catalog._advance_restore_checkpoint(
@@ -328,23 +365,8 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                         raise
                     context.complete_action("database.restore.complete.checkpoint")
                     current_checkpoint = PostRestoreCheckpoint.RESET_COMPLETE
-                try:
-                    latest_before_publication = catalog._latest_restore_binding(
-                        cluster.endpoint_host, cluster.endpoint_port, target
-                    )
-                    binding_changed = (
-                        latest_before_publication is None
-                        or latest_before_publication["sequence"] != expected_sequence
-                        or latest_before_publication["post_restore_checkpoint"]
-                        != current_checkpoint.value
-                    )
-                except BaseException as error:
-                    attach_failure(error, "default_switch")
-                    raise
-                if binding_changed:
-                    binding_error = BackupCatalogError("restore binding changed before publication")
-                    attach_failure(binding_error, "default_switch")
-                    raise binding_error
+                    expected_checkpoint = current_checkpoint.value
+                revalidate()
                 context.action("database.restore.complete.default-switch")
                 latest_config = type(config).load(root)
                 switched = msgspec.structs.replace(
@@ -353,6 +375,13 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                     managed_filestore=latest_config.managed_filestore
                     or filestore.relative_to(root),
                 )
+                generated_path = project_generated_config_path(root)
+                manifest_file = manifest_path(root)
+                validate_generated_config_target(
+                    generated_path, project_root=root, allow_untracked_without_git=True
+                )
+                generated_snapshot = _snapshot_owned_file(generated_path)
+                manifest_snapshot = _snapshot_owned_file(manifest_file)
                 try:
                     switch_project_default(root, switched)
                 except BaseException as error:
@@ -367,7 +396,13 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                         expected_checkpoint=current_checkpoint,
                     )
                 except BaseException as error:
-                    attach_failure(error, "catalogue_completion", published=True)
+                    try:
+                        _restore_owned_snapshot(manifest_file, manifest_snapshot)
+                        _restore_owned_snapshot(generated_path, generated_snapshot)
+                    except BaseException:
+                        attach_failure(error, "catalogue_completion", published=True)
+                        raise
+                    attach_failure(error, "catalogue_completion", published=False)
                     raise
                 context.complete_action("database.restore.complete.default-switch")
                 completed.append("default_switch")
@@ -382,9 +417,7 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                     published=True,
                 )
             finally:
-                if target_config_path is not None:
-                    with contextlib.suppress(OSError):
-                        target_config_path.unlink(missing_ok=True)
+                pass
 
     public_plan = ExecutionPlan(
         steps=tuple(step.public_projection() for step in steps),
@@ -416,3 +449,16 @@ def _restore_data_directory(
     if not start_config.data_dir:
         return None
     return str(_resolve_data_dir(start_config.data_dir, source_config))
+
+
+def _snapshot_owned_file(path: Path) -> tuple[bytes, int] | None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise BackupCatalogError("project publication file is not a regular owned file")
+        return stream.read(), stat.S_IMODE(metadata.st_mode)

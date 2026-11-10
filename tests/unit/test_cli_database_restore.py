@@ -15,6 +15,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     DatabasePreparationResult,
     PostRestoreCheckpoint,
+    RestoreCompletionFailureContext,
     RestoreCompletionResult,
 )
 
@@ -178,6 +179,62 @@ def test_restore_completion_dry_run_uses_existing_leaf_and_is_inert(
         "mail",
     )
     assert effects == []
+
+
+@pytest.mark.parametrize("output_format", ["json", "toon"])
+def test_restore_completion_interrupt_preserves_typed_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    output_format: str,
+) -> None:
+    client = MagicMock()
+    interrupted = KeyboardInterrupt()
+    setattr(
+        interrupted,
+        "failure_context",
+        RestoreCompletionFailureContext(
+            target_database="restored_db",
+            checkpoint=PostRestoreCheckpoint.RESET_COMPLETE,
+            completed_stages=("module_update",),
+            pending_stage="default_switch",
+            requested_modules=("base", "mail"),
+            previous_default="old_default",
+            effective_default="old_default",
+            published=False,
+        ),
+    )
+    client.environments.complete_restore_command.return_value = _command(error=interrupted)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+
+    invocation = CliRunner().invoke(
+        cli,
+        [
+            "db",
+            "restore",
+            "--complete",
+            "restored_db",
+            "--yes",
+            "--format",
+            output_format,
+        ],
+    )
+
+    assert invocation.exit_code == 130, invocation.output
+    if output_format == "json":
+        context = json.loads(invocation.stdout)["context"]
+        assert context["target_database"] == "restored_db"
+        assert context["completed_stages"] == ["module_update"]
+        assert context["pending_stage"] == "default_switch"
+        assert context["requested_modules"] == ["base", "mail"]
+        assert context["previous_default"] == "old_default"
+        assert context["effective_default"] == "old_default"
+    else:
+        assert "restored_db" in invocation.stdout
+        assert "module_update" in invocation.stdout
+        assert "default_switch" in invocation.stdout
+        assert "old_default" in invocation.stdout
+    assert "private-secret" not in invocation.stdout
 
 
 def _record_completion_effect(
