@@ -97,9 +97,37 @@ env.cr.commit()
             session.sid,
         )
         assert logout_status == 200
+        stale_status, stale_response = _post_json(
+            instance.config.base_url + "/web/session/get_session_info",
+            {"jsonrpc": "2.0", "method": "call", "params": {}},
+            session.sid,
+        )
+        assert stale_status == 200
+        stale_info = stale_response.get("result") or {}
+        assert stale_info.get("uid") in (None, False)
+        deactivate_user = """import sys
+user = env['res.users'].sudo().browse(int(sys.argv[1])).exists()
+if user:
+    user.write({'active': False})
+env.cr.commit()
+"""
+        instance.run_shell_script_command(
+            deactivate_user, argv=(str(selected.id),), timeout=30, commit=True
+        ).run()
+        with pytest.raises(RuntimeError, match="session creation failed") as failure:
+            instance.create_browser_session_command(selected.id).run()
+        assert "sid" not in str(failure.value).lower()
         record_property(
             "browser_login_selected_session",
-            json.dumps({"uid": selected.id, "database": database, "logout_status": logout_status}),
+            json.dumps(
+                {
+                    "uid": selected.id,
+                    "database": database,
+                    "logout_status": logout_status,
+                    "stale_uid": stale_info.get("uid"),
+                    "inactive_user_rejected": True,
+                }
+            ),
         )
     finally:
         if process is not None:

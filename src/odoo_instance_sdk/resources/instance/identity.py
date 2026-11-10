@@ -1020,14 +1020,14 @@ class _IdentityMixin:
         """Return a bounded list of active internal non-superuser Odoo users."""
         from odoo_instance_sdk.models import BrowserLoginUser
 
-        if len(query) > 80:
+        if len(query) > 128:
             raise ValueError("browser login search is too long")
         source = """import json, sys
 query = sys.argv[1].strip()
 domain = [('active', '=', True), ('share', '=', False), ('id', '!=', SUPERUSER_ID)]
 if query:
     domain = ['&', '&', '&', ('active', '=', True), ('share', '=', False), ('id', '!=', SUPERUSER_ID), '|', ('login', 'ilike', query), ('name', 'ilike', query)]
-users = env['res.users'].sudo().search(domain, limit=100, order='name, id')
+users = env['res.users'].sudo().search(domain, limit=100, order='id')
 print(json.dumps([{'id': user.id, 'login': user.login, 'name': user.name} for user in users[:100]]))
 """
 
@@ -1054,6 +1054,30 @@ print(json.dumps([{'id': user.id, 'login': user.login, 'name': user.name} for us
             raise ValueError("browser login user id must be positive")
         handoff_dir = Path(tempfile.gettempdir()) / f"odcli-browser-session-{uuid.uuid4().hex}"
         handoff_file = handoff_dir / "sid"
+        cleanup_source = """import os, stat, sys
+from odoo.http import root
+path = sys.argv[1]
+expected_uid = int(sys.argv[2])
+try:
+    directory_info = os.stat(os.path.dirname(path), follow_symlinks=False)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_mode & 0o077
+                or directory_info.st_uid != os.geteuid() or not stat.S_ISREG(info.st_mode)
+                or info.st_mode & 0o077 or info.st_uid != os.geteuid()):
+            raise RuntimeError('unsafe handoff file')
+        sid = os.read(descriptor, 512).decode('ascii')
+    finally:
+        os.close(descriptor)
+    store = root.session_store
+    if type(store).__name__ == 'FilesystemSessionStore' and sid:
+        session = store.get(sid)
+        if session and session.get('db') == env.cr.dbname and session.get('uid') == expected_uid:
+            store.delete(session)
+except Exception:
+    pass
+"""
         source = """import os, sys
 from odoo.http import root
 user = env['res.users'].sudo().browse(int(sys.argv[2])).exists()
@@ -1085,30 +1109,50 @@ finally:
         os.chmod(sys.argv[1], 0o600)
 """
 
-        def execute(context: RunContext[_BrowserSessionCredential]) -> _BrowserSessionCredential:
+        def read_private_handoff() -> str | None:
             try:
-                result = cast("ProcessResult", context.process("instance.shell_script"))
-                if result.returncode != 0:
-                    raise RuntimeError("browser login session creation failed")
                 descriptor = os.open(handoff_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
                 try:
                     directory_info = os.stat(handoff_dir, follow_symlinks=False)
                     info = os.fstat(descriptor)
-                    if (
-                        not stat.S_ISDIR(directory_info.st_mode)
-                        or directory_info.st_mode & 0o077
-                        or directory_info.st_uid != os.geteuid()
-                        or not stat.S_ISREG(info.st_mode)
-                        or info.st_mode & 0o077
-                        or info.st_uid != os.geteuid()
-                    ):
-                        raise RuntimeError("browser login handoff is invalid")
+                    valid_file = (
+                        stat.S_ISDIR(directory_info.st_mode)
+                        and not directory_info.st_mode & 0o077
+                        and directory_info.st_uid == os.geteuid()
+                        and stat.S_ISREG(info.st_mode)
+                        and not info.st_mode & 0o077
+                        and info.st_uid == os.geteuid()
+                    )
                     sid = os.read(descriptor, 512).decode("ascii")
                 finally:
                     os.close(descriptor)
-                if not sid or len(sid) > 256:
-                    raise RuntimeError("browser login handoff is invalid")
-                return _BrowserSessionCredential(sid)
+            except (OSError, UnicodeError):
+                return None
+            return sid if valid_file and sid and len(sid) <= 256 else None
+
+        def run_creation(
+            context: RunContext[_BrowserSessionCredential],
+        ) -> _BrowserSessionCredential:
+            result = cast("ProcessResult", context.process("instance.shell_script"))
+            if result.returncode != 0:
+                raise RuntimeError("browser login session creation failed")
+            sid = read_private_handoff()
+            if sid is None:
+                raise RuntimeError("browser login handoff is invalid")
+            return _BrowserSessionCredential(sid)
+
+        def execute(context: RunContext[_BrowserSessionCredential]) -> _BrowserSessionCredential:
+            try:
+                return run_creation(context)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    self.run_shell_script_command(
+                        cleanup_source,
+                        argv=(str(handoff_file), str(user_id)),
+                        timeout=15,
+                        commit=True,
+                    ).run()
+                raise
             finally:
                 shutil.rmtree(handoff_dir, ignore_errors=True)
 

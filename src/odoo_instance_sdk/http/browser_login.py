@@ -60,7 +60,7 @@ class BrowserLoginController:
 
     def users(self, request: BrowserLoginUsersRequest) -> tuple[BrowserLoginUser, ...]:
         target = self._resolver.resolve(request.owner_kind, request.owner_id)
-        return target.list_users(request.query.strip()[:80])[:100]
+        return target.list_users(request.query.strip()[:128])[:100]
 
     def issue(self, request: BrowserLoginTicketRequest, panel_origin: str) -> BrowserLoginTicket:
         target = self._resolver.resolve(request.owner_kind, request.owner_id)
@@ -86,16 +86,29 @@ class BrowserLoginController:
     def consume(
         self, body: bytes, *, host: str, origin: str, trusted_proxy: bool
     ) -> tuple[str, str] | None:
-        if not trusted_proxy or len(body) > 512:
-            return None
         try:
-            fields = parse_qsl(body.decode("ascii"), keep_blank_values=True, strict_parsing=True)
-        except (UnicodeDecodeError, ValueError):
+            fields = parse_qsl(
+                body[:512].decode("ascii", errors="replace"),
+                keep_blank_values=True,
+                strict_parsing=False,
+                max_num_fields=512,
+            )
+        except ValueError:
             return None
-        if len(fields) != 1 or fields[0][0] != "handoff" or not fields[0][1]:
-            return None
+        handoffs = tuple(value for key, value in fields if key == "handoff" and value)
         with self._lock:
-            ticket = self._tickets.pop(fields[0][1], None)
+            consumed = tuple(
+                self._tickets.pop(handoff, None) for handoff in dict.fromkeys(handoffs)
+            )
+        ticket = consumed[0] if len(handoffs) == 1 and len(consumed) == 1 else None
+        if (
+            not trusted_proxy
+            or len(body) > 512
+            or len(fields) != 1
+            or fields[0][0] != "handoff"
+            or not fields[0][1]
+        ):
+            return None
         if ticket is None or ticket.expires <= monotonic():
             return None
         target = ticket.target
@@ -179,27 +192,22 @@ def build_browser_login_router(  # noqa: C901
 
     async def consume(request: Request) -> Response:
         peer = request.client.host if request.client else ""
-        if (
+        valid_content_type = (
             request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            != "application/x-www-form-urlencoded"
-        ):
-            return Response(
-                "Browser login unavailable", status_code=400, headers={"Cache-Control": "no-store"}
-            )
+            == "application/x-www-form-urlencoded"
+        )
         body = bytearray()
+        too_large = False
         async for chunk in request.stream():
-            if len(body) + len(chunk) > 512:
-                return Response(
-                    "Browser login unavailable",
-                    status_code=400,
-                    headers={"Cache-Control": "no-store"},
-                )
-            body.extend(chunk)
+            remaining = 512 - len(body)
+            body.extend(chunk[:remaining])
+            too_large = too_large or len(chunk) > remaining
         result = controller.consume(
-            bytes(body),
+            bytes(body) + (b" " if too_large else b""),
             host=request.headers.get("host", ""),
             origin=request.headers.get("origin", ""),
-            trusted_proxy=peer in trusted_proxy_addresses
+            trusted_proxy=valid_content_type
+            and peer in trusted_proxy_addresses
             and request.headers.get("x-forwarded-proto", "").lower() == "https"
             and request.headers.get("x-forwarded-host", "").lower()
             == request.headers.get("host", "").lower(),

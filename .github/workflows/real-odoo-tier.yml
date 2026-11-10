@@ -174,7 +174,10 @@ jobs:
           elif [[ "${{ inputs.mode }}" == "targeted" ]]; then
             uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo/test_critical_path.py tests/integration/real_odoo/test_focused_auth_archive.py tests/integration/real_odoo/test_project_removal.py -k 'source_backed_full_critical_path or remote_auth_and_unreachable_source_fail_closed or archive_and_restore_boundaries_publish_no_unowned_state and truncated or public_project_forget_reinit_and_purge'
           else
-            uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo
+            test_files=()
+            while IFS= read -r -d '' path; do test_files+=("$path"); done < <(find tests/integration/real_odoo -type f -name 'test_*.py' ! -path 'tests/integration/real_odoo/test_browser_session_login.py' -print0 | sort -z)
+            test_files+=(tests/integration/real_odoo/test_browser_session_login.py)
+            uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' "${test_files[@]}"
           fi
       - name: Save content-addressed caches
         if: >-

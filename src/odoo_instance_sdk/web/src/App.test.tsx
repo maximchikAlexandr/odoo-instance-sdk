@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MantineProvider } from "@mantine/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -237,6 +237,7 @@ describe("App", () => {
     await screen.findByText("ready-env");
     fireEvent.click(screen.getAllByTestId("open-as-odoo")[3]);
     expect(await screen.findByText("Tabs on this instance host share the same Odoo login cookie.")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Search eligible users" }).getAttribute("maxlength")).toBe("128");
     await waitFor(() => expect(queryOdooBrowserLoginUsers).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("textbox", { name: "User" }));
     fireEvent.click(await screen.findByText("fixture-user — Fixture User"));
@@ -250,6 +251,92 @@ describe("App", () => {
     expect(document.querySelector('form input[name="handoff"]')).toBeNull();
     fireEvent.click(screen.getAllByTestId("open-odoo")[0]);
     expect(open).toHaveBeenCalledWith("https://env-a.example.test", "_blank", "noopener,noreferrer");
+  });
+
+  it("reports a blocked popup without issuing a login handoff", async () => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
+    vi.mocked(queryOdooBrowserLoginUsers).mockResolvedValue({
+      data: { users: [{ id: 42, login: "fixture-user", name: "Fixture User" }] },
+    } as never);
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    render(<MantineProvider><App /></MantineProvider>);
+
+    await screen.findByText("ready-env");
+    fireEvent.click(screen.getAllByTestId("open-as-odoo")[3]);
+    expect(await screen.findByText("Tabs on this instance host share the same Odoo login cookie.")).toBeTruthy();
+    await waitFor(() => expect(queryOdooBrowserLoginUsers).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("textbox", { name: "User" }));
+    fireEvent.click(await screen.findByText("fixture-user — Fixture User"));
+    fireEvent.click(screen.getByRole("button", { name: "Open selected user" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Allow popups");
+    expect(open).toHaveBeenCalledOnce();
+    expect(issueOdooBrowserLoginTicket).not.toHaveBeenCalled();
+  });
+
+  it("closes the blank popup and clears form credentials when issuance fails", async () => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
+    vi.mocked(queryOdooBrowserLoginUsers).mockResolvedValue({
+      data: { users: [{ id: 42, login: "fixture-user", name: "Fixture User" }] },
+    } as never);
+    vi.mocked(issueOdooBrowserLoginTicket).mockRejectedValue(new Error("private-handoff"));
+    const popup = { name: "", opener: window, close: vi.fn() } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    render(<MantineProvider><App /></MantineProvider>);
+
+    await screen.findByText("ready-env");
+    fireEvent.click(screen.getAllByTestId("open-as-odoo")[3]);
+    expect(await screen.findByText("Tabs on this instance host share the same Odoo login cookie.")).toBeTruthy();
+    await waitFor(() => expect(queryOdooBrowserLoginUsers).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("textbox", { name: "User" }));
+    fireEvent.click(await screen.findByText("fixture-user — Fixture User"));
+    fireEvent.click(screen.getByRole("button", { name: "Open selected user" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Unable to start");
+    expect(popup.close).toHaveBeenCalledOnce();
+    expect(document.querySelector('form input[name="handoff"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("private-handoff");
+  });
+
+  it("suppresses duplicate issuance while the first request is pending", async () => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
+    vi.mocked(queryOdooBrowserLoginUsers).mockResolvedValue({
+      data: { users: [{ id: 42, login: "fixture-user", name: "Fixture User" }] },
+    } as never);
+    let resolveTicket: ((value: unknown) => void) | undefined;
+    vi.mocked(issueOdooBrowserLoginTicket).mockReturnValue(
+      new Promise((resolve) => { resolveTicket = resolve; }) as never,
+    );
+    const popup = { name: "", opener: window, close: vi.fn() } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    const submitForm = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
+    render(<MantineProvider><App /></MantineProvider>);
+
+    await screen.findByText("ready-env");
+    fireEvent.click(screen.getAllByTestId("open-as-odoo")[3]);
+    expect(await screen.findByText("Tabs on this instance host share the same Odoo login cookie.")).toBeTruthy();
+    await waitFor(() => expect(queryOdooBrowserLoginUsers).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("textbox", { name: "User" }));
+    fireEvent.click(await screen.findByText("fixture-user — Fixture User"));
+    const submitButton = screen.getByRole("button", { name: "Open selected user" });
+    act(() => {
+      fireEvent.click(submitButton);
+      fireEvent.click(submitButton);
+    });
+    expect(issueOdooBrowserLoginTicket).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      resolveTicket?.({
+        data: {
+          action_url: "https://env-a.example.test/_odcli/auth/consume",
+          method: "POST",
+          handoff: "transient-handoff",
+          expires_at: "2030-01-01T00:00:00Z",
+        },
+      });
+    });
+    expect(submitForm).toHaveBeenCalledOnce();
+    expect(document.querySelector('form input[name="handoff"]')).toBeNull();
   });
 
   it("composes the running filter with project selection without another snapshot request", async () => {

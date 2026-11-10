@@ -22,7 +22,7 @@ class BrowserLoginUsersRequest(
 ):
     owner_kind: Literal["project", "environment"]
     owner_id: Annotated[str, msgspec.Meta(min_length=1, max_length=128)]
-    query: Annotated[str, msgspec.Meta(max_length=80)] = ""
+    query: Annotated[str, msgspec.Meta(max_length=128)] = ""
 
 
 class BrowserLoginTicketRequest(

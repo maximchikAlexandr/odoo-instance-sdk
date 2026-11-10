@@ -275,7 +275,7 @@ function RuntimeCard({
     try {
       const response = await queryOdooBrowserLoginUsers({
         client,
-        body: { ...target, query: query.slice(0, 80) },
+        body: { ...target, query: query.slice(0, 128) },
         throwOnError: true,
       });
       setLoginUsers(response.data.users);
@@ -427,9 +427,9 @@ function RuntimeCard({
             <TextInput
               label="Search eligible users"
               value={loginQuery}
-              maxLength={80}
+              maxLength={128}
               onChange={(event) => {
-                const value = event.currentTarget.value.slice(0, 80);
+                const value = event.currentTarget.value.slice(0, 128);
                 setLoginQuery(value);
                 void queryLoginUsers(value);
               }}

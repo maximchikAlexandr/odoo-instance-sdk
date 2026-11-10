@@ -121,7 +121,7 @@
           },
           "query": {
             "default": "",
-            "maxLength": 80,
+            "maxLength": 128,
             "type": "string"
           }
         },
