@@ -41,7 +41,7 @@ from toon import encode, encoders as toon_encoders
 from odoo_instance_sdk.internal.dbprep.source import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.output_rich import rich_plan_projection as _rich_plan_projection
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
-from odoo_instance_sdk.models.backup import PostgresClusterState
+from odoo_instance_sdk.models.backup import PostgresClusterState, RestoreCompletionFailureContext
 
 if TYPE_CHECKING:
     from toon.types import Depth, JsonArray, ResolvedEncodeOptions
@@ -242,6 +242,7 @@ def _failure_context(error: BaseException | None) -> JsonObject:
             DatabasePreparationFailureContext,
             DatabaseDropFailureContext,
             CopyReplacementFailureContext,
+            RestoreCompletionFailureContext,
         ),
     ):
         return {}

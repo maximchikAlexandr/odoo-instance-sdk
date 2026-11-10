@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
-from odoo_instance_sdk.models import Backup, BackupState, EnvironmentState, RestoreState
+from odoo_instance_sdk.models import (
+    Backup,
+    BackupState,
+    EnvironmentState,
+    PostRestoreCheckpoint,
+    RestoreState,
+)
 from odoo_instance_sdk.storage.catalog.helpers import (
     CurrentBackupProvenance,
     _row_to_backup,
@@ -47,6 +53,7 @@ class _RestoreMixin:
         data_directory: str | Path | None = None,
         database_oid: int | None = None,
         state: RestoreState | str = RestoreState.COMPLETE,
+        post_restore_checkpoint: PostRestoreCheckpoint | str | None = None,
     ) -> None:
         host = normalize_db_host(db_host)
         kind, evidence_backup_id, digest = restore_provenance(backup_id, source_kind, source_sha256)
@@ -54,6 +61,16 @@ class _RestoreMixin:
             restore_state = RestoreState(state)
         except (TypeError, ValueError) as exc:
             raise BackupCatalogError("restore state must be 'complete' or 'incomplete'") from exc
+        try:
+            checkpoint = (
+                None
+                if post_restore_checkpoint is None
+                else PostRestoreCheckpoint(post_restore_checkpoint)
+            )
+        except (TypeError, ValueError) as exc:
+            raise BackupCatalogError("post-restore checkpoint is invalid") from exc
+        if checkpoint is not None and restore_state is not RestoreState.INCOMPLETE:
+            raise BackupCatalogError("post-restore checkpoints require an incomplete restore")
         identity = None if cluster_id is None else self._cluster_uuid(cluster_id)
         data_dir = None if data_directory is None else str(data_directory)
         if data_dir is not None and not data_dir.strip():
@@ -68,8 +85,9 @@ class _RestoreMixin:
             self._conn.execute(
                 """INSERT INTO restores
                    (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
-                   restored_at, cluster_id, data_directory, database_oid, state)
-                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)""",
+                   restored_at, cluster_id, data_directory, database_oid, state,
+                   post_restore_checkpoint)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)""",
                 (
                     host,
                     db_port,
@@ -81,6 +99,7 @@ class _RestoreMixin:
                     data_dir,
                     database_oid,
                     restore_state.value,
+                    None if checkpoint is None else checkpoint.value,
                 ),
             )
             self._conn.execute(
@@ -483,7 +502,7 @@ class _RestoreMixin:
             "list[sqlite3.Row]",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, database_oid, restored_at, state "
+                "data_directory, database_oid, restored_at, state, post_restore_checkpoint "
                 "FROM restores WHERE db_host=? AND db_port=? "
                 "ORDER BY database_name ASC, restored_at DESC, sequence DESC",
                 (host, db_port),
@@ -500,12 +519,126 @@ class _RestoreMixin:
             "sqlite3.Row | None",
             self._conn.execute(
                 "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
-                "data_directory, database_oid, restored_at, state "
+                "data_directory, database_oid, restored_at, state, sequence, "
+                "post_restore_checkpoint "
                 "FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
                 "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
                 (host, db_port, database_name),
             ).fetchone(),
         )
+
+    @_translate_sqlite_error
+    def _advance_restore_checkpoint(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+        *,
+        expected_sequence: int,
+        expected_checkpoint: PostRestoreCheckpoint | str,
+        checkpoint: PostRestoreCheckpoint | str,
+    ) -> int:
+        """Append a checkpoint only while the exact latest incomplete row matches."""
+        host = normalize_db_host(db_host)
+        try:
+            before = PostRestoreCheckpoint(expected_checkpoint)
+            after = PostRestoreCheckpoint(checkpoint)
+        except (TypeError, ValueError) as exc:
+            raise BackupCatalogError("post-restore checkpoint is invalid") from exc
+        if (
+            before is not PostRestoreCheckpoint.RESET_PENDING
+            or after is not PostRestoreCheckpoint.RESET_COMPLETE
+        ):
+            raise BackupCatalogError("post-restore checkpoint transition is invalid")
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT * FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (host, db_port, database_name),
+            ).fetchone()
+            if (
+                row is None
+                or row["sequence"] != expected_sequence
+                or row["state"] != RestoreState.INCOMPLETE.value
+                or row["post_restore_checkpoint"] != before.value
+            ):
+                raise BackupCatalogError("latest restore binding changed before checkpoint advance")
+            cursor = self._conn.execute(
+                """INSERT INTO restores
+                   (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
+                    restored_at, cluster_id, data_directory, database_oid, state,
+                    post_restore_checkpoint)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, 'incomplete', ?)""",
+                (
+                    row["db_host"],
+                    row["db_port"],
+                    row["database_name"],
+                    row["backup_id"],
+                    row["source_kind"],
+                    row["source_sha256"],
+                    row["cluster_id"],
+                    row["data_directory"],
+                    row["database_oid"],
+                    after.value,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise BackupCatalogError("restore checkpoint append did not return a sequence")
+            return cursor.lastrowid
+
+    @_translate_sqlite_error
+    def _complete_restore_binding(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+        *,
+        expected_sequence: int,
+        expected_checkpoint: PostRestoreCheckpoint | str,
+    ) -> int:
+        """Append the terminal exact binding without emitting a restored event."""
+        host = normalize_db_host(db_host)
+        try:
+            checkpoint = PostRestoreCheckpoint(expected_checkpoint)
+        except (TypeError, ValueError) as exc:
+            raise BackupCatalogError("post-restore checkpoint is invalid") from exc
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT * FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (host, db_port, database_name),
+            ).fetchone()
+            if (
+                row is None
+                or row["sequence"] != expected_sequence
+                or row["state"] != RestoreState.INCOMPLETE.value
+                or row["post_restore_checkpoint"] != checkpoint.value
+                or checkpoint is PostRestoreCheckpoint.RESET_PENDING
+            ):
+                raise BackupCatalogError("latest restore binding changed before completion")
+            cursor = self._conn.execute(
+                """INSERT INTO restores
+                   (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
+                    restored_at, cluster_id, data_directory, database_oid, state,
+                    post_restore_checkpoint)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, 'complete', NULL)""",
+                (
+                    row["db_host"],
+                    row["db_port"],
+                    row["database_name"],
+                    row["backup_id"],
+                    row["source_kind"],
+                    row["source_sha256"],
+                    row["cluster_id"],
+                    row["data_directory"],
+                    row["database_oid"],
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise BackupCatalogError("restore completion append did not return a sequence")
+            return cursor.lastrowid
 
     @_translate_sqlite_error
     def distinct_restored_database_names(

@@ -104,6 +104,42 @@ def test_catalog_settings_migration_0014_to_0015_is_reversible_and_preserves_row
     conn.close()
 
 
+def test_post_restore_checkpoint_migration_preserves_existing_bindings_as_null(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "post-restore-checkpoint.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "0015")
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO restores "
+        "(db_host,db_port,database_name,backup_id,source_kind,source_sha256,restored_at,"
+        "cluster_id,data_directory,state,database_oid) "
+        "VALUES ('localhost',5432,'legacy',NULL,'local_archive',?, 'before',NULL,NULL,"
+        "'incomplete',NULL)",
+        ("d" * 64,),
+    )
+    conn.commit()
+    conn.close()
+
+    command.upgrade(config, "0016")
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT state,post_restore_checkpoint FROM restores WHERE database_name='legacy'"
+    ).fetchone() == ("incomplete", None)
+    conn.close()
+
+    command.downgrade(config, "0015")
+    conn = sqlite3.connect(str(db))
+    assert "post_restore_checkpoint" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(restores)")
+    }
+    assert conn.execute("SELECT state FROM restores WHERE database_name='legacy'").fetchone() == (
+        "incomplete",
+    )
+    conn.close()
+
+
 def test_restore_state_migration_backfills_and_downgrades_to_legacy_shape(
     tmp_path: Path,
 ) -> None:

@@ -163,6 +163,7 @@ UTC/ISO-8601 values. For example:
 odcli env create PROJ-123 --dry-run
 odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
 odcli db restore --file ./backup.zip --target restored_db --dry-run
+odcli db restore --complete restored_db --dry-run
 ```
 
 ### Lifecycle and recovery contracts
@@ -194,6 +195,12 @@ confirmation boundaries:
   target and environment identity, use matching database/filestore
   provenance, support the existing `--reset-admin-password`, and retain
   sanitized retry evidence on incomplete compensation.
+- If restore import, verification, filestore restore, and neutralization finished
+  but administrator reset or default publication failed, inspect
+  `odcli db restore --complete TARGET --dry-run` before retrying. Completion
+  requires a project-owned target with a non-null checkpoint. Optional module
+  repairs use repeated `--update-module MODULE`; modules are never inferred.
+  Legacy incomplete rows remain on the existing guarded reimport path.
 - Top-level `odcli stop` validates the persisted owner and the secret-free
   launch identity captured when the runtime started, plus live executable,
   argv, create time, cwd, config, and (on POSIX) process-group identity.

@@ -1665,6 +1665,41 @@ def test_production_restore_command_rolls_back_after_odoo_child_failure(
     )
 
 
+def test_reset_failure_after_completed_restore_records_completion_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.models import PostRestoreCheckpoint
+
+    observed: dict[str, object] = {}
+    command, _executor, project, _backup_value, write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        odoo_returncode=1,
+        observed=observed,
+        restore_probe_results=("false\n", "123\n"),
+    )
+    monkeypatch.setattr(
+        type(observed["cluster"]), "_restore_provenance", lambda _cluster: ("cluster-id", None)
+    )
+
+    with pytest.raises(Exception, match="Administrator password reset failed") as failure:
+        command.run()
+
+    catalog = cast("MagicMock", observed["client"]).get_catalog.return_value
+    catalog.record_restore.assert_called_once()
+    assert catalog.record_restore.call_args.kwargs["state"] == RestoreState.INCOMPLETE
+    assert (
+        catalog.record_restore.call_args.kwargs["post_restore_checkpoint"]
+        is PostRestoreCheckpoint.RESET_PENDING
+    )
+    assert catalog.record_restore.call_args.kwargs["database_oid"] == 123
+    context = getattr(failure.value, "failure_context")
+    assert context.completed_stages == ("db_restore", "db_verify", "filestore_restore")
+    assert context.pending_stage == "admin_reset"
+    assert project.default_source_database == "old"
+    write.assert_not_called()
+
+
 def test_restore_failure_before_attempt_does_not_consume_or_record_probe_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1701,7 +1736,7 @@ def test_restore_failure_after_attempt_persists_valid_incomplete_evidence(
         tmp_path,
         monkeypatch,
         observed=observed,
-        restore_probe_results=("false\n", "true\n"),
+        restore_probe_results=("false\n", "123\n"),
     )
     client = cast("MagicMock", observed["client"])
     local = cast("MagicMock", observed["local"])
