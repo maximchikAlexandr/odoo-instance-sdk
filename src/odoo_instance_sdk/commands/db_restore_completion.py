@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from rich.console import Console
 from rich_click import UsageError
@@ -82,7 +83,7 @@ def completion_command(
 def restore_interruption_context(
     error: KeyboardInterrupt,
     *,
-    backup_id: object,
+    backup_id: UUID | None,
     archive_file: Path | None,
     target_database: str | None,
 ) -> JsonObject:
