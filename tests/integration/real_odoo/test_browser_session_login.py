@@ -6,6 +6,8 @@ import os
 import subprocess
 import urllib.error
 import urllib.request
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +102,22 @@ env.cr.commit()
     assert "sid" not in str(failure.value).lower()
 
 
+@contextmanager
+def _runtime_environment(environment: Mapping[str, str]) -> Iterator[None]:
+    """Bind public SDK operations to this runtime's private HOME and catalog."""
+    previous = {key: os.environ.get(key) for key in environment}
+    present = {key: key in os.environ for key in environment}
+    os.environ.update(environment)
+    try:
+        yield
+    finally:
+        for key in environment:
+            if present[key]:
+                os.environ[key] = str(previous[key])
+            else:
+                os.environ.pop(key, None)
+
+
 @pytest.fixture(scope="module")
 def browser_session_server(
     target_runtime: E2ERuntime,
@@ -192,6 +210,8 @@ def browser_session_server(
     )
     assert "--config" in cli_probe.stdout
     process = None
+    primary_failure: BaseException | None = None
+    cleanup_failures: list[BaseException] = []
     try:
         process = instance.start()
         instance.wait_ready(process, timeout=120)
@@ -201,9 +221,24 @@ def browser_session_server(
             "instance": instance,
             "session_store": session_store,
         }
+    except BaseException as error:
+        primary_failure = error
     finally:
         if process is not None:
-            instance.stop(process)
+            try:
+                with _runtime_environment(runtime.environment):
+                    instance.stop(process)
+            except BaseException as error:
+                cleanup_failures.append(error)
+    if primary_failure is not None and cleanup_failures:
+        raise BaseExceptionGroup(
+            "browser test and server cleanup both failed",
+            [primary_failure, *cleanup_failures],
+        )
+    if primary_failure is not None:
+        raise primary_failure
+    if cleanup_failures:
+        raise BaseExceptionGroup("browser server cleanup failed", cleanup_failures)
 
 
 @pytest.fixture
@@ -239,20 +274,42 @@ env.cr.commit()
             cleanup_user, argv=(login,), timeout=30, commit=True
         ).run()
 
-    try:
-        instance.run_shell_script_command(create_user, argv=(login,), timeout=30, commit=True).run()
-        users = instance.list_browser_login_users_command(login).run()
-        assert len(users) == 1
-        selected = users[0]
-        yield {
-            **browser_session_server,
-            "selected": selected,
-            "login": login,
-            "cleanup_user": cleanup_selected_user,
-        }
-    finally:
-        cleanup_selected_user()
-        assert instance.list_browser_login_users_command(login).run() == ()
+    primary_failure: BaseException | None = None
+    cleanup_failures: list[BaseException] = []
+    with _runtime_environment(runtime.environment):
+        try:
+            instance.run_shell_script_command(
+                create_user, argv=(login,), timeout=30, commit=True
+            ).run()
+            users = instance.list_browser_login_users_command(login).run()
+            assert len(users) == 1
+            selected = users[0]
+            yield {
+                **browser_session_server,
+                "selected": selected,
+                "login": login,
+                "cleanup_user": cleanup_selected_user,
+            }
+        except BaseException as error:
+            primary_failure = error
+        finally:
+            try:
+                cleanup_selected_user()
+            except BaseException as error:
+                cleanup_failures.append(error)
+            try:
+                assert instance.list_browser_login_users_command(login).run() == ()
+            except BaseException as error:
+                cleanup_failures.append(error)
+    if primary_failure is not None and cleanup_failures:
+        raise BaseExceptionGroup(
+            "browser test and user cleanup both failed",
+            [primary_failure, *cleanup_failures],
+        )
+    if primary_failure is not None:
+        raise primary_failure
+    if cleanup_failures:
+        raise BaseExceptionGroup("browser user cleanup failed", cleanup_failures)
 
 
 def test_source_browser_selected_user_session(
