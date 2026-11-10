@@ -142,7 +142,7 @@ if not user:
         'name': 'OdCLI Browser Session Fixture',
         'active': True,
         'share': False,
-        'groups_id': [(6, 0, [env.ref('base.group_user').id])],
+        'group_ids': [(6, 0, [env.ref('base.group_user').id])],
     })
 env.cr.commit()
 print(user.id)
