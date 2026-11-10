@@ -282,11 +282,6 @@ def _switch_database_config(path: Path, database: str) -> None:
 def _start_owned(instance: Any, runtime: E2ERuntime) -> Any:
     process = instance.start()
     instance.wait_ready(process, timeout=180.0)
-    instance._persist_runtime_identity(
-        process.pid,
-        instance.config.start_config,
-        instance.config.default_cwd,
-    )
     runtime.ledger.record(
         "process",
         f"{runtime.run_id}-odoo-{process.pid}",
