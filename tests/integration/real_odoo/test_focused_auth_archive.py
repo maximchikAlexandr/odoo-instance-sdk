@@ -12,6 +12,12 @@ import pytest
 from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
+    ProcessResult,
+    StepObserver,
+    SubprocessExecutor,
+)
 from odoo_instance_sdk.models import BackupState
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
@@ -40,6 +46,11 @@ from tests.integration.real_odoo.focused_support import (
     project_filestore,
     record as _record,
     seed_backup as _seed_backup,
+)
+from tests.integration.real_odoo.inventory_diagnostics import (
+    InventoryDiagnostic,
+    inventory_diagnostic,
+    inventory_step_id,
 )
 
 pytestmark = [
@@ -472,6 +483,28 @@ def test_complete_post_restore_without_reimport(
     _ensure_isolated_environment(catalog_path, project)
     _approve_project_postgres(project, environment)
 
+    inventory_diagnostics: list[InventoryDiagnostic] = []
+    original_execute = SubprocessExecutor.execute
+
+    def capture_inventory_result(
+        self: SubprocessExecutor,
+        step: PreparedStep,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResult:
+        if not inventory_step_id(step):
+            return original_execute(self, step, observer=observer, observe_output=observe_output)
+        try:
+            result = original_execute(self, step, observer=observer, observe_output=observe_output)
+        except BaseException as error:
+            inventory_diagnostics.append(inventory_diagnostic(None, error=error))
+            raise
+        inventory_diagnostics.append(inventory_diagnostic(result))
+        return result
+
+    monkeypatch.setattr(SubprocessExecutor, "execute", capture_inventory_result)
+
     reset_failure_injected = False
 
     def fail_reset_once(self: DatabaseResource, *, admin_password: str, provenance: str) -> object:
@@ -586,6 +619,9 @@ def test_complete_post_restore_without_reimport(
         ],
         environment,
     )
+    inventory_evidence = {"inventory_processes": inventory_diagnostics}
+    assert_secret_free(inventory_evidence, failure_evidence.secret_canary)
+    _record(record_property, "POST_RESTORE_INVENTORY_DIAGNOSTICS", inventory_evidence)
     repeated_result = _assert_post_restore_no_op(
         repeated, project, target, home=environment["HOME"]
     )
