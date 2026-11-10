@@ -18,6 +18,11 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
+    BrowserLoginTicket,
+    BrowserLoginTicketRequest,
+    BrowserLoginUser,
+    BrowserLoginUsersRequest,
+    BrowserLoginUsersResponse,
     HttpError,
     HttpErrorCode,
     PgAdminOpenRequest,
@@ -275,6 +280,11 @@ def install_openapi_schema(app: FastAPI) -> None:
         schemas.update(
             _msgspec_components(
                 Snapshot,
+                BrowserLoginTicket,
+                BrowserLoginTicketRequest,
+                BrowserLoginUser,
+                BrowserLoginUsersRequest,
+                BrowserLoginUsersResponse,
                 HttpError,
                 PgAdminOpenRequest,
                 PgAdminOpenResult,
@@ -351,6 +361,39 @@ def install_openapi_schema(app: FastAPI) -> None:
                             (503, "Runtime unavailable"),
                         )
                     },
+                }
+        for path, request_model, response_model, description in (
+            (
+                "/api/v1/odoo/users/query",
+                BrowserLoginUsersRequest,
+                BrowserLoginUsersResponse,
+                "Eligible users returned",
+            ),
+            (
+                "/api/v1/odoo/login-tickets",
+                BrowserLoginTicketRequest,
+                BrowserLoginTicket,
+                "One-time instance-host handoff issued",
+            ),
+        ):
+            path_value = paths.get(path)
+            operation_value = path_value.get("post") if isinstance(path_value, dict) else None
+            if isinstance(operation_value, dict):
+                operation_value["requestBody"] = {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": f"#/components/schemas/{request_model.__name__}"}
+                        }
+                    },
+                }
+                operation_value["responses"] = {
+                    "200": {"description": description, **_typed_response(response_model)},
+                    "409": {
+                        "description": "Browser login unavailable",
+                        **_typed_response(HttpError),
+                    },
+                    "422": {"description": "Invalid request", **_typed_response(HttpError)},
                 }
         app.openapi_schema = schema
         return cast("dict[str, JsonValue]", schema)

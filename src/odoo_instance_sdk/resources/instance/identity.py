@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
+import stat
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+import msgspec
 import psutil
 
 from odoo_instance_sdk.exceptions import (
@@ -77,10 +82,19 @@ if TYPE_CHECKING:
         Command,
     )
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
+    from odoo_instance_sdk.models import BrowserLoginUser
     from odoo_instance_sdk.resources.git import GitResource
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _BrowserSessionCredential:
+    sid: str
+
+    def __repr__(self) -> str:
+        return "_BrowserSessionCredential(sid=<redacted>)"
 
 
 class _IdentityMixin:
@@ -676,6 +690,7 @@ class _IdentityMixin:
         exclusive: bool,
         result_converter: Callable[[CommandResult], T] | None = None,
         callback_override: Callable[[], T] | None = None,
+        context_callback_override: Callable[[RunContext[T]], T] | None = None,
         preflight: Callable[[RunContext[T]], None] | None = None,
         extra_steps: Sequence[PreparedStep | PreparedAction] = (),
         executor: ProcessExecutor | None = None,
@@ -721,6 +736,11 @@ class _IdentityMixin:
                     _write_secret_config(snapshot, secret_path)
                     secret_created = True
                 try:
+                    if context_callback_override is not None:
+                        context.action(action.step_id)
+                        converted_result = context_callback_override(context)
+                        context.complete_action(action.step_id)
+                        return converted_result
                     if callback_override is not None:
                         context.action(action.step_id)
                         converted_result = callback_override()
@@ -993,3 +1013,110 @@ class _IdentityMixin:
             mismatches.append("process_group")
         if mismatches:
             raise RuntimeError(f"runtime identity mismatch: {', '.join(mismatches)}")
+
+    def list_browser_login_users_command(
+        self, query: str = ""
+    ) -> Command[tuple[BrowserLoginUser, ...]]:
+        """Return a bounded list of active internal non-superuser Odoo users."""
+        from odoo_instance_sdk.models import BrowserLoginUser
+
+        if len(query) > 80:
+            raise ValueError("browser login search is too long")
+        source = """import json, sys
+query = sys.argv[1].strip()
+domain = [('active', '=', True), ('share', '=', False), ('id', '!=', SUPERUSER_ID)]
+if query:
+    domain = ['&', '&', '&', ('active', '=', True), ('share', '=', False), ('id', '!=', SUPERUSER_ID), '|', ('login', 'ilike', query), ('name', 'ilike', query)]
+users = env['res.users'].sudo().search(domain, limit=100, order='name, id')
+print(json.dumps([{'id': user.id, 'login': user.login, 'name': user.name} for user in users[:100]]))
+"""
+
+        def decode(result: CommandResult) -> tuple[BrowserLoginUser, ...]:
+            if result.returncode != 0:
+                raise RuntimeError("browser login user query failed")
+            try:
+                return msgspec.json.decode(result.stdout, type=tuple[BrowserLoginUser, ...])
+            except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+                raise RuntimeError("browser login user query returned invalid data") from exc
+
+        return self._shell_script_command(
+            source,
+            argv=(query,),
+            timeout=30,
+            commit=False,
+            exclusive=False,
+            result_converter=decode,
+        )
+
+    def create_browser_session_command(self, user_id: int) -> Command[_BrowserSessionCredential]:
+        """Create a supported Odoo session and keep its SID in a private file."""
+        if type(user_id) is not int or user_id <= 0:
+            raise ValueError("browser login user id must be positive")
+        handoff_dir = Path(tempfile.gettempdir()) / f"odcli-browser-session-{uuid.uuid4().hex}"
+        handoff_file = handoff_dir / "sid"
+        source = """import os, sys
+from odoo.http import root
+user = env['res.users'].sudo().browse(int(sys.argv[2])).exists()
+if not user or not user.active or user.share or user.id == SUPERUSER_ID:
+    raise RuntimeError('selected user is not eligible')
+store = root.session_store
+if type(store).__name__ != 'FilesystemSessionStore':
+    raise RuntimeError('unsupported session store')
+session = store.new()
+try:
+    session.update({
+        'db': env.cr.dbname,
+        'login': user.login,
+        'uid': user.id,
+        'context': dict(user.context_get()),
+        'session_token': user._compute_session_token(session.sid),
+    })
+    store.save(session)
+    directory = os.path.dirname(os.path.abspath(sys.argv[1]))
+    os.mkdir(directory, 0o700)
+    descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as output:
+        output.write(session.sid)
+except Exception:
+    store.delete(session)
+    raise
+finally:
+    if os.path.exists(sys.argv[1]):
+        os.chmod(sys.argv[1], 0o600)
+"""
+
+        def execute(context: RunContext[_BrowserSessionCredential]) -> _BrowserSessionCredential:
+            try:
+                result = cast("ProcessResult", context.process("instance.shell_script"))
+                if result.returncode != 0:
+                    raise RuntimeError("browser login session creation failed")
+                descriptor = os.open(handoff_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    directory_info = os.stat(handoff_dir, follow_symlinks=False)
+                    info = os.fstat(descriptor)
+                    if (
+                        not stat.S_ISDIR(directory_info.st_mode)
+                        or directory_info.st_mode & 0o077
+                        or directory_info.st_uid != os.geteuid()
+                        or not stat.S_ISREG(info.st_mode)
+                        or info.st_mode & 0o077
+                        or info.st_uid != os.geteuid()
+                    ):
+                        raise RuntimeError("browser login handoff is invalid")
+                    sid = os.read(descriptor, 512).decode("ascii")
+                finally:
+                    os.close(descriptor)
+                if not sid or len(sid) > 256:
+                    raise RuntimeError("browser login handoff is invalid")
+                return _BrowserSessionCredential(sid)
+            finally:
+                shutil.rmtree(handoff_dir, ignore_errors=True)
+
+        return self._shell_script_command(
+            source,
+            argv=(str(handoff_file), str(user_id)),
+            timeout=30,
+            commit=True,
+            exclusive=True,
+            context_callback_override=execute,
+        )

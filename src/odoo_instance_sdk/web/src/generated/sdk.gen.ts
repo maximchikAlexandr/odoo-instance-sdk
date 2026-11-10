@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { GetMonitorSnapshotData, GetMonitorSnapshotErrors, GetMonitorSnapshotResponses, HealthzHealthzGetData, HealthzHealthzGetResponses, OpenPgAdminData, OpenPgAdminErrors, OpenPgAdminResponses, StartRuntimeData, StartRuntimeErrors, StartRuntimeResponses, StopRuntimeData, StopRuntimeErrors, StopRuntimeResponses } from './types.gen';
+import type { GetMonitorSnapshotData, GetMonitorSnapshotErrors, GetMonitorSnapshotResponses, HealthzHealthzGetData, HealthzHealthzGetResponses, IssueOdooBrowserLoginTicketData, IssueOdooBrowserLoginTicketErrors, IssueOdooBrowserLoginTicketResponses, OpenPgAdminData, OpenPgAdminErrors, OpenPgAdminResponses, QueryOdooBrowserLoginUsersData, QueryOdooBrowserLoginUsersErrors, QueryOdooBrowserLoginUsersResponses, StartRuntimeData, StartRuntimeErrors, StartRuntimeResponses, StopRuntimeData, StopRuntimeErrors, StopRuntimeResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -17,6 +17,30 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
      */
     meta?: keyof ClientMeta extends never ? Record<string, unknown> : ClientMeta;
 };
+
+/**
+ * Issue
+ */
+export const issueOdooBrowserLoginTicket = <ThrowOnError extends boolean = false>(options: Options<IssueOdooBrowserLoginTicketData, ThrowOnError>): RequestResult<IssueOdooBrowserLoginTicketResponses, IssueOdooBrowserLoginTicketErrors, ThrowOnError> => (options.client ?? client).post<IssueOdooBrowserLoginTicketResponses, IssueOdooBrowserLoginTicketErrors, ThrowOnError>({
+    url: '/api/v1/odoo/login-tickets',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Users
+ */
+export const queryOdooBrowserLoginUsers = <ThrowOnError extends boolean = false>(options: Options<QueryOdooBrowserLoginUsersData, ThrowOnError>): RequestResult<QueryOdooBrowserLoginUsersResponses, QueryOdooBrowserLoginUsersErrors, ThrowOnError> => (options.client ?? client).post<QueryOdooBrowserLoginUsersResponses, QueryOdooBrowserLoginUsersErrors, ThrowOnError>({
+    url: '/api/v1/odoo/users/query',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
 
 /**
  * Open Pgadmin

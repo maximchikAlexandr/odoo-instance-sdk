@@ -19,6 +19,50 @@ export type BackupFreshnessSnapshot = {
 };
 
 /**
+ * BrowserLoginTicket
+ */
+export type BrowserLoginTicket = {
+    action_url: string;
+    expires_at: string;
+    handoff: string;
+    method: string;
+};
+
+/**
+ * BrowserLoginTicketRequest
+ */
+export type BrowserLoginTicketRequest = {
+    owner_id: string;
+    owner_kind: 'environment' | 'project';
+    user_id: number;
+};
+
+/**
+ * BrowserLoginUser
+ */
+export type BrowserLoginUser = {
+    id: number;
+    login: string;
+    name: string;
+};
+
+/**
+ * BrowserLoginUsersRequest
+ */
+export type BrowserLoginUsersRequest = {
+    owner_id: string;
+    owner_kind: 'environment' | 'project';
+    query?: string;
+};
+
+/**
+ * BrowserLoginUsersResponse
+ */
+export type BrowserLoginUsersResponse = {
+    users: Array<BrowserLoginUser>;
+};
+
+/**
  * ClusterContainer
  */
 export type ClusterContainer = {
@@ -179,6 +223,7 @@ export type HttpError = {
  * HttpErrorCode
  */
 export enum HttpErrorCode {
+    BROWSER_LOGIN_UNAVAILABLE = 'browser_login_unavailable',
     DATABASE_NOT_FOUND = 'database_not_found',
     ENVIRONMENT_NOT_FOUND = 'environment_not_found',
     INVALID_REQUEST = 'invalid_request',
@@ -450,6 +495,64 @@ export type ValidationError = {
      */
     type: string;
 };
+
+export type IssueOdooBrowserLoginTicketData = {
+    body: BrowserLoginTicketRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/odoo/login-tickets';
+};
+
+export type IssueOdooBrowserLoginTicketErrors = {
+    /**
+     * Browser login unavailable
+     */
+    409: HttpError;
+    /**
+     * Invalid request
+     */
+    422: HttpError;
+};
+
+export type IssueOdooBrowserLoginTicketError = IssueOdooBrowserLoginTicketErrors[keyof IssueOdooBrowserLoginTicketErrors];
+
+export type IssueOdooBrowserLoginTicketResponses = {
+    /**
+     * One-time instance-host handoff issued
+     */
+    200: BrowserLoginTicket;
+};
+
+export type IssueOdooBrowserLoginTicketResponse = IssueOdooBrowserLoginTicketResponses[keyof IssueOdooBrowserLoginTicketResponses];
+
+export type QueryOdooBrowserLoginUsersData = {
+    body: BrowserLoginUsersRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/odoo/users/query';
+};
+
+export type QueryOdooBrowserLoginUsersErrors = {
+    /**
+     * Browser login unavailable
+     */
+    409: HttpError;
+    /**
+     * Invalid request
+     */
+    422: HttpError;
+};
+
+export type QueryOdooBrowserLoginUsersError = QueryOdooBrowserLoginUsersErrors[keyof QueryOdooBrowserLoginUsersErrors];
+
+export type QueryOdooBrowserLoginUsersResponses = {
+    /**
+     * Eligible users returned
+     */
+    200: BrowserLoginUsersResponse;
+};
+
+export type QueryOdooBrowserLoginUsersResponse = QueryOdooBrowserLoginUsersResponses[keyof QueryOdooBrowserLoginUsersResponses];
 
 export type OpenPgAdminData = {
     body: PgAdminOpenRequest;

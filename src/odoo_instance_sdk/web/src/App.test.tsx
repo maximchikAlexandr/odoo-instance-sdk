@@ -9,6 +9,8 @@ import {
   openPgAdmin,
   startRuntime,
   stopRuntime,
+  queryOdooBrowserLoginUsers,
+  issueOdooBrowserLoginTicket,
   EnvironmentState,
   PgAdminEligibilityState,
   PidScope,
@@ -24,6 +26,8 @@ vi.mock("./generated", async (importOriginal) => ({
   openPgAdmin: vi.fn(),
   startRuntime: vi.fn(),
   stopRuntime: vi.fn(),
+  queryOdooBrowserLoginUsers: vi.fn(),
+  issueOdooBrowserLoginTicket: vi.fn(),
 }));
 
 Object.defineProperty(window, "matchMedia", {
@@ -210,6 +214,42 @@ describe("App", () => {
     expect(screen.getAllByTestId("project-card")).toHaveLength(1);
     expect(screen.getByText("beta (b)")).toBeTruthy();
     expect(getMonitorSnapshot).toHaveBeenCalledWith(expect.objectContaining({ throwOnError: true }));
+  });
+
+  it("opens a transient selected-user form while preserving Open Odoo", async () => {
+    vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshot) as never);
+    vi.mocked(queryOdooBrowserLoginUsers).mockResolvedValue({
+      data: { users: [{ id: 42, login: "fixture-user", name: "Fixture User" }] },
+    } as never);
+    vi.mocked(issueOdooBrowserLoginTicket).mockResolvedValue({
+      data: {
+        action_url: "https://env-a.example.test/_odcli/auth/consume",
+        method: "POST",
+        handoff: "fixture-handoff",
+        expires_at: "2030-01-01T00:00:00Z",
+      },
+    } as never);
+    const popup = { name: "", opener: window, close: vi.fn() } as unknown as Window;
+    const open = vi.spyOn(window, "open").mockReturnValue(popup);
+    const submit = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
+    render(<MantineProvider><App /></MantineProvider>);
+
+    await screen.findByText("ready-env");
+    fireEvent.click(screen.getAllByTestId("open-as-odoo")[3]);
+    expect(await screen.findByText("Tabs on this instance host share the same Odoo login cookie.")).toBeTruthy();
+    await waitFor(() => expect(queryOdooBrowserLoginUsers).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("textbox", { name: "User" }));
+    fireEvent.click(await screen.findByText("fixture-user — Fixture User"));
+    fireEvent.click(screen.getByRole("button", { name: "Open selected user" }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(issueOdooBrowserLoginTicket).toHaveBeenCalledWith(expect.objectContaining({
+      body: { owner_kind: "environment", owner_id: "a", user_id: 42 },
+    }));
+    expect(document.querySelector('form input[name="handoff"]')).toBeNull();
+    fireEvent.click(screen.getAllByTestId("open-odoo")[0]);
+    expect(open).toHaveBeenCalledWith("https://env-a.example.test", "_blank", "noopener,noreferrer");
   });
 
   it("composes the running filter with project selection without another snapshot request", async () => {
