@@ -672,12 +672,13 @@ def prepare_restore(  # noqa: C901
                 )
                 retained_incomplete = False
                 if checkpoint is PostRestoreCheckpoint.RESET_PENDING:
-                    retained = _retain_reset_pending_restore(
+                    retention = _retain_reset_pending_restore(
                         client,
                         preflight,
                         backup=backup,
                         local_restore=local_restore,
                     )
+                    retained = retention.retained
                     retained_incomplete = retained is True
                     if retained is None:
                         exists_before, exists_after, database_oid = (
