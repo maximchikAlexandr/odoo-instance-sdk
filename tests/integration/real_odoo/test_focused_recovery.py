@@ -71,6 +71,18 @@ def _prepare_recovery_case(
     name: str,
 ) -> tuple[str, Path, str, Path, dict[str, str]]:
     run_id = target_runtime.run_id
+    staged_archive = target_runtime.root / f"{name}-{run_id}.zip"
+    shutil.copy2(source_backup.path, staged_archive)
+    if name == "recovery":
+        temporary = staged_archive.with_suffix(".tmp.zip")
+        with zipfile.ZipFile(staged_archive) as source, zipfile.ZipFile(temporary, "w") as target:
+            for member in source.infolist():
+                contents = source.read(member.filename)
+                if member.filename == source_backup.dump_member:
+                    contents += b"\nSELECT pg_sleep(30);\n"
+                target.writestr(member, contents)
+        temporary.replace(staged_archive)
+
     project = _project(target_runtime, target_runtime.root / f"{name}-{run_id}")
     catalog_path = _isolated_catalog(
         _catalog_for_project(target_runtime, project), tmp_path / f"{name}-catalog"
@@ -79,17 +91,8 @@ def _prepare_recovery_case(
     project_id = registered_project_id(catalog_path, project)
     backup_home = catalog_path.parent.parent / ".odcli" / "backups"
     backup_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    archive_path = backup_home / f"{name}-{run_id}.zip"
-    shutil.copy2(source_backup.path, archive_path)
-    if name == "recovery":
-        temporary = archive_path.with_suffix(".tmp.zip")
-        with zipfile.ZipFile(archive_path) as source, zipfile.ZipFile(temporary, "w") as target:
-            for member in source.infolist():
-                contents = source.read(member.filename)
-                if member.filename == source_backup.dump_member:
-                    contents += b"\nSELECT pg_sleep(30);\n"
-                target.writestr(member, contents)
-        temporary.replace(archive_path)
+    archive_path = backup_home / staged_archive.name
+    staged_archive.replace(archive_path)
     backup_id = _RECOVERY_BACKUP_IDS[name]
     _seed_backup(
         catalog_path,

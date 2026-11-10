@@ -118,8 +118,6 @@ def test_recovery_input_is_removed_while_diagnostics_are_retained(
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr("dump.sql", "SELECT 1;")
         archive.writestr("filestore/blob", "fixture")
-    seed = Mock()
-    monkeypatch.setattr(recovery, "_seed_backup", seed)
     monkeypatch.setattr(
         recovery, "_project", Mock(side_effect=RuntimeError("stop before provisioning"))
     )
@@ -132,9 +130,14 @@ def test_recovery_input_is_removed_while_diagnostics_are_retained(
             evidence,
             name,
         )
-    copied_archive = seed.call_args.args[1]
-    assert copied_archive.read_bytes() == source.read_bytes()
+    staged_archive = runtime.root / f"{name}-{run_id}.zip"
+    assert staged_archive.is_file()
+    if name == "recovery":
+        with zipfile.ZipFile(staged_archive) as archive:
+            assert b"SELECT pg_sleep(30);" in archive.read("dump.sql")
+    else:
+        assert staged_archive.read_bytes() == source.read_bytes()
     monkeypatch.setenv("ODCLI_E2E_KEEP_FAILED", "1")
     fixtures._remove_runtime_files(runtime)
-    assert not copied_archive.exists()
+    assert not staged_archive.exists()
     assert set(runtime.artifact_root.iterdir()) == set(diagnostics)
