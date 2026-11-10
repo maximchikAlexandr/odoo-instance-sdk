@@ -142,7 +142,7 @@ jobs:
           assert {name: actual.get(name) for name in expected} == expected
           project_lock = tomllib.loads((root / "uv.lock").read_text())
           project_versions = {item["name"]: item["version"] for item in project_lock["package"]}
-assert project_versions.get("certifi") == "2026.10.23", project_versions.get("certifi")
+          assert project_versions.get("certifi") == "2026.10.23", project_versions.get("certifi")
           print("fixture_versions=" + repr({name: actual[name] for name in expected}))
           print("repository_certifi=" + project_versions["certifi"])
           PY
