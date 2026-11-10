@@ -280,6 +280,15 @@ def _isolated_catalog(source: Path, root: Path) -> Path:
     return destination
 
 
+def focused_cli_environment(base_environment: dict[str, str], catalog_path: Path) -> dict[str, str]:
+    """Isolate the catalogue while retaining the HOME that owns project resources."""
+    environment = dict(base_environment)
+    home = Path(environment.get("HOME", Path.home())).expanduser().resolve()
+    environment.setdefault("ODCLI_USER_ROOT", str(home / ".odcli"))
+    environment["ODCLI_E2E_CATALOG"] = str(catalog_path)
+    return environment
+
+
 def _ensure_isolated_environment(catalog_path: Path, project: Path) -> str:
     """Require each leaf to start from the active environment in its catalog."""
     return _assert_project_state_preflight(project, catalog_path)

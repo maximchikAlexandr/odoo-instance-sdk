@@ -19,10 +19,16 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
 )
 from odoo_instance_sdk.models import BackupState
+from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence
 from tests.integration.real_odoo.conftest import E2ERuntime
+from tests.integration.real_odoo.credential_binding_diagnostics import (
+    capture_binding,
+    capture_project_binding,
+    compare_bindings,
+)
 from tests.integration.real_odoo.failures import (
     assert_secret_free,
     write_archive_variant,
@@ -39,6 +45,7 @@ from tests.integration.real_odoo.focused_support import (
     _project_database_probe,
     catalog_state as _catalog_state,
     focused_catalog as _focused_catalog_fixture,
+    focused_cli_environment as _focused_cli_environment,
     focused_project as _focused_project_fixture,
     invoke_in_registered_worktree as _invoke_in_registered_worktree,
     observe_failure as _observe_failure,
@@ -474,9 +481,7 @@ def test_complete_post_restore_without_reimport(
     previous_default = ProjectConfig.load(project).default_source_database
     target = f"odcli_postrestore_{target_runtime.run_id.replace('-', '')[:22]}"
     environment = {
-        **target_runtime.environment,
-        "HOME": str(catalog_path.parent.parent),
-        "ODCLI_E2E_CATALOG": str(catalog_path),
+        **_focused_cli_environment(target_runtime.environment, catalog_path),
         "ODCLI_E2E_KEEP_FAILED": "1",
         "ODCLI_ADMIN_PASSWORD": failure_evidence.secret_canary,
     }
@@ -484,6 +489,33 @@ def test_complete_post_restore_without_reimport(
     _approve_project_postgres(project, environment)
 
     inventory_diagnostics: list[InventoryDiagnostic] = []
+    credential_bindings = []
+    from odoo_instance_sdk.internal.pg import inventory as inventory_module
+
+    original_credentials = inventory_module._credentials
+
+    def capture_credential_binding(instance: object) -> tuple[str, int, str | None, str | None]:
+        selected = original_credentials(cast("OdooInstance", instance))
+        credential_bindings.append(capture_binding(instance, selected))
+        return selected
+
+    monkeypatch.setattr(inventory_module, "_credentials", capture_credential_binding)
+    from odoo_instance_sdk.internal import project_init as project_init_module
+
+    publication_binding_traces: list[dict[str, object]] = []
+    original_generated_rewrite = project_init_module._rewrite_project_generated_database
+
+    def capture_publication_binding(root: Path, config: ProjectConfig, destination: Path) -> None:
+        before_publication = capture_project_binding(root)
+        original_generated_rewrite(root, config, destination)
+        after_publication = capture_project_binding(root)
+        publication_binding_traces.append(compare_bindings(before_publication, after_publication))
+
+    monkeypatch.setattr(
+        project_init_module,
+        "_rewrite_project_generated_database",
+        capture_publication_binding,
+    )
     original_execute = SubprocessExecutor.execute
 
     def capture_inventory_result(
@@ -622,6 +654,58 @@ def test_complete_post_restore_without_reimport(
     inventory_evidence = {"inventory_processes": inventory_diagnostics}
     assert_secret_free(inventory_evidence, failure_evidence.secret_canary)
     _record(record_property, "POST_RESTORE_INVENTORY_DIAGNOSTICS", inventory_evidence)
+    assert len(credential_bindings) >= 2
+    credential_trace = compare_bindings(credential_bindings[0], credential_bindings[-1])
+    assert_secret_free(credential_trace, failure_evidence.secret_canary)
+    for predicate in (
+        "cluster_identity_unchanged",
+        "endpoint_identity_unchanged",
+        "user_identity_unchanged",
+        "password_present_before",
+        "password_present_after",
+        "selected_password_matches_baseline",
+        "generated_password_matches_selected_before",
+        "generated_password_matches_selected_after",
+        "generated_password_matches_owned_file_before",
+        "generated_password_matches_owned_file_after",
+        "owned_password_file_unchanged",
+        "password_file_binding_unchanged",
+        "home_binding_unchanged",
+        "user_root_binding_unchanged",
+        "user_root_matches_home_before",
+        "user_root_matches_home_after",
+    ):
+        assert credential_trace[predicate] is True
+    assert (
+        credential_trace["credential_source_before"] == credential_trace["credential_source_after"]
+    )
+    _record(record_property, "POST_RESTORE_CREDENTIAL_BINDING", credential_trace)
+    assert publication_binding_traces
+    for publication_trace in publication_binding_traces:
+        for predicate in (
+            "cluster_identity_unchanged",
+            "endpoint_identity_unchanged",
+            "user_identity_unchanged",
+            "selected_password_matches_baseline",
+            "generated_password_matches_selected_before",
+            "generated_password_matches_selected_after",
+            "generated_password_matches_owned_file_before",
+            "generated_password_matches_owned_file_after",
+            "owned_password_file_unchanged",
+            "password_file_binding_unchanged",
+            "home_binding_unchanged",
+            "user_root_binding_unchanged",
+            "user_root_matches_home_before",
+            "user_root_matches_home_after",
+        ):
+            assert publication_trace[predicate] is True
+        assert (
+            publication_trace["credential_source_before"]
+            == publication_trace["credential_source_after"]
+        )
+    publication_evidence = {"default_publications": publication_binding_traces}
+    assert_secret_free(publication_evidence, failure_evidence.secret_canary)
+    _record(record_property, "POST_RESTORE_PUBLICATION_BINDING", publication_evidence)
     repeated_result = _assert_post_restore_no_op(
         repeated, project, target, home=environment["HOME"]
     )
