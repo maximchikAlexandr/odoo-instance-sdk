@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any
 import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
+from odoo_instance_sdk.project import ProjectConfig
+from scripts.real_odoo_pins import E2E_PINS
 
 from .conftest import E2ERuntime
 
@@ -37,7 +40,7 @@ def _post_json(url: str, payload: dict[str, Any], sid: str) -> tuple[int, dict[s
 @pytest.mark.timeout(180)
 def test_source_backed_selected_user_session_and_logout(
     target_runtime: E2ERuntime,
-    tmp_path: Path,
+    focused_project: Path,
     monkeypatch: pytest.MonkeyPatch,
     record_property: Any,
 ) -> None:
@@ -45,14 +48,29 @@ def test_source_backed_selected_user_session_and_logout(
     for key, value in runtime.environment.items():
         monkeypatch.setenv(key, value)
     database = runtime.topology.target_sentinel_database
-    config_text = runtime.config_file.read_text(encoding="utf-8")
-    config_text += f"\ndb_name = {database}\ndbfilter = ^{database}$\n"
-    config_path = tmp_path / "browser-login-odoo.conf"
-    config_path.write_text(config_text, encoding="utf-8")
-    config_path.chmod(0o600)
-
+    project = ProjectConfig.load(focused_project)
+    selector = focused_project / ".odcli" / "e2e-environment-id"
+    environment_id = selector.read_text(encoding="ascii").strip()
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
-    instance = client.instance.from_config(config_path)
+    environment = client.environments.get(environment_id)
+    instance = client.instance.from_environment(environment)
+    start_config = instance.config.start_config
+    assert start_config is not None
+    assert project.python is not None and Path(project.python).is_file()
+    assert project.odoo_bin is not None and Path(project.odoo_bin).is_file()
+    assert instance.config.command_prefix == (str(project.python), str(project.odoo_bin))
+    assert start_config.db_name == database
+    assert start_config.data_dir is not None
+    session_store = Path(start_config.data_dir) / "sessions"
+    assert Path(environment.generated_config_path).is_file()
+    assert Path(environment.worktree_path).is_dir()
+    pinned_source = subprocess.run(
+        ["git", "-C", environment.worktree_path, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert pinned_source == E2E_PINS.odoo_source_commit
     login = f"odcli_open_as_{runtime.run_id[:12]}"
     create_user = """import sys
 login = sys.argv[1]
@@ -74,6 +92,7 @@ env['res.users'].sudo().search([('login', '=', sys.argv[1])]).unlink()
 env.cr.commit()
 """
     process = None
+    database_ready = True  # focused_project initializes this pinned project database.
     try:
         instance.run_shell_script_command(create_user, argv=(login,), timeout=30, commit=True).run()
         users = instance.list_browser_login_users_command(login).run()
@@ -82,6 +101,7 @@ env.cr.commit()
         process = instance.start()
         instance.wait_ready(process, timeout=120)
         session = instance.create_browser_session_command(selected.id).run()
+        assert session_store.is_dir()
         status, response = _post_json(
             instance.config.base_url + "/web/session/get_session_info",
             {"jsonrpc": "2.0", "method": "call", "params": {}},
@@ -130,8 +150,11 @@ env.cr.commit()
             ),
         )
     finally:
-        if process is not None:
-            instance.stop(process)
-        instance.run_shell_script_command(
-            cleanup_user, argv=(login,), timeout=30, commit=True
-        ).run()
+        try:
+            if process is not None:
+                instance.stop(process)
+        finally:
+            if database_ready:
+                instance.run_shell_script_command(
+                    cleanup_user, argv=(login,), timeout=30, commit=True
+                ).run()

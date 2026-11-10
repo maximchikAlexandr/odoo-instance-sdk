@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ from tests.integration.real_odoo.focused_support import (
     observe_failure as _observe_failure,
     project_filestore,
     record as _record,
+    registered_project_id,
     registered_worktree as _registered_worktree,
     seed_backup as _seed_backup,
 )
@@ -69,21 +71,33 @@ def _prepare_recovery_case(
     name: str,
 ) -> tuple[str, Path, str, Path, dict[str, str]]:
     run_id = target_runtime.run_id
-    archive_path = target_runtime.root / f"{name}-{run_id}.zip"
-    shutil.copy2(source_backup.path, archive_path)
-    backup_id = _RECOVERY_BACKUP_IDS[name]
-    catalog_path = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
-    _seed_backup(
-        catalog_path,
-        archive_path,
-        backup_id=backup_id,
-        database=source_backup_plan.database,
-    )
     project = _project(target_runtime, target_runtime.root / f"{name}-{run_id}")
     catalog_path = _isolated_catalog(
         _catalog_for_project(target_runtime, project), tmp_path / f"{name}-catalog"
     )
     _ensure_isolated_environment(catalog_path, project)
+    project_id = registered_project_id(catalog_path, project)
+    backup_home = catalog_path.parent.parent / ".odcli" / "backups"
+    backup_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    archive_path = backup_home / f"{name}-{run_id}.zip"
+    shutil.copy2(source_backup.path, archive_path)
+    if name == "recovery":
+        temporary = archive_path.with_suffix(".tmp.zip")
+        with zipfile.ZipFile(archive_path) as source, zipfile.ZipFile(temporary, "w") as target:
+            for member in source.infolist():
+                contents = source.read(member.filename)
+                if member.filename == source_backup.dump_member:
+                    contents += b"\nSELECT pg_sleep(30);\n"
+                target.writestr(member, contents)
+        temporary.replace(archive_path)
+    backup_id = _RECOVERY_BACKUP_IDS[name]
+    _seed_backup(
+        catalog_path,
+        archive_path,
+        backup_id=backup_id,
+        database=source_backup_plan.database,
+        project_id=project_id,
+    )
     environment = {
         **os.environ,
         **target_runtime.environment,

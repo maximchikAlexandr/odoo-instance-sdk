@@ -33,6 +33,7 @@ from .focused_support import (
     observe_failure,
     project_filestore,
     record,
+    registered_project_id,
     registered_worktree,
     seed_backup,
 )
@@ -299,6 +300,9 @@ def _exec(state: _State) -> tuple[Result, dict[str, Any]]:
 
 def _default(state: _State) -> tuple[Result, dict[str, Any] | None]:
     result = _invoke(state, state.args, input="raise RuntimeError('focused leaf failure')\n")
+    if state.case.path == ("prepare-venv",):
+        assert result.exit_code == 0, result.output
+        return result, None
     if state.case.path not in {("psql",), ("logs",)}:
         assert result.exit_code == 0, result.output
         document = json.loads(result.stdout)
@@ -357,14 +361,30 @@ def invoke_case(
     if case.path in {("db", "drop"), ("db", "rm")}:
         args = ["db", "drop", runtime.topology.target_sentinel_database, "--yes"]
     if case.path in {("backup", "delete"), ("backup", "rm")}:
-        backup_path = runtime.artifact_root / f"leaf-{runtime.run_id}-{case.path[-1]}.zip"
+        active_catalog = catalog_path or Path(runtime.environment["ODCLI_E2E_CATALOG"])
+        backup_home = (
+            catalog_path.parent.parent
+            if catalog_path is not None
+            else Path(runtime.environment["HOME"])
+        )
+        backup_path = (
+            backup_home / ".odcli" / "backups" / f"leaf-{runtime.run_id}-{case.path[-1]}.zip"
+        )
+        backup_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with zipfile.ZipFile(backup_path, "w") as archive:
             archive.writestr("manifest.json", '{"db_name": "demo"}')
             archive.writestr("dump.sql", "-- database: demo\n")
             archive.writestr("filestore/demo/blob", b"fixture")
-        seed_backup(catalog_path or Path(runtime.environment["ODCLI_E2E_CATALOG"]), backup_path)
+        seed_backup(
+            active_catalog,
+            backup_path,
+            project_id=registered_project_id(active_catalog, project),
+        )
         args = ["backup", "delete", BACKUP_ID, "--yes"]
-    if case.classification not in {"native-passthrough", "jsonl-stream"}:
+    if case.path != ("prepare-venv",) and case.classification not in {
+        "native-passthrough",
+        "jsonl-stream",
+    }:
         args.extend(("--format", "json"))
     state = _State(
         case,
@@ -378,6 +398,7 @@ def invoke_case(
             **({"ODCLI_E2E_CATALOG": str(catalog_path)} if catalog_path else {}),
             "ODCLI_E2E_KEEP_FAILED": "1",
             "ODCLI_TEST_MASTER_PASSWORD": evidence.secret_canary,
+            "ODCLI_ADMIN_PASSWORD": evidence.secret_canary,
         },
         source_backup,
     )

@@ -183,14 +183,42 @@ def seed_backup(
     backup_id: str = BACKUP_ID,
     database: str = "demo",
     source_base_url: str = "http://127.0.0.1:8069",
+    project_id: str | None = None,
 ) -> None:
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     catalog = BackupCatalog(db_path=db_path)
     try:
-        catalog.start_download(backup_id, source_base_url, database, "zip", True, archive_path)
+        catalog.start_download(
+            backup_id,
+            source_base_url,
+            database,
+            "zip",
+            True,
+            archive_path,
+            project_id=project_id,
+        )
         catalog.success_download(backup_id, archive_path.name, archive_path.stat().st_size, digest)
     finally:
         catalog.close()
+
+
+def registered_project_id(catalog_path: Path, project: Path) -> str:
+    """Resolve the canonical project ownership recorded by public init."""
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        row = next(
+            (
+                item
+                for item in catalog.list_projects()
+                if Path(str(item["repository_root"])).resolve() == project.resolve()
+            ),
+            None,
+        )
+    finally:
+        catalog.close()
+    if row is None:
+        raise AssertionError(f"focused project is not registered in its catalog: {project}")
+    return str(row["project_id"])
 
 
 def catalog_state(db_path: Path, backup_id: str = BACKUP_ID) -> BackupState:

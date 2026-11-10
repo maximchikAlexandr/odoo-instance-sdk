@@ -241,7 +241,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
             result, runtime=target_runtime, evidence=failure_evidence, name="archive-truncated"
         )
         assert document is not None
-        assert document["error"]["code"] == "backup_validate_invalid"
+        assert document["error"]["code"] == "backup_corrupt"
     assert _catalog_state(catalog_path) is BackupState.AVAILABLE
     assert not (tmp_path / "database").exists()
     assert not (tmp_path / "filestore").exists()
