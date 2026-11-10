@@ -932,6 +932,7 @@ def test_stop_cli_real_resolved_context_owner_neutral_output(
         "environment_id": owner_id if owner_kind == "environment" else None,
         "environment_name": "demo" if owner_kind == "environment" else None,
     }
+    expected_worktree_path = str(context.runtime.root)
     if mode == "rich":
         for key, value in expected_identity.items():
             assert f"{key}={value}" in result.stdout
@@ -939,12 +940,16 @@ def test_stop_cli_real_resolved_context_owner_neutral_output(
         document = json.loads(result.stdout)
         assert all(document["context"][key] == value for key, value in expected_identity.items())
         assert all(document["result"][key] == value for key, value in expected_identity.items())
+        assert document["context"]["worktree_path"] == expected_worktree_path
+        assert document["result"]["worktree_path"] == expected_worktree_path
     else:
         from toon import DecodeOptions, decode
 
         document = decode(result.stdout, DecodeOptions(indent=2, strict=True))
         assert all(document["context"][key] == value for key, value in expected_identity.items())
         assert all(document["result"][key] == value for key, value in expected_identity.items())
+        assert document["context"]["worktree_path"] == expected_worktree_path
+        assert document["result"]["worktree_path"] == expected_worktree_path
     terminate.assert_called_once()
 
 

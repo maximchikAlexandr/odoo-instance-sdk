@@ -694,10 +694,18 @@ def test_source_backed_full_critical_path(  # noqa: C901
         repeated_stop_result = _invoke(
             runner, project, cli_environment, "--env", environment_id, "stop"
         )
-        assert stop_result == {"status": "stopped", "environment_id": environment_id}
-        assert repeated_stop_result == {
-            "status": "already_stopped",
+        expected_stop_context = {
+            "owner_kind": "environment",
+            "owner_id": environment_id,
+            "project_id": environment["project_id"],
             "environment_id": environment_id,
+            "environment_name": environment["name"],
+            "worktree_path": environment["worktree_path"],
+        }
+        assert stop_result == {**expected_stop_context, "status": "stopped"}
+        assert repeated_stop_result == {
+            **expected_stop_context,
+            "status": "already_stopped",
         }
     finally:
         try:

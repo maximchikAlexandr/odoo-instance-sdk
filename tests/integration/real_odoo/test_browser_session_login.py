@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -86,17 +87,26 @@ def test_source_backed_selected_user_session_and_logout(
         check=True,
     ).stdout.strip()
     assert bound_source == E2E_PINS.odoo_source_commit
+    bound_source_root = bound_odoo_bin.parent
+    probe_environment = os.environ.copy()
+    probe_environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(bound_source_root), probe_environment.get("PYTHONPATH", ""))
+        if value
+    )
     runtime_probe = subprocess.run(
         [
-            *command_prefix,
+            command_prefix[0],
             "-c",
             (
-                "import json, sys; from odoo.release import version_info; "
+                "import json, pathlib, sys, odoo; "
+                "from odoo.release import version_info; "
                 "print(json.dumps({'python': list(sys.version_info[:3]), "
-                "'odoo_major': version_info[0]}))"
+                "'odoo_major': version_info[0], 'odoo_file': str(pathlib.Path(odoo.__file__).resolve())}))"
             ),
         ],
-        cwd=environment.worktree_path,
+        cwd=bound_source_root,
+        env=probe_environment,
         capture_output=True,
         text=True,
         check=True,
@@ -104,6 +114,16 @@ def test_source_backed_selected_user_session_and_logout(
     runtime_identity = json.loads(runtime_probe.stdout)
     assert runtime_identity["python"] == [int(part) for part in E2E_PINS.cpython.split(".")]
     assert runtime_identity["odoo_major"] == 19
+    assert Path(runtime_identity["odoo_file"]).is_relative_to(bound_source_root)
+    cli_probe = subprocess.run(
+        [*command_prefix, "--config", environment.generated_config_path, "--help"],
+        cwd=bound_source_root,
+        env=probe_environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--config" in cli_probe.stdout
     login = f"odcli_open_as_{runtime.run_id[:12]}"
     create_user = """import sys
 login = sys.argv[1]
