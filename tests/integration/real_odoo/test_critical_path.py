@@ -654,7 +654,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     env_obj: Any = None
     instance: Any = None
 
-    def _exercise_runtime_bootstrap():
+    def _exercise_runtime_bootstrap() -> None:
         nonlocal client, env_obj, instance
         from odoo_instance_sdk import OdooClient, OdooClientConfig
 
@@ -703,7 +703,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
 
     _exercise_runtime_bootstrap()
 
-    def _exercise_module_update_and_tests():
+    def _exercise_module_update_and_tests() -> None:
         module_update = _invoke(
             runner,
             project,
@@ -767,7 +767,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     shown: Any = None
     validated: Any = None
 
-    def _capture_and_validate_source_backup():
+    def _capture_and_validate_source_backup() -> None:
         nonlocal second_process, refresh, restored_database, backup, backup_id, shown, validated
         second_process = _start_owned(instance, runtime)
         wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
@@ -826,7 +826,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
 
     _capture_and_validate_source_backup()
 
-    def _verify_restored_database_and_runtime():
+    def _verify_restored_database_and_runtime() -> None:
         nonlocal env_obj, instance
         _stop_owned(instance, second_process)
         _switch_database_config(Path(env_obj.generated_config_path), restored_database)
@@ -897,7 +897,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     postgres_stop: Any = None
     repeated_postgres_stop: Any = None
 
-    def _cleanup_owned_resources():
+    def _cleanup_owned_resources() -> None:
         nonlocal removed, removed_again, postgres_stop, repeated_postgres_stop
         _invoke(
             runner,
@@ -958,7 +958,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
 
     audit: Any = None
 
-    def _audit_cleanup_and_record():
+    def _audit_cleanup_and_record() -> None:
         nonlocal audit
         audit = audit_no_leaks(
             runtime.run_id,
@@ -984,7 +984,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
 
     _audit_cleanup_and_record()
 
-    def _write_final_evidence():
+    def _write_final_evidence() -> None:
         evidence = runtime.artifact_root / "critical-path.json"
         evidence.write_text(
             json.dumps(
