@@ -1679,13 +1679,18 @@ def test_reset_failure_after_completed_restore_records_completion_checkpoint(
         restore_probe_results=("false\n", "123\n"),
     )
     monkeypatch.setattr(
-        type(observed["cluster"]), "_restore_provenance", lambda _cluster: ("cluster-id", None)
+        type(observed["cluster"]),
+        "_restore_provenance",
+        lambda _cluster: ("cluster-id", tmp_path / "data"),
     )
+    catalog = cast("MagicMock", observed["client"]).get_catalog.return_value
+    catalog._latest_restore_binding.return_value = None
 
     with pytest.raises(Exception, match="Administrator password reset failed") as failure:
         command.run()
 
-    catalog = cast("MagicMock", observed["client"]).get_catalog.return_value
+    assert getattr(failure.value, "restore_stage_id", None) == "admin_reset"
+    assert getattr(failure.value, "failure_context").database_confirmed is True
     catalog.record_restore.assert_called_once()
     assert catalog.record_restore.call_args.kwargs["state"] == RestoreState.INCOMPLETE
     assert (

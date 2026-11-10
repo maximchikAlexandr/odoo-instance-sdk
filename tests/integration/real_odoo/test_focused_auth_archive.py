@@ -364,6 +364,9 @@ def _assert_post_restore_failure(
         "error": failure.get("error"),
         "context": context,
     }
+    assert context.get("database_confirmed") is True
+    assert context.get("restore_state") == "incomplete"
+    assert context.get("retained_database")
     assert failure["context"]["pending_stage"] == "admin_reset"
     assert ProjectConfig.load(project).default_source_database == previous_default
     return cast("dict[str, object]", failure)

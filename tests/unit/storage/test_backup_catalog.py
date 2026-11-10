@@ -718,6 +718,73 @@ def test_record_restore_inserts_rows(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_reset_pending_restore_retains_exact_completed_binding_without_second_event(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "reset-pending-restore.db")
+    path = _create_backup_file(tmp_path, "reset-pending.zip")
+    backup_id = _u("reset-pending")
+    catalog.start_download(backup_id, "https://source.example", "mydb", "zip", True, path)
+    catalog.success_download(backup_id, path.name, 1, "")
+    claim = catalog._ensure_postgres_cluster_pending("project", "compose", "volume")
+    claim = catalog._activate_postgres_cluster(claim.cluster_id, "project", "compose", "volume")
+    data_directory = str(tmp_path / "data")
+    catalog.record_restore(
+        "localhost",
+        5432,
+        "mydb",
+        backup_id,
+        cluster_id=claim.cluster_id,
+        data_directory=data_directory,
+        database_oid=123,
+    )
+    original = catalog._latest_restore_binding("localhost", 5432, "mydb")
+    assert original is not None
+    event_count = catalog._conn.execute(
+        "SELECT COUNT(*) FROM database_events WHERE database_name='mydb'"
+    ).fetchone()[0]
+
+    assert catalog._retain_reset_pending_restore(
+        "localhost",
+        5432,
+        "mydb",
+        expected_sequence=original["sequence"],
+        backup_id=backup_id,
+        source_kind="catalogue",
+        source_sha256=None,
+        cluster_id=str(claim.cluster_id),
+        data_directory=data_directory,
+        database_oid=123,
+    )
+
+    retained = catalog._latest_restore_binding("localhost", 5432, "mydb")
+    assert retained is not None
+    assert retained["sequence"] > original["sequence"]
+    assert retained["state"] == "incomplete"
+    assert retained["post_restore_checkpoint"] == "reset_pending"
+    assert retained["database_oid"] == 123
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE database_name='mydb'"
+        ).fetchone()[0]
+        == event_count
+        == 1
+    )
+    assert not catalog._retain_reset_pending_restore(
+        "localhost",
+        5432,
+        "mydb",
+        expected_sequence=original["sequence"],
+        backup_id=backup_id,
+        source_kind="catalogue",
+        source_sha256=None,
+        cluster_id=str(claim.cluster_id),
+        data_directory=data_directory,
+        database_oid=123,
+    )
+    catalog.close()
+
+
 def test_restore_state_defaults_to_complete_and_accepts_incomplete(
     tmp_path: Path,
 ) -> None:
