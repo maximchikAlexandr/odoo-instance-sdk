@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -193,7 +193,7 @@ def test_public_cli_completion_revalidation_uses_captured_inventory_and_reset_pr
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Run real completion and child commands through deterministic process steps."""
-    from odoo_instance_sdk.internal.proc import ProcessResult, SubprocessExecutor
+    from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, SubprocessExecutor
     from odoo_instance_sdk.models import PostRestoreCheckpoint
     from odoo_instance_sdk.project import PostgresProjectConfig
     from odoo_instance_sdk.resources.database import DatabaseResource
@@ -215,7 +215,7 @@ def test_public_cli_completion_revalidation_uses_captured_inventory_and_reset_pr
     monkeypatch.setattr(ProjectConfig, "load", classmethod(lambda _cls, _root: compose_project))
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-    project_cluster = PostgresCluster.from_project(root)
+    project_cluster = cast("Any", PostgresCluster.from_project(root))
     project_cluster.mode = "compose"
     project_cluster.endpoint_host = "127.0.0.1"
     project_cluster.endpoint_port = 5432
@@ -223,7 +223,8 @@ def test_public_cli_completion_revalidation_uses_captured_inventory_and_reset_pr
     project_cluster.password_file.write_text("postgres-secret\n", encoding="utf-8")
     catalog.row["database_oid"] = 12345
     catalog.row["post_restore_checkpoint"] = PostRestoreCheckpoint.RESET_PENDING.value
-    instance = resource._client.instance.from_project.return_value
+    client = cast("Any", resource._client)
+    instance = client.instance.from_project.return_value
     instance._postgres_cluster = SimpleNamespace(
         _project_id="restore-test",
         endpoint_host="127.0.0.1",
@@ -236,7 +237,7 @@ def test_public_cli_completion_revalidation_uses_captured_inventory_and_reset_pr
     )
 
     def result_for_step(step: object) -> ProcessResult:
-        prepared = step
+        prepared = cast("PreparedStep", step)
         assert hasattr(prepared, "step_id")
         if prepared.step_id == "database.list.inventory":
             stdout = json.dumps(
