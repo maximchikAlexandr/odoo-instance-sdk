@@ -16,6 +16,7 @@ import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
     PreparedStep,
     ProcessResult,
     RecordingExecutor,
@@ -32,22 +33,65 @@ def _instance(tmp_path: Path) -> OdooInstance:
     return client.instance.from_config(config_path)
 
 
+def _browser_query_process_result(
+    prepared: PreparedProcess, *, fail_query: bool = False, truncate_output: bool = False
+) -> ProcessResult:
+    assert isinstance(prepared, PreparedStep)
+    step = prepared
+    assert step.stdin is not None
+
+    class User:
+        id = 14
+        login = "fixture"
+        name = "Fixture User"
+
+    class Users:
+        def sudo(self) -> Users:
+            return self
+
+        def search(self, _domain: object, *, limit: int, order: str) -> list[User]:
+            assert limit == 100 and order == "id"
+            if fail_query:
+                raise RuntimeError("private query failure")
+            return [User()]
+
+    class Environment:
+        def __init__(self) -> None:
+            self.cr = SimpleNamespace(commit=lambda: None, rollback=lambda: None)
+
+        def __getitem__(self, _key: str) -> Users:
+            return Users()
+
+    output = io.StringIO()
+    returncode = 0
+    try:
+        with redirect_stdout(output):
+            exec(
+                step.stdin.decode("utf-8"),
+                {
+                    "env": Environment(),
+                    "odoo": SimpleNamespace(api=SimpleNamespace(SUPERUSER_ID=1)),
+                },
+            )
+    except RuntimeError:
+        returncode = 1
+    stdout = "Odoo 19 shell initialized\n" + output.getvalue()
+    if truncate_output:
+        stdout = stdout.rsplit(" __END_PAYLOAD__", 1)[0]
+    return ProcessResult(
+        argv=step.argv,
+        returncode=returncode,
+        stdout=stdout,
+        stderr="",
+        duration=0.01,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+
+
 def test_bounded_user_query_returns_typed_safe_projection(tmp_path: Path) -> None:
     instance = _instance(tmp_path)
-    payload = json.dumps([{"id": 14, "login": "fixture", "name": "Fixture User"}])
-    executor = RecordingExecutor(
-        results={
-            "instance.shell_script": ProcessResult(
-                argv=("python3", "shell"),
-                returncode=0,
-                stdout=payload,
-                stderr="",
-                duration=0.01,
-                cwd=None,
-                environment=(),
-            )
-        }
-    )
+    executor = RecordingExecutor(result_factory=_browser_query_process_result)
     with patch(
         "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=executor,
@@ -59,6 +103,49 @@ def test_bounded_user_query_returns_typed_safe_projection(tmp_path: Path) -> Non
     assert len(command.plan.process_steps) == 1
     assert command.plan.process_steps[0].input_preview == "<redacted>"
     assert "SUPERUSER_ID" not in repr(users)
+
+
+def test_browser_user_query_refuses_failed_wrapped_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = _instance(tmp_path)
+    executor = RecordingExecutor(
+        result_factory=lambda step: _browser_query_process_result(step, fail_query=True)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+        lambda: executor,
+    )
+    command = instance.list_browser_login_users_command("fixture")
+
+    with pytest.raises(RuntimeError, match="query failed") as failure:
+        command.run()
+
+    assert "fixture" not in str(failure.value)
+    assert "returncode=1" in str(failure.value)
+    assert "stdout_bytes=" in str(failure.value)
+    assert "framing=prefix-before-wrapper-payload" in str(failure.value)
+
+
+def test_browser_user_query_rejects_missing_wrapper_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = _instance(tmp_path)
+    executor = RecordingExecutor(
+        result_factory=lambda step: _browser_query_process_result(step, truncate_output=True)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+        lambda: executor,
+    )
+    command = instance.list_browser_login_users_command("fixture")
+
+    with pytest.raises(RuntimeError, match="returned invalid data") as failure:
+        command.run()
+
+    assert "fixture" not in str(failure.value)
+    assert "stdout_bytes=" in str(failure.value)
+    assert "framing=prefix-before-wrapper-payload" in str(failure.value)
 
 
 def test_browser_user_search_rejects_over_128_characters(tmp_path: Path) -> None:

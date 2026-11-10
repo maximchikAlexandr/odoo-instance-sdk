@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -15,8 +17,13 @@ from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.conftest import isolated_cli_catalogue
+from tests.integration.real_odoo.cleanup import ResourceLedger
 from tests.integration.real_odoo.focused_handlers import _stable_plan
-from tests.integration.real_odoo.test_critical_path import _reap_owned_child
+from tests.integration.real_odoo.test_critical_path import (
+    _reap_owned_child,
+    _start_owned,
+    _stop_owned,
+)
 
 
 def test_real_odoo_catalogue_follows_runtime_home_in_sdk_and_child(
@@ -140,3 +147,39 @@ def test_owned_detached_child_is_reaped_by_its_parent(tmp_path: Path) -> None:
 
     assert not reaper.is_alive()
     assert len(result) == 1 and result[0] not in (None, -1)
+
+
+def test_owned_process_lifecycle_reaps_each_child_on_stop_and_ledger_unwind() -> None:
+    class Runtime:
+        def __init__(self, run_id: str) -> None:
+            self.run_id = run_id
+            self.ledger = ResourceLedger(run_id)
+
+    class Instance:
+        def __init__(self) -> None:
+            self.process: subprocess.Popen[bytes] | None = None
+            self.stopped = False
+
+        def run_detached(self, **_kwargs: object) -> subprocess.Popen[bytes]:
+            self.process = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+            )
+            return self.process
+
+        def stop_environment(self) -> SimpleNamespace:
+            assert self.process is not None
+            if self.stopped:
+                return SimpleNamespace(status="already_stopped")
+            os.kill(self.process.pid, signal.SIGTERM)
+            self.stopped = True
+            return SimpleNamespace(status="stopped")
+
+    for index in range(3):
+        runtime = Runtime(f"owned-process-{index}")
+        instance = Instance()
+        owned = _start_owned(instance, runtime)
+        if index == 0:
+            _stop_owned(instance, owned)
+        else:
+            runtime.ledger.unwind()
+        assert owned.reap_result and owned.reap_result[0] != -1

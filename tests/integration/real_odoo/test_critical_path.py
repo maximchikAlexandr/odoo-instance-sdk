@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -280,15 +281,34 @@ def _switch_database_config(path: Path, database: str) -> None:
     path.chmod(0o600)
 
 
-def _start_owned(instance: Any, runtime: E2ERuntime) -> Any:
+def _start_owned(instance: Any, runtime: Any) -> Any:
+    owned_children: list[_OwnedProcess] = []
+
+    def cleanup() -> None:
+        if owned_children:
+            _stop_owned(instance, owned_children[0])
+        else:
+            instance.stop_environment()
+
     # Register owner cleanup before launch so any later setup assertion still
-    # has a public lifecycle path to stop the process.
+    # has a public lifecycle path to stop and reap the process.
     runtime.ledger.record(
         "process",
         f"{runtime.run_id}-odoo",
-        instance.stop_environment,
+        cleanup,
     )
-    return instance.run_detached(wait_ready=True, readiness_timeout=180.0)
+    process = instance.run_detached(wait_ready=True, readiness_timeout=180.0)
+    reap_result: list[int | None] = []
+    reaper = threading.Thread(
+        target=_reap_owned_child,
+        args=(process.pid, reap_result),
+        name=f"reap-odoo-{process.pid}",
+        daemon=True,
+    )
+    owned = _OwnedProcess(process, reaper, reap_result)
+    owned_children.append(owned)
+    reaper.start()
+    return owned
 
 
 def _reap_owned_child(pid: int, result: list[int | None]) -> None:
@@ -307,9 +327,33 @@ def _reap_owned_child(pid: int, result: list[int | None]) -> None:
     result.append(-1)
 
 
-def _stop_owned(instance: Any, process: Any) -> None:
-    result = instance.stop_environment()
-    assert result.status in {"stopped", "already_stopped"}, result
+@dataclass(slots=True)
+class _OwnedProcess:
+    process: Any
+    reaper: threading.Thread
+    reap_result: list[int | None]
+
+
+def _stop_owned(instance: Any, owned: _OwnedProcess) -> None:
+    errors: list[BaseException] = []
+    try:
+        result = instance.stop_environment()
+        assert result.status in {"stopped", "already_stopped"}, result
+    except BaseException as error:
+        errors.append(error)
+    try:
+        if owned.reaper.ident is None:
+            _reap_owned_child(owned.process.pid, owned.reap_result)
+        else:
+            owned.reaper.join(timeout=35.0)
+        assert not owned.reaper.is_alive(), "owned Odoo child reaper did not finish"
+        assert owned.reap_result and owned.reap_result[0] != -1, "owned Odoo leader was not reaped"
+    except BaseException as error:
+        errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("owned process stop and reap failed", errors)
 
 
 @pytest.mark.timeout(600)
@@ -681,14 +725,6 @@ def test_source_backed_full_critical_path(  # noqa: C901
     )
     _invoke(runner, project, cli_environment, "--env", environment_id, "module", "list", _PROBE)
     first_process = _start_owned(instance, runtime)
-    reap_result: list[int | None] = []
-    reaper = threading.Thread(
-        target=_reap_owned_child,
-        args=(first_process.pid, reap_result),
-        name=f"reap-odoo-{first_process.pid}",
-        daemon=True,
-    )
-    reaper.start()
     try:
         wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
         stop_result = _invoke(runner, project, cli_environment, "--env", environment_id, "stop")
@@ -716,12 +752,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
             "status": "already_stopped",
         }
     finally:
-        try:
-            _stop_owned(instance, first_process)
-        finally:
-            reaper.join(timeout=35.0)
-    assert not reaper.is_alive(), "owned Odoo child reaper did not finish"
-    assert reap_result and reap_result[0] != -1, "owned Odoo leader was not reaped"
+        _stop_owned(instance, first_process)
     assert (
         instance.run_foreground(
             args=(f"--init={_PROBE}", "--without-demo=all", "--stop-after-init")

@@ -19,6 +19,7 @@ from odoo_instance_sdk.internal.proc import (
     RunContext,
     SubprocessExecutor,
 )
+from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.models import BrowserLoginUser, CommandResult
 from odoo_instance_sdk.resources.instance.auxiliary_restore import (
     _build_shell_script_step,
@@ -54,15 +55,47 @@ users = env['res.users'].sudo().search(domain, limit=100, order='id')
 print(json.dumps([{'id': user.id, 'login': user.login, 'name': user.name} for user in users[:100]]))
 """
 
-    def decode(result: CommandResult) -> tuple[BrowserLoginUser, ...]:
-        if result.returncode != 0:
-            raise RuntimeError("browser login user query failed")
-        try:
-            return msgspec.json.decode(result.stdout, type=tuple[BrowserLoginUser, ...])
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            raise RuntimeError("browser login user query returned invalid data") from exc
+    command: Command[tuple[BrowserLoginUser, ...]]
 
-    return instance._shell_script_command(
+    def decode(result: CommandResult) -> tuple[BrowserLoginUser, ...]:
+        nonce = command._private_wrapper_nonce()
+        if nonce is None:
+            raise RuntimeError("browser login user query returned invalid data")
+        marker = f"__ODCLI_PAYLOAD__{nonce}__"
+        offset = result.stdout.find(marker)
+        framing = (
+            "missing-wrapper-payload"
+            if offset < 0
+            else "wrapper-payload-at-start"
+            if offset == 0
+            else "prefix-before-wrapper-payload"
+        )
+        diagnostic = (
+            f"returncode={result.returncode}, "
+            f"stdout_bytes={len(result.stdout.encode('utf-8'))}, framing={framing}"
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"browser login user query failed ({diagnostic})")
+        # Odoo CLI startup output precedes the nonce-bound wrapper payload.
+        payload = parse_payload(result.stdout, nonce)
+        user_stdout = payload.get("user_stdout") if payload is not None else None
+        if (
+            payload is None
+            or payload.get("ok") is not True
+            or payload.get("truncated") is not False
+            or payload.get("user_error") is not None
+            or payload.get("finalization_error") is not None
+            or not isinstance(user_stdout, str)
+        ):
+            raise RuntimeError(f"browser login user query returned invalid data ({diagnostic})")
+        try:
+            return msgspec.json.decode(user_stdout, type=tuple[BrowserLoginUser, ...])
+        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            raise RuntimeError(
+                f"browser login user query returned invalid data ({diagnostic})"
+            ) from exc
+
+    command = instance._shell_script_command(
         source,
         argv=(query,),
         timeout=30,
@@ -70,6 +103,7 @@ print(json.dumps([{'id': user.id, 'login': user.login, 'name': user.name} for us
         exclusive=False,
         result_converter=decode,
     )
+    return command
 
 
 def create_browser_session_command(  # noqa: C901
