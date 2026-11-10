@@ -9,7 +9,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -680,7 +680,7 @@ class _IdentityMixin:
             source, argv=argv, timeout=timeout, commit=commit, exclusive=False
         )
 
-    def _shell_script_command(
+    def _shell_script_command(  # noqa: C901
         self,
         source: str,
         *,
@@ -693,6 +693,14 @@ class _IdentityMixin:
         context_callback_override: Callable[[RunContext[T]], T] | None = None,
         preflight: Callable[[RunContext[T]], None] | None = None,
         extra_steps: Sequence[PreparedStep | PreparedAction] = (),
+        additional_secret_values: Sequence[str] = (),
+        post_steps_factory: (
+            Callable[
+                [PreparedStep, StartConfig, str | None],
+                Sequence[PreparedStep | PreparedAction],
+            ]
+            | None
+        ) = None,
         executor: ProcessExecutor | None = None,
     ) -> Command[T]:
         config = self.config.start_config
@@ -710,6 +718,13 @@ class _IdentityMixin:
             commit=commit,
             project_environment=self.config.project_environment,
         )
+        if additional_secret_values:
+            step = replace(
+                step,
+                secret_values=tuple(
+                    dict.fromkeys((*step.secret_values, *additional_secret_values))
+                ),
+            )
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         action = PreparedAction(
             step_id="instance.shell_script.transaction",
@@ -720,7 +735,12 @@ class _IdentityMixin:
             mutating=commit,
         )
 
-        captured_steps = (*dependency_steps, *extra_steps, step, action)
+        post_steps = (
+            tuple(post_steps_factory(step, snapshot, secret_path))
+            if post_steps_factory is not None
+            else ()
+        )
+        captured_steps = (*dependency_steps, *extra_steps, step, *post_steps, action)
 
         def execute(context: RunContext[T]) -> T:
             # Stale-plan validation is deliberately the first operation.  In
@@ -1048,7 +1068,9 @@ print(json.dumps([{'id': user.id, 'login': user.login, 'name': user.name} for us
             result_converter=decode,
         )
 
-    def create_browser_session_command(self, user_id: int) -> Command[_BrowserSessionCredential]:
+    def create_browser_session_command(  # noqa: C901
+        self, user_id: int
+    ) -> Command[_BrowserSessionCredential]:
         """Create a supported Odoo session and keep its SID in a private file."""
         if type(user_id) is not int or user_id <= 0:
             raise ValueError("browser login user id must be positive")
@@ -1141,17 +1163,51 @@ finally:
                 raise RuntimeError("browser login handoff is invalid")
             return _BrowserSessionCredential(sid)
 
+        cleanup_step: PreparedStep | None = None
+
+        def capture_cleanup_step(
+            _create_step: PreparedStep,
+            snapshot: StartConfig,
+            secret_path: str | None,
+        ) -> tuple[PreparedStep, ...]:
+            nonlocal cleanup_step
+            captured_cleanup, _, _, _ = _build_shell_script_step(
+                snapshot,
+                executable_prefix=self._executable_prefix(),
+                default_cwd=self.config.default_cwd,
+                source=cleanup_source,
+                argv=(str(handoff_file), str(user_id)),
+                timeout=15,
+                commit=True,
+                secret_config_path=secret_path,
+                project_environment=self.config.project_environment,
+            )
+            cleanup_step = replace(
+                captured_cleanup,
+                step_id="instance.browser_session.cleanup",
+                secret_values=tuple(
+                    dict.fromkeys((*captured_cleanup.secret_values, str(handoff_file)))
+                ),
+            )
+            return (cleanup_step,)
+
         def execute(context: RunContext[_BrowserSessionCredential]) -> _BrowserSessionCredential:
             try:
                 return run_creation(context)
-            except Exception:
-                with contextlib.suppress(Exception):
-                    self.run_shell_script_command(
-                        cleanup_source,
-                        argv=(str(handoff_file), str(user_id)),
-                        timeout=15,
-                        commit=True,
-                    ).run()
+            except Exception as exc:
+                sid = read_private_handoff()
+                if cleanup_step is not None:
+                    with contextlib.suppress(Exception):
+                        cleanup_result = cast(
+                            "ProcessResult", context.process_prepared(cleanup_step)
+                        )
+                        if cleanup_result.returncode != 0:
+                            raise RuntimeError("browser login session cleanup failed") from None
+                error_text = str(exc)
+                if str(handoff_file) in error_text or (sid is not None and sid in error_text):
+                    if isinstance(exc, TimeoutError):
+                        raise TimeoutError("browser login session creation timed out") from None
+                    raise RuntimeError("browser login session creation failed") from None
                 raise
             finally:
                 shutil.rmtree(handoff_dir, ignore_errors=True)
@@ -1163,4 +1219,6 @@ finally:
             commit=True,
             exclusive=True,
             context_callback_override=execute,
+            additional_secret_values=(str(handoff_file),),
+            post_steps_factory=capture_cleanup_step,
         )
