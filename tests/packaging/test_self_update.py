@@ -106,6 +106,14 @@ def _isolated_home(tmp_path: Path, *, source_repo: Path | None = None) -> dict[s
         env["XDG_CACHE_HOME"],
     ):
         Path(path).mkdir(parents=True, exist_ok=True)
+    companion_launcher = shutil.which("odcli-multica", path=env.get("PATH"))
+    if companion_launcher is not None:
+        companion_bin = Path(companion_launcher).parent.resolve()
+        env["PATH"] = os.pathsep.join(
+            entry
+            for entry in env.get("PATH", "").split(os.pathsep)
+            if Path(entry or ".").resolve() != companion_bin
+        )
     # Production deliberately installs from the allow-listed GitHub origin.
     # Rewrite that origin to this checkout so packaging E2E never waits on a
     # network fetch after the local fixture install has already succeeded.
@@ -514,6 +522,7 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
     _require_uv()
     fixture, baseline, candidate = _create_dashboard_update_fixture(tmp_path)
     env = _isolated_home(tmp_path, source_repo=fixture)
+    assert shutil.which("odcli-multica", path=env.get("PATH")) is None
     install = _install_uv_tool_vcs(
         env,
         fixture,
