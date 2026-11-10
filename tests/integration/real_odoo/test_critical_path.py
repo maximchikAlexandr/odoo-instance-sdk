@@ -904,10 +904,27 @@ def test_source_backed_full_critical_path(  # noqa: C901
     repeated_stop_result = _invoke(
         runner, project, cli_environment, "--env", environment_id, "stop"
     )
-    assert stop_result == {"status": "stopped", "environment_id": environment_id}
-    assert repeated_stop_result == {
-        "status": "already_stopped",
+    final_environments = _invoke(runner, project, cli_environment, "env", "list")
+    final_environment = _environment_state(final_environments, environment_id)
+    final_project = next(
+        row
+        for row in catalog.list_projects()
+        if Path(str(row["repository_root"])).resolve() == project.resolve()
+    )
+    final_project_id = str(final_project["project_id"])
+    assert final_environment["project_id"] in (None, final_project_id)
+    final_stop_context = {
+        "owner_kind": "environment",
+        "owner_id": environment_id,
+        "project_id": final_project_id,
         "environment_id": environment_id,
+        "environment_name": final_environment["name"],
+        "worktree_path": final_environment["worktree_path"],
+    }
+    assert stop_result == {**final_stop_context, "status": "stopped"}
+    assert repeated_stop_result == {
+        **final_stop_context,
+        "status": "already_stopped",
     }
     _stop_owned(instance, third_process)
     status_after_stop = _invoke(runner, project, cli_environment, "postgres", "status")
