@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -19,7 +20,12 @@ from .focused_support import focused_project as _focused_project_fixture
 
 focused_project = _focused_project_fixture
 
-pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
+pytestmark = [
+    pytest.mark.real_odoo,
+    pytest.mark.e2e_full,
+    pytest.mark.serial,
+    pytest.mark.timeout(180),
+]
 
 
 def _post_json(url: str, payload: dict[str, Any], sid: str) -> tuple[int, dict[str, Any]]:
@@ -94,13 +100,15 @@ env.cr.commit()
     assert "sid" not in str(failure.value).lower()
 
 
-@pytest.fixture
-def browser_session_runtime(
+@pytest.fixture(scope="module")
+def browser_session_server(
     target_runtime: E2ERuntime,
     focused_project: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> Any:
     runtime = target_runtime
+    monkeypatch = pytest.MonkeyPatch()
+    request.addfinalizer(monkeypatch.undo)
     for key, value in runtime.environment.items():
         monkeypatch.setenv(key, value)
     database = runtime.topology.target_sentinel_database
@@ -183,7 +191,29 @@ def browser_session_runtime(
         check=True,
     )
     assert "--config" in cli_probe.stdout
-    login = f"odcli_open_as_{runtime.run_id[:12]}"
+    process = None
+    try:
+        process = instance.start()
+        instance.wait_ready(process, timeout=120)
+        yield {
+            "runtime": runtime,
+            "database": database,
+            "instance": instance,
+            "session_store": session_store,
+        }
+    finally:
+        if process is not None:
+            instance.stop(process)
+
+
+@pytest.fixture
+def browser_session_runtime(
+    browser_session_server: dict[str, Any], request: pytest.FixtureRequest
+) -> Any:
+    runtime = browser_session_server["runtime"]
+    instance = browser_session_server["instance"]
+    login_suffix = hashlib.sha256(request.node.nodeid.encode()).hexdigest()[:8]
+    login = f"odcli_open_as_{runtime.run_id[:12]}_{login_suffix}"
     create_user = """import sys
 login = sys.argv[1]
 users = env['res.users'].sudo()
@@ -209,30 +239,20 @@ env.cr.commit()
             cleanup_user, argv=(login,), timeout=30, commit=True
         ).run()
 
-    process = None
     try:
         instance.run_shell_script_command(create_user, argv=(login,), timeout=30, commit=True).run()
         users = instance.list_browser_login_users_command(login).run()
         assert len(users) == 1
         selected = users[0]
-        process = instance.start()
-        instance.wait_ready(process, timeout=120)
         yield {
-            "runtime": runtime,
-            "database": database,
-            "instance": instance,
-            "session_store": session_store,
+            **browser_session_server,
             "selected": selected,
             "login": login,
             "cleanup_user": cleanup_selected_user,
         }
     finally:
-        try:
-            if process is not None:
-                instance.stop(process)
-        finally:
-            cleanup_selected_user()
-            assert instance.list_browser_login_users_command(login).run() == ()
+        cleanup_selected_user()
+        assert instance.list_browser_login_users_command(login).run() == ()
 
 
 def test_source_browser_selected_user_session(
@@ -272,7 +292,6 @@ def test_source_browser_fixture_cleans_up_created_user(
     assert case["instance"].list_browser_login_users_command(case["login"]).run() == ()
 
 
-@pytest.mark.timeout(180)
 def test_source_backed_selected_user_session_and_logout(
     browser_session_runtime: dict[str, Any],
     record_property: Any,
