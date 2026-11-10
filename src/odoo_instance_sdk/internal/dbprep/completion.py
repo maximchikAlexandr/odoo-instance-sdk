@@ -30,7 +30,6 @@ from odoo_instance_sdk.internal.project_init import (
     validate_generated_config_target,
 )
 from odoo_instance_sdk.internal.project_manifest import manifest_path
-from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import (
     PostRestoreCheckpoint,
     RestoreCompletionAction,
@@ -70,8 +69,8 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
     target = target_database.strip()
     if not target or target != target_database:
         raise ConfigError("completion target must be an exact database name")
-    project_id = f"project_{repo_key(root, git_common_dir(root))}"
     cluster = PostgresCluster.from_project(root)
+    project_id = cluster._project_id
     cluster_id, data_directory = cluster._restore_provenance()
     if cluster_id is None:
         raise BackupCatalogError("active project cluster identity is unavailable")
