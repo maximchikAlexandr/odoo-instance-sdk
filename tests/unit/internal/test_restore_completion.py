@@ -188,6 +188,131 @@ def test_public_cli_completion_dry_run_has_no_project_or_temporary_file_writes(
     assert writes == []
 
 
+def test_public_cli_completion_revalidation_uses_captured_inventory_and_reset_processes(
+    completion_setup: tuple[Path, str, ProjectConfig, _CompletionCatalog, EnvironmentResource],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run real completion and child commands through deterministic process steps."""
+    from odoo_instance_sdk.internal.proc import ProcessResult, SubprocessExecutor
+    from odoo_instance_sdk.models import PostRestoreCheckpoint
+    from odoo_instance_sdk.project import PostgresProjectConfig
+    from odoo_instance_sdk.resources.database import DatabaseResource
+
+    root, target, _project, catalog, resource = completion_setup
+    import msgspec
+
+    compose_project = msgspec.structs.replace(
+        _project,
+        postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5432),
+    )
+    generated_config = root / ".odcli" / "odoo.conf"
+    generated_config.parent.mkdir(parents=True, exist_ok=True)
+    generated_config.write_text("[options]\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.completion._load_project",
+        lambda _project: (compose_project, root),
+    )
+    monkeypatch.setattr(ProjectConfig, "load", classmethod(lambda _cls, _root: compose_project))
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    project_cluster = PostgresCluster.from_project(root)
+    project_cluster.mode = "compose"
+    project_cluster.endpoint_host = "127.0.0.1"
+    project_cluster.endpoint_port = 5432
+    project_cluster.password_file = root / ".odcli" / "postgres-password"
+    project_cluster.password_file.write_text("postgres-secret\n", encoding="utf-8")
+    catalog.row["database_oid"] = 12345
+    catalog.row["post_restore_checkpoint"] = PostRestoreCheckpoint.RESET_PENDING.value
+    instance = resource._client.instance.from_project.return_value
+    instance._postgres_cluster = SimpleNamespace(
+        _project_id="restore-test",
+        endpoint_host="127.0.0.1",
+        endpoint_port=5432,
+        _user="odoo",
+        _password="test-password",
+        mode="compose",
+        owned=True,
+        ensure_running=lambda **_kwargs: None,
+    )
+
+    def result_for_step(step: object) -> ProcessResult:
+        prepared = step
+        assert hasattr(prepared, "step_id")
+        if prepared.step_id == "database.list.inventory":
+            stdout = json.dumps(
+                [
+                    {
+                        "name": target,
+                        "database_oid": 12345,
+                        "logical_size_bytes": 0,
+                        "active_sessions": 0,
+                    }
+                ]
+            )
+        elif prepared.step_id == "database.prepare.default-switch.git.toplevel":
+            stdout = str(root)
+        elif prepared.step_id == "database.prepare.default-switch.git.tracked":
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=1,
+                stdout="",
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+        elif prepared.step_id == "instance.shell_script":
+            stdout = ""
+        else:
+            pytest.fail(f"unexpected child process step: {prepared.step_id}")
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    def execute(_self: SubprocessExecutor, step: object, **_kwargs: object) -> ProcessResult:
+        return result_for_step(step)
+
+    monkeypatch.setattr(SubprocessExecutor, "execute", execute)
+
+    def inventory(self: DatabaseResource, project_root: str | Path) -> object:
+        from odoo_instance_sdk.internal.proc import RecordingExecutor
+
+        executor = RecordingExecutor(result_factory=result_for_step)
+        return self.list_inventory_command(project_root, executor=executor).run()
+
+    monkeypatch.setattr(DatabaseResource, "list_inventory", inventory)
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: resource._client
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: root)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "db",
+            "restore",
+            "--complete",
+            target,
+            "--yes",
+            "--format",
+            "json",
+        ],
+        env={"ODCLI_ADMIN_PASSWORD": "test-admin-password"},
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    assert document["ok"] is True
+    assert document["result"]["completed_stages"] == ["admin_reset", "default_switch"]
+    assert catalog.row["state"] == "complete"
+
+
 @pytest.mark.parametrize(
     "drift",
     ["source_sha256", "database_oid", "data_directory", "sequence", "claim"],
