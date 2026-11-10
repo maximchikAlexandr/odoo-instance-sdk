@@ -433,7 +433,6 @@ def test_complete_post_restore_without_reimport(
     focused_catalog: Path,
     record_property: object,
 ) -> None:
-    from odoo_instance_sdk.execution import Command, ExecutionPlan
     from odoo_instance_sdk.models import PostRestoreCheckpoint
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.database import DatabaseResource
@@ -465,35 +464,32 @@ def test_complete_post_restore_without_reimport(
     _ensure_isolated_environment(catalog_path, project)
     _approve_project_postgres(project, environment)
 
-    original_reset_command = DatabaseResource.reset_admin_password_command
+    def fail_reset_once(self: DatabaseResource, *, admin_password: str, provenance: str) -> object:
+        del self, admin_password, provenance
+        raise RuntimeError("injected administrator reset failure")
 
-    def fail_reset_once(self: DatabaseResource, **kwargs: object) -> Command[object]:
-        def fail(_context: object) -> object:
-            raise RuntimeError("injected administrator reset failure")
-
-        return Command.create(ExecutionPlan(), fail)
-
-    monkeypatch.setattr(DatabaseResource, "reset_admin_password_command", fail_reset_once)
-    failed = _invoke_in_registered_worktree(
-        CliRunner(),
-        cli,
-        project,
-        catalog_path,
-        [
-            "--project",
-            str(project),
-            "db",
-            "restore",
-            backup_id,
-            "--target",
-            target,
-            "--reset-admin-password",
-            "--yes",
-            "--format",
-            "json",
-        ],
-        environment,
-    )
+    with monkeypatch.context() as injected:
+        injected.setattr(DatabaseResource, "reset_admin_password", fail_reset_once)
+        failed = _invoke_in_registered_worktree(
+            CliRunner(),
+            cli,
+            project,
+            catalog_path,
+            [
+                "--project",
+                str(project),
+                "db",
+                "restore",
+                backup_id,
+                "--target",
+                target,
+                "--reset-admin-password",
+                "--yes",
+                "--format",
+                "json",
+            ],
+            environment,
+        )
     failure = _assert_post_restore_failure(failed, project, previous_default, failure_evidence)
     filestore = project_filestore(project, target)
     assert filestore.is_dir()
@@ -520,8 +516,6 @@ def test_complete_post_restore_without_reimport(
     filestore_before = sorted(
         path.relative_to(filestore).as_posix() for path in filestore.rglob("*")
     )
-    monkeypatch.setattr(DatabaseResource, "reset_admin_password_command", original_reset_command)
-
     completed = _invoke_in_registered_worktree(
         CliRunner(),
         cli,

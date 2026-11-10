@@ -834,11 +834,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
     repeated_stop_result = _invoke(
         runner, project, cli_environment, "--env", environment_id, "stop"
     )
-    assert stop_result == {"status": "stopped", "environment_id": environment_id}
-    assert repeated_stop_result == {
-        "status": "already_stopped",
-        "environment_id": environment_id,
-    }
+    assert stop_result["status"] == "already_stopped"
+    assert stop_result["environment_id"] == environment_id
+    assert stop_result["owner_kind"] == "environment"
+    assert repeated_stop_result["status"] == "already_stopped"
+    assert repeated_stop_result["environment_id"] == environment_id
+    assert repeated_stop_result["owner_kind"] == "environment"
     _stop_owned(instance, third_process)
     status_after_stop = _invoke(runner, project, cli_environment, "postgres", "status")
     repeated_status_after_stop = _invoke(runner, project, cli_environment, "postgres", "status")
