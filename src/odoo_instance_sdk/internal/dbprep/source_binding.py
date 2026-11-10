@@ -41,6 +41,7 @@ from odoo_instance_sdk.models import (
     BackupFormat,
     LocalArchiveRestoreSource,
     NoBackup,
+    PostRestoreCheckpoint,
 )
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, BackupProjection
@@ -126,6 +127,9 @@ def _annotate_retained_failure(
     effective_config: str | None = None,
     managed_filestore: str | None = None,
     binding_published: bool | None = None,
+    post_restore_checkpoint: PostRestoreCheckpoint | None = None,
+    completed_stages: tuple[str, ...] = (),
+    pending_stage: str | None = None,
 ) -> None:
     """Attach only non-secret retained-artifact identifiers to a failure."""
     restore_stage_id = getattr(error, "restore_stage_id", None)
@@ -150,6 +154,30 @@ def _annotate_retained_failure(
         effective_config=effective_config if isinstance(effective_config, str) else None,
         managed_filestore=managed_filestore if isinstance(managed_filestore, str) else None,
         binding_published=binding_published,
+        post_restore_checkpoint=post_restore_checkpoint,
+        completed_stages=(
+            completed_stages
+            or (
+                ("db_restore", "db_verify", "filestore_restore")
+                + (
+                    ("admin_reset",)
+                    if post_restore_checkpoint is PostRestoreCheckpoint.RESET_COMPLETE
+                    else ()
+                )
+                if post_restore_checkpoint is not None
+                else ()
+            )
+        ),
+        pending_stage=(
+            pending_stage
+            or (
+                "admin_reset"
+                if post_restore_checkpoint is PostRestoreCheckpoint.RESET_PENDING
+                else "default_switch"
+                if post_restore_checkpoint is not None
+                else None
+            )
+        ),
     )
     setattr(error, "failure_context", context)
     note = retained_artifact_context(

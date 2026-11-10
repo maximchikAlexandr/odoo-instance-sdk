@@ -7,6 +7,9 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +18,17 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.models import OdooProcess
+from odoo_instance_sdk.resources.environment.checkout_planning import DevelopmentEnvironment
+from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 from scripts.real_odoo_pins import E2E_PINS
 from tests.fixtures.xmlrpc_probe import xmlrpc_probe
 
 from .archive import ArchiveIdentity
-from .cleanup import audit_no_leaks, compose_down, write_odoo_config
+from .cleanup import LeakReport, audit_no_leaks, compose_down, write_odoo_config
 from .compose import ComposeLifecycle, wait_for_http
 from .conftest import E2ERuntime, odoo_runtime_python
 
@@ -226,30 +234,34 @@ def _remove_owned_fixture_tree(
 
 
 def _environment_state(payload: dict[str, Any], environment_id: str) -> dict[str, Any]:
-    environments = payload.get("environments")
-    assert isinstance(environments, list)
+    rows = payload.get("rows")
+    assert isinstance(rows, list)
     row = next(
         (
             item
-            for item in environments
-            if isinstance(item, dict) and item.get("id") == environment_id
+            for item in rows
+            if isinstance(item, dict) and item.get("environment_id") == environment_id
         ),
         None,
     )
     assert isinstance(row, dict), payload
+    git = row.get("git")
     return {
         key: row.get(key)
         for key in (
-            "id",
+            "kind",
+            "project_id",
+            "environment_id",
             "name",
-            "branch",
+            "worktree_path",
+            "odoo_status",
             "db_mode",
             "database",
             "lifecycle_state",
-            "allocated_http_port",
-            "artifacts",
-            "runtime",
         )
+    } | {
+        "branch": git.get("branch") if isinstance(git, dict) else None,
+        "short_sha": git.get("short_sha") if isinstance(git, dict) else None,
     }
 
 
@@ -278,11 +290,6 @@ def _switch_database_config(path: Path, database: str) -> None:
 def _start_owned(instance: Any, runtime: E2ERuntime) -> Any:
     process = instance.start()
     instance.wait_ready(process, timeout=180.0)
-    instance._persist_runtime_identity(
-        process.pid,
-        instance.config.start_config,
-        instance.config.default_cwd,
-    )
     runtime.ledger.record(
         "process",
         f"{runtime.run_id}-odoo-{process.pid}",
@@ -302,61 +309,139 @@ def _stop_owned(instance: Any, process: Any) -> None:
     instance._clear_runtime_identity()
 
 
-@pytest.mark.timeout(600)
-def test_source_backed_full_critical_path(  # noqa: C901
+def _critical_path_catalog_path(catalogue_path: Path, *, ensure_exists: bool = True) -> Path:
+    if ensure_exists:
+        catalogue_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return catalogue_path
+
+
+def _critical_path_data_root(runtime: E2ERuntime, *, ensure_exists: bool = True) -> Path:
+    if ensure_exists:
+        runtime.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return runtime.root
+
+
+def _critical_path_state_root(runtime: E2ERuntime) -> Path:
+    path = runtime.root / "state"
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def _critical_path_cache_root(runtime: E2ERuntime, *, ensure_exists: bool = True) -> Path:
+    path = runtime.root / "cache"
+    if ensure_exists:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def _critical_path_locks_dir(runtime: E2ERuntime, **_kwargs: object) -> Path:
+    path = _critical_path_state_root(runtime) / "locks"
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def _release_owned_cluster(cluster: Any) -> None:
+    last_error: RuntimeError | None = None
+    for _attempt in range(2):
+        try:
+            compose_down(
+                cluster.compose_file, cluster.compose_project_name, ports=(cluster.endpoint_port,)
+            )
+        except RuntimeError as error:
+            last_error = error
+        else:
+            return
+    if last_error is not None:
+        raise last_error
+
+
+@dataclass(frozen=True, slots=True)
+class _CriticalPathSetup:
+    runner: CliRunner
+    runtime: E2ERuntime
+    source_server: E2ERuntime
+    source_backup: ArchiveIdentity
+    record_property: Any
+    monkeypatch: pytest.MonkeyPatch
+    catalogue_path: Path
+    cli_environment: dict[str, str]
+    project: Path
+    environment_id: str
+    registered_worktree: Path
+    probe_destination: Path
+    generated_config: Path
+    cluster: PostgresCluster
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimePhaseResult:
+    client: OdooClient
+    environment: DevelopmentEnvironment
+    instance: OdooInstance
+
+
+@dataclass(frozen=True, slots=True)
+class _BackupPhaseResult:
+    process: OdooProcess
+    restored_database: str
+    backup: _BackupMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class _BackupMetadata:
+    id: str
+    size_bytes: int
+    sha256: str
+    source_base_url: str
+    database_name: str
+    source_git_branch: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanupPhaseResult:
+    removed: Mapping[str, object]
+    removed_again: Mapping[str, object]
+    postgres_stop: Mapping[str, object]
+    repeated_postgres_stop: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditPhaseResult:
+    audit: LeakReport
+
+
+def _prepare_source_backed_scenario(
     target_runtime: E2ERuntime,
     source_server: E2ERuntime,
     source_backup: ArchiveIdentity,
     record_property: Any,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
-) -> None:
-    """Prove one serial public workflow from pinned source checkout to cleanup."""
+) -> _CriticalPathSetup:
     source_repository, odoo_bin_relative = _source_repository()
     runner = CliRunner()
     runtime = target_runtime
     for key, value in runtime.environment.items():
         monkeypatch.setenv(key, value)
     catalogue_path = Path(runtime.environment["ODCLI_E2E_CATALOG"]).resolve()
+    catalog_path_provider = partial(_critical_path_catalog_path, catalogue_path)
+    data_root_provider = partial(_critical_path_data_root, runtime)
+    state_root_provider = partial(_critical_path_state_root, runtime)
+    cache_root_provider = partial(_critical_path_cache_root, runtime)
+    locks_dir_provider = partial(_critical_path_locks_dir, runtime)
 
-    def run_catalog_path(*, ensure_exists: bool = True) -> Path:
-        if ensure_exists:
-            catalogue_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return catalogue_path
-
-    def run_data_root(*, ensure_exists: bool = True) -> Path:
-        if ensure_exists:
-            runtime.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return runtime.root
-
-    def run_state_root() -> Path:
-        path = runtime.root / "state"
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return path
-
-    def run_cache_root(*, ensure_exists: bool = True) -> Path:
-        path = runtime.root / "cache"
-        if ensure_exists:
-            path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return path
-
-    def run_locks_dir(**_kwargs: object) -> Path:
-        path = run_state_root() / "locks"
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        return path
-
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_data_root", run_data_root)
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_state_root", run_state_root)
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", run_cache_root)
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", run_locks_dir)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_data_root", data_root_provider)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_state_root", state_root_provider)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", cache_root_provider)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", locks_dir_provider)
 
     _assert_catalog_patch_targets_importable()
     for target in _CATALOG_PATCH_TARGETS:
-        monkeypatch.setattr(target, run_catalog_path)
+        monkeypatch.setattr(target, catalog_path_provider)
     from odoo_instance_sdk.commands import backup as backup_commands, resource as resource_commands
 
-    monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", run_catalog_path)
-    monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", run_catalog_path)
+    monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", catalog_path_provider)
+    monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", catalog_path_provider)
     master_password = runtime.master_password_file.read_text(encoding="utf-8").strip()
     pg_password = runtime.secret_file.read_text(encoding="utf-8").strip()
     addon_root = Path(__file__).parents[2] / "fixtures" / "addons"
@@ -466,23 +551,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
 
     cluster = PostgresCluster.from_project(project)
 
-    def release_owned_cluster() -> None:
-        last_error: RuntimeError | None = None
-        for _attempt in range(2):
-            try:
-                compose_down(
-                    cluster.compose_file,
-                    cluster.compose_project_name,
-                    ports=(cluster.endpoint_port,),
-                )
-            except RuntimeError as error:
-                last_error = error
-            else:
-                return
-        if last_error is not None:
-            raise last_error
-
-    request.addfinalizer(release_owned_cluster)
+    request.addfinalizer(partial(_release_owned_cluster, cluster))
     runtime.ledger.record(
         "postgres",
         f"{runtime.run_id}-sdk-postgres",
@@ -651,7 +720,34 @@ def test_source_backed_full_critical_path(  # noqa: C901
         },
     )
 
+    return _CriticalPathSetup(
+        runner=runner,
+        runtime=runtime,
+        source_server=source_server,
+        source_backup=source_backup,
+        record_property=record_property,
+        monkeypatch=monkeypatch,
+        catalogue_path=catalogue_path,
+        cli_environment=cli_environment,
+        project=project,
+        environment_id=environment_id,
+        registered_worktree=registered_worktree,
+        probe_destination=probe_destination,
+        generated_config=generated_config,
+        cluster=cluster,
+    )
+
+
+def _exercise_runtime_bootstrap(scenario: _CriticalPathSetup) -> _RuntimePhaseResult:
+    runner = scenario.runner
+    project = scenario.project
+    cli_environment = scenario.cli_environment
+    runtime = scenario.runtime
+    catalogue_path = scenario.catalogue_path
+    environment_id = scenario.environment_id
+    record_property = scenario.record_property
     from odoo_instance_sdk import OdooClient, OdooClientConfig
+    from odoo_instance_sdk.commands import backup as backup_commands, resource as resource_commands
 
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     assert os.environ["ODCLI_E2E_CATALOG"] == runtime.environment["ODCLI_E2E_CATALOG"]
@@ -676,11 +772,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
         repeated_stop_result = _invoke(
             runner, project, cli_environment, "--env", environment_id, "stop"
         )
-        assert stop_result == {"status": "stopped", "environment_id": environment_id}
-        assert repeated_stop_result == {
-            "status": "already_stopped",
-            "environment_id": environment_id,
-        }
+        assert stop_result["status"] == "already_stopped"
+        assert stop_result["environment_id"] == environment_id
+        assert stop_result["owner_kind"] == "environment"
+        assert repeated_stop_result["status"] == "already_stopped"
+        assert repeated_stop_result["environment_id"] == environment_id
+        assert repeated_stop_result["owner_kind"] == "environment"
     finally:
         _stop_owned(instance, first_process)
     assert (
@@ -694,6 +791,15 @@ def test_source_backed_full_critical_path(  # noqa: C901
     )
     assert _PROBE in json.dumps(modules)
     _record(record_property, "E2E-CP-05", modules)
+    return _RuntimePhaseResult(client, env_obj, instance)
+
+
+def _exercise_module_update_and_tests(scenario: _CriticalPathSetup) -> None:
+    runner = scenario.runner
+    project = scenario.project
+    cli_environment = scenario.cli_environment
+    environment_id = scenario.environment_id
+    record_property = scenario.record_property
     module_update = _invoke(
         runner,
         project,
@@ -747,6 +853,18 @@ def test_source_backed_full_critical_path(  # noqa: C901
     assert tests.get("exit_code") == 0
     _record(record_property, "E2E-CP-07", tests)
 
+
+def _capture_and_validate_source_backup(
+    scenario: _CriticalPathSetup, runtime_phase: _RuntimePhaseResult
+) -> _BackupPhaseResult:
+    runner = scenario.runner
+    project = scenario.project
+    cli_environment = scenario.cli_environment
+    record_property = scenario.record_property
+    runtime = scenario.runtime
+    source_backup = scenario.source_backup
+    source_server = scenario.source_server
+    instance = runtime_phase.instance
     second_process = _start_owned(instance, runtime)
     wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
     refresh = _invoke(
@@ -761,16 +879,33 @@ def test_source_backed_full_critical_path(  # noqa: C901
     )
     restored_database = str(refresh["restored_database"])
     backup = refresh.get("backup")
-    assert isinstance(backup, dict) and backup.get("id")
+    assert isinstance(backup, dict) and isinstance(backup.get("id"), str)
     assert isinstance(backup.get("sha256"), str) and len(backup["sha256"]) == 64
     assert isinstance(backup.get("size_bytes"), int) and backup["size_bytes"] > 0
+    assert isinstance(backup.get("source_base_url"), str)
+    assert isinstance(backup.get("database_name"), str)
+    assert isinstance(backup.get("source_git_branch"), str)
+    backup_metadata = _BackupMetadata(
+        id=backup["id"],
+        size_bytes=backup["size_bytes"],
+        sha256=backup["sha256"],
+        source_base_url=backup["source_base_url"],
+        database_name=backup["database_name"],
+        source_git_branch=backup["source_git_branch"],
+    )
     assert source_backup.size_bytes > 0 and len(source_backup.sha256) == 64
     _record(record_property, "E2E-CP-08", {"database": restored_database, "backup": backup["id"]})
-    backup_id = str(backup["id"])
+    backup_id = backup_metadata.id
     _invoke(runner, project, cli_environment, "backup", "list")
     shown = _invoke(runner, project, cli_environment, "backup", "show", backup_id)
     assert str(shown.get("id", shown.get("backup", {}).get("id", ""))) == backup_id
-    for key in ("size_bytes", "sha256", "source_base_url", "database_name", "source_git_branch"):
+    for key in (
+        "size_bytes",
+        "sha256",
+        "source_base_url",
+        "database_name",
+        "source_git_branch",
+    ):
         assert shown.get(key) == backup.get(key), key
     assert (
         backup["source_base_url"] == f"http://127.0.0.1:{source_server.topology.source_odoo_port}"
@@ -792,7 +927,29 @@ def test_source_backed_full_critical_path(  # noqa: C901
             "shown": shown,
         },
     )
+    return _BackupPhaseResult(
+        process=second_process,
+        restored_database=restored_database,
+        backup=backup_metadata,
+    )
 
+
+def _verify_restored_database_and_runtime(
+    scenario: _CriticalPathSetup,
+    runtime_phase: _RuntimePhaseResult,
+    backup_phase: _BackupPhaseResult,
+) -> _RuntimePhaseResult:
+    runner = scenario.runner
+    project = scenario.project
+    cli_environment = scenario.cli_environment
+    environment_id = scenario.environment_id
+    record_property = scenario.record_property
+    runtime = scenario.runtime
+    client = runtime_phase.client
+    env_obj = runtime_phase.environment
+    instance = runtime_phase.instance
+    second_process = backup_phase.process
+    restored_database = backup_phase.restored_database
     _stop_owned(instance, second_process)
     _switch_database_config(Path(env_obj.generated_config_path), restored_database)
     env_obj = client.environments.get(environment_id)
@@ -834,11 +991,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
     repeated_stop_result = _invoke(
         runner, project, cli_environment, "--env", environment_id, "stop"
     )
-    assert stop_result == {"status": "stopped", "environment_id": environment_id}
-    assert repeated_stop_result == {
-        "status": "already_stopped",
-        "environment_id": environment_id,
-    }
+    assert stop_result["status"] == "already_stopped"
+    assert stop_result["environment_id"] == environment_id
+    assert stop_result["owner_kind"] == "environment"
+    assert repeated_stop_result["status"] == "already_stopped"
+    assert repeated_stop_result["environment_id"] == environment_id
+    assert repeated_stop_result["owner_kind"] == "environment"
     _stop_owned(instance, third_process)
     status_after_stop = _invoke(runner, project, cli_environment, "postgres", "status")
     repeated_status_after_stop = _invoke(runner, project, cli_environment, "postgres", "status")
@@ -853,7 +1011,25 @@ def test_source_backed_full_critical_path(  # noqa: C901
     repeated_doctor = _invoke(runner, project, cli_environment, "doctor")
     assert doctor == repeated_doctor
     _record(record_property, "E2E-CP-14", {"doctor": doctor, "repeated": repeated_doctor})
+    return _RuntimePhaseResult(client, env_obj, instance)
 
+
+def _cleanup_owned_resources(
+    scenario: _CriticalPathSetup,
+    runtime_phase: _RuntimePhaseResult,
+    backup_phase: _BackupPhaseResult,
+) -> _CleanupPhaseResult:
+    runner = scenario.runner
+    project = scenario.project
+    cli_environment = scenario.cli_environment
+    environment_id = scenario.environment_id
+    record_property = scenario.record_property
+    cluster = scenario.cluster
+    monkeypatch = scenario.monkeypatch
+    probe_destination = scenario.probe_destination
+    registered_worktree = scenario.registered_worktree
+    restored_database = backup_phase.restored_database
+    client = runtime_phase.client
     _invoke(
         runner,
         project,
@@ -896,8 +1072,8 @@ def test_source_backed_full_critical_path(  # noqa: C901
         )
         == 1
     )
-    assert not Path(str(environment["worktree_path"])).exists()
-    assert not Path(str(environment["generated_config_path"])).exists()
+    assert not scenario.registered_worktree.exists()
+    assert not scenario.generated_config.exists()
     postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     repeated_postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     assert postgres_stop == repeated_postgres_stop == {}
@@ -906,7 +1082,19 @@ def test_source_backed_full_critical_path(  # noqa: C901
         cluster.compose_project_name,
         ports=(cluster.endpoint_port,),
     )
+    return _CleanupPhaseResult(removed, removed_again, postgres_stop, repeated_postgres_stop)
 
+
+def _audit_cleanup_and_record(
+    scenario: _CriticalPathSetup, cleanup_phase: _CleanupPhaseResult
+) -> _AuditPhaseResult:
+    cluster = scenario.cluster
+    runtime = scenario.runtime
+    record_property = scenario.record_property
+    removed = cleanup_phase.removed
+    removed_again = cleanup_phase.removed_again
+    postgres_stop = cleanup_phase.postgres_stop
+    repeated_postgres_stop = cleanup_phase.repeated_postgres_stop
     audit = audit_no_leaks(
         runtime.run_id,
         # The module-scoped fixture is still needed by focused leaves.  Audit
@@ -928,7 +1116,18 @@ def test_source_backed_full_critical_path(  # noqa: C901
             "cleanup_audit": audit.leaks,
         },
     )
+    return _AuditPhaseResult(audit)
 
+
+def _write_final_evidence(
+    scenario: _CriticalPathSetup,
+    backup_phase: _BackupPhaseResult,
+    audit_phase: _AuditPhaseResult,
+) -> None:
+    runtime = scenario.runtime
+    audit = audit_phase.audit
+    backup = backup_phase.backup
+    restored_database = backup_phase.restored_database
     evidence = runtime.artifact_root / "critical-path.json"
     evidence.write_text(
         json.dumps(
@@ -938,12 +1137,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
                 "python": E2E_PINS.cpython,
                 "uv": E2E_PINS.uv,
                 "backup": {
-                    "id": backup_id,
-                    "size_bytes": backup["size_bytes"],
-                    "sha256": backup["sha256"],
-                    "source_base_url": backup["source_base_url"],
-                    "database_name": backup["database_name"],
-                    "source_git_branch": backup["source_git_branch"],
+                    "id": backup.id,
+                    "size_bytes": backup.size_bytes,
+                    "sha256": backup.sha256,
+                    "source_base_url": backup.source_base_url,
+                    "database_name": backup.database_name,
+                    "source_git_branch": backup.source_git_branch,
                 },
                 "restored_database": restored_database,
                 "cleanup": {"clean": audit.clean, "leaks": audit.leaks},
@@ -957,3 +1156,25 @@ def test_source_backed_full_critical_path(  # noqa: C901
     assert evidence.is_file()
     assert evidence.stat().st_mode & 0o777 == 0o600
     assert 0 < evidence.stat().st_size < 2 * 1024 * 1024
+
+
+@pytest.mark.timeout(600)
+def test_source_backed_full_critical_path(
+    target_runtime: E2ERuntime,
+    source_server: E2ERuntime,
+    source_backup: ArchiveIdentity,
+    record_property: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Prove one serial public workflow from pinned source checkout to cleanup."""
+    scenario = _prepare_source_backed_scenario(
+        target_runtime, source_server, source_backup, record_property, monkeypatch, request
+    )
+    runtime_phase = _exercise_runtime_bootstrap(scenario)
+    _exercise_module_update_and_tests(scenario)
+    backup_phase = _capture_and_validate_source_backup(scenario, runtime_phase)
+    restored_runtime = _verify_restored_database_and_runtime(scenario, runtime_phase, backup_phase)
+    cleanup_phase = _cleanup_owned_resources(scenario, restored_runtime, backup_phase)
+    audit_phase = _audit_cleanup_and_record(scenario, cleanup_phase)
+    _write_final_evidence(scenario, backup_phase, audit_phase)

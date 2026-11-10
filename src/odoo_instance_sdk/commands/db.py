@@ -24,6 +24,11 @@ from odoo_instance_sdk.commands.context import (
     resolve_environment,
     resolve_project_path,
 )
+from odoo_instance_sdk.commands.db_restore_completion import (
+    completion_command,
+    restore_completion_rich,
+    validate_completion_options,
+)
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -80,7 +85,6 @@ def _run_rich_restore(
     *,
     show_command_output: bool,
 ) -> tuple[int, DatabasePreparationResult | None]:
-    """Compatibility seam backed by the shared bounded Rich runner."""
     return run_rich_bounded(
         run,
         show_command_output=show_command_output,
@@ -110,7 +114,7 @@ def _validate_replace_context(client: OdooClient, environment: DevelopmentEnviro
 
 @click.group(help="Prepare and reset project databases.")
 def db_group() -> None:
-    """Prepare and reset project databases."""
+    pass
 
 
 @db_group.command("refresh", help="Download and optionally restore a project test backup.")
@@ -282,6 +286,18 @@ def db_list(
 )
 @click.option("--target", "target_database", default=None, help="Exact new database name.")
 @click.option(
+    "--complete",
+    "complete_database",
+    default=None,
+    help="Complete proven post-restore work for this exact database.",
+)
+@click.option(
+    "--update-module",
+    "update_modules",
+    multiple=True,
+    help="Explicit module to update before completion; repeat as needed.",
+)
+@click.option(
     "--reset-admin-password",
     "reset_admin_password",
     is_flag=True,
@@ -305,6 +321,8 @@ def db_restore(  # noqa: C901
     backup_uuid: str | None,
     archive_file: Path | None,
     target_database: str | None,
+    complete_database: str | None,
+    update_modules: tuple[str, ...],
     reset_admin_password: bool,
     yes: bool,
     replace_environment: bool,
@@ -315,9 +333,18 @@ def db_restore(  # noqa: C901
 ) -> None:
     """Restore one exact catalogue backup or caller-owned local archive."""
     output_mode = resolve_output_mode(output_format, json_output)
-    if backup_uuid is None and archive_file is None:
+    validate_completion_options(
+        complete_database,
+        backup_uuid,
+        archive_file,
+        target_database,
+        replace_environment,
+        reset_admin_password,
+        update_modules,
+    )
+    if complete_database is None and (backup_uuid is None and archive_file is None):
         raise click.UsageError("db restore requires exactly one of BACKUP_UUID or --file")
-    if backup_uuid is not None and archive_file is not None:
+    if complete_database is None and backup_uuid is not None and archive_file is not None:
         raise click.UsageError("db restore accepts exactly one of BACKUP_UUID or --file")
     if replace_environment and archive_file is not None:
         raise click.UsageError("--replace is only available for a retained backup UUID")
@@ -359,7 +386,21 @@ def db_restore(  # noqa: C901
     try:
         client = _client_class()(config=_client_config_class()(executable="odoo"))
         command: _InspectableCommand[msgspec.Struct]
-        if replace_environment:
+        if complete_database is not None:
+            project_path = resolve_project_path(ctx)
+            command = cast(
+                "_InspectableCommand[msgspec.Struct]",
+                completion_command(
+                    client,
+                    project_path,
+                    complete_database,
+                    modules=update_modules,
+                    mode=output_mode,
+                    no_input=no_input,
+                    dry_run=dry_run,
+                ),
+            )
+        elif replace_environment:
             assert backup_id is not None
             environment = resolve_environment(client, ctx.env, cwd=Path.cwd())
             _validate_replace_context(client, environment)
@@ -420,11 +461,17 @@ def db_restore(  # noqa: C901
             details=_error_details(exc),
         )
 
-    source_label = "local archive" if archive_file is not None else f"backup {backup_id}"
+    source_label = (
+        f"completion of {complete_database}"
+        if complete_database is not None
+        else "local archive"
+        if archive_file is not None
+        else f"backup {backup_id}"
+    )
 
     def confirm() -> None:
         click.confirm(
-            f"Restore {source_label}"
+            f"{'Complete' if complete_database is not None else 'Restore'} {source_label}"
             + (f" into {target_database!r}" if target_database else "")
             + "?",
             default=False,
@@ -432,27 +479,15 @@ def db_restore(  # noqa: C901
         )
 
     def interrupted(error: KeyboardInterrupt) -> None:
-        from odoo_instance_sdk.internal.dbprep.source import (
-            DatabasePreparationFailureContext,
+        from odoo_instance_sdk.commands.db_restore_completion import (
+            restore_interruption_context,
         )
-        from odoo_instance_sdk.internal.dbreplace.planning import CopyReplacementFailureContext
 
-        context = getattr(error, "failure_context", None)
-        safe_context: dict[str, JsonValue] = (
-            model_to_dict(context)
-            if isinstance(
-                context, (DatabasePreparationFailureContext, CopyReplacementFailureContext)
-            )
-            else cast(
-                "dict[str, JsonValue]",
-                {
-                    "backup_id": str(backup_id) if backup_id is not None else None,
-                    "source_kind": "local_archive" if archive_file is not None else "catalogue",
-                    "retained_database": target_database,
-                    "database_confirmed": False,
-                    "default_switch_confirmed": False,
-                },
-            )
+        safe_context = restore_interruption_context(
+            error,
+            backup_id=backup_id,
+            archive_file=archive_file,
+            target_database=target_database,
         )
         emit(
             failure_document(
@@ -477,6 +512,8 @@ def db_restore(  # noqa: C901
                 "source_kind": "local_archive" if archive_file is not None else "catalogue",
                 "target_database": target_database,
                 "replace": replace_environment,
+                "complete": complete_database,
+                "update_modules": list(update_modules),
             },
             provenance={"project_source": project_provenance(ctx)},
             confirm=None if yes or dry_run else confirm,
@@ -855,6 +892,8 @@ def _restore_rich(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     payload = document.result if isinstance(document.result, dict) else {}
+    if "completed_stages" in payload:
+        return restore_completion_rich(payload)
     if "steps" in payload:
         return _rich_plan_projection(
             document.result, command=document.command, warnings=document.warnings

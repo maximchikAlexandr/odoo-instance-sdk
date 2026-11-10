@@ -3,7 +3,7 @@
   "source_commit": "cd992ceebbaf343c03e1941d39cfe423d35ba6c6",
   "python": "3.12.13",
   "platform": "x86_64-manylinux_2_17",
-  "lock_sha256": "7453ea85977d6837e7d9e2ab229d5120e1ac16bd6a230582c6cc4813d335148c",
+  "lock_sha256": "5bc9f79daf276889d35915ec8ead6b3537438cee08c664c4f1e36b2bac2349b8",
   "scanner": "pip-audit 2.10.1",
   "reviewed_overrides": {
     "cbor2": "5.9.0",
@@ -13,6 +13,7 @@
     "lxml": "6.1.1",
     "lxml-html-clean": "0.4.5",
     "pillow": "13.0.0",
+    "pyasn1": "0.6.5",
     "pyopenssl": "26.0.0",
     "python-ldap": "3.4.5",
     "requests": "2.32.5",

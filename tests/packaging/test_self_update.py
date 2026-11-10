@@ -106,6 +106,14 @@ def _isolated_home(tmp_path: Path, *, source_repo: Path | None = None) -> dict[s
         env["XDG_CACHE_HOME"],
     ):
         Path(path).mkdir(parents=True, exist_ok=True)
+    companion_launcher = shutil.which("odcli-multica", path=env.get("PATH"))
+    if companion_launcher is not None:
+        companion_bin = Path(companion_launcher).parent.resolve()
+        env["PATH"] = os.pathsep.join(
+            entry
+            for entry in env.get("PATH", "").split(os.pathsep)
+            if Path(entry or ".").resolve() != companion_bin
+        )
     # Production deliberately installs from the allow-listed GitHub origin.
     # Rewrite that origin to this checkout so packaging E2E never waits on a
     # network fetch after the local fixture install has already succeeded.
@@ -514,6 +522,7 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
     _require_uv()
     fixture, baseline, candidate = _create_dashboard_update_fixture(tmp_path)
     env = _isolated_home(tmp_path, source_repo=fixture)
+    assert shutil.which("odcli-multica", path=env.get("PATH")) is None
     install = _install_uv_tool_vcs(
         env,
         fixture,
@@ -525,13 +534,19 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
         pytest.skip(f"uv dashboard tool install unavailable: {install.stderr}")
     odcli = Path(env["HOME"]) / ".local" / "bin" / "odcli"
 
+    _update_dashboard_tool(odcli, env, candidate, cwd=tmp_path)
+    _assert_dashboard_extra_and_assets(env)
+    _assert_dashboard_monitor_ready(odcli, env)
+
+
+def _update_dashboard_tool(odcli: Path, env: dict[str, str], candidate: str, *, cwd: Path) -> None:
     update = subprocess.run(
         [str(odcli), "update", "--ref", candidate, "--yes", "--format", "json"],
         check=False,
         capture_output=True,
         text=True,
         env=env,
-        cwd=tmp_path,
+        cwd=cwd,
         timeout=_FULL_UPDATE_CHILD_TIMEOUT_SECONDS,
     )
     assert update.returncode == 0, update.stderr or update.stdout
@@ -542,6 +557,8 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
     assert payload["result"]["snapshot_state"] == "cleared"
     assert payload["result"]["journal_state"] == "cleared"
 
+
+def _assert_dashboard_extra_and_assets(env: dict[str, str]) -> None:
     tool_root = Path(env["HOME"]) / ".local" / "share" / "uv" / "tools" / "odoo-instance-sdk"
     tool_python = tool_root / "bin" / "python"
     imports = subprocess.run(
@@ -566,6 +583,8 @@ def test_packaged_dashboard_tool_retains_extra_and_restarted_monitor(
     assert imports.returncode == 0, imports.stderr
     assert imports.stdout.strip() == "fastapi:starlette:starlette_admin:pwdlib:sqlcipher3:uvicorn"
 
+
+def _assert_dashboard_monitor_ready(odcli: Path, env: dict[str, str]) -> None:
     readiness = _run_dashboard_monitor(odcli, env=env, port=18080 + (os.getpid() % 1000))
     assert readiness.error is None, readiness.error
     assert readiness.health_status == 200

@@ -141,6 +141,13 @@ restores = Table(
         server_default="complete",
     ),
     Column("database_oid", Integer),
+    Column(
+        "post_restore_checkpoint",
+        Text,
+        CheckConstraint(
+            "post_restore_checkpoint IN ('reset_pending', 'reset_complete', 'reset_not_requested')"
+        ),
+    ),
     CheckConstraint(
         "(source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
         "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "

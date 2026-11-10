@@ -196,6 +196,7 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
     compose_file.chmod(0o600)
     environment = {
         "HOME": str(home),
+        "ODCLI_USER_ROOT": str(home / ".odcli"),
         "XDG_CONFIG_HOME": str(root / "xdg-config"),
         "XDG_DATA_HOME": str(root / "xdg-data"),
         "XDG_CACHE_HOME": str(root / "xdg-cache"),

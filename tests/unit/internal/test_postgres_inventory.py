@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -18,6 +19,69 @@ from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from tests.integration.real_odoo.inventory_diagnostics import inventory_diagnostic
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("returncode", "stderr", "expected_category", "expected_sqlstate"),
+    [
+        (
+            2,
+            "FATAL: password authentication failed for user <secret> SQLSTATE 28P01",
+            "auth",
+            "28P01",
+        ),
+        (2, "connection refused SQLSTATE 08006", "connection", "08006"),
+        (2, "ERROR: syntax error SQLSTATE 42601", "sql", "42601"),
+        (2, "ERROR: statement timeout SQLSTATE 57014", "timeout", "57014"),
+        (127, "psql: exec format error", "process", None),
+        (2, "unclassified failure SQLSTATE ABCDE", "unknown", None),
+        (999, "unclassified failure", "unknown", None),
+    ],
+)
+def test_inventory_diagnostics_allowlist_categories_without_retaining_secrets(
+    returncode: int,
+    stderr: str,
+    expected_category: str,
+    expected_sqlstate: str | None,
+) -> None:
+    secret = "inventory-diagnostic-secret-canary"
+    result = ProcessResult(
+        argv=("psql", secret),
+        returncode=returncode,
+        stdout=secret,
+        stderr=stderr.replace("<secret>", secret) + f" {secret}",
+        duration=0.0,
+        cwd=secret,
+        environment=(("PGPASSWORD", secret),),
+    )
+
+    diagnostic = inventory_diagnostic(result)
+
+    assert diagnostic == {
+        "exit_code": returncode if -128 <= returncode <= 255 else None,
+        "category": expected_category,
+        "sqlstate": expected_sqlstate,
+    }
+    assert secret not in json.dumps(diagnostic)
+
+
+@pytest.mark.unit
+def test_inventory_diagnostic_marks_absent_and_unparsed_result_unknown() -> None:
+    assert inventory_diagnostic(None) == {
+        "exit_code": None,
+        "category": "unknown",
+        "sqlstate": None,
+    }
+    assert inventory_diagnostic(None, error=ValueError("private diagnostic text")) == {
+        "exit_code": None,
+        "category": "unknown",
+        "sqlstate": None,
+    }
+    assert inventory_diagnostic(
+        None, error=subprocess.TimeoutExpired("private argv", timeout=3)
+    ) == {"exit_code": None, "category": "timeout", "sqlstate": None}
 
 
 def _instance(

@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0015"
+CATALOG_REVISION = "0016"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -418,7 +418,9 @@ _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
     "backups": frozenset({"source_name", "pinned"}),
     "environment_copy_journal": frozenset({"backup_ownership"}),
     "runtime": frozenset({"launch_identity_json"}),
-    "restores": frozenset({"source_kind", "source_sha256", "database_oid"}),
+    "restores": frozenset(
+        {"source_kind", "source_sha256", "database_oid", "post_restore_checkpoint"}
+    ),
     "database_events": frozenset({"source_kind", "source_sha256"}),
 }
 
@@ -707,7 +709,9 @@ def _historical_checks(
         checks = tuple(
             check
             for check in checks
-            if "source_kind" not in check and not (version == "v16" and "state IN" in check)
+            if "source_kind" not in check
+            and "post_restore_checkpoint" not in check
+            and not (version == "v16" and "state IN" in check)
         )
     elif table == "database_events":
         checks = (
@@ -745,7 +749,6 @@ def _reference_ddl_fingerprint() -> _DdlFingerprint:
 
 
 def verify_schema_equivalence(conn: sqlite3.Connection) -> None:
-    """Verify that an existing catalogue matches the canonical metadata."""
     if _ddl_fingerprint(conn) != _reference_ddl_fingerprint():
         if (
             catalog_revision(conn) == CATALOG_REVISION
@@ -757,7 +760,6 @@ def verify_schema_equivalence(conn: sqlite3.Connection) -> None:
 
 
 def _repair_known_v16_catalog(conn: sqlite3.Connection) -> bool:
-    """Restore the index lost by the historical v16 table rebuild."""
     user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if user_version != 16:
         return False
@@ -771,6 +773,10 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> bool:
                 "CHECK (state IN ('complete', 'incomplete'))"
             )
             conn.execute("ALTER TABLE restores ADD COLUMN database_oid INTEGER")
+            conn.execute(
+                "ALTER TABLE restores ADD COLUMN post_restore_checkpoint TEXT "
+                "CHECK (post_restore_checkpoint IN ('reset_pending', 'reset_complete', 'reset_not_requested'))"
+            )
             conn.execute(
                 "CREATE UNIQUE INDEX environments_one_active_branch "
                 "ON environments(git_common_dir, branch) WHERE state <> 'removed'"
