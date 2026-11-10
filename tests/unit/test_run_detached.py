@@ -668,13 +668,19 @@ def test_detached_readiness_early_exit_does_not_clear_unpersisted_identity(
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
         patch("odoo_instance_sdk.resources.instance.planning.terminate") as terminate_process,
+        patch(
+            "odoo_instance_sdk.resources.instance.planning._verify_process_exit"
+        ) as verify_process_exit,
         patch.object(OdooInstance, "_clear_runtime_identity") as clear_runtime,
         pytest.raises(InstanceConfigurationError, match="exited immediately"),
     ):
         instance.run_detached(wait_ready=True)
     terminate_process.assert_called_once_with(
-        executor.handles["instance.detached"], process_group_id=4242, timeout=5.0
+        executor.handles["instance.detached"],
+        process_group_id=executor.handles["instance.detached"].pid,
+        timeout=5.0,
     )
+    verify_process_exit.assert_called_once_with(executor.handles["instance.detached"].pid)
     clear_runtime.assert_not_called()
 
 

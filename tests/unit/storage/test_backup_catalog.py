@@ -804,6 +804,45 @@ def test_restore_checkpoint_advancement_rejects_stale_latest_binding(tmp_path: P
     catalog.close()
 
 
+@pytest.mark.parametrize(
+    ("expected_checkpoint", "checkpoint", "error"),
+    [
+        ("invalid", "reset_complete", "checkpoint is invalid"),
+        ("reset_complete", "reset_complete", "transition is invalid"),
+        ("reset_pending", "reset_pending", "transition is invalid"),
+    ],
+)
+def test_restore_checkpoint_rejects_invalid_transitions_without_appending(
+    tmp_path: Path,
+    expected_checkpoint: str,
+    checkpoint: str,
+    error: str,
+) -> None:
+    catalog, first_sequence, event_count = _restore_checkpoint_catalog(tmp_path)
+
+    with pytest.raises(BackupCatalogError, match=error):
+        catalog._advance_restore_checkpoint(
+            "localhost",
+            5432,
+            "retry_db",
+            expected_sequence=first_sequence,
+            expected_checkpoint=expected_checkpoint,
+            checkpoint=checkpoint,
+        )
+
+    latest = catalog._latest_restore_binding("localhost", 5432, "retry_db")
+    assert latest is not None
+    assert latest["sequence"] == first_sequence
+    assert latest["post_restore_checkpoint"] == "reset_pending"
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE database_name='retry_db'"
+        ).fetchone()[0]
+        == event_count
+    )
+    catalog.close()
+
+
 def test_restore_completion_preserves_history_and_does_not_add_restore_event(
     tmp_path: Path,
 ) -> None:
@@ -843,6 +882,45 @@ def test_restore_completion_preserves_history_and_does_not_add_restore_event(
         "reset_complete",
         "reset_pending",
     ]
+    catalog.close()
+
+
+@pytest.mark.parametrize(
+    ("expected_sequence_offset", "expected_checkpoint", "error"),
+    [
+        (0, "reset_pending", "latest restore binding changed"),
+        (1, "reset_complete", "latest restore binding changed"),
+        (0, "invalid", "checkpoint is invalid"),
+    ],
+)
+def test_restore_completion_rejects_stale_or_pending_checkpoint_without_appending(
+    tmp_path: Path,
+    expected_sequence_offset: int,
+    expected_checkpoint: str,
+    error: str,
+) -> None:
+    catalog, first_sequence, event_count = _restore_checkpoint_catalog(tmp_path)
+
+    with pytest.raises(BackupCatalogError, match=error):
+        catalog._complete_restore_binding(
+            "localhost",
+            5432,
+            "retry_db",
+            expected_sequence=first_sequence + expected_sequence_offset,
+            expected_checkpoint=expected_checkpoint,
+        )
+
+    latest = catalog._latest_restore_binding("localhost", 5432, "retry_db")
+    assert latest is not None
+    assert latest["sequence"] == first_sequence
+    assert latest["state"] == "incomplete"
+    assert latest["post_restore_checkpoint"] == "reset_pending"
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE database_name='retry_db'"
+        ).fetchone()[0]
+        == event_count
+    )
     catalog.close()
 
 
