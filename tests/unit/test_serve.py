@@ -206,7 +206,10 @@ def test_run_server_external_mode_registers_panel_and_disables_uvicorn_proxy_tru
     )
 
     assert captured["route"] == ("http://127.0.0.1:8123", settings)
-    assert captured["app"]["external_proxy"] is proxy
+    configured_proxy = captured["app"]["external_proxy"]
+    assert configured_proxy.allowed_hosts == proxy.allowed_hosts
+    assert configured_proxy.trusted_proxy_addresses == proxy.trusted_proxy_addresses
+    assert configured_proxy.instance_hosts == ()
     assert captured["browser_url"] == "https://panel.example.test/"
     assert captured["proxy_headers"] is False
     assert captured["forwarded_allow_ips"] == ""

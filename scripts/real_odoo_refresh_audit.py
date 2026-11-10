@@ -19,8 +19,9 @@ from scripts.real_odoo_bootstrap import (
 SCHEMA = "odoo19-python-resolution-audit-v1"
 SCANNER = "pip-audit 2.10.1"
 FIXED_OVERRIDES = {
-    "certifi": "2026.10.19",
+    "certifi": "2026.10.23",
     "pillow": "13.0.0",
+    "pyasn1": "0.6.5",
     "urllib3": "2.8.0",
     "werkzeug": "3.1.9",
 }

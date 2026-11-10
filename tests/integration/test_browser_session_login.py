@@ -1,28 +1,37 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import importlib
+from typing import TYPE_CHECKING, cast
 
-from odoo_instance_sdk.http.browser_login import (
-    BrowserLoginController,
-    LoginTarget,
-    build_browser_login_router,
-)
+import pytest
+
+fastapi = pytest.importorskip("fastapi")
+FastAPI = fastapi.FastAPI
+TestClient = importlib.import_module("fastapi.testclient").TestClient
+browser_login = importlib.import_module("odoo_instance_sdk.http.browser_login")
+BrowserLoginController = browser_login.BrowserLoginController
+build_browser_login_router = browser_login.build_browser_login_router
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.http.browser_login import LoginTarget
 
 
 def test_selected_user_handoff_sets_host_cookie_once() -> None:
     class Resolver:
         def resolve(self, owner_kind: str, owner_id: str) -> LoginTarget:
             assert (owner_kind, owner_id) == ("project", "project-fixture")
-            return LoginTarget(
-                owner_kind="project",
-                owner_id=owner_id,
-                runtime_id="ready-runtime",
-                database="fixture-db",
-                instance_url="https://instance.example.test",
-                panel_origin="https://panel.example.test",
-                list_users=lambda _query: (),
-                create_session=lambda user_id: f"sid-for-user-{user_id}",
+            return cast(
+                "LoginTarget",
+                browser_login.LoginTarget(
+                    owner_kind="project",
+                    owner_id=owner_id,
+                    runtime_id="ready-runtime",
+                    database="fixture-db",
+                    instance_url="https://instance.example.test",
+                    panel_origin="https://panel.example.test",
+                    list_users=lambda _query: (),
+                    create_session=lambda user_id: f"sid-for-user-{user_id}",
+                ),
             )
 
     app = FastAPI()

@@ -1,22 +1,24 @@
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace
+from typing import TYPE_CHECKING, cast
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
-import odoo_instance_sdk.http.browser_login as browser_login
-from odoo_instance_sdk.http.browser_login import (
-    BrowserLoginController,
-    LoginTarget,
-    build_browser_login_router,
-)
-from odoo_instance_sdk.models import (
-    BrowserLoginTicketRequest,
-    BrowserLoginUser,
-    BrowserLoginUsersRequest,
-)
+fastapi = pytest.importorskip("fastapi")
+FastAPI = fastapi.FastAPI
+TestClient = importlib.import_module("fastapi.testclient").TestClient
+browser_login = importlib.import_module("odoo_instance_sdk.http.browser_login")
+BrowserLoginController = browser_login.BrowserLoginController
+build_browser_login_router = browser_login.build_browser_login_router
+models = importlib.import_module("odoo_instance_sdk.models")
+BrowserLoginTicketRequest = models.BrowserLoginTicketRequest
+BrowserLoginUsersRequest = models.BrowserLoginUsersRequest
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.http.browser_login import LoginTarget
+    from odoo_instance_sdk.models import BrowserLoginUser
 
 
 class Resolver:
@@ -24,15 +26,18 @@ class Resolver:
         self.created_sessions: list[int] = []
         self.queries: list[str] = []
         self.failure: str | None = None
-        self.target = LoginTarget(
-            owner_kind="environment",
-            owner_id="env-1",
-            runtime_id="runtime-1",
-            database="db-1",
-            instance_url="https://instance.example.test",
-            panel_origin="https://panel.example.test",
-            list_users=self._list_users,
-            create_session=self._create_session,
+        self.target = cast(
+            "LoginTarget",
+            browser_login.LoginTarget(
+                owner_kind="environment",
+                owner_id="env-1",
+                runtime_id="runtime-1",
+                database="db-1",
+                instance_url="https://instance.example.test",
+                panel_origin="https://panel.example.test",
+                list_users=self._list_users,
+                create_session=self._create_session,
+            ),
         )
 
     def resolve(self, owner_kind: str, owner_id: str) -> LoginTarget:
@@ -44,7 +49,7 @@ class Resolver:
     def _list_users(self, query: str) -> tuple[BrowserLoginUser, ...]:
         self.queries.append(query)
         return tuple(
-            BrowserLoginUser(id=index, login=f"user{index}", name=f"User {index}")
+            models.BrowserLoginUser(id=index, login=f"user{index}", name=f"User {index}")
             for index in range(1, 103)
             if not query or query in f"user{index}"
         )
@@ -149,15 +154,32 @@ def test_expired_handoff_is_consumed(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         is None
     )
+
+
+def test_handoff_capacity_rejects_and_expired_entries_are_pruned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(browser_login, "monotonic", lambda: now[0])
+    controller = BrowserLoginController(Resolver())
+    request = BrowserLoginTicketRequest(owner_kind="environment", owner_id="env-1", user_id=7)
+    tickets = [controller.issue(request, "https://panel.example.test") for _ in range(128)]
+
+    with pytest.raises(ValueError, match="browser login is unavailable"):
+        controller.issue(request, "https://panel.example.test")
+
+    now[0] = 131.0
     assert (
         controller.consume(
-            body,
+            f"handoff={tickets[0].handoff}".encode(),
             host="instance.example.test",
             origin="https://panel.example.test",
             trusted_proxy=True,
         )
         is None
     )
+    fresh = controller.issue(request, "https://panel.example.test")
+    assert fresh.handoff not in {ticket.handoff for ticket in tickets}
 
 
 def test_extra_form_field_rejects_and_burns_handoff() -> None:

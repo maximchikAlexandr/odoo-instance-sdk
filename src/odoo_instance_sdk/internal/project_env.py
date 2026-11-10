@@ -135,7 +135,7 @@ def _read_environment_descriptor(
         if directory_fd is None
         else None
     )
-    before = path.lstat() if directory_fd is None or not getattr(os, "O_NOFOLLOW", 0) else None
+    before = path.lstat()
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = (
         os.open(path, flags)

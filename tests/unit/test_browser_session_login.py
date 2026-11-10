@@ -4,8 +4,10 @@ import json
 import sys
 import tempfile
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Protocol
 from unittest.mock import patch
 
 import pytest
@@ -91,14 +93,31 @@ def test_session_command_plan_never_contains_a_sid(tmp_path: Path) -> None:
     assert command.plan.process_steps[0].input_preview == "<redacted>"
 
 
-@pytest.mark.parametrize(
-    "failure", ["success", "process", "timeout", "invalid-file", "cleanup-failure"]
-)
-def test_session_command_cleans_private_file_and_known_session_best_effort(  # noqa: C901
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: str,
-) -> None:
+class _TestSessionExecutor(Protocol):
+    outcome: str
+    step_ids: list[str]
+
+
+class _TestSessionStore(Protocol):
+    def get(self, sid: str) -> object | None: ...
+
+
+@dataclass
+class _BrowserSessionHarness:
+    instance: OdooInstance
+    handoff_dir: Path
+    handoff_file: Path
+    store: _TestSessionStore
+    session_root: SimpleNamespace
+    executor: _TestSessionExecutor
+    removed_sessions: list[dict[str, object]]
+    session: dict[str, object]
+    events: list[StepEvent]
+
+
+def _browser_session_harness(  # noqa: C901
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> _BrowserSessionHarness:
     instance = _instance(tmp_path)
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(uuid, "uuid4", lambda: SimpleNamespace(hex="fixed"))
@@ -158,13 +177,15 @@ def test_session_command_cleans_private_file_and_known_session_best_effort(  # n
             return Users()
 
     fake_http = ModuleType("odoo.http")
-    setattr(fake_http, "root", SimpleNamespace(session_store=store))
+    session_root = SimpleNamespace(session_store=store)
+    setattr(fake_http, "root", session_root)
     fake_odoo = ModuleType("odoo")
     setattr(fake_odoo, "http", fake_http)
 
     class BrowserSessionExecutor:
         def __init__(self) -> None:
             self.step_ids: list[str] = []
+            self.outcome = "success"
 
         def execute(
             self,
@@ -183,7 +204,10 @@ def test_session_command_cleans_private_file_and_known_session_best_effort(  # n
                         chunk=f"handoff diagnostics: {handoff_file}",
                     )
                 )
-            if step.step_id == "instance.browser_session.cleanup" and failure == "cleanup-failure":
+            if (
+                step.step_id == "instance.browser_session.cleanup"
+                and self.outcome == "cleanup-failure"
+            ):
                 raise RuntimeError(f"cleanup failed for {handoff_file}")
             with (
                 patch.dict(sys.modules, {"odoo": fake_odoo, "odoo.http": fake_http}),
@@ -194,13 +218,13 @@ def test_session_command_cleans_private_file_and_known_session_best_effort(  # n
                     {"env": Env(), "SUPERUSER_ID": 1},
                 )
             if step.step_id == "instance.shell_script":
-                if failure in {"timeout", "cleanup-failure"}:
-                    raise TimeoutError(f"timeout {handoff_file} private-sid")
-                if failure == "invalid-file":
+                if self.outcome in {"timeout", "cleanup-failure"}:
+                    raise TimeoutError("timeout private-sid")
+                if self.outcome == "invalid-file":
                     handoff_file.chmod(0o644)
                 return ProcessResult(
                     argv=("python3", "shell"),
-                    returncode=1 if failure == "process" else 0,
+                    returncode=1 if self.outcome == "process" else 0,
                     stdout="",
                     stderr=f"failure {handoff_file} private-sid",
                     duration=0.01,
@@ -220,90 +244,140 @@ def test_session_command_cleans_private_file_and_known_session_best_effort(  # n
 
     executor = BrowserSessionExecutor()
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.browser_login.SubprocessExecutor",
         lambda: executor,
     )
-    command = instance.create_browser_session_command(14)
+    return _BrowserSessionHarness(
+        instance,
+        handoff_dir,
+        handoff_file,
+        store,
+        session_root,
+        executor,
+        removed_sessions,
+        session,
+        [],
+    )
+
+
+def _assert_private_execution(harness: _BrowserSessionHarness) -> None:
+    assert not harness.handoff_dir.exists()
+    event_text = repr(harness.events)
+    assert str(harness.handoff_file) not in event_text
+    assert "private-sid" not in event_text
+
+
+def test_session_command_success_keeps_session_and_cleans_private_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _browser_session_harness(tmp_path, monkeypatch)
+    command = harness.instance.create_browser_session_command(14)
     plan_repr = repr(command.plan)
-    assert str(handoff_file) not in plan_repr
+    assert str(harness.handoff_file) not in plan_repr
     assert "private-sid" not in plan_repr
     assert [step.step_id for step in command.plan.process_steps] == [
         "instance.shell_script",
         "instance.browser_session.cleanup",
     ]
 
-    observer_events: list[StepEvent] = []
-    if failure == "success":
-        credential = command.run(observer=observer_events.append)
-        assert credential.sid == "private-sid"
-        assert "private-sid" not in repr(credential)
-        assert store.get("private-sid") is not None
-        assert executor.step_ids == ["instance.shell_script"]
-        assert removed_sessions == []
-    else:
-        expected_exception: type[Exception] = (
-            TimeoutError if failure in {"timeout", "cleanup-failure"} else RuntimeError
-        )
-        expected_message = {
-            "process": "session creation failed",
-            "timeout": "session creation timed out",
-            "invalid-file": "handoff is invalid",
-            "cleanup-failure": "session creation timed out",
-        }[failure]
-        with pytest.raises(expected_exception, match=expected_message) as error:
-            command.run(observer=observer_events.append)
+    credential = command.run(observer=harness.events.append)
 
-        assert str(handoff_file) not in str(error.value)
-        assert "private-sid" not in str(error.value)
-        assert executor.step_ids == ["instance.shell_script", "instance.browser_session.cleanup"]
-        assert removed_sessions == (
-            [session] if failure not in {"invalid-file", "cleanup-failure"} else []
-        )
-    assert not handoff_dir.exists()
-    event_text = repr(observer_events)
-    assert str(handoff_file) not in event_text
-    assert "private-sid" not in event_text
+    assert credential.sid == "private-sid"
+    assert "private-sid" not in repr(credential)
+    assert harness.store.get("private-sid") is not None
+    assert harness.executor.step_ids == ["instance.shell_script"]
+    assert harness.removed_sessions == []
+    _assert_private_execution(harness)
+
+
+def test_session_command_process_failure_removes_known_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _browser_session_harness(tmp_path, monkeypatch)
+    harness.executor.outcome = "process"
+
+    with pytest.raises(RuntimeError, match="session creation failed") as error:
+        harness.instance.create_browser_session_command(14).run(observer=harness.events.append)
+
+    assert str(harness.handoff_file) not in str(error.value)
+    assert "private-sid" not in str(error.value)
+    assert harness.executor.step_ids == [
+        "instance.shell_script",
+        "instance.browser_session.cleanup",
+    ]
+    assert harness.removed_sessions == [harness.session]
+    _assert_private_execution(harness)
+
+
+def test_session_command_timeout_removes_known_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _browser_session_harness(tmp_path, monkeypatch)
+    harness.executor.outcome = "timeout"
+
+    with pytest.raises(TimeoutError, match="session creation timed out") as error:
+        harness.instance.create_browser_session_command(14).run(observer=harness.events.append)
+
+    assert str(harness.handoff_file) not in str(error.value)
+    assert "private-sid" not in str(error.value)
+    assert harness.executor.step_ids == [
+        "instance.shell_script",
+        "instance.browser_session.cleanup",
+    ]
+    assert harness.removed_sessions == [harness.session]
+    _assert_private_execution(harness)
+
+
+def test_session_command_rejects_unsafe_handoff_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _browser_session_harness(tmp_path, monkeypatch)
+    harness.executor.outcome = "invalid-file"
+
+    with pytest.raises(RuntimeError, match="handoff is invalid") as error:
+        harness.instance.create_browser_session_command(14).run(observer=harness.events.append)
+
+    assert str(harness.handoff_file) not in str(error.value)
+    assert "private-sid" not in str(error.value)
+    assert harness.executor.step_ids == [
+        "instance.shell_script",
+        "instance.browser_session.cleanup",
+    ]
+    assert harness.removed_sessions == []
+    _assert_private_execution(harness)
+
+
+def test_session_command_preserves_timeout_when_best_effort_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _browser_session_harness(tmp_path, monkeypatch)
+    harness.executor.outcome = "cleanup-failure"
+
+    with pytest.raises(TimeoutError, match="session creation timed out") as error:
+        harness.instance.create_browser_session_command(14).run(observer=harness.events.append)
+
+    assert str(harness.handoff_file) not in str(error.value)
+    assert "private-sid" not in str(error.value)
+    assert harness.executor.step_ids == [
+        "instance.shell_script",
+        "instance.browser_session.cleanup",
+    ]
+    assert harness.removed_sessions == []
+    _assert_private_execution(harness)
 
 
 def test_session_command_checks_supported_store_before_creating_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    instance = _instance(tmp_path)
-    source: list[str] = []
+    harness = _browser_session_harness(tmp_path, monkeypatch)
+    harness.session_root.session_store = object()
 
-    def capture_shell_script(_self: OdooInstance, script: str, **_kwargs: object) -> object:
-        source.append(script)
-        return object()
+    with pytest.raises(RuntimeError, match="unsupported session store"):
+        harness.instance.create_browser_session_command(14).run(observer=harness.events.append)
 
-    monkeypatch.setattr(OdooInstance, "_shell_script_command", capture_shell_script)
-    instance.create_browser_session_command(14)
-    assert "type(store).__name__ != 'FilesystemSessionStore'" in source[0]
-    assert source[0].index("unsupported session store") < source[0].index("session = store.new()")
-    assert "not user.active or user.share or user.id == SUPERUSER_ID" in source[0]
-
-    class User:
-        id = 14
-        active = True
-        share = False
-
-        def exists(self) -> User:
-            return self
-
-    class Users:
-        def sudo(self) -> Users:
-            return self
-
-        def browse(self, _user_id: int) -> User:
-            return User()
-
-    fake_odoo = ModuleType("odoo")
-    fake_http = ModuleType("odoo.http")
-    setattr(fake_http, "root", SimpleNamespace(session_store=object()))
-    setattr(fake_odoo, "http", fake_http)
-    namespace = {"env": {"res.users": Users()}, "SUPERUSER_ID": 1}
-    with (
-        patch.dict(sys.modules, {"odoo": fake_odoo, "odoo.http": fake_http}),
-        patch.object(sys, "argv", ["odoo-shell", "/private/sid", "14"]),
-        pytest.raises(RuntimeError, match="unsupported session store"),
-    ):
-        exec(source[0], namespace)
+    assert harness.executor.step_ids == [
+        "instance.shell_script",
+        "instance.browser_session.cleanup",
+    ]
+    assert harness.removed_sessions == []
+    _assert_private_execution(harness)

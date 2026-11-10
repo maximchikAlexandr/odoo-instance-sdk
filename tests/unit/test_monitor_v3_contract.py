@@ -154,6 +154,7 @@ def test_pgadmin_enum_values() -> None:
         "runtime_not_found",
         "runtime_conflict",
         "runtime_unavailable",
+        "browser_login_unavailable",
     ]
 
 

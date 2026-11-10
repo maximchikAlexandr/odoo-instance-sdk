@@ -104,6 +104,7 @@ jobs:
             --no-header \
             --upgrade-package certifi \
             --upgrade-package pillow \
+            --upgrade-package pyasn1 \
             --upgrade-package urllib3 \
             --upgrade-package werkzeug
           generated_lock="$output/odoo19-linux-amd64-py3.12.lock"
@@ -114,7 +115,7 @@ jobs:
             cat "$generated_lock"
           } > "$generated_lock.with-header"
           mv "$generated_lock.with-header" "$generated_lock"
-          uv lock --upgrade-package certifi
+          uv lock --upgrade-package certifi --upgrade-package pyasn1
           cp uv.lock "$output/uv.lock"
           cp /tmp/odoo19-overrides.txt "$output/odoo19-overrides.txt"
           set +e
@@ -136,7 +137,7 @@ jobs:
 
           root = Path(".artifacts/real-odoo-dependency-refresh")
           lock = (root / "odoo19-linux-amd64-py3.12.lock").read_text()
-          expected = {"certifi": "2026.10.19", "pillow": "13.0.0", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
+          expected = {"certifi": "2026.10.23", "pillow": "13.0.0", "pyasn1": "0.6.5", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
           actual = {name: version for name, version in re.findall(r"(?m)^([A-Za-z0-9_.-]+)==([^\s\\]+)", lock)}
           assert {name: actual.get(name) for name in expected} == expected
           project_lock = tomllib.loads((root / "uv.lock").read_text())

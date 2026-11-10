@@ -50,6 +50,9 @@ class _Ticket:
     expires: float
 
 
+_MAX_HANDOFFS = 128
+
+
 class BrowserLoginController:
     """Small process-local, atomically consumed instance-host handoffs."""
 
@@ -72,9 +75,9 @@ class BrowserLoginController:
         deadline = monotonic() + 30
         with self._lock:
             now = monotonic()
-            self._tickets = {
-                key: value for key, value in self._tickets.items() if value.expires > now
-            }
+            self._prune_expired(now)
+            if len(self._tickets) >= _MAX_HANDOFFS:
+                raise ValueError("browser login is unavailable")
             self._tickets[token] = _Ticket(target, request.user_id, deadline)
         return BrowserLoginTicket(
             action_url=f"{target.instance_url.rstrip('/')}/_odcli/auth/consume",
@@ -97,6 +100,7 @@ class BrowserLoginController:
             return None
         handoffs = tuple(value for key, value in fields if key == "handoff" and value)
         with self._lock:
+            self._prune_expired(monotonic())
             consumed = tuple(
                 self._tickets.pop(handoff, None) for handoff in dict.fromkeys(handoffs)
             )
@@ -129,6 +133,9 @@ class BrowserLoginController:
         except Exception:
             return None
         return sid, "/odoo"
+
+    def _prune_expired(self, now: float) -> None:
+        self._tickets = {key: value for key, value in self._tickets.items() if value.expires > now}
 
 
 def build_browser_login_router(  # noqa: C901
