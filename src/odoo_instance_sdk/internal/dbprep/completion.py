@@ -17,6 +17,7 @@ from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     ConfigError,
 )
+from odoo_instance_sdk.internal.dbprep.materialize_steps import _default_switch_git_steps
 from odoo_instance_sdk.internal.dbprep.source import (
     _load_project,
     _resolve_source_config,
@@ -59,7 +60,12 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
 ) -> Command[RestoreCompletionResult]:
     """Capture exact restore evidence, then revalidate it under the project lock."""
     from odoo_instance_sdk.execution import Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor, prepared_command
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        SubprocessExecutor,
+        prepared_command,
+    )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
     modules = tuple(dict.fromkeys(update_modules))
@@ -198,7 +204,7 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
         )
     if not no_op:
         step_ids.append("database.restore.complete.default-switch")
-    steps = tuple(
+    action_steps = tuple(
         PreparedAction(
             step_id=step,
             action=step,
@@ -207,6 +213,10 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
             not in {"database.restore.complete.lock", "database.restore.complete.revalidate"},
         )
         for step in step_ids
+    )
+    steps: tuple[PreparedAction | PreparedStep, ...] = (
+        *action_steps,
+        *(_default_switch_git_steps(root, "compose") if not no_op else ()),
     )
 
     def run(context: RunContext[RestoreCompletionResult]) -> RestoreCompletionResult:  # noqa: C901
@@ -376,9 +386,12 @@ def complete_restore_command(  # noqa: C901 -- one captured command owns the saf
                 )
                 generated_path = project_generated_config_path(root)
                 manifest_file = manifest_path(root)
-                validate_generated_config_target(
-                    generated_path, project_root=root, allow_untracked_without_git=True
-                )
+                if config.postgres is None or config.postgres.mode != "compose":
+                    validate_generated_config_target(
+                        generated_path,
+                        project_root=root,
+                        allow_untracked_without_git=True,
+                    )
                 generated_snapshot = _snapshot_owned_file(generated_path)
                 manifest_snapshot = _snapshot_owned_file(manifest_file)
                 try:
