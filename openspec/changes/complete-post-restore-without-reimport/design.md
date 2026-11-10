@@ -4,7 +4,7 @@ The restore pipeline already holds the project preparation lock, restores into a
 
 The public `db restore` leaf, module update operation, administrator-reset operation, typed command planning, stage observer, catalogue migrations, and `switch_project_default()` are existing extension points. The design must preserve the previous default until completion, fail closed for foreign or ambiguous targets, and keep all secrets out of durable evidence and output.
 
-Ponytail full gate: no new subsystem is necessary. A workflow engine, recovery daemon, second restore backend, parallel journal, or generic stage framework would duplicate existing preparation, command, lock, and catalogue boundaries, so all are omitted.
+Ponytail full gate: no new subsystem is necessary. The required capability fits the existing catalogue migration, database-preparation command, project lock, module update, administrator reset, default-switch, CLI output, and test boundaries. A workflow engine, recovery daemon, second restore backend, parallel journal, generic stage framework, new public command leaf, and separate evidence runner would duplicate those alternatives, so all are removed. The retained additions are only one nullable closed checkpoint, exact compare-and-append transitions, one typed completion command, and the existing `db restore` mode needed to prevent destructive reimport; each closes a data-safety or public-contract gap that existing state cannot prove.
 
 ## Goals / Non-Goals
 
