@@ -41,13 +41,65 @@ def _post_json(url: str, payload: dict[str, Any], sid: str) -> tuple[int, dict[s
         return response.status, json.loads(content) if content else {}
 
 
-@pytest.mark.timeout(180)
-def test_source_backed_selected_user_session_and_logout(
+def _assert_selected_user_session(
+    instance: Any,
+    selected_user_id: int,
+    database: str,
+    session_store: Path,
+) -> tuple[Any, int]:
+    session = instance.create_browser_session_command(selected_user_id).run()
+    assert session_store.is_dir()
+    status, response = _post_json(
+        instance.config.base_url + "/web/session/get_session_info",
+        {"jsonrpc": "2.0", "method": "call", "params": {}},
+        session.sid,
+    )
+    assert status == 200
+    result = response["result"]
+    assert result["uid"] == selected_user_id
+    assert result["db"] == database
+    return session, result["uid"]
+
+
+def _assert_logout_invalidates_session(instance: Any, sid: str) -> tuple[int, object]:
+    logout_status, _ = _post_json(
+        instance.config.base_url + "/web/session/destroy",
+        {"jsonrpc": "2.0", "method": "call", "params": {}},
+        sid,
+    )
+    assert logout_status == 200
+    stale_status, stale_response = _post_json(
+        instance.config.base_url + "/web/session/get_session_info",
+        {"jsonrpc": "2.0", "method": "call", "params": {}},
+        sid,
+    )
+    assert stale_status == 200
+    stale_uid = (stale_response.get("result") or {}).get("uid")
+    assert stale_uid in (None, False)
+    return logout_status, stale_uid
+
+
+def _assert_inactive_user_rejected(instance: Any, selected_user_id: int) -> None:
+    deactivate_user = """import sys
+user = env['res.users'].sudo().browse(int(sys.argv[1])).exists()
+if user:
+    user.write({'active': False})
+env.cr.commit()
+"""
+    instance.run_shell_script_command(
+        deactivate_user, argv=(str(selected_user_id),), timeout=30, commit=True
+    ).run()
+    with pytest.raises(RuntimeError, match="session creation failed") as failure:
+        instance.create_browser_session_command(selected_user_id).run()
+    assert "sid" not in str(failure.value).lower()
+
+
+@pytest.fixture
+def browser_session_runtime(
     target_runtime: E2ERuntime,
     focused_project: Path,
     monkeypatch: pytest.MonkeyPatch,
-    record_property: Any,
-) -> None:
+) -> Any:
     runtime = target_runtime
     for key, value in runtime.environment.items():
         monkeypatch.setenv(key, value)
@@ -151,8 +203,13 @@ print(user.id)
 env['res.users'].sudo().search([('login', '=', sys.argv[1])]).unlink()
 env.cr.commit()
 """
+
+    def cleanup_selected_user() -> None:
+        instance.run_shell_script_command(
+            cleanup_user, argv=(login,), timeout=30, commit=True
+        ).run()
+
     process = None
-    database_ready = True  # focused_project initializes this pinned project database.
     try:
         instance.run_shell_script_command(create_user, argv=(login,), timeout=30, commit=True).run()
         users = instance.list_browser_login_users_command(login).run()
@@ -160,61 +217,82 @@ env.cr.commit()
         selected = users[0]
         process = instance.start()
         instance.wait_ready(process, timeout=120)
-        session = instance.create_browser_session_command(selected.id).run()
-        assert session_store.is_dir()
-        status, response = _post_json(
-            instance.config.base_url + "/web/session/get_session_info",
-            {"jsonrpc": "2.0", "method": "call", "params": {}},
-            session.sid,
-        )
-        assert status == 200
-        result = response["result"]
-        assert result["uid"] == selected.id
-        assert result["db"] == database
-        logout_status, _ = _post_json(
-            instance.config.base_url + "/web/session/destroy",
-            {"jsonrpc": "2.0", "method": "call", "params": {}},
-            session.sid,
-        )
-        assert logout_status == 200
-        stale_status, stale_response = _post_json(
-            instance.config.base_url + "/web/session/get_session_info",
-            {"jsonrpc": "2.0", "method": "call", "params": {}},
-            session.sid,
-        )
-        assert stale_status == 200
-        stale_info = stale_response.get("result") or {}
-        assert stale_info.get("uid") in (None, False)
-        deactivate_user = """import sys
-user = env['res.users'].sudo().browse(int(sys.argv[1])).exists()
-if user:
-    user.write({'active': False})
-env.cr.commit()
-"""
-        instance.run_shell_script_command(
-            deactivate_user, argv=(str(selected.id),), timeout=30, commit=True
-        ).run()
-        with pytest.raises(RuntimeError, match="session creation failed") as failure:
-            instance.create_browser_session_command(selected.id).run()
-        assert "sid" not in str(failure.value).lower()
-        record_property(
-            "browser_login_selected_session",
-            json.dumps(
-                {
-                    "uid": selected.id,
-                    "database": database,
-                    "logout_status": logout_status,
-                    "stale_uid": stale_info.get("uid"),
-                    "inactive_user_rejected": True,
-                }
-            ),
-        )
+        yield {
+            "runtime": runtime,
+            "database": database,
+            "instance": instance,
+            "session_store": session_store,
+            "selected": selected,
+            "login": login,
+            "cleanup_user": cleanup_selected_user,
+        }
     finally:
         try:
             if process is not None:
                 instance.stop(process)
         finally:
-            if database_ready:
-                instance.run_shell_script_command(
-                    cleanup_user, argv=(login,), timeout=30, commit=True
-                ).run()
+            cleanup_selected_user()
+            assert instance.list_browser_login_users_command(login).run() == ()
+
+
+def test_source_browser_selected_user_session(
+    browser_session_runtime: dict[str, Any],
+) -> None:
+    case = browser_session_runtime
+    _assert_selected_user_session(
+        case["instance"], case["selected"].id, case["database"], case["session_store"]
+    )
+
+
+def test_source_browser_logout_invalidates_stale_sid(
+    browser_session_runtime: dict[str, Any],
+) -> None:
+    case = browser_session_runtime
+    session, _uid = _assert_selected_user_session(
+        case["instance"], case["selected"].id, case["database"], case["session_store"]
+    )
+    _assert_logout_invalidates_session(case["instance"], session.sid)
+
+
+def test_source_browser_rejects_inactive_user(
+    browser_session_runtime: dict[str, Any],
+) -> None:
+    case = browser_session_runtime
+    _assert_inactive_user_rejected(case["instance"], case["selected"].id)
+
+
+def test_source_browser_fixture_cleans_up_created_user(
+    browser_session_runtime: dict[str, Any],
+) -> None:
+    case = browser_session_runtime
+    assert case["instance"].list_browser_login_users_command(case["login"]).run() == (
+        case["selected"],
+    )
+    case["cleanup_user"]()
+    assert case["instance"].list_browser_login_users_command(case["login"]).run() == ()
+
+
+@pytest.mark.timeout(180)
+def test_source_backed_selected_user_session_and_logout(
+    browser_session_runtime: dict[str, Any],
+    record_property: Any,
+) -> None:
+    case = browser_session_runtime
+    selected = case["selected"]
+    session, _session_uid = _assert_selected_user_session(
+        case["instance"], selected.id, case["database"], case["session_store"]
+    )
+    logout_status, stale_uid = _assert_logout_invalidates_session(case["instance"], session.sid)
+    _assert_inactive_user_rejected(case["instance"], selected.id)
+    record_property(
+        "browser_login_selected_session",
+        json.dumps(
+            {
+                "uid": selected.id,
+                "database": case["database"],
+                "logout_status": logout_status,
+                "stale_uid": stale_uid,
+                "inactive_user_rejected": True,
+            }
+        ),
+    )

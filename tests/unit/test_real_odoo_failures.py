@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -93,9 +94,31 @@ def test_secret_scan_rejects_each_variant_inside_a_binary_zip(tmp_path: Path, va
         assert_secret_free((path,), "focused-secret-canary")
 
 
-@pytest.mark.parametrize("name", ["recovery", "recovery-timeout", "partial"])
+def _assert_recovery_archive_mutation(path: Path, source: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        assert b"SELECT pg_sleep(30);" in archive.read("dump.sql")
+    assert path.read_bytes() != source.read_bytes()
+
+
+def _assert_recovery_archive_preserved(path: Path, source: Path) -> None:
+    assert path.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("name", "assert_archive"),
+    [
+        pytest.param("recovery", _assert_recovery_archive_mutation, id="recovery-mutates"),
+        pytest.param(
+            "recovery-timeout", _assert_recovery_archive_preserved, id="timeout-preserves"
+        ),
+        pytest.param("partial", _assert_recovery_archive_preserved, id="partial-preserves"),
+    ],
+)
 def test_recovery_input_is_removed_while_diagnostics_are_retained(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    assert_archive: Callable[[Path, Path], None],
 ) -> None:
     from tests.integration.real_odoo import conftest as fixtures, test_focused_recovery as recovery
     from tests.integration.real_odoo.archive import SourceBackupPlan, archive_identity
@@ -132,11 +155,7 @@ def test_recovery_input_is_removed_while_diagnostics_are_retained(
         )
     staged_archive = runtime.root / f"{name}-{run_id}.zip"
     assert staged_archive.is_file()
-    if name == "recovery":
-        with zipfile.ZipFile(staged_archive) as archive:
-            assert b"SELECT pg_sleep(30);" in archive.read("dump.sql")
-    else:
-        assert staged_archive.read_bytes() == source.read_bytes()
+    assert_archive(staged_archive, source)
     monkeypatch.setenv("ODCLI_E2E_KEEP_FAILED", "1")
     fixtures._remove_runtime_files(runtime)
     assert not staged_archive.exists()

@@ -11,6 +11,7 @@ import {
   type PublicationSnapshot,
   type RuntimeMetrics,
   type Snapshot,
+  type BrowserLoginUser,
 } from "./generated";
 import client from "./client-config";
 import { formatBytes, formatLocalTimestamp, formatPercent } from "./format";
@@ -229,7 +230,7 @@ function RuntimeCard({
   const [completedState, setCompletedState] = useState<"started" | "stopped" | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
   const [loginQuery, setLoginQuery] = useState("");
-  const [loginUsers, setLoginUsers] = useState<{ id: number; login: string; name: string }[]>([]);
+  const [loginUsers, setLoginUsers] = useState<BrowserLoginUser[]>([]);
   const [selectedLoginUser, setSelectedLoginUser] = useState<string | null>(null);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);

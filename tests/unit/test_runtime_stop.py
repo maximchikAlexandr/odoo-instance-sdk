@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 import signal
 import sys
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -891,18 +893,181 @@ def _real_stop_context(
     )
 
 
+def _rich_stop_fields(result: Result) -> tuple[Mapping[str, object], ...]:
+    return (
+        {
+            key: None if value == "None" else value
+            for key, value in re.findall(r"([a-z_]+)=([^\s]+)", result.output)
+        },
+    )
+
+
+def _json_stop_fields(result: Result) -> tuple[Mapping[str, object], ...]:
+    document = json.loads(result.stdout)
+    return document["context"], document["result"]
+
+
+def _toon_stop_fields(result: Result) -> tuple[Mapping[str, object], ...]:
+    from toon import DecodeOptions, decode
+
+    document = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+    return document["context"], document["result"]
+
+
+@dataclass(frozen=True, slots=True)
+class _StopCliOutputCase:
+    owner_kind: str
+    selector: tuple[str, ...]
+    format_args: tuple[str, ...]
+    parse: Callable[[Result], tuple[Mapping[str, object], ...]]
+    expected_environment: Callable[[str, Path], str | None]
+    expected_project: Callable[[str, Path], str | None]
+    expected_environment_name: str | None
+    expected_fields: tuple[str, ...]
+
+
+def _environment_selection(owner_id: str, _project: Path) -> str | None:
+    return owner_id
+
+
+def _no_environment_selection(_owner_id: str, _project: Path) -> str | None:
+    return None
+
+
+def _project_selection(_owner_id: str, project: Path) -> str | None:
+    return str(project)
+
+
+def _no_project_selection(_owner_id: str, _project: Path) -> str | None:
+    return None
+
+
+_STOP_CLI_OUTPUT_CASES = (
+    pytest.param(
+        _StopCliOutputCase(
+            "environment",
+            ("--env", "{owner_id}"),
+            (),
+            _rich_stop_fields,
+            _environment_selection,
+            _no_project_selection,
+            "demo",
+            ("owner_kind", "owner_id", "project_id", "environment_id", "environment_name"),
+        ),
+        id="environment-rich",
+    ),
+    pytest.param(
+        _StopCliOutputCase(
+            "environment",
+            ("--env", "{owner_id}"),
+            ("--format", "json"),
+            _json_stop_fields,
+            _environment_selection,
+            _no_project_selection,
+            "demo",
+            (
+                "owner_kind",
+                "owner_id",
+                "project_id",
+                "environment_id",
+                "environment_name",
+                "worktree_path",
+            ),
+        ),
+        id="environment-json",
+    ),
+    pytest.param(
+        _StopCliOutputCase(
+            "environment",
+            ("--env", "{owner_id}"),
+            ("--format", "toon"),
+            _toon_stop_fields,
+            _environment_selection,
+            _no_project_selection,
+            "demo",
+            (
+                "owner_kind",
+                "owner_id",
+                "project_id",
+                "environment_id",
+                "environment_name",
+                "worktree_path",
+            ),
+        ),
+        id="environment-toon",
+    ),
+    pytest.param(
+        _StopCliOutputCase(
+            "project",
+            ("--project", "{project_path}"),
+            (),
+            _rich_stop_fields,
+            _no_environment_selection,
+            _project_selection,
+            None,
+            ("owner_kind", "owner_id", "project_id", "environment_id", "environment_name"),
+        ),
+        id="project-rich",
+    ),
+    pytest.param(
+        _StopCliOutputCase(
+            "project",
+            ("--project", "{project_path}"),
+            ("--format", "json"),
+            _json_stop_fields,
+            _no_environment_selection,
+            _project_selection,
+            None,
+            (
+                "owner_kind",
+                "owner_id",
+                "project_id",
+                "environment_id",
+                "environment_name",
+                "worktree_path",
+            ),
+        ),
+        id="project-json",
+    ),
+    pytest.param(
+        _StopCliOutputCase(
+            "project",
+            ("--project", "{project_path}"),
+            ("--format", "toon"),
+            _toon_stop_fields,
+            _no_environment_selection,
+            _project_selection,
+            None,
+            (
+                "owner_kind",
+                "owner_id",
+                "project_id",
+                "environment_id",
+                "environment_name",
+                "worktree_path",
+            ),
+        ),
+        id="project-toon",
+    ),
+)
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize("owner_kind", ["environment", "project"])
-@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+@pytest.mark.parametrize("case", _STOP_CLI_OUTPUT_CASES)
 def test_stop_cli_real_resolved_context_owner_neutral_output(
-    tmp_path: Path, owner_kind: str, mode: str
+    tmp_path: Path, case: _StopCliOutputCase
 ) -> None:
-    instance, _catalog, owner_id = _instance(tmp_path, owner_kind=owner_kind)
-    context = _real_stop_context(tmp_path, instance, owner_kind, owner_id)
-    selector = ["--env", owner_id] if owner_kind == "environment" else ["--project", str(tmp_path)]
-    argv = [*selector, "stop"]
-    if mode != "rich":
-        argv.extend(["--format", mode])
+    instance, _catalog, owner_id = _instance(tmp_path, owner_kind=case.owner_kind)
+    context = _real_stop_context(tmp_path, instance, case.owner_kind, owner_id)
+    project_path = tmp_path
+    argv = [
+        *(
+            argument.format(owner_id=owner_id, project_path=project_path)
+            for argument in case.selector
+        ),
+        "stop",
+        *case.format_args,
+    ]
 
     with (
         patch(
@@ -923,33 +1088,19 @@ def test_stop_cli_real_resolved_context_owner_neutral_output(
 
     assert result.exit_code == 0, result.output
     resolved_cli = ready.call_args.args[0]
-    assert resolved_cli.env == (owner_id if owner_kind == "environment" else None)
-    assert resolved_cli.project == (str(tmp_path) if owner_kind == "project" else None)
+    assert resolved_cli.env == case.expected_environment(owner_id, project_path)
+    assert resolved_cli.project == case.expected_project(owner_id, project_path)
     expected_identity = {
-        "owner_kind": owner_kind,
+        "owner_kind": case.owner_kind,
         "owner_id": owner_id,
         "project_id": context.runtime.project_id,
-        "environment_id": owner_id if owner_kind == "environment" else None,
-        "environment_name": "demo" if owner_kind == "environment" else None,
+        "environment_id": case.expected_environment(owner_id, project_path),
+        "environment_name": case.expected_environment_name,
     }
-    expected_worktree_path = str(context.runtime.root)
-    if mode == "rich":
-        for key, value in expected_identity.items():
-            assert f"{key}={value}" in result.stdout
-    elif mode == "json":
-        document = json.loads(result.stdout)
-        assert all(document["context"][key] == value for key, value in expected_identity.items())
-        assert all(document["result"][key] == value for key, value in expected_identity.items())
-        assert document["context"]["worktree_path"] == expected_worktree_path
-        assert document["result"]["worktree_path"] == expected_worktree_path
-    else:
-        from toon import DecodeOptions, decode
-
-        document = decode(result.stdout, DecodeOptions(indent=2, strict=True))
-        assert all(document["context"][key] == value for key, value in expected_identity.items())
-        assert all(document["result"][key] == value for key, value in expected_identity.items())
-        assert document["context"]["worktree_path"] == expected_worktree_path
-        assert document["result"]["worktree_path"] == expected_worktree_path
+    expected_identity["worktree_path"] = str(context.runtime.root)
+    expected_payload = {key: expected_identity[key] for key in case.expected_fields}
+    for payload in case.parse(result):
+        assert {key: payload[key] for key in case.expected_fields} == expected_payload
     terminate.assert_called_once()
 
 

@@ -178,9 +178,7 @@ def test_backup_delete_dry_run_and_machine_confirmation_gate_precede_mutation(
     assert backup_path.is_file()
 
 
-def test_backup_rm_deletes_owned_older_item_and_retains_newest_sibling(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _seed_owned_backup_siblings(tmp_path: Path) -> tuple[Path, Path, Path, Path, str, str]:
     project = tmp_path / "project"
     common = project / ".git"
     common.mkdir(parents=True)
@@ -212,25 +210,48 @@ def test_backup_rm_deletes_owned_older_item_and_retains_newest_sibling(
         if backup_id == target_id:
             time.sleep(1.05)  # Backup catalog timestamps have one-second precision.
     catalog.close()
+    return project, catalog_path, backup_paths[0], backup_paths[1], target_id, newest_id
+
+
+def test_backup_rm_deletes_owned_older_item_and_preserves_newest_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, catalog_path, older_path, newest_path, older_id, _newest_id = (
+        _seed_owned_backup_siblings(tmp_path)
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: catalog_path
     )
-    args = ["--project", str(project), "backup", "rm", target_id, "--yes", "--format", "json"]
-
-    removed = CliRunner().invoke(cli, args)
+    removed = CliRunner().invoke(
+        cli,
+        ["--project", str(project), "backup", "rm", older_id, "--yes", "--format", "json"],
+    )
 
     assert removed.exit_code == 0, removed.output
     assert json.loads(removed.stdout)["result"]["already_deleted"] is False
-    assert not backup_paths[0].exists()
-    retained = CliRunner().invoke(
+    assert not older_path.exists()
+    assert newest_path.is_file()
+
+
+def test_backup_rm_refuses_newest_owned_sibling_without_deleting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, catalog_path, older_path, newest_path, _older_id, newest_id = (
+        _seed_owned_backup_siblings(tmp_path)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: catalog_path
+    )
+    refused = CliRunner().invoke(
         cli,
         ["--project", str(project), "backup", "rm", newest_id, "--yes", "--format", "json"],
     )
-    assert retained.exit_code == 1
-    refusal = json.loads(retained.stdout)
+    assert refused.exit_code == 1
+    refusal = json.loads(refused.stdout)
     assert refusal["error"]["code"] == "backup_delete_failed"
     assert "newest available backup in historical source group" in refusal["error"]["message"]
-    assert backup_paths[1].is_file()
+    assert older_path.is_file()
+    assert newest_path.is_file()
 
 
 def test_backup_delete_rich_confirmation_shows_immutable_preview(

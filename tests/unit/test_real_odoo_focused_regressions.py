@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
-import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from inspect import unwrap
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import msgspec
 import pytest
@@ -24,6 +24,7 @@ from tests.integration.real_odoo.test_critical_path import (
     _start_owned,
     _stop_owned,
 )
+from tests.unit.owned_child_lifecycle import OwnedChildInstance
 
 
 def test_real_odoo_catalogue_follows_runtime_home_in_sdk_and_child(
@@ -149,37 +150,37 @@ def test_owned_detached_child_is_reaped_by_its_parent(tmp_path: Path) -> None:
     assert len(result) == 1 and result[0] not in (None, -1)
 
 
-def test_owned_process_lifecycle_reaps_each_child_on_stop_and_ledger_unwind() -> None:
+def _stop_owned_process_case(instance: object, runtime: object, owned: object) -> None:
+    _stop_owned(instance, owned)  # type: ignore[arg-type]
+
+
+def _unwind_owned_process_case(instance: object, runtime: object, owned: object) -> None:
+    runtime.ledger.unwind()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("run_id", "cleanup"),
+    [
+        pytest.param("owned-process-first", _stop_owned_process_case, id="first-stop"),
+        pytest.param("owned-process-second", _unwind_owned_process_case, id="second-unwind"),
+        pytest.param("owned-process-third", _unwind_owned_process_case, id="third-unwind"),
+    ],
+)
+def test_each_owned_process_is_reaped_after_public_stop_or_ledger_unwind(
+    run_id: str, cleanup: Callable[[Any, Any, Any], None]
+) -> None:
     class Runtime:
         def __init__(self, run_id: str) -> None:
             self.run_id = run_id
             self.ledger = ResourceLedger(run_id)
 
-    class Instance:
-        def __init__(self) -> None:
-            self.process: subprocess.Popen[bytes] | None = None
-            self.stopped = False
+    runtime = Runtime(run_id)
+    instance = OwnedChildInstance()
+    owned = _start_owned(instance, runtime)
 
-        def run_detached(self, **_kwargs: object) -> subprocess.Popen[bytes]:
-            self.process = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
-            )
-            return self.process
+    cleanup(instance, runtime, owned)
+    runtime.ledger.unwind()
 
-        def stop_environment(self) -> SimpleNamespace:
-            assert self.process is not None
-            if self.stopped:
-                return SimpleNamespace(status="already_stopped")
-            os.kill(self.process.pid, signal.SIGTERM)
-            self.stopped = True
-            return SimpleNamespace(status="stopped")
-
-    for index in range(3):
-        runtime = Runtime(f"owned-process-{index}")
-        instance = Instance()
-        owned = _start_owned(instance, runtime)
-        if index == 0:
-            _stop_owned(instance, owned)
-        else:
-            runtime.ledger.unwind()
-        assert owned.reap_result and owned.reap_result[0] != -1
+    assert owned.reap_result and owned.reap_result[0] != -1
+    assert not owned.reaper.is_alive()
+    assert runtime.ledger.records == ()
