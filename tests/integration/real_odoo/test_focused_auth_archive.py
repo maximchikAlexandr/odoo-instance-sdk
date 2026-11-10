@@ -279,6 +279,7 @@ def test_incompatible_archive_restore_is_rejected_without_unowned_publication(
     target = f"odcli_incompatible_{case.runtime.run_id.replace('-', '')[:20]}"
     restore = _invoke_in_registered_worktree(
         CliRunner(),
+        cli,
         case.project,
         case.catalog,
         [
