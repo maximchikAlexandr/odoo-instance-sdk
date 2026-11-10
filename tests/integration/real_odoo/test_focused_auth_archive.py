@@ -358,7 +358,7 @@ def _assert_post_restore_failure(
     )
     failure = json.loads(failed.stdout)
     assert failure["ok"] is False
-    assert failure["context"]["post_restore_checkpoint"] == "reset_pending"
+    assert failure["context"].get("post_restore_checkpoint") == "reset_pending", failure
     assert failure["context"]["pending_stage"] == "admin_reset"
     assert ProjectConfig.load(project).default_source_database == previous_default
     return cast("dict[str, object]", failure)
@@ -464,8 +464,12 @@ def test_complete_post_restore_without_reimport(
     _ensure_isolated_environment(catalog_path, project)
     _approve_project_postgres(project, environment)
 
+    reset_failure_injected = False
+
     def fail_reset_once(self: DatabaseResource, *, admin_password: str, provenance: str) -> object:
+        nonlocal reset_failure_injected
         del self, admin_password, provenance
+        reset_failure_injected = True
         raise RuntimeError("injected administrator reset failure")
 
     with monkeypatch.context() as injected:
@@ -491,6 +495,7 @@ def test_complete_post_restore_without_reimport(
             environment,
         )
     failure = _assert_post_restore_failure(failed, project, previous_default, failure_evidence)
+    assert reset_failure_injected
     filestore = project_filestore(project, target)
     assert filestore.is_dir()
     cluster = PostgresCluster.from_project(project)
