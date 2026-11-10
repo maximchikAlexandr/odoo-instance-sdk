@@ -12,6 +12,7 @@ from odoo_instance_sdk.commands.output import (
     OutputMode,
     _InspectableCommand,
     bordered_table,
+    model_to_dict,
     render_rich_text,
 )
 from odoo_instance_sdk.exceptions import AdminPasswordRequiredError
@@ -76,6 +77,36 @@ def completion_command(
             admin_password=password,
             admin_password_provenance=provenance,
         )
+
+
+def restore_interruption_context(
+    error: KeyboardInterrupt,
+    *,
+    backup_id: object,
+    archive_file: Path | None,
+    target_database: str | None,
+) -> JsonObject:
+    from odoo_instance_sdk.internal.dbprep.source import DatabasePreparationFailureContext
+    from odoo_instance_sdk.internal.dbreplace.planning import CopyReplacementFailureContext
+    from odoo_instance_sdk.models import RestoreCompletionFailureContext
+
+    context = getattr(error, "failure_context", None)
+    if isinstance(
+        context,
+        (
+            DatabasePreparationFailureContext,
+            CopyReplacementFailureContext,
+            RestoreCompletionFailureContext,
+        ),
+    ):
+        return model_to_dict(context)
+    return {
+        "backup_id": str(backup_id) if backup_id is not None else None,
+        "source_kind": "local_archive" if archive_file is not None else "catalogue",
+        "retained_database": target_database,
+        "database_confirmed": False,
+        "default_switch_confirmed": False,
+    }
 
 
 def restore_completion_rich(payload: JsonObject) -> str:

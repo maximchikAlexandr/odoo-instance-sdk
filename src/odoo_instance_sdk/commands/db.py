@@ -479,33 +479,15 @@ def db_restore(  # noqa: C901
         )
 
     def interrupted(error: KeyboardInterrupt) -> None:
-        from odoo_instance_sdk.internal.dbprep.source import (
-            DatabasePreparationFailureContext,
+        from odoo_instance_sdk.commands.db_restore_completion import (
+            restore_interruption_context,
         )
-        from odoo_instance_sdk.internal.dbreplace.planning import CopyReplacementFailureContext
-        from odoo_instance_sdk.models import RestoreCompletionFailureContext
 
-        context = getattr(error, "failure_context", None)
-        safe_context: dict[str, JsonValue] = (
-            model_to_dict(context)
-            if isinstance(
-                context,
-                (
-                    DatabasePreparationFailureContext,
-                    CopyReplacementFailureContext,
-                    RestoreCompletionFailureContext,
-                ),
-            )
-            else cast(
-                "dict[str, JsonValue]",
-                {
-                    "backup_id": str(backup_id) if backup_id is not None else None,
-                    "source_kind": "local_archive" if archive_file is not None else "catalogue",
-                    "retained_database": target_database,
-                    "database_confirmed": False,
-                    "default_switch_confirmed": False,
-                },
-            )
+        safe_context = restore_interruption_context(
+            error,
+            backup_id=backup_id,
+            archive_file=archive_file,
+            target_database=target_database,
         )
         emit(
             failure_document(
