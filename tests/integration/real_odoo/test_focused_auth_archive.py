@@ -6,12 +6,14 @@ import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.models import BackupState
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence
 from tests.integration.real_odoo.conftest import E2ERuntime
@@ -335,6 +337,78 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     )
 
 
+def _assert_post_restore_failure(
+    failed: Result, project: Path, previous_default: str | None
+) -> dict[str, object]:
+    from odoo_instance_sdk.project import ProjectConfig
+
+    assert failed.exit_code != 0, failed.output
+    failure = json.loads(failed.stdout)
+    assert failure["ok"] is False
+    assert failure["context"]["post_restore_checkpoint"] == "reset_pending"
+    assert failure["context"]["pending_stage"] == "admin_reset"
+    assert ProjectConfig.load(project).default_source_database == previous_default
+    return cast("dict[str, object]", failure)
+
+
+def _assert_post_restore_completion(
+    completed: Result,
+    *,
+    project: Path,
+    target: str,
+    live_oid_before: int,
+    home: str,
+    filestore: Path,
+    filestore_before: list[str],
+    catalog_path: Path,
+    cluster: PostgresCluster,
+    oid_before: int,
+    restored_events_before: int,
+) -> dict[str, object]:
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    assert completed.exit_code == 0, completed.output
+    result = json.loads(completed.stdout)
+    assert result["ok"] is True
+    assert result["result"]["target_database"] == target
+    assert result["result"]["completed_stages"] == ["admin_reset", "default_switch"]
+    assert ProjectConfig.load(project).default_source_database == target
+    assert project_database_oid(project, target, home=home) == live_oid_before
+    assert sorted(path.relative_to(filestore).as_posix() for path in filestore.rglob("*")) == (
+        filestore_before
+    )
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        binding = catalog._latest_restore_binding(
+            cluster.endpoint_host, cluster.endpoint_port, target
+        )
+        assert binding is not None
+        assert binding["state"] == "complete"
+        assert binding["database_oid"] == oid_before
+        assert binding["post_restore_checkpoint"] is None
+        assert (
+            catalog._conn.execute(
+                "SELECT COUNT(*) FROM database_events WHERE database_name=? AND event_type='restored'",
+                (target,),
+            ).fetchone()[0]
+            == restored_events_before
+        )
+    finally:
+        catalog.close()
+    return cast("dict[str, object]", result)
+
+
+def _assert_post_restore_no_op(
+    repeated: Result, project: Path, target: str, *, home: str
+) -> dict[str, object]:
+    assert repeated.exit_code == 0, repeated.output
+    result = json.loads(repeated.stdout)
+    assert result["result"]["no_op"] is True
+    assert _project_database_probe(project, target, home=home).stdout.strip() == target
+    return cast("dict[str, object]", result)
+
+
 def test_complete_post_restore_without_reimport(
     tmp_path: Path,
     source_backup: ArchiveIdentity,
@@ -405,12 +479,7 @@ def test_complete_post_restore_without_reimport(
         ],
         environment,
     )
-    assert failed.exit_code != 0, failed.output
-    failure = json.loads(failed.stdout)
-    assert failure["ok"] is False
-    assert failure["context"]["post_restore_checkpoint"] == "reset_pending"
-    assert failure["context"]["pending_stage"] == "admin_reset"
-    assert ProjectConfig.load(project).default_source_database == previous_default
+    failure = _assert_post_restore_failure(failed, project, previous_default)
     filestore = project_filestore(project, target)
     assert filestore.is_dir()
     cluster = PostgresCluster.from_project(project)
@@ -456,35 +525,19 @@ def test_complete_post_restore_without_reimport(
         ],
         environment,
     )
-    assert completed.exit_code == 0, completed.output
-    result = json.loads(completed.stdout)
-    assert result["ok"] is True
-    assert result["result"]["target_database"] == target
-    assert result["result"]["completed_stages"] == ["admin_reset", "default_switch"]
-    assert ProjectConfig.load(project).default_source_database == target
-    assert project_database_oid(project, target, home=environment["HOME"]) == live_oid_before
-    assert (
-        sorted(path.relative_to(filestore).as_posix() for path in filestore.rglob("*"))
-        == filestore_before
+    result = _assert_post_restore_completion(
+        completed,
+        project=project,
+        target=target,
+        live_oid_before=live_oid_before,
+        home=environment["HOME"],
+        filestore=filestore,
+        filestore_before=filestore_before,
+        catalog_path=catalog_path,
+        cluster=cluster,
+        oid_before=oid_before,
+        restored_events_before=restored_events_before,
     )
-    catalog = BackupCatalog(db_path=catalog_path)
-    try:
-        binding = catalog._latest_restore_binding(
-            cluster.endpoint_host, cluster.endpoint_port, target
-        )
-        assert binding is not None
-        assert binding["state"] == "complete"
-        assert binding["database_oid"] == oid_before
-        assert binding["post_restore_checkpoint"] is None
-        assert (
-            catalog._conn.execute(
-                "SELECT COUNT(*) FROM database_events WHERE database_name=? AND event_type='restored'",
-                (target,),
-            ).fetchone()[0]
-            == restored_events_before
-        )
-    finally:
-        catalog.close()
 
     repeated = _invoke_in_registered_worktree(
         CliRunner(),
@@ -504,13 +557,11 @@ def test_complete_post_restore_without_reimport(
         ],
         environment,
     )
-    assert repeated.exit_code == 0, repeated.output
-    assert json.loads(repeated.stdout)["result"]["no_op"] is True
-    assert (
-        _project_database_probe(project, target, home=environment["HOME"]).stdout.strip() == target
+    repeated_result = _assert_post_restore_no_op(
+        repeated, project, target, home=environment["HOME"]
     )
     _record(
         record_property,
         "COMP-HAPPY",
-        {"failure": failure, "completed": result, "repeat": json.loads(repeated.stdout)},
+        {"failure": failure, "completed": result, "repeat": repeated_result},
     )
