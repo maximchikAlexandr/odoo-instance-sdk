@@ -55,6 +55,8 @@ def test_bootstrap_is_built_once_and_each_consumer_runs_its_own_pinned_import(
             if argv[1:3] == ["pip", "sync"]:
                 return _success()
             return _success(f"uv {E2E_PINS.uv}\n")
+        if len(argv) == 2 and argv[1] == "--version":
+            return _success(f"Python {E2E_PINS.cpython}\n")
         if argv[0] == "git":
             return _success(f"{E2E_PINS.odoo_source_commit}\n")
         if len(argv) > 2 and argv[-1:] == ["--version"]:
@@ -113,6 +115,8 @@ def test_bootstrap_rejects_changed_lock_and_source_before_import(
             return _success(f"uv {E2E_PINS.uv}\n")
         if argv[0] == "git":
             return _success("different-source-commit\n")
+        if len(argv) == 2 and argv[1] == "--version":
+            return _success(f"Python {E2E_PINS.cpython}\n")
         return real_run(argv, **kwargs)
 
     subprocess_module = cast("ModuleType", getattr(e2e_fixtures, "subprocess"))
