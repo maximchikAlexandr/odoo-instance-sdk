@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,9 +80,8 @@ def test_critical_path_preserves_post_start_and_cleanup_failures(
     assert ledger.records == ()
 
 
-def test_public_env_list_shape_drives_full_stop_and_repeat_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.fixture
+def public_env_stop_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     environment_id = "env-public-row"
     project_id = "project-public-row"
     worktree_path = str(tmp_path / "worktree")
@@ -111,19 +111,12 @@ def test_public_env_list_shape_drives_full_stop_and_repeat_payload(
         "odoo_instance_sdk.commands.env.checkout.OdooClient",
         lambda **_kwargs: fake_client,
     )
-    listing = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
-    assert listing.exit_code == 0, listing.output
-    listed_payload = json.loads(listing.stdout)["result"]
-
     state = SimpleNamespace(
         project=tmp_path,
         catalog=SimpleNamespace(
             list_projects=lambda: [{"project_id": project_id, "repository_root": str(tmp_path)}]
         ),
     )
-    resolved_row = _environment_state(listed_payload, environment_id)
-    expected = _expected_stop_context(state, resolved_row)
-    statuses = iter(("stopped", "already_stopped"))
     runtime = SimpleNamespace(
         owner_kind="environment",
         owner_id=environment_id,
@@ -132,23 +125,52 @@ def test_public_env_list_shape_drives_full_stop_and_repeat_payload(
         environment_name="critical-path",
         root=Path(worktree_path),
     )
+    stop_commands = deque(
+        (
+            action_command("instance.stop", lambda: {"status": "stopped"}),
+            action_command("instance.stop", lambda: {"status": "already_stopped"}),
+        )
+    )
     resolved = SimpleNamespace(
         runtime=runtime,
-        instance=SimpleNamespace(
-            stop_runtime_command=lambda: action_command(
-                "instance.stop", lambda: {"status": next(statuses)}
-            )
-        ),
+        instance=SimpleNamespace(stop_runtime_command=stop_commands.popleft),
         output_provenance={"project_source": "explicit", "environment_source": "explicit"},
     )
     monkeypatch.setattr("odoo_instance_sdk.cli.cli_context.ready_instance", lambda _ctx: resolved)
-    for expected_status in ("stopped", "already_stopped"):
-        stopped = CliRunner().invoke(cli, ["stop", "--format", "json"])
-        assert stopped.exit_code == 0, stopped.output
-        assert json.loads(stopped.stdout)["result"] == {
-            **expected,
-            "status": expected_status,
-        }
+    return SimpleNamespace(
+        runner=CliRunner(),
+        state=state,
+        environment_id=environment_id,
+        project_id=project_id,
+        row=row,
+        stop_commands=stop_commands,
+    )
+
+
+def test_public_env_list_shape_drives_full_stop_and_repeat_payload(
+    public_env_stop_cli: SimpleNamespace,
+) -> None:
+    listing = public_env_stop_cli.runner.invoke(
+        cli, ["env", "list", "--all-projects", "--format", "json"]
+    )
+    assert listing.exit_code == 0, listing.output
+    listed_payload = json.loads(listing.stdout)["result"]
+
+    resolved_row = _environment_state(listed_payload, public_env_stop_cli.environment_id)
+    assert resolved_row == public_env_stop_cli.row
+    expected = _expected_stop_context(public_env_stop_cli.state, resolved_row)
+
+    first_stop = public_env_stop_cli.runner.invoke(cli, ["stop", "--format", "json"])
+    assert first_stop.exit_code == 0, first_stop.output
+    assert json.loads(first_stop.stdout)["result"] == {**expected, "status": "stopped"}
+
+    repeated_stop = public_env_stop_cli.runner.invoke(cli, ["stop", "--format", "json"])
+    assert repeated_stop.exit_code == 0, repeated_stop.output
+    assert json.loads(repeated_stop.stdout)["result"] == {
+        **expected,
+        "status": "already_stopped",
+    }
+    assert not public_env_stop_cli.stop_commands
 
 
 def test_public_init_manifest_boundary_precedes_checkout_binding(tmp_path: Path) -> None:
