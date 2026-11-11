@@ -14,6 +14,25 @@ from typing import Final, Literal
 
 Phase = Literal["setup", "test", "cleanup"]
 PHASES: Final = frozenset({"setup", "test", "cleanup"})
+_OUTPUT_PATH: Path | None = None
+
+
+def configure_output(config: object) -> Path | None:
+    """Resolve the timing sink before fixtures are allowed to change cwd."""
+    global _OUTPUT_PATH  # noqa: PLW0603
+    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
+    _OUTPUT_PATH = Path(configured).resolve() if configured else None
+    if _OUTPUT_PATH is not None:
+        setattr(config, "_odcli_e2e_timing_path", _OUTPUT_PATH)
+    return _OUTPUT_PATH
+
+
+def output_path() -> Path | None:
+    """Return the session-anchored sink, with a cwd-based fallback for direct use."""
+    if _OUTPUT_PATH is not None:
+        return _OUTPUT_PATH
+    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
+    return Path(configured).resolve() if configured else None
 
 
 def _read(path: Path) -> dict[str, object]:
@@ -136,11 +155,10 @@ def finish_test_excluding_cleanup(path: Path, *, now: float | None = None) -> fl
 def pytest_sessionfinish(session: object, exitstatus: int) -> Iterator[None]:
     """Measure test completion after teardown, excluding cleanup segments."""
     del session, exitstatus
-    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
-    if not configured:
+    path = output_path()
+    if path is None:
         yield
         return
-    path = Path(configured)
     try:
         yield
     finally:
@@ -158,17 +176,21 @@ else:
     def pytest_runtest_makereport(item: object, call: object) -> Iterator[None]:
         del call
         outcome = yield
-        configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
-        if not configured:
+        path = output_path()
+        if path is None:
             return
         report = outcome.get_result()  # type: ignore[attr-defined]
         nodeid = str(getattr(item, "nodeid", "unknown")).rsplit("/", 1)[-1]
         record_test_report(
-            Path(configured),
+            path,
             nodeid,
             str(getattr(report, "when", "unknown")),
             float(getattr(report, "duration", 0.0)),
         )
+
+    @pytest.hookimpl
+    def pytest_configure(config: object) -> None:
+        configure_output(config)
 
 
 def main() -> int:
