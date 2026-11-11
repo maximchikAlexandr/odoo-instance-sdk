@@ -10,7 +10,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 from scripts.real_odoo_pins import PhaseBudget, budget_for
@@ -43,6 +43,47 @@ def _bounded_text(path: Path) -> bytes:
     return text.encode("utf-8")[:TEXT_LIMIT_BYTES]
 
 
+def _bounded_xml(path: Path) -> bytes:
+    root = ET.fromstring(path.read_bytes())
+    for element in root.iter():
+        for name, value in tuple(element.attrib.items()):
+            element.set(name, sanitize_last_error(value) or "")
+        if element.text is not None:
+            element.text = sanitize_last_error(element.text) or ""
+        if element.tail is not None:
+            element.tail = sanitize_last_error(element.tail) or ""
+    content = cast("bytes", ET.tostring(root, encoding="utf-8", xml_declaration=True))
+    if len(content) > TEXT_LIMIT_BYTES:
+        raise ValueError(f"text evidence input exceeds {TEXT_LIMIT_BYTES} bytes: {path.name}")
+    return content
+
+
+def _sanitize_json_value(value: object) -> object:
+    if isinstance(value, str):
+        return sanitize_last_error(value) or ""
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        sanitized: dict[str, object] = {}
+        for key, item in value.items():
+            name = sanitize_last_error(str(key)) or ""
+            if name in sanitized:
+                raise ValueError("JSON evidence keys collide after sanitization")
+            sanitized[name] = _sanitize_json_value(item)
+        return sanitized
+    return value
+
+
+def _bounded_json(path: Path) -> bytes:
+    value = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    content = (json.dumps(_sanitize_json_value(value), indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    if len(content) > TEXT_LIMIT_BYTES:
+        raise ValueError(f"text evidence input exceeds {TEXT_LIMIT_BYTES} bytes: {path.name}")
+    return content
+
+
 def _copy_bounded(source: Path, destination: Path, secrets: tuple[str, ...]) -> None:
     if source.is_symlink() or not source.is_file():
         return
@@ -53,7 +94,13 @@ def _copy_bounded(source: Path, destination: Path, secrets: tuple[str, ...]) -> 
     if source.suffix.lower() in TEXT_SUFFIXES:
         if source.stat().st_size > TEXT_LIMIT_BYTES:
             raise ValueError(f"text evidence input exceeds {TEXT_LIMIT_BYTES} bytes: {source.name}")
-        content = _bounded_text(source)
+        suffix = source.suffix.lower()
+        if suffix == ".xml":
+            content = _bounded_xml(source)
+        elif suffix == ".json":
+            content = _bounded_json(source)
+        else:
+            content = _bounded_text(source)
     else:
         content = raw_content
     assert_secret_free(content, secrets)
@@ -76,8 +123,11 @@ def _include(source: Path, status: Status) -> bool:
     )
 
 
-def _write_packaging_error(output: Path, message: str) -> None:
-    output.unlink(missing_ok=True)
+def _write_packaging_error(
+    output: Path, message: str, *, preserve_safe_archive: bool = False
+) -> None:
+    if not preserve_safe_archive:
+        output.unlink(missing_ok=True)
     error_path = output.with_name("packaging-error.json")
     error_path.write_text(
         json.dumps(
@@ -288,10 +338,16 @@ def _write_junit_properties(junit: Path, properties: Mapping[str, object]) -> No
         existing = suite.find("properties")
         if existing is None:
             existing = ET.SubElement(suite, "properties")
+        values = {
+            child.get("name", ""): child.get("value", "")
+            for child in existing
+            if child.tag == "property" and child.get("name")
+        }
+        values.update({key: str(value) for key, value in properties.items()})
         for child in list(existing):
             existing.remove(child)
-        for key, value in sorted(properties.items()):
-            ET.SubElement(existing, "property", name=key, value=str(value))
+        for key, value in sorted(values.items()):
+            ET.SubElement(existing, "property", name=key, value=value)
     ET.ElementTree(root).write(junit, encoding="utf-8", xml_declaration=True)
     junit.chmod(0o600)
 
@@ -383,6 +439,7 @@ def package_evidence(  # noqa: C901
     """Create a bounded tar.gz and return its redacted packaging manifest."""
     if status not in {"success", "failure"}:
         raise ValueError(f"unsupported status: {status}")
+    safe_archive_created = False
     try:
         _required_files(source, status, tier)
         if canary_file is None:
@@ -402,7 +459,9 @@ def package_evidence(  # noqa: C901
             files = tuple(path for path in staging.rglob("*") if path.is_file())
             _check_bundle_size(files, status)
             output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            safe_archive_created = False
             _archive_staging(staging, output, status)
+            safe_archive_created = True
             if tier is None or cache_class is None:
                 raise ValueError(  # noqa: TRY301
                     "tier and cache class are required for budget evidence"
@@ -430,7 +489,9 @@ def package_evidence(  # noqa: C901
                     staging / "resource-manifest.json",
                     secrets,
                 )
+                safe_archive_created = False
                 _archive_staging(staging, output, status)
+                safe_archive_created = True
                 if report["artifact_bytes"] == output.stat().st_size:
                     break
                 report = _update_metrics(
@@ -452,14 +513,18 @@ def package_evidence(  # noqa: C901
     except (OSError, ET.ParseError, TypeError, UnicodeError, ValueError) as error:
         junit = source / "junit.xml"
         junit.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        junit.write_text(
+        failure_junit = source / "packaging-failure-junit.xml"
+        failure_junit.write_text(
             '<testsuite tests="0" failures="1"><properties>'
             '<property name="packaging_error" value="redacted"/>'
             "</properties></testsuite>\n",
             encoding="utf-8",
         )
-        junit.chmod(0o600)
-        _write_packaging_error(output, str(error))
+        failure_junit.chmod(0o600)
+        if not safe_archive_created:
+            junit.write_bytes(failure_junit.read_bytes())
+            junit.chmod(0o600)
+        _write_packaging_error(output, str(error), preserve_safe_archive=safe_archive_created)
         raise
     manifest = {
         "schema": "odcli-real-odoo-evidence-v1",

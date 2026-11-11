@@ -99,7 +99,25 @@ def test_declared_plugins_reach_pytest_collection_and_execution(tmp_path: Path) 
     assert "1 passed" in result.stdout
     manifest = json.loads(timing_file.read_text(encoding="utf-8"))
     assert manifest["phases"]["test"]["duration_seconds"] >= 0.0
+    assert manifest["test_reports"]["test_declared_plugin.py::test_declared_plugin_executes"]
+    assert set(
+        manifest["test_reports"]["test_declared_plugin.py::test_declared_plugin_executes"]
+    ) == {"setup", "call", "teardown"}
     assert (tmp_path / "evidence" / "command-matrix.md").is_file()
+
+
+def test_timing_report_bounds_node_ids_and_rejects_unknown_phases(tmp_path: Path) -> None:
+    path = tmp_path / "timing.json"
+    timing.record_test_report(path, "tests/test_case.py::test_one", "setup", 1.25)
+    report = json.loads(path.read_text(encoding="utf-8"))["test_reports"]
+    assert report == {"tests/test_case.py::test_one": {"setup": 1.25}}
+
+    timing.record_test_report(path, "n" * 513, "call", 2.0)
+    report = json.loads(path.read_text(encoding="utf-8"))["test_reports"]
+    assert len(report) == 2
+    assert all(len(nodeid.encode("utf-8")) <= 512 for nodeid in report)
+    with pytest.raises(ValueError, match="unsupported test phase"):
+        timing.record_test_report(path, "test", "unknown", 1.0)
 
 
 def test_test_timing_excludes_recorded_cleanup_segments(tmp_path: Path) -> None:

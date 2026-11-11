@@ -20,8 +20,11 @@ from odoo_instance_sdk.project import ProjectConfig
 from tests.integration.real_odoo.cleanup import ResourceLedger
 from tests.integration.real_odoo.conftest import E2ERuntime
 from tests.integration.real_odoo.test_critical_path import (
+    _CriticalPathWorkspace,
     _environment_state,
     _expected_stop_context,
+    _finalize_restored_case,
+    _OwnedProcess,
     _start_owned,
 )
 from tests.unit.owned_child_lifecycle import OwnedChildInstance
@@ -78,6 +81,44 @@ def test_critical_path_preserves_post_start_and_cleanup_failures(
     assert owned.reap_result and owned.reap_result[0] != -1
     assert not owned.reaper.is_alive()
     assert ledger.records == ()
+
+
+def test_restored_case_reverts_config_when_owned_stop_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "odoo.conf"
+    config.write_text("db_name = restored\ndbfilter = restored\n", encoding="utf-8")
+    stop_failure = RuntimeError("owned process stop failed")
+
+    def fail_stop(_instance: object, _owned: object) -> None:
+        raise stop_failure
+
+    monkeypatch.setattr(
+        "tests.integration.real_odoo.test_critical_path._stop_owned",
+        fail_stop,
+    )
+    state = cast(
+        "_CriticalPathWorkspace",
+        SimpleNamespace(
+            generated_config=config,
+            runtime=SimpleNamespace(topology=SimpleNamespace(target_sentinel_database="sentinel")),
+            environment_id="env-1",
+            client=SimpleNamespace(
+                environments=SimpleNamespace(get=lambda _environment_id: "sentinel-env"),
+                instance=SimpleNamespace(
+                    from_environment=lambda environment: f"instance:{environment}"
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="owned process stop failed") as caught:
+        _finalize_restored_case(state, object(), cast("_OwnedProcess", object()))
+
+    assert caught.value is stop_failure
+    assert "db_name = sentinel" in config.read_text(encoding="utf-8")
+    assert "dbfilter = sentinel" in config.read_text(encoding="utf-8")
+    assert state.instance == "instance:sentinel-env"
 
 
 @pytest.fixture
@@ -252,3 +293,67 @@ raise SystemExit(pytest.main([
     assert ordinary.split("|", 3)[2] == "600"
     ordinary_fixtures = set(ordinary.split("|", 3)[3].split(","))
     assert "critical_path_workspace" in ordinary_fixtures
+
+
+@pytest.mark.parametrize(
+    "node_name",
+    (
+        "test_critical_path_backup_metadata_and_source_identity",
+        "test_critical_path_restored_attachment_is_readable",
+        "test_critical_path_restored_model_marker_is_present",
+        "test_critical_path_restored_resource_inventory_is_healthy",
+        "test_critical_path_restored_runtime_stop_is_repeatable_and_owned",
+    ),
+)
+def test_each_restored_node_has_independent_fixture_and_timeout_plan(node_name: str) -> None:
+    script = """
+import json
+import sys
+import pytest
+
+class LayoutProbe:
+    def pytest_collection_finish(self, session):
+        for item in session.items:
+            fixtures = item._fixtureinfo.name2fixturedefs
+            scopes = {
+                name: definitions[-1].scope
+                for name, definitions in fixtures.items()
+                if name in {
+                    "critical_path_case",
+                    "critical_path_restored_database",
+                    "critical_path_restored_runtime",
+                    "critical_path_workspace",
+                }
+            }
+            timeout = item.get_closest_marker("timeout")
+            print("LAYOUT|" + json.dumps({
+                "name": item.name,
+                "timeout": timeout.args[0] if timeout else None,
+                "fixtures": scopes,
+            }, sort_keys=True))
+
+raise SystemExit(pytest.main([
+    "--setup-plan", "-q", "-o", "addopts=", sys.argv[1],
+], plugins=[LayoutProbe()]))
+"""
+    node = "tests/integration/real_odoo/test_critical_path.py::" + node_name
+    result = subprocess.run(
+        [sys.executable, "-c", script, node],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = [
+        line.removeprefix("LAYOUT|")
+        for line in result.stdout.splitlines()
+        if line.startswith("LAYOUT|")
+    ]
+    assert len(rows) == 1, result.stdout
+    layout = json.loads(rows[0])
+    assert layout["name"] == node_name
+    assert layout["timeout"] == 600
+    assert layout["fixtures"]["critical_path_case"] == "function"
+    assert layout["fixtures"]["critical_path_restored_database"] == "module"
+    assert layout["fixtures"]["critical_path_restored_runtime"] == "function"
+    assert layout["fixtures"]["critical_path_workspace"] == "module"

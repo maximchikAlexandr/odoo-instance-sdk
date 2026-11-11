@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -90,6 +91,27 @@ def record(path: Path, phase: Phase, started: float, finished: float) -> float:
     return duration
 
 
+def record_test_report(path: Path, nodeid: str, phase: str, duration: float) -> None:
+    """Persist bounded per-node pytest phase durations for fixture-cost diagnosis."""
+    if phase not in {"setup", "call", "teardown"}:
+        raise ValueError(f"unsupported test phase: {phase}")
+    manifest = _read(path)
+    reports = manifest.setdefault("test_reports", {})
+    if not isinstance(reports, dict):
+        raise TypeError("invalid test report map")
+    # Keep source test IDs readable while bounding arbitrary parametrized IDs.
+    safe_nodeid = (
+        nodeid
+        if len(nodeid.encode("utf-8")) <= 512
+        else hashlib.sha256(nodeid.encode("utf-8")).hexdigest()
+    )
+    report = reports.setdefault(safe_nodeid, {})
+    if not isinstance(report, dict):
+        raise TypeError("invalid test report entry")
+    report[phase] = round(max(0.0, duration), 6)
+    _write(path, manifest)
+
+
 def finish_test_excluding_cleanup(path: Path, *, now: float | None = None) -> float:
     """Finish test timing after teardown, excluding recorded cleanup segments."""
     manifest = _read(path)
@@ -131,6 +153,22 @@ except ImportError:
     pass
 else:
     pytest.hookimpl(hookwrapper=True, tryfirst=True)(pytest_sessionfinish)
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(item: object, call: object) -> Iterator[None]:
+        del call
+        outcome = yield
+        configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
+        if not configured:
+            return
+        report = outcome.get_result()  # type: ignore[attr-defined]
+        nodeid = str(getattr(item, "nodeid", "unknown")).rsplit("/", 1)[-1]
+        record_test_report(
+            Path(configured),
+            nodeid,
+            str(getattr(report, "when", "unknown")),
+            float(getattr(report, "duration", 0.0)),
+        )
 
 
 def main() -> int:

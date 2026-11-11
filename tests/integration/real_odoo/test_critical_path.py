@@ -375,6 +375,28 @@ def _stop_owned(instance: Any, owned: _OwnedProcess) -> None:
     owned.stopped = True
 
 
+def _finalize_restored_case(
+    state: _CriticalPathWorkspace, instance: Any, owned: _OwnedProcess
+) -> None:
+    errors: list[BaseException] = []
+    try:
+        _stop_owned(instance, owned)
+    except BaseException as error:
+        errors.append(error)
+    try:
+        _switch_database_config(
+            state.generated_config, state.runtime.topology.target_sentinel_database
+        )
+        state.env_obj = state.client.environments.get(state.environment_id)
+        state.instance = state.client.instance.from_environment(state.env_obj)
+    except BaseException as error:
+        errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("restored runtime cleanup and config restore failed", errors)
+
+
 @dataclass(slots=True)
 class _CriticalPathWorkspace:
     runtime: E2ERuntime
@@ -970,16 +992,31 @@ class _RestoredRuntime:
     owned_process: _OwnedProcess
 
 
-@pytest.fixture
-def critical_path_restored_runtime(
-    critical_path_case: _CriticalPathWorkspace,
+@dataclass(slots=True)
+class _RestoredDatabase:
+    workspace: _CriticalPathWorkspace
+    refresh: dict[str, Any]
+    restored_database: str
+    backup_id: str
+    backup: dict[str, Any]
+    backup_list: dict[str, Any]
+    shown_backup: dict[str, Any]
+    validation: dict[str, Any]
+
+
+@pytest.fixture(scope="module")
+def critical_path_restored_database(
+    critical_path_workspace: _CriticalPathWorkspace,
     request: pytest.FixtureRequest,
-) -> Iterator[_RestoredRuntime]:
-    """Prepare a fresh restored database/runtime for each restore or cleanup node."""
-    state = critical_path_case
+) -> _RestoredDatabase:
+    """Restore one immutable database for independently provisioned read-only nodes."""
+    state = critical_path_workspace
+    _switch_database_config(state.generated_config, state.runtime.topology.target_sentinel_database)
+    state.env_obj = state.client.environments.get(state.environment_id)
+    state.instance = state.client.instance.from_environment(state.env_obj)
     instance = state.instance
-    first_process = _start_owned(instance, state.runtime)
-    request.addfinalizer(lambda: _stop_owned(instance, first_process))
+    owned_process = _start_owned(instance, state.runtime)
+    request.addfinalizer(lambda: _stop_owned(instance, owned_process))
     wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
     refresh = _invoke(
         state.runner,
@@ -1002,16 +1039,8 @@ def critical_path_restored_runtime(
     validation = _invoke(
         state.runner, state.project, state.cli_environment, "backup", "validate", backup_id
     )
-
-    _stop_owned(instance, first_process)
-    _switch_database_config(state.generated_config, restored_database)
-    state.env_obj = state.client.environments.get(state.environment_id)
-    state.instance = state.client.instance.from_environment(state.env_obj)
-    owned_process = _start_owned(state.instance, state.runtime)
-    restored_instance = state.instance
-    request.addfinalizer(lambda: _stop_owned(restored_instance, owned_process))
-    wait_for_http(state.instance.config.base_url + "/web/health", timeout=180.0)
-    yield _RestoredRuntime(
+    _stop_owned(instance, owned_process)
+    return _RestoredDatabase(
         workspace=state,
         refresh=refresh,
         restored_database=restored_database,
@@ -1020,6 +1049,35 @@ def critical_path_restored_runtime(
         backup_list=backup_list,
         shown_backup=shown_backup,
         validation=validation,
+    )
+
+
+@pytest.fixture
+def critical_path_restored_runtime(
+    critical_path_case: _CriticalPathWorkspace,
+    critical_path_restored_database: _RestoredDatabase,
+    request: pytest.FixtureRequest,
+) -> Iterator[_RestoredRuntime]:
+    """Start an isolated owned process against the shared immutable restored database."""
+    state = critical_path_case
+    restored = critical_path_restored_database
+    _switch_database_config(state.generated_config, restored.restored_database)
+    state.env_obj = state.client.environments.get(state.environment_id)
+    state.instance = state.client.instance.from_environment(state.env_obj)
+    instance = state.instance
+    owned_process = _start_owned(instance, state.runtime)
+
+    request.addfinalizer(lambda: _finalize_restored_case(state, instance, owned_process))
+    wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
+    yield _RestoredRuntime(
+        workspace=state,
+        refresh=restored.refresh,
+        restored_database=restored.restored_database,
+        backup_id=restored.backup_id,
+        backup=restored.backup,
+        backup_list=restored.backup_list,
+        shown_backup=restored.shown_backup,
+        validation=restored.validation,
         owned_process=owned_process,
     )
 

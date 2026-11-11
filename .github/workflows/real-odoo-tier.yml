@@ -239,6 +239,7 @@ jobs:
         with:
           name: real-odoo-${{ inputs.mode }}-packaging-failure
           path: |
-            .artifacts/real-odoo-e2e/junit.xml
+            .artifacts/real-odoo-e2e/*-evidence.tar.gz
+            .artifacts/real-odoo-e2e/packaging-failure-junit.xml
             .artifacts/real-odoo-e2e/packaging-error.json
           retention-days: 7
