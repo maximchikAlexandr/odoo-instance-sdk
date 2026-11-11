@@ -334,7 +334,7 @@ locations while the production launch inventory is empty:
 - `tests/unit/test_monitor_cache_and_docker.py:119`
 - `tests/unit/test_cluster_resources.py:188`
 - `tests/unit/test_real_odoo_ci_components.py:40,109,151`
-- `tests/unit/test_real_odoo_foundation.py:324,347,366`
+- `tests/unit/test_real_odoo_foundation.py:383,406,425`
 
 These are not production launches or public behavior exceptions. Their removal
 condition is migration of each fixture to the shared recording executor; the
