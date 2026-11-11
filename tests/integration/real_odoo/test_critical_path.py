@@ -26,8 +26,14 @@ from tests.fixtures.xmlrpc_probe import xmlrpc_probe
 
 from .archive import ArchiveIdentity
 from .cleanup import audit_no_leaks, compose_down, write_odoo_config
-from .compose import ComposeLifecycle, new_run_id, wait_for_http
-from .conftest import E2ERuntime, _finalize, _make_runtime, _provision, odoo_runtime_python
+from .compose import new_run_id, wait_for_http
+from .conftest import (
+    E2ERuntime,
+    _finalize,
+    _make_runtime,
+    _register_runtime_ownership,
+    odoo_runtime_python,
+)
 
 pytestmark = [
     pytest.mark.real_odoo,
@@ -537,10 +543,6 @@ def _build_critical_path_workspace(
     odoo_bin_path = project / odoo_bin_relative
     odoo_python = odoo_runtime_python(runtime, project, odoo_bin_path)
 
-    down = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name).run(
-        "down", "--volumes", "--remove-orphans", timeout=60.0
-    )
-    assert down.returncode == 0, down.stderr
     bootstrap_config = runtime.root / "critical-path-bootstrap.conf"
     shutil.copy2(runtime.config_file, bootstrap_config)
     with bootstrap_config.open("a", encoding="utf-8") as stream:
@@ -792,12 +794,31 @@ def _build_critical_path_workspace(
 @pytest.fixture(scope="module")
 def critical_path_workspace(
     request: pytest.FixtureRequest,
-    target_runtime: E2ERuntime,
+    critical_path_runtime: E2ERuntime,
     source_server: E2ERuntime,
     source_backup: ArchiveIdentity,
 ) -> _CriticalPathWorkspace:
     """Share expensive pinned prerequisites among non-destructive focused nodes."""
-    return _build_critical_path_workspace(request, target_runtime, source_server, source_backup)
+    return _build_critical_path_workspace(
+        request, critical_path_runtime, source_server, source_backup
+    )
+
+
+@pytest.fixture(scope="module")
+def critical_path_runtime(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[E2ERuntime]:
+    """Own workspace resources without provisioning an unused target Odoo container."""
+    runtime = _make_runtime(
+        Path(tmp_path_factory.mktemp("odcli-critical-path")), new_run_id(), scope="target"
+    )
+    try:
+        _register_runtime_ownership(runtime)
+        yield runtime
+    except BaseException as error:
+        _finalize(runtime, error)
+    else:
+        _finalize(runtime)
 
 
 @pytest.fixture
@@ -813,7 +834,7 @@ def critical_path_cleanup_runtime(
         tmp_path_factory.mktemp("odcli-critical-cleanup"), new_run_id(), scope="target"
     )
     try:
-        _provision(runtime)
+        _register_runtime_ownership(runtime)
         workspace = _build_critical_path_workspace(request, runtime, source_server, source_backup)
         original_instance = workspace.instance
         original_process = _start_owned(original_instance, runtime)

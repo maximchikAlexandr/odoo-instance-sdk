@@ -263,6 +263,56 @@ def test_target_fixture_provisions_only_target_and_retains_host_http_port(
     assert not runtime.artifact_root.exists()
 
 
+def test_sdk_owned_runtime_registers_cleanup_without_container_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = e2e_fixtures._make_runtime(tmp_path, "f" * 32)
+    commands: list[tuple[str, ...]] = []
+    events: list[str] = []
+
+    class FakeLifecycle:
+        def __init__(self, compose_file: Path, project_name: str) -> None:
+            assert compose_file == runtime.compose_file
+            assert project_name == runtime.topology.project_name
+
+        def run(self, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+            del timeout
+            commands.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(e2e_fixtures, "ComposeLifecycle", FakeLifecycle)
+    monkeypatch.setattr(
+        e2e_fixtures, "compose_down", lambda *args, **kwargs: events.append("compose-down")
+    )
+    monkeypatch.setattr(
+        e2e_fixtures, "audit_no_leaks", lambda *args, **kwargs: events.append("audit")
+    )
+
+    e2e_fixtures._register_runtime_ownership(runtime)
+    records = {record.kind for record in runtime.ledger.records}
+    assert {
+        "runtime-root",
+        "compose-project",
+        "port",
+        "docker-resource",
+        "database",
+        "filestore",
+        "catalog",
+    } <= records
+    assert runtime.container_data_initialized is False
+    assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations[:3])
+    assert runtime.reservations[3].socket.fileno() != -1
+
+    e2e_fixtures._finalize(runtime)
+
+    assert commands == []
+    assert events == ["compose-down", "audit"]
+    assert runtime.ledger.records == ()
+    assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations)
+    assert not runtime.root.exists()
+    assert not runtime.artifact_root.exists()
+
+
 def test_source_fixture_does_not_provision_target_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -516,20 +566,10 @@ def test_fixture_failure_publishes_bounded_sanitized_compose_logs(
         assert commands == [
             ("logs", "--no-color", "--tail", "200", "target_postgres"),
             ("logs", "--no-color", "--tail", "200", "target_init"),
-            (
-                "run",
-                "--rm",
-                "--no-deps",
-                "--user",
-                "root",
-                "target_init",
-                "sh",
-                "-c",
-                "chmod -R a+rwX -- /var/lib/odoo-target",
-            ),
         ]
+        assert runtime.container_data_initialized is False
         e2e_fixtures._finalize(runtime)
-        assert len(commands) == 3
+        assert len(commands) == 2
         logs = sorted(runtime.artifact_root.glob("*.log"))
         assert {path.name for path in logs} == {"odoo.log", "postgres.log"}
         assert all("runtime-secret" not in path.read_text(encoding="utf-8") for path in logs)

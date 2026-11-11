@@ -320,6 +320,7 @@ class LayoutProbe:
                 for name, definitions in fixtures.items()
                 if name in {
                     "critical_path_case",
+                    "critical_path_runtime",
                     "critical_path_restored_database",
                     "critical_path_restored_runtime",
                     "critical_path_workspace",
@@ -356,4 +357,5 @@ raise SystemExit(pytest.main([
     assert layout["fixtures"]["critical_path_case"] == "function"
     assert layout["fixtures"]["critical_path_restored_database"] == "module"
     assert layout["fixtures"]["critical_path_restored_runtime"] == "function"
+    assert layout["fixtures"]["critical_path_runtime"] == "module"
     assert layout["fixtures"]["critical_path_workspace"] == "module"

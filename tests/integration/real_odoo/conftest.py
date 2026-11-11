@@ -57,6 +57,7 @@ class E2ERuntime:
     secret_registry_file: Path
     scope: str
     cleanup_cwd: Path
+    container_data_initialized: bool = False
     failed: bool = False
     finalized: bool = False
 
@@ -282,6 +283,7 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
     scope = scope or runtime.scope
     if scope not in {"source", "target"}:
         raise ValueError("scope must be source or target")
+    _register_runtime_ownership(runtime, scope=scope)
     services = (
         ("source_postgres", "source_odoo")
         if scope == "source"
@@ -289,6 +291,70 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
     )
     up_services = services if scope == "source" else ("target_postgres",)
     lifecycle = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+    lifecycle.run("up", "--detach", "--wait", *up_services, timeout=180.0)
+    runner = _compose_runner(lifecycle)
+    if scope == "source":
+        wait_for_compose_pg_isready(runner, "source_postgres")
+        lifecycle.run(
+            "run",
+            "--rm",
+            "--no-deps",
+            "source_odoo",
+            "odoo",
+            "--config=/etc/odoo/odoo.conf",
+            f"--database={runtime.topology.source_database}",
+            "--init=odcli_e2e_probe",
+            "--without-demo=all",
+            "--stop-after-init",
+            timeout=300.0,
+        )
+        # The bootstrap container runs as uid 100. Its shard directories are
+        # consequently not writable by the host-side SDK Odoo process that
+        # owns the subsequent project runtime. Normalize only this fixture's
+        # private bind mount before handing it to that process.
+        _make_container_data_host_removable(
+            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+        )
+        runtime.container_data_initialized = True
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
+            timeout=180.0,
+        )
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/database/selector",
+            timeout=180.0,
+        )
+    else:
+        wait_for_compose_pg_isready(runner, "target_postgres")
+        lifecycle.run(
+            "run",
+            "--rm",
+            "--no-deps",
+            "target_init",
+            "odoo",
+            "--config=/etc/odoo/odoo.conf",
+            f"--database={runtime.topology.target_sentinel_database}",
+            "--init=base",
+            "--without-demo=all",
+            "--stop-after-init",
+            timeout=300.0,
+        )
+        _make_container_data_host_removable(
+            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+        )
+        runtime.container_data_initialized = True
+
+
+def _register_runtime_ownership(runtime: E2ERuntime, *, scope: str | None = None) -> None:
+    """Register cleanup for a private runtime without starting its Compose services."""
+    scope = scope or runtime.scope
+    if scope not in {"source", "target"}:
+        raise ValueError("scope must be source or target")
+    services = (
+        ("source_postgres", "source_odoo")
+        if scope == "source"
+        else ("target_postgres", "target_init")
+    )
     runtime.ledger.record(
         "runtime-root",
         runtime.root.name,
@@ -325,56 +391,6 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
         runtime.ledger.record(kind, f"{runtime.run_id}-{suffix}", lambda: None)
     for reservation in runtime.reservations[:3]:
         reservation.release()
-    lifecycle.run("up", "--detach", "--wait", *up_services, timeout=180.0)
-    runner = _compose_runner(lifecycle)
-    if scope == "source":
-        wait_for_compose_pg_isready(runner, "source_postgres")
-        lifecycle.run(
-            "run",
-            "--rm",
-            "--no-deps",
-            "source_odoo",
-            "odoo",
-            "--config=/etc/odoo/odoo.conf",
-            f"--database={runtime.topology.source_database}",
-            "--init=odcli_e2e_probe",
-            "--without-demo=all",
-            "--stop-after-init",
-            timeout=300.0,
-        )
-        # The bootstrap container runs as uid 100. Its shard directories are
-        # consequently not writable by the host-side SDK Odoo process that
-        # owns the subsequent project runtime. Normalize only this fixture's
-        # private bind mount before handing it to that process.
-        _make_container_data_host_removable(
-            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
-        )
-        wait_for_http(
-            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
-            timeout=180.0,
-        )
-        wait_for_http(
-            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/database/selector",
-            timeout=180.0,
-        )
-    else:
-        wait_for_compose_pg_isready(runner, "target_postgres")
-        lifecycle.run(
-            "run",
-            "--rm",
-            "--no-deps",
-            "target_init",
-            "odoo",
-            "--config=/etc/odoo/odoo.conf",
-            f"--database={runtime.topology.target_sentinel_database}",
-            "--init=base",
-            "--without-demo=all",
-            "--stop-after-init",
-            timeout=300.0,
-        )
-        _make_container_data_host_removable(
-            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
-        )
 
 
 def _remove_runtime_files(runtime: E2ERuntime) -> None:
@@ -449,13 +465,14 @@ def _cleanup(runtime: E2ERuntime, primary_failure: BaseException | None = None) 
             )
         except BaseException as error:
             errors.append(error)
-    try:
-        _make_container_data_host_removable(
-            runtime,
-            ComposeLifecycle(runtime.compose_file, runtime.topology.project_name),
-        )
-    except BaseException as error:
-        errors.append(error)
+    if runtime.container_data_initialized:
+        try:
+            _make_container_data_host_removable(
+                runtime,
+                ComposeLifecycle(runtime.compose_file, runtime.topology.project_name),
+            )
+        except BaseException as error:
+            errors.append(error)
     # A public env removal can legitimately delete the registered worktree,
     # while the fixture project itself remains below the owned runtime root.
     # Move pytest's process cwd back to the fixture caller's durable directory
