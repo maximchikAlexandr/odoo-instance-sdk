@@ -19,6 +19,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.models.monitor import CheckoutRow
 from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 from scripts.real_odoo_pins import E2E_PINS
 from tests.fixtures.xmlrpc_probe import xmlrpc_probe
@@ -234,7 +235,7 @@ def _remove_owned_fixture_tree(
     return before, after
 
 
-def _environment_state(payload: dict[str, Any], environment_id: str) -> dict[str, Any]:
+def _environment_state(payload: dict[str, Any], environment_id: str) -> CheckoutRow:
     rows = payload.get("rows")
     assert isinstance(rows, list)
     row = next(
@@ -248,42 +249,32 @@ def _environment_state(payload: dict[str, Any], environment_id: str) -> dict[str
         None,
     )
     assert isinstance(row, dict), payload
-    return {
-        key: row.get(key)
-        for key in (
-            "kind",
-            "project_id",
-            "environment_id",
-            "name",
-            "worktree_path",
-            "db_mode",
-            "database",
-            "lifecycle_state",
-            "git",
-            "facts",
-        )
-    }
+    environment = msgspec.convert(row, type=CheckoutRow)
+    assert environment.kind == "environment"
+    assert environment.environment_id == environment_id
+    return environment
 
 
 def _cluster_state(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload.get(key) for key in ("mode", "owned", "state", "endpoint")}
 
 
-def _expected_stop_context(state: Any, environment: dict[str, Any]) -> dict[str, Any]:
+def _expected_stop_context(state: Any, environment: CheckoutRow) -> dict[str, Any]:
     project = next(
         row
         for row in state.catalog.list_projects()
         if Path(str(row["repository_root"])).resolve() == state.project.resolve()
     )
     project_id = str(project["project_id"])
-    assert environment.get("project_id") in (None, project_id)
+    assert environment.project_id == project_id
+    assert environment.environment_id is not None
     return {
         "owner_kind": "environment",
-        "owner_id": str(environment["id"]),
+        "owner_id": environment.environment_id,
         "project_id": project_id,
-        "environment_id": str(environment["id"]),
-        "environment_name": environment["name"],
-        "worktree_path": environment["worktree_path"],
+        "environment_id": environment.environment_id,
+        "environment_name": environment.name,
+        "worktree_path": environment.worktree_path,
     }
 
 
@@ -392,6 +383,7 @@ class _CriticalPathWorkspace:
     runner: CliRunner
     project: Path
     manifest: Path
+    initialized_source_config: Path
     cli_environment: dict[str, str]
     cluster: Any
     status: dict[str, Any]
@@ -408,6 +400,7 @@ class _CriticalPathWorkspace:
     source_commit: str
     persisted_python: Path | None
     persisted_odoo_bin: Path | None
+    persisted_source_config: Path | None
     catalog: Any
     client: Any
     env_obj: Any
@@ -576,7 +569,9 @@ def _build_critical_path_workspace(
         default_base_ref=E2E_PINS.odoo_source_commit,
     )
     manifest.write_text(initialized.to_manifest(), encoding="utf-8")
-    assert ".odcli/odoo.conf" in manifest.read_text(encoding="utf-8")
+    initialized_source_config = initialized.source_config
+    assert initialized_source_config == Path(".odcli/odoo.conf")
+    assert ProjectConfig.load(project).source_config == initialized_source_config
 
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -737,6 +732,7 @@ def _build_critical_path_workspace(
         runner=runner,
         project=project,
         manifest=manifest,
+        initialized_source_config=initialized_source_config,
         cli_environment=cli_environment,
         cluster=cluster,
         status=status,
@@ -753,6 +749,9 @@ def _build_critical_path_workspace(
         source_commit=source_commit,
         persisted_python=Path(persisted.python) if persisted.python is not None else None,
         persisted_odoo_bin=Path(persisted.odoo_bin) if persisted.odoo_bin is not None else None,
+        persisted_source_config=(
+            Path(persisted.source_config) if persisted.source_config is not None else None
+        ),
         catalog=catalog,
         client=client,
         env_obj=env_obj,
@@ -1031,7 +1030,7 @@ def test_critical_path_owned_project_and_postgres_are_repeatable(
     state = critical_path_case
     runtime = state.runtime
     assert state.manifest.is_file()
-    assert ".odcli/odoo.conf" in state.manifest.read_text(encoding="utf-8")
+    assert state.initialized_source_config == Path(".odcli/odoo.conf")
     assert state.cluster.compose_file.parent.is_relative_to(runtime.root)
     assert state.cluster.password_file.is_file()
     assert state.status.get("state") == "healthy"
@@ -1063,6 +1062,7 @@ def test_critical_path_environment_is_bound_to_pinned_source_and_python(
     assert state.python_version == f"Python {E2E_PINS.cpython}"
     assert state.persisted_python == state.python
     assert state.persisted_odoo_bin == state.registered_worktree / "odoo-bin"
+    assert state.persisted_source_config == state.generated_config
     _record(
         record_property,
         "E2E-CP-02",
@@ -1135,7 +1135,9 @@ def test_critical_path_public_stop_and_probe_module_discovery(
             state.environment_id,
             "stop",
         )
-        stop_context = _expected_stop_context(state, state.environment)
+        stop_context = _expected_stop_context(
+            state, _environment_state(state.listed, state.environment_id)
+        )
         assert stop == {**stop_context, "status": "stopped"}
         assert repeated_stop == {**stop_context, "status": "already_stopped"}
     finally:

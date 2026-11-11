@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import msgspec
 import pytest
+from click.testing import CliRunner
 
+from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.output import action_command
+from odoo_instance_sdk.models.monitor import CheckoutInventory, CheckoutRow
+from odoo_instance_sdk.project import ProjectConfig
 from tests.integration.real_odoo.cleanup import ResourceLedger
 from tests.integration.real_odoo.conftest import E2ERuntime
-from tests.integration.real_odoo.test_critical_path import _start_owned
+from tests.integration.real_odoo.test_critical_path import (
+    _environment_state,
+    _expected_stop_context,
+    _start_owned,
+)
 from tests.unit.owned_child_lifecycle import OwnedChildInstance
 
 
@@ -64,6 +77,118 @@ def test_critical_path_preserves_post_start_and_cleanup_failures(
     assert owned.reap_result and owned.reap_result[0] != -1
     assert not owned.reaper.is_alive()
     assert ledger.records == ()
+
+
+def test_public_env_list_shape_drives_full_stop_and_repeat_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment_id = "env-public-row"
+    project_id = "project-public-row"
+    worktree_path = str(tmp_path / "worktree")
+    row = CheckoutRow(
+        kind="environment",
+        project_id=project_id,
+        environment_id=environment_id,
+        name="critical-path",
+        worktree_path=worktree_path,
+        odoo_status="running",
+    )
+    inventory = CheckoutInventory(
+        schema_version=1,
+        generated_at=datetime.now(UTC),
+        sample_time=datetime.now(UTC),
+        project_id=None,
+        rows=(row,),
+        clusters=(),
+    )
+
+    class FakeEnvironments:
+        def checkout_inventory(self, **_kwargs: object) -> CheckoutInventory:
+            return inventory
+
+    fake_client = SimpleNamespace(environments=FakeEnvironments())
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda **_kwargs: fake_client,
+    )
+    listing = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
+    assert listing.exit_code == 0, listing.output
+    listed_payload = json.loads(listing.stdout)["result"]
+
+    state = SimpleNamespace(
+        project=tmp_path,
+        catalog=SimpleNamespace(
+            list_projects=lambda: [{"project_id": project_id, "repository_root": str(tmp_path)}]
+        ),
+    )
+    resolved_row = _environment_state(listed_payload, environment_id)
+    expected = _expected_stop_context(state, resolved_row)
+    statuses = iter(("stopped", "already_stopped"))
+    runtime = SimpleNamespace(
+        owner_kind="environment",
+        owner_id=environment_id,
+        project_id=project_id,
+        environment_id=environment_id,
+        environment_name="critical-path",
+        root=Path(worktree_path),
+    )
+    resolved = SimpleNamespace(
+        runtime=runtime,
+        instance=SimpleNamespace(
+            stop_runtime_command=lambda: action_command(
+                "instance.stop", lambda: {"status": next(statuses)}
+            )
+        ),
+        output_provenance={"project_source": "explicit", "environment_source": "explicit"},
+    )
+    monkeypatch.setattr("odoo_instance_sdk.cli.cli_context.ready_instance", lambda _ctx: resolved)
+    for expected_status in ("stopped", "already_stopped"):
+        stopped = CliRunner().invoke(cli, ["stop", "--format", "json"])
+        assert stopped.exit_code == 0, stopped.output
+        assert json.loads(stopped.stdout)["result"] == {
+            **expected,
+            "status": expected_status,
+        }
+
+
+def test_public_init_manifest_boundary_precedes_checkout_binding(tmp_path: Path) -> None:
+    initialized = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--allow-partial",
+            "--odoo-bin",
+            "/pinned/bootstrap/odoo-bin",
+            "--python",
+            "/pinned/bootstrap/python",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+    assert initialized.exit_code == 0, initialized.output
+    manifest = tmp_path / ".odcli" / "project.toml"
+    init_config = msgspec.structs.replace(
+        ProjectConfig.load(tmp_path), source_config=Path(".odcli/odoo.conf")
+    )
+    manifest.write_text(init_config.to_manifest(), encoding="utf-8")
+    init_source_config = ProjectConfig.load(tmp_path).source_config
+    assert init_source_config == Path(".odcli/odoo.conf")
+
+    current_generated_config = tmp_path / ".odcli" / "environments" / "env-1" / "odoo.conf"
+    registered = msgspec.structs.replace(
+        init_config,
+        odoo_bin=tmp_path / "worktrees" / "env-1" / "odoo-bin",
+        python=tmp_path / "environments" / "env-1" / "bin" / "python",
+        source_config=current_generated_config,
+    )
+    manifest.write_text(registered.to_manifest(), encoding="utf-8")
+
+    persisted = ProjectConfig.load(tmp_path)
+    assert persisted.source_config == current_generated_config
+    assert persisted.odoo_bin == tmp_path / "worktrees" / "env-1" / "odoo-bin"
+    assert persisted.python == tmp_path / "environments" / "env-1" / "bin" / "python"
+    assert init_source_config != persisted.source_config
 
 
 def test_critical_path_cleanup_node_has_isolated_fixture_closure_and_timeout() -> None:
