@@ -57,7 +57,7 @@ class E2ERuntime:
     secret_registry_file: Path
     scope: str
     cleanup_cwd: Path
-    container_data_initialized: bool = False
+    container_data_may_have_written: bool = False
     failed: bool = False
     finalized: bool = False
 
@@ -291,6 +291,10 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
     )
     up_services = services if scope == "source" else ("target_postgres",)
     lifecycle = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+    if scope == "source":
+        # `up` starts source_odoo, which may write uid-100-owned bind-mount
+        # entries before it reports readiness or the later init command runs.
+        runtime.container_data_may_have_written = True
     lifecycle.run("up", "--detach", "--wait", *up_services, timeout=180.0)
     runner = _compose_runner(lifecycle)
     if scope == "source":
@@ -315,7 +319,6 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
         _make_container_data_host_removable(
             runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
         )
-        runtime.container_data_initialized = True
         wait_for_http(
             f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
             timeout=180.0,
@@ -326,6 +329,9 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
         )
     else:
         wait_for_compose_pg_isready(runner, "target_postgres")
+        # Mark before the first Odoo process can partially initialize the
+        # target data mount, including when init times out or raises.
+        runtime.container_data_may_have_written = True
         lifecycle.run(
             "run",
             "--rm",
@@ -342,7 +348,6 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
         _make_container_data_host_removable(
             runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
         )
-        runtime.container_data_initialized = True
 
 
 def _register_runtime_ownership(runtime: E2ERuntime, *, scope: str | None = None) -> None:
@@ -465,7 +470,7 @@ def _cleanup(runtime: E2ERuntime, primary_failure: BaseException | None = None) 
             )
         except BaseException as error:
             errors.append(error)
-    if runtime.container_data_initialized:
+    if runtime.container_data_may_have_written:
         try:
             _make_container_data_host_removable(
                 runtime,
