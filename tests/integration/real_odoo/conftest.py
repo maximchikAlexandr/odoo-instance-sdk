@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import os
+import platform
+import re
 import secrets
+import shutil
+import stat
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from hashlib import sha256
@@ -57,8 +62,250 @@ class E2ERuntime:
     secret_registry_file: Path
     scope: str
     cleanup_cwd: Path
+    container_data_may_have_written: bool = False
     failed: bool = False
     finalized: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedOdooBootstrap:
+    """Session-owned, read-only interpreter/dependencies for test bootstrap."""
+
+    root: Path
+    python: Path
+    platform_tag: tuple[str, str]
+    lock_sha256: str
+    python_version: str
+    uv_version: str
+    filesystem_state: tuple[tuple[str, bool, int, int, int, str], ...]
+
+
+def _bootstrap_filesystem_state(
+    root: Path,
+) -> tuple[tuple[str, bool, int, int, int, str], ...]:
+    entries: list[tuple[str, bool, int, int, int, str]] = []
+    for path in sorted(root.rglob("*")):
+        metadata = path.lstat()
+        is_symlink = stat.S_ISLNK(metadata.st_mode)
+        target = os.readlink(path) if is_symlink else ""
+        entries.append(
+            (
+                path.relative_to(root).as_posix(),
+                is_symlink,
+                stat.S_IMODE(metadata.st_mode),
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                target,
+            )
+        )
+    return tuple(entries)
+
+
+def _make_bootstrap_read_only(root: Path) -> None:
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in files:
+            path = current_path / name
+            if not path.is_symlink():
+                path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+        for name in directories:
+            path = current_path / name
+            if not path.is_symlink():
+                path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+    root.chmod(stat.S_IMODE(root.stat().st_mode) & ~0o222)
+
+
+def _assert_owned_bootstrap_path(root: Path, session_root: Path) -> None:
+    if root.is_symlink() or root.resolve().parent != session_root.resolve():
+        raise AssertionError(f"refusing to remove unowned bootstrap path: {root}")
+
+
+def _assert_bootstrap_unchanged(
+    root: Path,
+    expected_state: tuple[tuple[str, bool, int, int, int, str], ...],
+) -> None:
+    if _bootstrap_filesystem_state(root) != expected_state:
+        raise AssertionError("shared pinned Odoo bootstrap artifact was modified by a consumer")
+
+
+def _make_bootstrap_removable(root: Path) -> None:
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in files:
+            path = current_path / name
+            if not path.is_symlink():
+                path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWUSR)
+        for name in directories:
+            path = current_path / name
+            if not path.is_symlink():
+                path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWUSR | stat.S_IXUSR)
+    root.chmod(stat.S_IMODE(root.stat().st_mode) | stat.S_IWUSR | stat.S_IXUSR)
+
+
+def _remove_bootstrap_root(
+    root: Path,
+    session_root: Path,
+    expected_state: tuple[tuple[str, bool, int, int, int, str], ...] | None,
+) -> None:
+    if not root.exists() and not root.is_symlink():
+        return
+    _assert_owned_bootstrap_path(root, session_root)
+    errors: list[BaseException] = []
+    if expected_state is not None:
+        try:
+            _assert_bootstrap_unchanged(root, expected_state)
+        except BaseException as error:
+            errors.append(error)
+    try:
+        _make_bootstrap_removable(root)
+        shutil.rmtree(root)
+        if root.exists() or root.is_symlink():
+            errors.append(AssertionError(f"owned bootstrap artifact remains after cleanup: {root}"))
+    except BaseException as error:
+        errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("bootstrap artifact validation and cleanup failed", errors)
+
+
+def _build_pinned_odoo_bootstrap(root: Path) -> PinnedOdooBootstrap:
+    platform_tag = (platform.system().lower(), platform.machine().lower())
+    if platform_tag != ("linux", "x86_64"):
+        raise AssertionError(f"pinned Odoo dependency lock is incompatible with {platform_tag}")
+    lock_sha256 = sha256(PYTHON_RESOLUTION_LOCK.read_bytes()).hexdigest()
+    if lock_sha256 != E2E_PINS.odoo_python_lock_sha256:
+        raise AssertionError("pinned Odoo dependency lock digest changed")
+    host_python = subprocess.run(
+        [sys.executable, "--version"], capture_output=True, text=True, check=False
+    )
+    rendered_host_python = (host_python.stdout + host_python.stderr).strip()
+    if host_python.returncode or rendered_host_python != f"Python {E2E_PINS.cpython}":
+        raise AssertionError("pinned Odoo bootstrap host interpreter version mismatch")
+    uv_executable = shutil.which("uv")
+    if uv_executable is None:
+        raise AssertionError("pinned uv executable is unavailable on PATH")
+    uv = subprocess.run([uv_executable, "--version"], capture_output=True, text=True, check=False)
+    rendered_uv = uv.stdout.strip()
+    expected_uv_output = rf"uv {re.escape(E2E_PINS.uv)}(?: \([^()\r\n]+\))?"
+    if uv.returncode or re.fullmatch(expected_uv_output, rendered_uv) is None:
+        raise AssertionError("pinned uv version mismatch for Odoo bootstrap")
+    root.mkdir(mode=0o700)
+    environment = root / "venv"
+    python = environment / "bin" / "python"
+    created = subprocess.run(
+        [uv_executable, "venv", "--python", sys.executable, str(environment)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if created.returncode:
+        raise AssertionError(f"pinned Odoo bootstrap venv creation failed: {created.returncode}")
+    synced = subprocess.run(
+        [
+            uv_executable,
+            "pip",
+            "sync",
+            "--python",
+            str(python),
+            "--require-hashes",
+            str(PYTHON_RESOLUTION_LOCK),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if synced.returncode:
+        raise AssertionError(f"pinned Odoo bootstrap hash sync failed: {synced.returncode}")
+    version = subprocess.run(
+        [str(python), "--version"], capture_output=True, text=True, check=False
+    )
+    rendered_version = (version.stdout + version.stderr).strip()
+    if version.returncode or rendered_version != f"Python {E2E_PINS.cpython}":
+        raise AssertionError("pinned Odoo bootstrap interpreter version mismatch")
+    _make_bootstrap_read_only(root)
+    return PinnedOdooBootstrap(
+        root=root,
+        python=python,
+        platform_tag=platform_tag,
+        lock_sha256=lock_sha256,
+        python_version=rendered_version,
+        uv_version=uv.stdout.strip(),
+        filesystem_state=_bootstrap_filesystem_state(root),
+    )
+
+
+def verify_odoo_runtime_python(
+    bootstrap: PinnedOdooBootstrap, source_root: Path, odoo_bin: Path
+) -> Path:
+    """Bind the shared immutable interpreter to each consumer's pinned checkout."""
+    owned_root = Path(os.path.abspath(bootstrap.root))
+    owned_python = Path(os.path.abspath(bootstrap.python))
+    if bootstrap.root.is_symlink() or not owned_python.is_relative_to(owned_root):
+        raise AssertionError("shared Odoo bootstrap interpreter is outside its owned root")
+    current_platform = (platform.system().lower(), platform.machine().lower())
+    lock_sha256 = sha256(PYTHON_RESOLUTION_LOCK.read_bytes()).hexdigest()
+    if current_platform != bootstrap.platform_tag or lock_sha256 != bootstrap.lock_sha256:
+        raise AssertionError("pinned Odoo bootstrap platform or lock binding changed")
+    if lock_sha256 != E2E_PINS.odoo_python_lock_sha256:
+        raise AssertionError("pinned Odoo dependency lock digest changed")
+    resolved_root = source_root.resolve()
+    resolved_odoo_bin = odoo_bin.resolve()
+    if not resolved_odoo_bin.is_relative_to(resolved_root):
+        raise AssertionError("Odoo bootstrap executable is outside the consumer checkout")
+    commit = subprocess.run(
+        ["git", "-C", str(resolved_root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if commit.returncode or commit.stdout.strip() != E2E_PINS.odoo_source_commit:
+        raise AssertionError("consumer Odoo checkout does not match the pinned source commit")
+    version = subprocess.run(
+        [str(bootstrap.python), "--version"], capture_output=True, text=True, check=False
+    )
+    if version.returncode or (version.stdout + version.stderr).strip() != (
+        f"Python {E2E_PINS.cpython}"
+    ):
+        raise AssertionError("shared Odoo bootstrap interpreter no longer matches its pin")
+    probe = subprocess.run(
+        [str(bootstrap.python), str(resolved_odoo_bin), "--version"],
+        cwd=resolved_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode or "Odoo Server 19" not in (probe.stdout + probe.stderr):
+        raise AssertionError("pinned Odoo checkout import/API probe failed")
+    return bootstrap.python
+
+
+@pytest.fixture(scope="session")
+def pinned_odoo_bootstrap(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> PinnedOdooBootstrap:
+    session_root = tmp_path_factory.getbasetemp().resolve()
+    root = session_root / f"odcli-pinned-bootstrap-{uuid.uuid4().hex}"
+    expected_state: tuple[tuple[str, bool, int, int, int, str], ...] | None = None
+
+    def cleanup() -> None:
+        _remove_bootstrap_root(root, session_root, expected_state)
+
+    request.addfinalizer(cleanup)
+    try:
+        bootstrap = _build_pinned_odoo_bootstrap(root)
+        expected_state = bootstrap.filesystem_state
+        return bootstrap
+    except BaseException as primary:
+        try:
+            cleanup()
+        except BaseException as cleanup_error:
+            raise BaseExceptionGroup(
+                "pinned Odoo bootstrap setup and cleanup failed", [primary, cleanup_error]
+            ) from primary
+        raise
+    else:
+        return bootstrap
 
 
 @pytest.fixture(scope="session")
@@ -223,52 +470,6 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
     )
 
 
-def odoo_runtime_python(runtime: E2ERuntime, source_root: Path, odoo_bin: Path) -> Path:
-    """Prepare and verify the pinned Odoo interpreter independently of SDK uv sync."""
-    if sha256(PYTHON_RESOLUTION_LOCK.read_bytes()).hexdigest() != (
-        E2E_PINS.odoo_python_lock_sha256
-    ):
-        raise AssertionError("pinned Odoo dependency lock digest changed")
-    environment = runtime.root / "odoo-python"
-    python = environment / "bin" / "python"
-    if not python.is_file():
-        created = subprocess.run(
-            ["uv", "venv", "--python", sys.executable, str(environment)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert created.returncode == 0, f"Odoo runtime venv creation failed: {created.returncode}"
-    synced = subprocess.run(
-        [
-            "uv",
-            "pip",
-            "sync",
-            "--python",
-            str(python),
-            "--require-hashes",
-            str(PYTHON_RESOLUTION_LOCK),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert synced.returncode == 0, f"Odoo runtime lock sync failed: {synced.returncode}"
-    version = subprocess.run(
-        [str(python), "--version"], capture_output=True, text=True, check=False
-    )
-    assert version.returncode == 0 and E2E_PINS.cpython in version.stdout + version.stderr
-    probe = subprocess.run(
-        [str(python), str(odoo_bin), "--version"],
-        cwd=source_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert probe.returncode == 0, f"pinned Odoo runtime import probe failed: {probe.returncode}"
-    return python
-
-
 def _compose_runner(
     lifecycle: ComposeLifecycle,
 ) -> Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]]:
@@ -282,6 +483,7 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
     scope = scope or runtime.scope
     if scope not in {"source", "target"}:
         raise ValueError("scope must be source or target")
+    _register_runtime_ownership(runtime, scope=scope)
     services = (
         ("source_postgres", "source_odoo")
         if scope == "source"
@@ -289,6 +491,75 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
     )
     up_services = services if scope == "source" else ("target_postgres",)
     lifecycle = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+    if scope == "source":
+        # `up` starts source_odoo, which may write uid-100-owned bind-mount
+        # entries before it reports readiness or the later init command runs.
+        runtime.container_data_may_have_written = True
+    lifecycle.run("up", "--detach", "--wait", *up_services, timeout=180.0)
+    runner = _compose_runner(lifecycle)
+    if scope == "source":
+        wait_for_compose_pg_isready(runner, "source_postgres")
+        lifecycle.run(
+            "run",
+            "--rm",
+            "--no-deps",
+            "source_odoo",
+            "odoo",
+            "--config=/etc/odoo/odoo.conf",
+            f"--database={runtime.topology.source_database}",
+            "--init=odcli_e2e_probe",
+            "--without-demo=all",
+            "--stop-after-init",
+            timeout=300.0,
+        )
+        # The bootstrap container runs as uid 100. Its shard directories are
+        # consequently not writable by the host-side SDK Odoo process that
+        # owns the subsequent project runtime. Normalize only this fixture's
+        # private bind mount before handing it to that process.
+        _make_container_data_host_removable(
+            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+        )
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
+            timeout=180.0,
+        )
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/database/selector",
+            timeout=180.0,
+        )
+    else:
+        wait_for_compose_pg_isready(runner, "target_postgres")
+        # Mark before the first Odoo process can partially initialize the
+        # target data mount, including when init times out or raises.
+        runtime.container_data_may_have_written = True
+        lifecycle.run(
+            "run",
+            "--rm",
+            "--no-deps",
+            "target_init",
+            "odoo",
+            "--config=/etc/odoo/odoo.conf",
+            f"--database={runtime.topology.target_sentinel_database}",
+            "--init=base",
+            "--without-demo=all",
+            "--stop-after-init",
+            timeout=300.0,
+        )
+        _make_container_data_host_removable(
+            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+        )
+
+
+def _register_runtime_ownership(runtime: E2ERuntime, *, scope: str | None = None) -> None:
+    """Register cleanup for a private runtime without starting its Compose services."""
+    scope = scope or runtime.scope
+    if scope not in {"source", "target"}:
+        raise ValueError("scope must be source or target")
+    services = (
+        ("source_postgres", "source_odoo")
+        if scope == "source"
+        else ("target_postgres", "target_init")
+    )
     runtime.ledger.record(
         "runtime-root",
         runtime.root.name,
@@ -325,56 +596,6 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
         runtime.ledger.record(kind, f"{runtime.run_id}-{suffix}", lambda: None)
     for reservation in runtime.reservations[:3]:
         reservation.release()
-    lifecycle.run("up", "--detach", "--wait", *up_services, timeout=180.0)
-    runner = _compose_runner(lifecycle)
-    if scope == "source":
-        wait_for_compose_pg_isready(runner, "source_postgres")
-        lifecycle.run(
-            "run",
-            "--rm",
-            "--no-deps",
-            "source_odoo",
-            "odoo",
-            "--config=/etc/odoo/odoo.conf",
-            f"--database={runtime.topology.source_database}",
-            "--init=odcli_e2e_probe",
-            "--without-demo=all",
-            "--stop-after-init",
-            timeout=300.0,
-        )
-        # The bootstrap container runs as uid 100. Its shard directories are
-        # consequently not writable by the host-side SDK Odoo process that
-        # owns the subsequent project runtime. Normalize only this fixture's
-        # private bind mount before handing it to that process.
-        _make_container_data_host_removable(
-            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
-        )
-        wait_for_http(
-            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
-            timeout=180.0,
-        )
-        wait_for_http(
-            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/database/selector",
-            timeout=180.0,
-        )
-    else:
-        wait_for_compose_pg_isready(runner, "target_postgres")
-        lifecycle.run(
-            "run",
-            "--rm",
-            "--no-deps",
-            "target_init",
-            "odoo",
-            "--config=/etc/odoo/odoo.conf",
-            f"--database={runtime.topology.target_sentinel_database}",
-            "--init=base",
-            "--without-demo=all",
-            "--stop-after-init",
-            timeout=300.0,
-        )
-        _make_container_data_host_removable(
-            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
-        )
 
 
 def _remove_runtime_files(runtime: E2ERuntime) -> None:
@@ -449,13 +670,14 @@ def _cleanup(runtime: E2ERuntime, primary_failure: BaseException | None = None) 
             )
         except BaseException as error:
             errors.append(error)
-    try:
-        _make_container_data_host_removable(
-            runtime,
-            ComposeLifecycle(runtime.compose_file, runtime.topology.project_name),
-        )
-    except BaseException as error:
-        errors.append(error)
+    if runtime.container_data_may_have_written:
+        try:
+            _make_container_data_host_removable(
+                runtime,
+                ComposeLifecycle(runtime.compose_file, runtime.topology.project_name),
+            )
+        except BaseException as error:
+            errors.append(error)
     # A public env removal can legitimately delete the registered worktree,
     # while the fixture project itself remains below the owned runtime root.
     # Move pytest's process cwd back to the fixture caller's durable directory

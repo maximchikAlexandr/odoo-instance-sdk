@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from odoo_instance_sdk.http.browser_login import (
+    BrowserLoginController,
+    build_browser_login_router,
+)
 from odoo_instance_sdk.http.monitor import (
     PgAdminOpener,
     RuntimeControl,
@@ -17,6 +21,7 @@ from odoo_instance_sdk.http.monitor import (
     build_runtime_router,
     install_openapi_schema,
 )
+from odoo_instance_sdk.http.runtime import RuntimeController
 
 if TYPE_CHECKING:
     from fastapi import FastAPI, Request
@@ -40,12 +45,16 @@ class ExternalProxyConfig:
 
     allowed_hosts: tuple[str, ...]
     trusted_proxy_addresses: tuple[str, ...]
+    instance_hosts: tuple[str, ...] = ()
     scheme: Literal["https"] = "https"
 
     def __post_init__(self) -> None:
         hosts = tuple(host.strip().lower() for host in self.allowed_hosts)
         peers = tuple(peer.strip() for peer in self.trusted_proxy_addresses)
-        if not hosts or any(not host or "," in host or "/" in host for host in hosts):
+        instance_hosts = tuple(host.strip().lower() for host in self.instance_hosts)
+        if not hosts or any(
+            not host or "," in host or "/" in host for host in (*hosts, *instance_hosts)
+        ):
             raise ValueError("external proxy allowed_hosts must contain exact hosts")
         if not peers or any(not peer or "," in peer for peer in peers):
             raise ValueError("external proxy trusted_proxy_addresses must not be empty")
@@ -53,6 +62,7 @@ class ExternalProxyConfig:
             raise ValueError("external proxy scheme must be https")
         object.__setattr__(self, "allowed_hosts", hosts)
         object.__setattr__(self, "trusted_proxy_addresses", peers)
+        object.__setattr__(self, "instance_hosts", instance_hosts)
 
 
 def _is_port_free(host: str, port: int) -> bool:
@@ -88,6 +98,7 @@ def create_app(  # noqa: C901
     pgadmin_opener: PgAdminOpener | None = None,
     external_proxy: ExternalProxyConfig | None = None,
     runtime_controller: RuntimeControl | None = None,
+    browser_login_controller: BrowserLoginController | None = None,
 ) -> FastAPI:
     """Build the FastAPI app while keeping dashboard dependencies optional."""
     from fastapi import FastAPI
@@ -126,8 +137,8 @@ def create_app(  # noqa: C901
         forwarded_proto = request.headers.get("x-forwarded-proto", "").strip().lower()
         if (
             peer not in external_proxy.trusted_proxy_addresses
-            or host not in external_proxy.allowed_hosts
-            or forwarded_host not in external_proxy.allowed_hosts
+            or host not in (*external_proxy.allowed_hosts, *external_proxy.instance_hosts)
+            or forwarded_host not in (*external_proxy.allowed_hosts, *external_proxy.instance_hosts)
             or forwarded_proto != external_proxy.scheme
             or "," in request.headers.get("x-forwarded-host", "")
             or "," in request.headers.get("x-forwarded-proto", "")
@@ -180,16 +191,29 @@ def create_app(  # noqa: C901
             client = OdooClient(config=OdooClientConfig(executable="odoo"))
             app.state.odoo_client = client
             pgadmin_opener = client.environments.open_pgadmin
-        if external_proxy is None:
-            app.include_router(build_pgadmin_router(pgadmin_opener))
+        app.include_router(
+            build_pgadmin_router(
+                pgadmin_opener,
+                external_origin=(external_proxy.scheme, external_proxy.allowed_hosts)
+                if external_proxy
+                else None,
+            )
+        )
         if runtime_controller is None:
             from odoo_instance_sdk.client import OdooClient
             from odoo_instance_sdk.config import OdooClientConfig
-            from odoo_instance_sdk.http.runtime import RuntimeController
 
             if not hasattr(app.state, "odoo_client"):
                 app.state.odoo_client = OdooClient(config=OdooClientConfig(executable="odoo"))
-            runtime_controller = RuntimeController(app.state.odoo_client.config, app_monitor)
+            runtime_controller = RuntimeController(
+                app.state.odoo_client.config,
+                app_monitor,
+                panel_origin=(
+                    f"{external_proxy.scheme}://{external_proxy.allowed_hosts[0]}"
+                    if external_proxy
+                    else None
+                ),
+            )
         app.include_router(
             build_runtime_router(
                 runtime_controller,
@@ -198,6 +222,27 @@ def create_app(  # noqa: C901
                 else None,
             )
         )
+        if external_proxy is not None:
+            if browser_login_controller is None:
+                if isinstance(runtime_controller, RuntimeController):
+                    resolver = runtime_controller
+                else:
+                    from odoo_instance_sdk.config import OdooClientConfig
+
+                    resolver = RuntimeController(
+                        OdooClientConfig(executable="odoo"),
+                        app_monitor,
+                        panel_origin=f"{external_proxy.scheme}://{external_proxy.allowed_hosts[0]}",
+                    )
+                browser_login_controller = BrowserLoginController(resolver)
+            if browser_login_controller is not None:
+                app.include_router(
+                    build_browser_login_router(
+                        browser_login_controller,
+                        external_origin=(external_proxy.scheme, external_proxy.allowed_hosts),
+                        trusted_proxy_addresses=external_proxy.trusted_proxy_addresses,
+                    )
+                )
         from odoo_instance_sdk.http.admin import mount_admin
 
         # Non-headless composition always validates and mounts Admin.  A
@@ -254,6 +299,19 @@ def run_server(
         ) from exc
 
     chosen = _select_port(host, port)
+    if external_proxy is not None:
+        from dataclasses import replace
+        from urllib.parse import urlsplit
+
+        from odoo_instance_sdk.internal.publication_routes import read_owned_routes
+
+        instance_hosts = tuple(
+            parsed.hostname.lower()
+            for route in read_owned_routes()
+            if route.owner_kind != "panel"
+            and (parsed := urlsplit(route.external_url)).hostname is not None
+        )
+        external_proxy = replace(external_proxy, instance_hosts=instance_hosts)
     app = create_app(headless=headless, external_proxy=external_proxy)
 
     if publication_settings is not None:

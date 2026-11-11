@@ -56,6 +56,7 @@ class HttpErrorCode(enum.StrEnum):
     runtime_not_found = "runtime_not_found"
     runtime_conflict = "runtime_conflict"
     runtime_unavailable = "runtime_unavailable"
+    browser_login_unavailable = "browser_login_unavailable"
 
 
 class RuntimeActionRequest(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

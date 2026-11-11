@@ -624,7 +624,9 @@ PUBLIC_METHOD_EXPECTATIONS = (
     (
         OdooInstance,
         (
+            "create_browser_session_command",
             "iter_logs",
+            "list_browser_login_users_command",
             "run",
             "run_command",
             "run_detached",

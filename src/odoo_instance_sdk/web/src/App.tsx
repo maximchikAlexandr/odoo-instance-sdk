@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Badge, Button, Card, Group, Select, SimpleGrid, Stack, Text, Title } from "@mantine/core";
+import { Badge, Button, Card, Group, Modal, Select, SimpleGrid, Stack, Text, TextInput, Title } from "@mantine/core";
 import {
   getMonitorSnapshot,
   startRuntime,
   stopRuntime,
+  queryOdooBrowserLoginUsers,
+  issueOdooBrowserLoginTicket,
   type RuntimeActionRequest,
   type BackupFreshnessSnapshot,
   type PublicationSnapshot,
   type RuntimeMetrics,
   type Snapshot,
+  type BrowserLoginUser,
 } from "./generated";
 import client from "./client-config";
 import { formatBytes, formatLocalTimestamp, formatPercent } from "./format";
@@ -225,6 +228,13 @@ function RuntimeCard({
   const pendingAction = useRef(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [completedState, setCompletedState] = useState<"started" | "stopped" | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginQuery, setLoginQuery] = useState("");
+  const [loginUsers, setLoginUsers] = useState<BrowserLoginUser[]>([]);
+  const [selectedLoginUser, setSelectedLoginUser] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const loginPending = useRef(false);
   const runtimeLive = runtime?.state === "ready" || runtime?.state === "not_ready";
   useEffect(() => {
     if (completedState && runtimeLive === (completedState === "started")) setCompletedState(null);
@@ -260,6 +270,69 @@ function RuntimeCard({
     }
   };
   const externalUrl = publication?.state === "available" ? publication.external_url : null;
+  const queryLoginUsers = async (query: string) => {
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const response = await queryOdooBrowserLoginUsers({
+        client,
+        body: { ...target, query: query.slice(0, 128) },
+        throwOnError: true,
+      });
+      setLoginUsers(response.data.users);
+    } catch {
+      setLoginUsers([]);
+      setLoginError("Unable to load eligible users.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+  const openAsSelectedUser = async () => {
+    if (loginPending.current || !selectedLoginUser || !externalUrl) return;
+    loginPending.current = true;
+    setLoginLoading(true);
+    setLoginError(null);
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) {
+      setLoginError("Allow popups to open Odoo as the selected user.");
+      loginPending.current = false;
+      setLoginLoading(false);
+      return;
+    }
+    const targetName = `odcli-login-${crypto.randomUUID()}`;
+    popup.name = targetName;
+    popup.opener = null;
+    let handoff = "";
+    let form: HTMLFormElement | null = null;
+    try {
+      const response = await issueOdooBrowserLoginTicket({
+        client,
+        body: { ...target, user_id: Number(selectedLoginUser) },
+        throwOnError: true,
+      });
+      handoff = response.data.handoff;
+      form = document.createElement("form");
+      form.method = "POST";
+      form.action = response.data.action_url;
+      form.target = targetName;
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "handoff";
+      input.value = handoff;
+      form.append(input);
+      document.body.append(form);
+      form.submit();
+    } catch {
+      popup.close();
+      setLoginError("Unable to start the selected-user session.");
+    } finally {
+      handoff = "";
+      form?.querySelectorAll("input").forEach((input) => { input.value = ""; });
+      form?.remove();
+      loginPending.current = false;
+      setLoginLoading(false);
+    }
+  };
 
   return (
     <Card data-testid={testId} className="instance-card" withBorder padding="lg" radius="sm">
@@ -326,6 +399,18 @@ function RuntimeCard({
             Open Odoo <span className="instance-open-arrow" aria-hidden="true">↗</span>
           </Button>
           <Button
+            data-testid="open-as-odoo"
+            variant="subtle"
+            size="sm"
+            disabled={!externalUrl || !live}
+            onClick={() => {
+              setLoginOpen(true);
+              setLoginQuery("");
+              setSelectedLoginUser(null);
+              void queryLoginUsers("");
+            }}
+          >Open as...</Button>
+          <Button
             data-testid="runtime-control"
             variant="outline"
             color={live ? "red" : "odoo"}
@@ -338,6 +423,34 @@ function RuntimeCard({
           </Button>
         </Group>
         {actionError ? <Text size="xs" c="red" role="alert">{actionError}</Text> : null}
+        <Modal opened={loginOpen} onClose={() => setLoginOpen(false)} title="Open Odoo as...">
+          <Stack>
+            <TextInput
+              label="Search eligible users"
+              value={loginQuery}
+              maxLength={128}
+              onChange={(event) => {
+                const value = event.currentTarget.value.slice(0, 128);
+                setLoginQuery(value);
+                void queryLoginUsers(value);
+              }}
+            />
+            <Select
+              label="User"
+              placeholder={loginLoading ? "Loading users…" : "Select a user"}
+              data={loginUsers.map((user) => ({ value: String(user.id), label: `${user.login} — ${user.name}` }))}
+              value={selectedLoginUser}
+              onChange={setSelectedLoginUser}
+              searchable
+              nothingFoundMessage="No eligible users"
+            />
+            <Text size="sm">Tabs on this instance host share the same Odoo login cookie.</Text>
+            {loginError ? <Text c="red" role="alert">{loginError}</Text> : null}
+            <Button disabled={!selectedLoginUser || loginLoading} loading={loginLoading} onClick={() => void openAsSelectedUser()}>
+              Open selected user
+            </Button>
+          </Stack>
+        </Modal>
         {/* TODO(#147): Restore Open pgAdmin and its status after automatic credential provisioning and authorization are ready. */}
       </div>
     </Card>

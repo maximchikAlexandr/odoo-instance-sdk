@@ -282,7 +282,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/internal/git_askpass.py:72` — Git askpass child
   transport; the value is selected from the owner-only credential channel and
   is never emitted by the public SDK boundary.
-- `src/odoo_instance_sdk/resources/instance/identity.py:508` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:512` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 - `src/odoo_instance_sdk/internal/alternate_tool.py:980` — shared
@@ -334,7 +334,7 @@ locations while the production launch inventory is empty:
 - `tests/unit/test_monitor_cache_and_docker.py:119`
 - `tests/unit/test_cluster_resources.py:188`
 - `tests/unit/test_real_odoo_ci_components.py:40,109,151`
-- `tests/unit/test_real_odoo_foundation.py:324,347,366`
+- `tests/unit/test_real_odoo_foundation.py:383,406,425`
 
 These are not production launches or public behavior exceptions. Their removal
 condition is migration of each fixture to the shared recording executor; the

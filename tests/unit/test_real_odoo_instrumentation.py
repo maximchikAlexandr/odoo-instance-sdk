@@ -99,7 +99,99 @@ def test_declared_plugins_reach_pytest_collection_and_execution(tmp_path: Path) 
     assert "1 passed" in result.stdout
     manifest = json.loads(timing_file.read_text(encoding="utf-8"))
     assert manifest["phases"]["test"]["duration_seconds"] >= 0.0
+    assert manifest["test_reports"]["test_declared_plugin.py::test_declared_plugin_executes"]
+    assert set(
+        manifest["test_reports"]["test_declared_plugin.py::test_declared_plugin_executes"]
+    ) == {"setup", "call", "teardown"}
     assert (tmp_path / "evidence" / "command-matrix.md").is_file()
+
+
+def test_pytest_timing_sink_stays_anchored_across_fixture_cwd_changes(
+    tmp_path: Path,
+) -> None:
+    test_root = tmp_path / "suite"
+    test_root.mkdir()
+    (test_root / "conftest.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "import pytest\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def move_cwd_between_phases():\n"
+        "    root = Path(__file__).parent\n"
+        "    setup = root / 'setup-cwd'\n"
+        "    call = root / 'call-cwd'\n"
+        "    teardown = root / 'teardown-cwd'\n"
+        "    setup.mkdir(); call.mkdir(); teardown.mkdir()\n"
+        "    os.chdir(setup)\n"
+        "    yield\n"
+        "    os.chdir(teardown)\n",
+        encoding="utf-8",
+    )
+    (test_root / "test_cwd_timing.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "def test_call_phase_changes_cwd():\n"
+        "    os.chdir(Path(__file__).parent / 'call-cwd')\n"
+        "    assert Path.cwd().name == 'call-cwd'\n",
+        encoding="utf-8",
+    )
+    timing_file = ".artifacts/session/timing.json"
+    timing.start(tmp_path / timing_file, "test")
+    plugin_root = Path(__file__).resolve().parents[2]
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            path for path in (str(plugin_root), os.environ.get("PYTHONPATH", "")) if path
+        ),
+        "ODCLI_E2E_TIMING_FILE": timing_file,
+        "ODCLI_TIMING_TEST_CANARY": "must-not-enter-timing-manifest",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-o",
+            "addopts=",
+            "-p",
+            "scripts.real_odoo_timing",
+            str(test_root / "test_cwd_timing.py"),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
+
+    intended_sink = tmp_path / timing_file
+    manifest_bytes = intended_sink.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    reports = manifest["test_reports"]
+    report = reports["test_cwd_timing.py::test_call_phase_changes_cwd"]
+    assert set(report) == {"setup", "call", "teardown"}
+    assert all(isinstance(value, (int, float)) and value >= 0 for value in report.values())
+    assert len(manifest_bytes) < 64 * 1024
+    assert intended_sink.stat().st_mode & 0o777 == 0o600
+    assert b"must-not-enter-timing-manifest" not in manifest_bytes
+    assert not list(test_root.rglob(".artifacts"))
+
+
+def test_timing_report_bounds_node_ids_and_rejects_unknown_phases(tmp_path: Path) -> None:
+    path = tmp_path / "timing.json"
+    timing.record_test_report(path, "tests/test_case.py::test_one", "setup", 1.25)
+    report = json.loads(path.read_text(encoding="utf-8"))["test_reports"]
+    assert report == {"tests/test_case.py::test_one": {"setup": 1.25}}
+
+    timing.record_test_report(path, "n" * 513, "call", 2.0)
+    report = json.loads(path.read_text(encoding="utf-8"))["test_reports"]
+    assert len(report) == 2
+    assert all(len(nodeid.encode("utf-8")) <= 512 for nodeid in report)
+    with pytest.raises(ValueError, match="unsupported test phase"):
+        timing.record_test_report(path, "test", "unknown", 1.0)
 
 
 def test_test_timing_excludes_recorded_cleanup_segments(tmp_path: Path) -> None:

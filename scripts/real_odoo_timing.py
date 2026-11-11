@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -13,6 +14,25 @@ from typing import Final, Literal
 
 Phase = Literal["setup", "test", "cleanup"]
 PHASES: Final = frozenset({"setup", "test", "cleanup"})
+_OUTPUT_PATH: Path | None = None
+
+
+def configure_output(config: object) -> Path | None:
+    """Resolve the timing sink before fixtures are allowed to change cwd."""
+    global _OUTPUT_PATH  # noqa: PLW0603
+    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
+    _OUTPUT_PATH = Path(configured).resolve() if configured else None
+    if _OUTPUT_PATH is not None:
+        setattr(config, "_odcli_e2e_timing_path", _OUTPUT_PATH)
+    return _OUTPUT_PATH
+
+
+def output_path() -> Path | None:
+    """Return the session-anchored sink, with a cwd-based fallback for direct use."""
+    if _OUTPUT_PATH is not None:
+        return _OUTPUT_PATH
+    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
+    return Path(configured).resolve() if configured else None
 
 
 def _read(path: Path) -> dict[str, object]:
@@ -90,6 +110,27 @@ def record(path: Path, phase: Phase, started: float, finished: float) -> float:
     return duration
 
 
+def record_test_report(path: Path, nodeid: str, phase: str, duration: float) -> None:
+    """Persist bounded per-node pytest phase durations for fixture-cost diagnosis."""
+    if phase not in {"setup", "call", "teardown"}:
+        raise ValueError(f"unsupported test phase: {phase}")
+    manifest = _read(path)
+    reports = manifest.setdefault("test_reports", {})
+    if not isinstance(reports, dict):
+        raise TypeError("invalid test report map")
+    # Keep source test IDs readable while bounding arbitrary parametrized IDs.
+    safe_nodeid = (
+        nodeid
+        if len(nodeid.encode("utf-8")) <= 512
+        else hashlib.sha256(nodeid.encode("utf-8")).hexdigest()
+    )
+    report = reports.setdefault(safe_nodeid, {})
+    if not isinstance(report, dict):
+        raise TypeError("invalid test report entry")
+    report[phase] = round(max(0.0, duration), 6)
+    _write(path, manifest)
+
+
 def finish_test_excluding_cleanup(path: Path, *, now: float | None = None) -> float:
     """Finish test timing after teardown, excluding recorded cleanup segments."""
     manifest = _read(path)
@@ -114,11 +155,10 @@ def finish_test_excluding_cleanup(path: Path, *, now: float | None = None) -> fl
 def pytest_sessionfinish(session: object, exitstatus: int) -> Iterator[None]:
     """Measure test completion after teardown, excluding cleanup segments."""
     del session, exitstatus
-    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
-    if not configured:
+    path = output_path()
+    if path is None:
         yield
         return
-    path = Path(configured)
     try:
         yield
     finally:
@@ -131,6 +171,26 @@ except ImportError:
     pass
 else:
     pytest.hookimpl(hookwrapper=True, tryfirst=True)(pytest_sessionfinish)
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(item: object, call: object) -> Iterator[None]:
+        del call
+        outcome = yield
+        path = output_path()
+        if path is None:
+            return
+        report = outcome.get_result()  # type: ignore[attr-defined]
+        nodeid = str(getattr(item, "nodeid", "unknown")).rsplit("/", 1)[-1]
+        record_test_report(
+            path,
+            nodeid,
+            str(getattr(report, "when", "unknown")),
+            float(getattr(report, "duration", 0.0)),
+        )
+
+    @pytest.hookimpl
+    def pytest_configure(config: object) -> None:
+        configure_output(config)
 
 
 def main() -> int:

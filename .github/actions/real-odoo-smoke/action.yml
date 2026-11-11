@@ -128,7 +128,8 @@ runs:
       with:
         name: real-odoo-smoke-packaging-failure-${{ inputs.cache_class }}
         path: |
-          .artifacts/real-odoo-e2e/junit.xml
+          .artifacts/real-odoo-e2e/*-evidence.tar.gz
+          .artifacts/real-odoo-e2e/packaging-failure-junit.xml
           .artifacts/real-odoo-e2e/packaging-error.json
         retention-days: 7
     - name: Assert smoke evidence budget

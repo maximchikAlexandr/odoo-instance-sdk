@@ -35,10 +35,15 @@ REQUIRED_RUNS: Final[tuple[tuple[str, str], ...]] = (
 SUCCESS_ARTIFACT_LIMIT_BYTES = evidence.SUCCESS_LIMIT_BYTES
 FAILURE_BUNDLE_LIMIT_BYTES = evidence.FAILURE_BUNDLE_LIMIT_BYTES
 
+
 # This is deliberately a registry of executable selectors, rather than a
 # search for evidence-id strings in source.  A selector is executable only if
 # its test module and collected node exist; smoke points at the integrated
 # upstream smoke implementation rather than inventing another scenario.
+def _critical_path_executor(test_name: str) -> str:
+    return f"tests/integration/real_odoo/test_critical_path.py::{test_name}"
+
+
 EVIDENCE_EXECUTORS: Final[dict[str, tuple[str, ...]]] = {
     **{
         f"E2E-SM-{number:02d}": (
@@ -46,15 +51,41 @@ EVIDENCE_EXECUTORS: Final[dict[str, tuple[str, ...]]] = {
         )
         for number in range(1, 6)
     },
-    **{
-        f"E2E-CP-{number:02d}": (
-            (
-                "tests/integration/real_odoo/test_critical_path.py::"
-                "test_source_backed_full_critical_path"
-            ),
-        )
-        for number in range(1, 16)
-    },
+    "E2E-CP-01": (
+        _critical_path_executor("test_critical_path_owned_project_and_postgres_are_repeatable"),
+    ),
+    "E2E-CP-02": (
+        _critical_path_executor(
+            "test_critical_path_environment_is_bound_to_pinned_source_and_python"
+        ),
+    ),
+    "E2E-CP-03": (
+        _critical_path_executor("test_critical_path_environment_registration_and_paths_are_stable"),
+    ),
+    "E2E-CP-04": (
+        _critical_path_executor("test_critical_path_hash_locked_dependencies_and_base_runtime"),
+    ),
+    "E2E-CP-05": (
+        _critical_path_executor("test_critical_path_public_stop_and_probe_module_discovery"),
+    ),
+    "E2E-CP-06": (_critical_path_executor("test_critical_path_module_update_is_idempotent"),),
+    "E2E-CP-07": (_critical_path_executor("test_critical_path_public_native_module_test_passes"),),
+    "E2E-CP-08": (
+        _critical_path_executor("test_critical_path_backup_metadata_and_source_identity"),
+    ),
+    "E2E-CP-09": (
+        _critical_path_executor("test_critical_path_backup_metadata_and_source_identity"),
+    ),
+    "E2E-CP-10": (_critical_path_executor("test_critical_path_restored_attachment_is_readable"),),
+    "E2E-CP-11": (_critical_path_executor("test_critical_path_restored_model_marker_is_present"),),
+    "E2E-CP-12": (
+        _critical_path_executor("test_critical_path_restored_resource_inventory_is_healthy"),
+    ),
+    "E2E-CP-13": (
+        _critical_path_executor("test_critical_path_restored_runtime_stop_is_repeatable_and_owned"),
+    ),
+    "E2E-CP-14": (_critical_path_executor("test_critical_path_project_doctor_is_repeatable"),),
+    "E2E-CP-15": (_critical_path_executor("test_critical_path_environment_removal_is_idempotent"),),
     "E2E-FC-01": (
         (
             "tests/integration/real_odoo/test_focused_auth_archive.py::"

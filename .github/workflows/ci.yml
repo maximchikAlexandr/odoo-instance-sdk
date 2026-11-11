@@ -77,6 +77,7 @@ jobs:
           python-version: "3.12"
       - run: uv sync --frozen --group test --all-packages
       - run: make test
+      - run: uv run pytest -q -o addopts='' tests/unit/test_browser_session_login.py tests/integration/test_browser_session_login.py
       - run: uv run pytest -q -o addopts='' packages/odcli-multica/tests
       - uses: actions/upload-artifact@v4
         if: always()
@@ -121,6 +122,7 @@ jobs:
       - run: cd src/odoo_instance_sdk/web && npm test
       - run: cd src/odoo_instance_sdk/web && npm run build
       - run: uv run pytest -q -o addopts='' -m dashboard
+      - run: uv run pytest -q -o addopts='' tests/unit/test_http_browser_login.py
       - run: uv run pytest -q -o addopts='' tests/unit/test_http_contract.py::test_external_same_origin_mutation_accepts_secure_csrf
       - run: make smoke
 

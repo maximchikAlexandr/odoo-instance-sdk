@@ -55,6 +55,9 @@ from odoo_instance_sdk.resources.instance.auxiliary_restore import (
     _worktree_ref,
     resolve_runtime_argv_extra,
 )
+from odoo_instance_sdk.resources.instance.identity_validation import (
+    validate_runtime_identity,
+)
 from odoo_instance_sdk.resources.instance.runtime import (
     T,
     _canonical_runtime_path,
@@ -62,7 +65,6 @@ from odoo_instance_sdk.resources.instance.runtime import (
     _encode_launch_identity,
     _iter_logfile,
     _project_runtime_argv,
-    _runtime_argv_mismatch_components,
     _runtime_config_arg,
     _RuntimeBinding,
     _RuntimeCatalog,
@@ -77,8 +79,10 @@ if TYPE_CHECKING:
         Command,
     )
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
+    from odoo_instance_sdk.models import BrowserLoginUser
     from odoo_instance_sdk.resources.git import GitResource
     from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.resources.instance.browser_login import _BrowserSessionCredential
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -974,22 +978,20 @@ class _IdentityMixin:
 
     @staticmethod
     def _validate_runtime_identity(identity: _RuntimeIdentity) -> None:
-        if identity.vanished:
-            return
-        mismatches: list[str] = []
-        if identity.live_create_time != identity.create_time:
-            mismatches.append("create_time")
-        if identity.live_executable != identity.expected_executable:
-            mismatches.append("executable")
-        mismatches.extend(_runtime_argv_mismatch_components(identity))
-        if identity.live_cwd != identity.expected_cwd:
-            mismatches.append("cwd")
-        if (
-            identity.live_config_path != identity.expected_config_path
-            and "argv: --config" not in mismatches
-        ):
-            mismatches.append("config")
-        if sys.platform != "win32" and identity.process_group_id != identity.root_pid:
-            mismatches.append("process_group")
-        if mismatches:
-            raise RuntimeError(f"runtime identity mismatch: {', '.join(mismatches)}")
+        validate_runtime_identity(identity)
+
+    def list_browser_login_users_command(
+        self, query: str = ""
+    ) -> Command[tuple[BrowserLoginUser, ...]]:
+        from odoo_instance_sdk.resources.instance.browser_login import (
+            list_browser_login_users_command,
+        )
+
+        return list_browser_login_users_command(cast("OdooInstance", self), query)
+
+    def create_browser_session_command(self, user_id: int) -> Command[_BrowserSessionCredential]:
+        from odoo_instance_sdk.resources.instance.browser_login import (
+            create_browser_session_command,
+        )
+
+        return create_browser_session_command(cast("OdooInstance", self), user_id)

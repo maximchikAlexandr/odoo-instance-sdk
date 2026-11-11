@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
+
+if TYPE_CHECKING:
+    from click.testing import Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.models import BackupState
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence
-from tests.integration.real_odoo.conftest import E2ERuntime
+from tests.integration.real_odoo.conftest import E2ERuntime, PinnedOdooBootstrap
 from tests.integration.real_odoo.failures import (
     assert_secret_free,
     write_archive_variant,
@@ -57,6 +61,7 @@ def test_remote_auth_and_unreachable_source_fail_closed(
     record_property: object,
     focused_project: Path,
     focused_catalog: Path,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The public refresh command must fail before creating a local backup."""
@@ -112,6 +117,7 @@ def test_remote_auth_and_unreachable_source_fail_closed(
         runtime,
         runtime.root / f"unreachable-project-{runtime.run_id}",
         source=unreachable_plan,
+        bootstrap=pinned_odoo_bootstrap,
     )
     unreachable_source_catalog = _catalog_for_project(runtime, unreachable_project)
     unreachable_catalog = _isolated_catalog(
@@ -151,18 +157,29 @@ def test_remote_auth_and_unreachable_source_fail_closed(
     )
 
 
-@pytest.mark.parametrize("variant", ["truncated", "incompatible"])
-def test_archive_and_restore_boundaries_publish_no_unowned_state(
+@dataclass(frozen=True, slots=True)
+class _ArchiveBoundary:
+    tmp_path: Path
+    runtime: E2ERuntime
+    source_plan: SourceBackupPlan
+    evidence: FailureEvidence
+    project: Path
+    catalog: Path
+    environment: dict[str, str]
+    result: Result
+    variant: str
+
+
+def _archive_validation_boundary(
     tmp_path: Path,
     source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
     variant: str,
-    record_property: object,
     monkeypatch: pytest.MonkeyPatch,
     focused_project: Path,
     focused_catalog: Path,
-) -> None:
+) -> _ArchiveBoundary:
     path = tmp_path / f"{variant}.zip"
     write_archive_variant(path, variant)  # type: ignore[arg-type]
     catalog_path = _isolated_catalog(focused_catalog, tmp_path)
@@ -189,63 +206,116 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
         ["backup", "validate", _BACKUP_ID, "--format", "json"],
         environment,
     )
-    if variant == "incompatible":
-        assert result.exit_code == 0, result.output
-        document = json.loads(result.stdout)
-        assert document["ok"] is True
-        assert document["result"]["db_name"] == "not-the-catalogue-database"
-        assert document["result"]["db_name"] != source_backup_plan.database
-        files = write_failure_evidence(
-            failure_evidence, logs={"archive-incompatible": result.stdout}
-        )
-        assert_secret_free(files, failure_evidence.secret_canary)
-        project = focused_project
-        target = f"odcli_incompatible_{target_runtime.run_id.replace('-', '')[:20]}"
-        restore = _invoke_in_registered_worktree(
-            CliRunner(),
-            cli,
-            project,
-            catalog_path,
-            [
-                "--project",
-                str(project),
-                "db",
-                "restore",
-                _BACKUP_ID,
-                "--target",
-                target,
-                "--yes",
-                "--format",
-                "json",
-            ],
-            environment,
-        )
-        assert restore.exit_code != 0
-        restore_document, _ = _observe_failure(
-            restore,
-            runtime=target_runtime,
-            evidence=failure_evidence,
-            name="archive-incompatible-restore",
-        )
-        assert restore_document is not None
-        assert restore_document["error"]["code"] == "db_restore_failed"
-        assert "database" in restore_document["error"]["message"].lower()
-        assert _catalog_state(catalog_path) is BackupState.AVAILABLE
-        assert not project_filestore(project, target).exists()
-        probe = _project_database_probe(project, target, home=target_runtime.environment["HOME"])
-        assert probe.returncode == 0
-        assert probe.stdout.strip() != target
-    else:
-        assert result.exit_code != 0
-        document, _ = _observe_failure(
-            result, runtime=target_runtime, evidence=failure_evidence, name="archive-truncated"
-        )
-        assert document is not None
-        assert document["error"]["code"] == "backup_validate_invalid"
-    assert _catalog_state(catalog_path) is BackupState.AVAILABLE
-    assert not (tmp_path / "database").exists()
-    assert not (tmp_path / "filestore").exists()
-    _record(record_property, "E2E-FC-03" if variant == "truncated" else "E2E-FC-04", document)
+    return _ArchiveBoundary(
+        tmp_path,
+        target_runtime,
+        source_backup_plan,
+        failure_evidence,
+        focused_project,
+        catalog_path,
+        environment,
+        result,
+        variant,
+    )
+
+
+def test_truncated_archive_is_rejected_without_unowned_publication(
+    tmp_path: Path,
+    source_backup_plan: SourceBackupPlan,
+    target_runtime: E2ERuntime,
+    failure_evidence: FailureEvidence,
+    record_property: object,
+    monkeypatch: pytest.MonkeyPatch,
+    focused_project: Path,
+    focused_catalog: Path,
+) -> None:
+    case = _archive_validation_boundary(
+        tmp_path,
+        source_backup_plan,
+        target_runtime,
+        failure_evidence,
+        "truncated",
+        monkeypatch,
+        focused_project,
+        focused_catalog,
+    )
+    assert case.result.exit_code != 0
+    document, _ = _observe_failure(
+        case.result, runtime=case.runtime, evidence=case.evidence, name="archive-truncated"
+    )
+    assert document is not None
+    assert document["error"]["code"] == "backup_corrupt"
+    assert _catalog_state(case.catalog) is BackupState.AVAILABLE
+    assert not (case.tmp_path / "database").exists()
+    assert not (case.tmp_path / "filestore").exists()
+    _record(record_property, "E2E-FC-03", document)
+
+
+def test_incompatible_archive_restore_is_rejected_without_unowned_publication(
+    tmp_path: Path,
+    source_backup_plan: SourceBackupPlan,
+    target_runtime: E2ERuntime,
+    failure_evidence: FailureEvidence,
+    record_property: object,
+    monkeypatch: pytest.MonkeyPatch,
+    focused_project: Path,
+    focused_catalog: Path,
+) -> None:
+    case = _archive_validation_boundary(
+        tmp_path,
+        source_backup_plan,
+        target_runtime,
+        failure_evidence,
+        "incompatible",
+        monkeypatch,
+        focused_project,
+        focused_catalog,
+    )
+    assert case.result.exit_code == 0, case.result.output
+    document = json.loads(case.result.stdout)
+    assert document["ok"] is True
+    assert document["result"]["db_name"] == "not-the-catalogue-database"
+    assert document["result"]["db_name"] != case.source_plan.database
+    files = write_failure_evidence(case.evidence, logs={"archive-incompatible": case.result.stdout})
+    assert_secret_free(files, case.evidence.secret_canary)
+    target = f"odcli_incompatible_{case.runtime.run_id.replace('-', '')[:20]}"
+    restore = _invoke_in_registered_worktree(
+        CliRunner(),
+        cli,
+        case.project,
+        case.catalog,
+        [
+            "--project",
+            str(case.project),
+            "db",
+            "restore",
+            _BACKUP_ID,
+            "--target",
+            target,
+            "--yes",
+            "--format",
+            "json",
+        ],
+        case.environment,
+    )
+    assert restore.exit_code != 0
+    restore_document, _ = _observe_failure(
+        restore,
+        runtime=case.runtime,
+        evidence=case.evidence,
+        name="archive-incompatible-restore",
+    )
+    assert restore_document is not None
+    assert restore_document["error"]["code"] == "db_restore_failed"
+    assert "database" in restore_document["error"]["message"].lower()
+    assert _catalog_state(case.catalog) is BackupState.AVAILABLE
+    assert not project_filestore(case.project, target).exists()
+    probe = _project_database_probe(case.project, target, home=case.runtime.environment["HOME"])
+    assert probe.returncode == 0
+    assert probe.stdout.strip() != target
+    assert not (case.tmp_path / "database").exists()
+    assert not (case.tmp_path / "filestore").exists()
+    _record(record_property, "E2E-FC-04", document)
 
 
 def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(

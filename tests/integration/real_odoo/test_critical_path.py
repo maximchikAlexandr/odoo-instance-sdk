@@ -7,6 +7,10 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,16 +19,29 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.models.monitor import CheckoutRow
 from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 from scripts.real_odoo_pins import E2E_PINS
 from tests.fixtures.xmlrpc_probe import xmlrpc_probe
 
 from .archive import ArchiveIdentity
 from .cleanup import audit_no_leaks, compose_down, write_odoo_config
-from .compose import ComposeLifecycle, wait_for_http
-from .conftest import E2ERuntime, odoo_runtime_python
+from .compose import new_run_id, wait_for_http
+from .conftest import (
+    E2ERuntime,
+    PinnedOdooBootstrap,
+    _finalize,
+    _make_runtime,
+    _register_runtime_ownership,
+    verify_odoo_runtime_python,
+)
 
-pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
+pytestmark = [
+    pytest.mark.real_odoo,
+    pytest.mark.e2e_full,
+    pytest.mark.serial,
+    pytest.mark.timeout(600),
+]
 
 _PROBE = "odcli_e2e_probe"
 _PROBE_MARKER = "ODCLI-E2E-RESTORED"
@@ -225,36 +242,47 @@ def _remove_owned_fixture_tree(
     return before, after
 
 
-def _environment_state(payload: dict[str, Any], environment_id: str) -> dict[str, Any]:
-    environments = payload.get("environments")
-    assert isinstance(environments, list)
+def _environment_state(payload: dict[str, Any], environment_id: str) -> CheckoutRow:
+    rows = payload.get("rows")
+    assert isinstance(rows, list)
     row = next(
         (
             item
-            for item in environments
-            if isinstance(item, dict) and item.get("id") == environment_id
+            for item in rows
+            if isinstance(item, dict)
+            and item.get("kind") == "environment"
+            and item.get("environment_id") == environment_id
         ),
         None,
     )
     assert isinstance(row, dict), payload
-    return {
-        key: row.get(key)
-        for key in (
-            "id",
-            "name",
-            "branch",
-            "db_mode",
-            "database",
-            "lifecycle_state",
-            "allocated_http_port",
-            "artifacts",
-            "runtime",
-        )
-    }
+    environment = msgspec.convert(row, type=CheckoutRow)
+    assert environment.kind == "environment"
+    assert environment.environment_id == environment_id
+    return environment
 
 
 def _cluster_state(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload.get(key) for key in ("mode", "owned", "state", "endpoint")}
+
+
+def _expected_stop_context(state: Any, environment: CheckoutRow) -> dict[str, Any]:
+    project = next(
+        row
+        for row in state.catalog.list_projects()
+        if Path(str(row["repository_root"])).resolve() == state.project.resolve()
+    )
+    project_id = str(project["project_id"])
+    assert environment.project_id == project_id
+    assert environment.environment_id is not None
+    return {
+        "owner_kind": "environment",
+        "owner_id": environment.environment_id,
+        "project_id": project_id,
+        "environment_id": environment.environment_id,
+        "environment_name": environment.name,
+        "worktree_path": environment.worktree_path,
+    }
 
 
 def _switch_database_config(path: Path, database: str) -> None:
@@ -275,48 +303,154 @@ def _switch_database_config(path: Path, database: str) -> None:
     path.chmod(0o600)
 
 
-def _start_owned(instance: Any, runtime: E2ERuntime) -> Any:
-    process = instance.start()
-    instance.wait_ready(process, timeout=180.0)
-    instance._persist_runtime_identity(
-        process.pid,
-        instance.config.start_config,
-        instance.config.default_cwd,
-    )
+def _start_owned(instance: Any, runtime: Any) -> Any:
+    owned_children: list[_OwnedProcess] = []
+
+    def cleanup() -> None:
+        if owned_children:
+            _stop_owned(instance, owned_children[0])
+        else:
+            instance.stop_environment()
+
+    # Register owner cleanup before launch so any later setup assertion still
+    # has a public lifecycle path to stop and reap the process.
     runtime.ledger.record(
         "process",
-        f"{runtime.run_id}-odoo-{process.pid}",
-        lambda: (
-            instance.stop(process) if instance._client.get_handle(process.id) is not None else None
-        ),
+        f"{runtime.run_id}-odoo",
+        cleanup,
     )
-    return process
+    process = instance.run_detached(wait_ready=True, readiness_timeout=180.0)
+    reap_result: list[int | None] = []
+    reaper = threading.Thread(
+        target=_reap_owned_child,
+        args=(process.pid, reap_result),
+        name=f"reap-odoo-{process.pid}",
+        daemon=True,
+    )
+    owned = _OwnedProcess(process, reaper, reap_result)
+    owned_children.append(owned)
+    reaper.start()
+    return owned
 
 
-def _stop_owned(instance: Any, process: Any) -> None:
-    handle = instance._client.get_handle(process.id)
-    if handle is not None and handle.poll() is None:
-        instance.stop(process)
-    elif handle is not None:
-        instance._client.unregister_process(process.id)
-    instance._clear_runtime_identity()
+def _reap_owned_child(pid: int, result: list[int | None]) -> None:
+    """Reap only the direct child returned by this test's public launch."""
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            result.append(None)  # Python's Popen cleanup already reaped this child.
+            return
+        if waited_pid == pid:
+            result.append(status)
+            return
+        time.sleep(0.02)
+    result.append(-1)
 
 
-@pytest.mark.timeout(600)
-def test_source_backed_full_critical_path(  # noqa: C901
-    target_runtime: E2ERuntime,
-    source_server: E2ERuntime,
-    source_backup: ArchiveIdentity,
-    record_property: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
+@dataclass(slots=True)
+class _OwnedProcess:
+    process: Any
+    reaper: threading.Thread
+    reap_result: list[int | None]
+    stopped: bool = False
+
+
+def _stop_owned(instance: Any, owned: _OwnedProcess) -> None:
+    if owned.stopped:
+        return
+    errors: list[BaseException] = []
+    try:
+        result = instance.stop_environment()
+        assert result.status in {"stopped", "already_stopped"}, result
+    except BaseException as error:
+        errors.append(error)
+    try:
+        if owned.reaper.ident is None:
+            _reap_owned_child(owned.process.pid, owned.reap_result)
+        else:
+            owned.reaper.join(timeout=35.0)
+        assert not owned.reaper.is_alive(), "owned Odoo child reaper did not finish"
+        assert owned.reap_result and owned.reap_result[0] != -1, "owned Odoo leader was not reaped"
+    except BaseException as error:
+        errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("owned process stop and reap failed", errors)
+    owned.stopped = True
+
+
+def _finalize_restored_case(
+    state: _CriticalPathWorkspace, instance: Any, owned: _OwnedProcess
 ) -> None:
-    """Prove one serial public workflow from pinned source checkout to cleanup."""
-    source_repository, odoo_bin_relative = _source_repository()
-    runner = CliRunner()
-    runtime = target_runtime
+    errors: list[BaseException] = []
+    try:
+        _stop_owned(instance, owned)
+    except BaseException as error:
+        errors.append(error)
+    try:
+        _switch_database_config(
+            state.generated_config, state.runtime.topology.target_sentinel_database
+        )
+        state.env_obj = state.client.environments.get(state.environment_id)
+        state.instance = state.client.instance.from_environment(state.env_obj)
+    except BaseException as error:
+        errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("restored runtime cleanup and config restore failed", errors)
+
+
+@dataclass(slots=True)
+class _CriticalPathWorkspace:
+    runtime: E2ERuntime
+    source_server: E2ERuntime
+    source_backup: ArchiveIdentity
+    runner: CliRunner
+    project: Path
+    manifest: Path
+    initialized_source_config: Path
+    cli_environment: dict[str, str]
+    cluster: Any
+    status: dict[str, Any]
+    repeated_status: dict[str, Any]
+    uv_version: str
+    checkout: dict[str, Any]
+    environment: dict[str, Any]
+    environment_id: str
+    registered_worktree: Path
+    probe_destination: Path
+    generated_config: Path
+    python: Path
+    python_version: str
+    source_commit: str
+    persisted_python: Path | None
+    persisted_odoo_bin: Path | None
+    persisted_source_config: Path | None
+    catalog: Any
+    client: Any
+    env_obj: Any
+    instance: Any
+    listed: dict[str, Any]
+    repeated_listed: dict[str, Any]
+    path_result: dict[str, Any]
+    sync: dict[str, Any]
+    repeated_sync: dict[str, Any]
+    deps: dict[str, Any]
+    base_init_status: int
+    initial_probe_state: dict[str, Any]
+    cleanup_evidence: dict[str, Any] = field(default_factory=dict)
+
+
+def _patch_runtime_environment(runtime: E2ERuntime, runtime_patch: pytest.MonkeyPatch) -> None:
     for key, value in runtime.environment.items():
-        monkeypatch.setenv(key, value)
+        runtime_patch.setenv(key, value)
+
+
+def _bind_runtime_catalog_paths(runtime: E2ERuntime, runtime_patch: pytest.MonkeyPatch) -> None:
     catalogue_path = Path(runtime.environment["ODCLI_E2E_CATALOG"]).resolve()
 
     def run_catalog_path(*, ensure_exists: bool = True) -> Path:
@@ -345,18 +479,38 @@ def test_source_backed_full_critical_path(  # noqa: C901
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         return path
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_data_root", run_data_root)
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_state_root", run_state_root)
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", run_cache_root)
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", run_locks_dir)
-
+    runtime_patch.setattr("odoo_instance_sdk.internal.paths.get_data_root", run_data_root)
+    runtime_patch.setattr("odoo_instance_sdk.internal.paths.get_state_root", run_state_root)
+    runtime_patch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", run_cache_root)
+    runtime_patch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", run_locks_dir)
     _assert_catalog_patch_targets_importable()
-    for target in _CATALOG_PATCH_TARGETS:
-        monkeypatch.setattr(target, run_catalog_path)
+    _patch_catalog_call_sites(runtime_patch, run_catalog_path)
     from odoo_instance_sdk.commands import backup as backup_commands, resource as resource_commands
 
-    monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", run_catalog_path)
-    monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", run_catalog_path)
+    runtime_patch.setattr(backup_commands._catalog_path_provider, "provider", run_catalog_path)
+    runtime_patch.setattr(resource_commands._catalog_path_provider, "provider", run_catalog_path)
+
+
+def _patch_catalog_call_sites(runtime_patch: pytest.MonkeyPatch, run_catalog_path: Any) -> None:
+    for target in _CATALOG_PATCH_TARGETS:
+        runtime_patch.setattr(target, run_catalog_path)
+
+
+def _build_critical_path_workspace(
+    request: pytest.FixtureRequest,
+    runtime: E2ERuntime,
+    source_server: E2ERuntime,
+    source_backup: ArchiveIdentity,
+    bootstrap: PinnedOdooBootstrap,
+) -> _CriticalPathWorkspace:
+    """Build pinned project/environment prerequisites under one owned runtime."""
+    source_repository, odoo_bin_relative = _source_repository()
+    runner = CliRunner()
+    runtime_patch = pytest.MonkeyPatch()
+    request.addfinalizer(runtime_patch.undo)
+    _patch_runtime_environment(runtime, runtime_patch)
+    _bind_runtime_catalog_paths(runtime, runtime_patch)
+
     master_password = runtime.master_password_file.read_text(encoding="utf-8").strip()
     pg_password = runtime.secret_file.read_text(encoding="utf-8").strip()
     addon_root = Path(__file__).parents[2] / "fixtures" / "addons"
@@ -369,18 +523,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
         data_dir=runtime.root / "target-data",
         http_interface="127.0.0.1",
         http_port=runtime.reservations[3].port,
-        addons_path=(
-            Path("/usr/lib/python3/dist-packages/odoo/addons"),
-            addon_root,
-        ),
+        addons_path=(Path("/usr/lib/python3/dist-packages/odoo/addons"), addon_root),
     )
     cli_environment = dict(os.environ)
     cli_environment.update(runtime.environment)
     cli_environment.update(
         {
-            # The local target config owns ``master_password``; db.refresh
-            # authenticates against the independent source Odoo endpoint and
-            # must use that runtime's admin password instead.
             "ODCLI_TEST_MASTER_PASSWORD": source_server.master_password_file.read_text(
                 encoding="utf-8"
             ).strip(),
@@ -394,25 +542,14 @@ def test_source_backed_full_critical_path(  # noqa: C901
     runtime.ledger.record(
         "worktree", project.name, lambda: shutil.rmtree(project, ignore_errors=True)
     )
-
-    # The public checkout owns the audited lock contract. It must not discover
-    # Odoo requirements or compile/install an alternate lock.
     odoo_bin_path = project / odoo_bin_relative
-    odoo_python = odoo_runtime_python(runtime, project, odoo_bin_path)
+    odoo_python = verify_odoo_runtime_python(bootstrap, project, odoo_bin_path)
 
-    # The shared target fixture owns a disposable PostgreSQL only to establish
-    # the target namespace.  The public project lifecycle owns the cluster used
-    # by the critical path from this point onward.
-    down = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name).run(
-        "down", "--volumes", "--remove-orphans", timeout=60.0
-    )
-    assert down.returncode == 0, down.stderr
     bootstrap_config = runtime.root / "critical-path-bootstrap.conf"
     shutil.copy2(runtime.config_file, bootstrap_config)
     with bootstrap_config.open("a", encoding="utf-8") as stream:
         stream.write(f"logfile = {runtime.root / 'odoo.log'}\n")
     bootstrap_config.chmod(0o600)
-
     init = runner.invoke(
         cli,
         [
@@ -444,7 +581,6 @@ def test_source_backed_full_critical_path(  # noqa: C901
     )
     assert init.exit_code == 0, init.output
     manifest = project / ".odcli" / "project.toml"
-    assert manifest.is_file()
     from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
 
     initialized = ProjectConfig.load(project)
@@ -459,8 +595,9 @@ def test_source_backed_full_critical_path(  # noqa: C901
         default_base_ref=E2E_PINS.odoo_source_commit,
     )
     manifest.write_text(initialized.to_manifest(), encoding="utf-8")
-    assert ".odcli/odoo.conf" in manifest.read_text(encoding="utf-8")
-    _record(record_property, "E2E-CP-01", {"manifest": str(manifest), "postgres": "compose"})
+    initialized_source_config = initialized.source_config
+    assert initialized_source_config == Path(".odcli/odoo.conf")
+    assert ProjectConfig.load(project).source_config == initialized_source_config
 
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -506,16 +643,9 @@ def test_source_backed_full_critical_path(  # noqa: C901
     _invoke(runner, project, cli_environment, "postgres", "up")
     status = _invoke(runner, project, cli_environment, "postgres", "status")
     repeated_status = _invoke(runner, project, cli_environment, "postgres", "status")
-    assert status.get("state") == "healthy"
-    assert _cluster_state(status) == _cluster_state(repeated_status)
-    _record(record_property, "E2E-CP-01", {"status": status, "repeated_status": repeated_status})
 
-    uv_version = subprocess.run(
-        ["uv", "--version"], capture_output=True, shell=False, text=True, check=True
-    ).stdout.strip()
-    assert uv_version.split()[1] == E2E_PINS.uv
+    uv_version = bootstrap.uv_version
     runtime.reservations[3].release()
-
     checkout = _invoke(
         runner,
         project,
@@ -544,12 +674,6 @@ def test_source_backed_full_critical_path(  # noqa: C901
     environment = checkout["environment"]
     assert isinstance(environment, dict)
     environment_id = str(environment["id"])
-    assert environment["state"] == "ready"
-    assert environment["branch"] == "MYL-166"
-    assert environment.get("python_environment_owned") is True
-    assert Path(str(environment["generated_config_path"])).is_file()
-    assert Path(str(environment["python_environment_path"])).is_dir()
-    assert Path(str(environment["worktree_path"])).is_dir()
     registered_worktree = Path(str(environment["worktree_path"]))
     probe_root = registered_worktree / "addons"
     probe_destination = probe_root / _PROBE
@@ -564,26 +688,16 @@ def test_source_backed_full_critical_path(  # noqa: C901
     config_lines.append(f"addons_path = {configured_addons}")
     generated_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
     generated_config.chmod(0o600)
-    assert (
-        subprocess.run(
-            ["git", "-C", str(environment["worktree_path"]), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        == E2E_PINS.odoo_source_commit
-    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(registered_worktree), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     python = Path(str(environment["python_environment_path"])) / "bin" / "python"
-    assert (
-        subprocess.run(
-            [str(python), "--version"],
-            capture_output=True,
-            shell=False,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        == f"Python {E2E_PINS.cpython}"
-    )
+    python_version = subprocess.run(
+        [str(python), "--version"], capture_output=True, shell=False, text=True, check=True
+    ).stdout.strip()
     registered = ProjectConfig.load(project)
     registered = msgspec.structs.replace(
         registered,
@@ -594,25 +708,9 @@ def test_source_backed_full_critical_path(  # noqa: C901
     manifest.write_text(registered.to_manifest(), encoding="utf-8")
     manifest.chmod(0o600)
     persisted = ProjectConfig.load(project)
-    assert persisted.python == python
-    assert persisted.odoo_bin == registered_worktree / odoo_bin_relative
-    # Every command after checkout must resolve its implicit cwd through the
-    # registered environment, not the pytest repository root.
-    monkeypatch.chdir(registered_worktree)
-    _record(
-        record_property,
-        "E2E-CP-02",
-        {"commit": E2E_PINS.odoo_source_commit, "environment": environment_id},
-    )
     listed = _invoke(runner, project, cli_environment, "env", "list")
     repeated_listed = _invoke(runner, project, cli_environment, "env", "list")
-    assert environment_id in json.dumps(listed)
-    assert _environment_state(listed, environment_id) == _environment_state(
-        repeated_listed, environment_id
-    )
     path_result = _invoke(runner, project, cli_environment, "env", "path", environment_id)
-    assert path_result["worktree_path"] == environment["worktree_path"]
-    _record(record_property, "E2E-CP-03", path_result)
     sync = _invoke(
         runner,
         project,
@@ -637,122 +735,318 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "--hash-lock-sha256",
         E2E_PINS.odoo_python_lock_sha256,
     )
-    assert sync == repeated_sync
     deps = _invoke(runner, project, cli_environment, "--env", environment_id, "deps", "verify")
-    assert deps.get("pip_check_ok") is True
-    assert deps.get("missing_imports") == []
-    _record(
-        record_property,
-        "E2E-CP-04",
-        {
-            "python": E2E_PINS.cpython,
-            "uv": E2E_PINS.uv,
-            "resolution_lock": E2E_PINS.odoo_python_lock_sha256,
-        },
-    )
 
     from odoo_instance_sdk import OdooClient, OdooClientConfig
 
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
-    assert os.environ["ODCLI_E2E_CATALOG"] == runtime.environment["ODCLI_E2E_CATALOG"]
-    assert Path(cli_environment["ODCLI_E2E_CATALOG"]).resolve() == catalogue_path
-    sdk_catalogue = client.get_catalog().db_path.resolve()
-    assert sdk_catalogue == catalogue_path
-    backup_catalogue = backup_commands._catalog_path_provider.provider
-    resource_catalogue = resource_commands._catalog_path_provider.provider
-    assert callable(backup_catalogue) and backup_catalogue().resolve() == catalogue_path
-    assert callable(resource_catalogue) and resource_catalogue().resolve() == catalogue_path
+    catalog = client.get_catalog()
     env_obj = client.environments.get(environment_id)
     instance = client.instance.from_environment(env_obj)
-    assert (
-        instance.run_foreground(args=("--init=base", "--without-demo=all", "--stop-after-init"))
-        == 0
+    base_init_status = instance.run_foreground(
+        args=("--init=base", "--without-demo=all", "--stop-after-init")
     )
-    _invoke(runner, project, cli_environment, "--env", environment_id, "module", "list", _PROBE)
-    first_process = _start_owned(instance, runtime)
-    try:
-        wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
-        stop_result = _invoke(runner, project, cli_environment, "--env", environment_id, "stop")
-        repeated_stop_result = _invoke(
-            runner, project, cli_environment, "--env", environment_id, "stop"
-        )
-        assert stop_result == {"status": "stopped", "environment_id": environment_id}
-        assert repeated_stop_result == {
-            "status": "already_stopped",
-            "environment_id": environment_id,
-        }
-    finally:
-        _stop_owned(instance, first_process)
-    assert (
-        instance.run_foreground(
-            args=(f"--init={_PROBE}", "--without-demo=all", "--stop-after-init")
-        )
-        == 0
-    )
-    modules = _invoke(
+    initial_probe_state = _invoke(
         runner, project, cli_environment, "--env", environment_id, "module", "list", _PROBE
     )
-    assert _PROBE in json.dumps(modules)
-    _record(record_property, "E2E-CP-05", modules)
-    module_update = _invoke(
-        runner,
-        project,
-        cli_environment,
-        "--env",
-        environment_id,
-        "module",
-        "update",
-        _PROBE,
-        "--yes",
+    return _CriticalPathWorkspace(
+        runtime=runtime,
+        source_server=source_server,
+        source_backup=source_backup,
+        runner=runner,
+        project=project,
+        manifest=manifest,
+        initialized_source_config=initialized_source_config,
+        cli_environment=cli_environment,
+        cluster=cluster,
+        status=status,
+        repeated_status=repeated_status,
+        uv_version=uv_version,
+        checkout=checkout,
+        environment=environment,
+        environment_id=environment_id,
+        registered_worktree=registered_worktree,
+        probe_destination=probe_destination,
+        generated_config=generated_config,
+        python=python,
+        python_version=python_version,
+        source_commit=source_commit,
+        persisted_python=Path(persisted.python) if persisted.python is not None else None,
+        persisted_odoo_bin=Path(persisted.odoo_bin) if persisted.odoo_bin is not None else None,
+        persisted_source_config=(
+            Path(persisted.source_config) if persisted.source_config is not None else None
+        ),
+        catalog=catalog,
+        client=client,
+        env_obj=env_obj,
+        instance=instance,
+        listed=listed,
+        repeated_listed=repeated_listed,
+        path_result=path_result,
+        sync=sync,
+        repeated_sync=repeated_sync,
+        deps=deps,
+        base_init_status=base_init_status,
+        initial_probe_state=initial_probe_state,
     )
-    module_state = _invoke(
-        runner, project, cli_environment, "--env", environment_id, "module", "list", _PROBE
-    )
-    repeated_module_update = _invoke(
-        runner,
-        project,
-        cli_environment,
-        "--env",
-        environment_id,
-        "module",
-        "update",
-        _PROBE,
-        "--yes",
-    )
-    repeated_module_state = _invoke(
-        runner, project, cli_environment, "--env", environment_id, "module", "list", _PROBE
-    )
-    assert module_state == repeated_module_state
-    _record(
-        record_property,
-        "E2E-CP-06",
-        {
-            "first_update": module_update,
-            "repeated_update": repeated_module_update,
-            "state": module_state,
-            "repeated_state": repeated_module_state,
-        },
-    )
-    tests = _invoke(
-        runner,
-        project,
-        cli_environment,
-        "--env",
-        environment_id,
-        "test",
-        _PROBE,
-        "--tags",
-        f"/{_PROBE}",
-    )
-    assert tests.get("exit_code") == 0
-    _record(record_property, "E2E-CP-07", tests)
 
-    second_process = _start_owned(instance, runtime)
+
+@pytest.fixture(scope="module")
+def critical_path_workspace(
+    request: pytest.FixtureRequest,
+    critical_path_runtime: E2ERuntime,
+    source_server: E2ERuntime,
+    source_backup: ArchiveIdentity,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
+) -> _CriticalPathWorkspace:
+    """Share expensive pinned prerequisites among non-destructive focused nodes."""
+    return _build_critical_path_workspace(
+        request, critical_path_runtime, source_server, source_backup, pinned_odoo_bootstrap
+    )
+
+
+@pytest.fixture(scope="module")
+def critical_path_runtime(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[E2ERuntime]:
+    """Own workspace resources without provisioning an unused target Odoo container."""
+    runtime = _make_runtime(
+        Path(tmp_path_factory.mktemp("odcli-critical-path")), new_run_id(), scope="target"
+    )
+    try:
+        _register_runtime_ownership(runtime)
+        yield runtime
+    except BaseException as error:
+        _finalize(runtime, error)
+    else:
+        _finalize(runtime)
+
+
+@pytest.fixture
+def critical_path_cleanup_runtime(
+    request: pytest.FixtureRequest,
+    source_server: E2ERuntime,
+    source_backup: ArchiveIdentity,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
+    tmp_path_factory: pytest.TempPathFactory,
+    record_property: Any,
+) -> Iterator[_RestoredRuntime]:
+    """Own a disposable restored runtime for environment removal and final cleanup."""
+    runtime = _make_runtime(
+        tmp_path_factory.mktemp("odcli-critical-cleanup"), new_run_id(), scope="target"
+    )
+    try:
+        _register_runtime_ownership(runtime)
+        workspace = _build_critical_path_workspace(
+            request, runtime, source_server, source_backup, pinned_odoo_bootstrap
+        )
+        original_instance = workspace.instance
+        original_process = _start_owned(original_instance, runtime)
+        wait_for_http(original_instance.config.base_url + "/web/health", timeout=180.0)
+        refresh = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "db",
+            "refresh",
+            "--restore",
+            "--source-branch",
+            E2E_PINS.odoo_source_commit,
+        )
+        restored_database = str(refresh["restored_database"])
+        backup = refresh.get("backup")
+        assert isinstance(backup, dict)
+        backup_id = str(backup["id"])
+        backup_list = _invoke(
+            workspace.runner, workspace.project, workspace.cli_environment, "backup", "list"
+        )
+        shown_backup = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "backup",
+            "show",
+            backup_id,
+        )
+        validation = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "backup",
+            "validate",
+            backup_id,
+        )
+        _stop_owned(original_instance, original_process)
+        _switch_database_config(workspace.generated_config, restored_database)
+        workspace.env_obj = workspace.client.environments.get(workspace.environment_id)
+        workspace.instance = workspace.client.instance.from_environment(workspace.env_obj)
+        owned_process = _start_owned(workspace.instance, runtime)
+        wait_for_http(workspace.instance.config.base_url + "/web/health", timeout=180.0)
+        environment = _environment_state(
+            _invoke(workspace.runner, workspace.project, workspace.cli_environment, "env", "list"),
+            workspace.environment_id,
+        )
+        stop = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "--env",
+            workspace.environment_id,
+            "stop",
+        )
+        repeated_stop = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "--env",
+            workspace.environment_id,
+            "stop",
+        )
+        stop_context = _expected_stop_context(workspace, environment)
+        assert stop == {**stop_context, "status": "stopped"}
+        assert repeated_stop == {**stop_context, "status": "already_stopped"}
+        _stop_owned(workspace.instance, owned_process)
+        workspace.cleanup_evidence["stop"] = stop
+        workspace.cleanup_evidence["repeated_stop"] = repeated_stop
+        yield _RestoredRuntime(
+            workspace=workspace,
+            refresh=refresh,
+            restored_database=restored_database,
+            backup_id=backup_id,
+            backup=backup,
+            backup_list=backup_list,
+            shown_backup=shown_backup,
+            validation=validation,
+            owned_process=owned_process,
+        )
+        postgres_stop = _invoke(
+            workspace.runner, workspace.project, workspace.cli_environment, "postgres", "stop"
+        )
+        repeated_postgres_stop = _invoke(
+            workspace.runner, workspace.project, workspace.cli_environment, "postgres", "stop"
+        )
+        assert postgres_stop == repeated_postgres_stop == {}
+        compose_down(
+            workspace.cluster.compose_file,
+            workspace.cluster.compose_project_name,
+            ports=(workspace.cluster.endpoint_port,),
+        )
+        audit = audit_no_leaks(runtime.run_id, ports=(workspace.cluster.endpoint_port,))
+        assert audit.clean, audit.leaks
+        _record(
+            record_property,
+            "E2E-CP-15",
+            {
+                **workspace.cleanup_evidence,
+                "postgres_stop": postgres_stop,
+                "repeated_postgres_stop": repeated_postgres_stop,
+                "cleanup_audit": audit.leaks,
+            },
+        )
+        runtime.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        runtime.artifact_root.chmod(0o700)
+        evidence = runtime.artifact_root / "critical-path.json"
+        evidence.write_text(
+            json.dumps(
+                {
+                    "run_id": runtime.run_id,
+                    "source_commit": E2E_PINS.odoo_source_commit,
+                    "python": E2E_PINS.cpython,
+                    "uv": E2E_PINS.uv,
+                    "backup": {
+                        key: backup[key]
+                        for key in (
+                            "id",
+                            "size_bytes",
+                            "sha256",
+                            "source_base_url",
+                            "database_name",
+                            "source_git_branch",
+                        )
+                    },
+                    "restored_database": restored_database,
+                    "cleanup": {
+                        "postgres_stop": postgres_stop,
+                        "repeated_postgres_stop": repeated_postgres_stop,
+                        "clean": audit.clean,
+                        "leaks": audit.leaks,
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        evidence.chmod(0o600)
+        assert evidence.is_file()
+        assert evidence.stat().st_mode & 0o777 == 0o600
+        assert 0 < evidence.stat().st_size < 2 * 1024 * 1024
+    except BaseException as error:
+        _finalize(runtime, error)
+        raise
+    else:
+        _finalize(runtime)
+
+
+@pytest.fixture
+def critical_path_case(
+    critical_path_workspace: _CriticalPathWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _CriticalPathWorkspace:
+    """Restore each node's database/cwd/env prerequisites without test-order coupling."""
+    state = critical_path_workspace
+    for key, value in state.runtime.environment.items():
+        monkeypatch.setenv(key, value)
+    _switch_database_config(state.generated_config, state.runtime.topology.target_sentinel_database)
+    monkeypatch.chdir(state.registered_worktree)
+    state.env_obj = state.client.environments.get(state.environment_id)
+    state.instance = state.client.instance.from_environment(state.env_obj)
+    return state
+
+
+@dataclass(slots=True)
+class _RestoredRuntime:
+    workspace: _CriticalPathWorkspace
+    refresh: dict[str, Any]
+    restored_database: str
+    backup_id: str
+    backup: dict[str, Any]
+    backup_list: dict[str, Any]
+    shown_backup: dict[str, Any]
+    validation: dict[str, Any]
+    owned_process: _OwnedProcess
+
+
+@dataclass(slots=True)
+class _RestoredDatabase:
+    workspace: _CriticalPathWorkspace
+    refresh: dict[str, Any]
+    restored_database: str
+    backup_id: str
+    backup: dict[str, Any]
+    backup_list: dict[str, Any]
+    shown_backup: dict[str, Any]
+    validation: dict[str, Any]
+
+
+@pytest.fixture(scope="module")
+def critical_path_restored_database(
+    critical_path_workspace: _CriticalPathWorkspace,
+    request: pytest.FixtureRequest,
+) -> _RestoredDatabase:
+    """Restore one immutable database for independently provisioned read-only nodes."""
+    state = critical_path_workspace
+    _switch_database_config(state.generated_config, state.runtime.topology.target_sentinel_database)
+    state.env_obj = state.client.environments.get(state.environment_id)
+    state.instance = state.client.instance.from_environment(state.env_obj)
+    instance = state.instance
+    owned_process = _start_owned(instance, state.runtime)
+    request.addfinalizer(lambda: _stop_owned(instance, owned_process))
     wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
     refresh = _invoke(
-        runner,
-        project,
-        cli_environment,
+        state.runner,
+        state.project,
+        state.cli_environment,
         "db",
         "refresh",
         "--restore",
@@ -761,199 +1055,476 @@ def test_source_backed_full_critical_path(  # noqa: C901
     )
     restored_database = str(refresh["restored_database"])
     backup = refresh.get("backup")
-    assert isinstance(backup, dict) and backup.get("id")
-    assert isinstance(backup.get("sha256"), str) and len(backup["sha256"]) == 64
-    assert isinstance(backup.get("size_bytes"), int) and backup["size_bytes"] > 0
-    assert source_backup.size_bytes > 0 and len(source_backup.sha256) == 64
-    _record(record_property, "E2E-CP-08", {"database": restored_database, "backup": backup["id"]})
+    assert isinstance(backup, dict)
     backup_id = str(backup["id"])
-    _invoke(runner, project, cli_environment, "backup", "list")
-    shown = _invoke(runner, project, cli_environment, "backup", "show", backup_id)
-    assert str(shown.get("id", shown.get("backup", {}).get("id", ""))) == backup_id
-    for key in ("size_bytes", "sha256", "source_base_url", "database_name", "source_git_branch"):
-        assert shown.get(key) == backup.get(key), key
+    backup_list = _invoke(state.runner, state.project, state.cli_environment, "backup", "list")
+    shown_backup = _invoke(
+        state.runner, state.project, state.cli_environment, "backup", "show", backup_id
+    )
+    validation = _invoke(
+        state.runner, state.project, state.cli_environment, "backup", "validate", backup_id
+    )
+    _stop_owned(instance, owned_process)
+    return _RestoredDatabase(
+        workspace=state,
+        refresh=refresh,
+        restored_database=restored_database,
+        backup_id=backup_id,
+        backup=backup,
+        backup_list=backup_list,
+        shown_backup=shown_backup,
+        validation=validation,
+    )
+
+
+@pytest.fixture
+def critical_path_restored_runtime(
+    critical_path_case: _CriticalPathWorkspace,
+    critical_path_restored_database: _RestoredDatabase,
+    request: pytest.FixtureRequest,
+) -> Iterator[_RestoredRuntime]:
+    """Start an isolated owned process against the shared immutable restored database."""
+    state = critical_path_case
+    restored = critical_path_restored_database
+    _switch_database_config(state.generated_config, restored.restored_database)
+    state.env_obj = state.client.environments.get(state.environment_id)
+    state.instance = state.client.instance.from_environment(state.env_obj)
+    instance = state.instance
+    owned_process = _start_owned(instance, state.runtime)
+
+    request.addfinalizer(lambda: _finalize_restored_case(state, instance, owned_process))
+    wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
+    yield _RestoredRuntime(
+        workspace=state,
+        refresh=restored.refresh,
+        restored_database=restored.restored_database,
+        backup_id=restored.backup_id,
+        backup=restored.backup,
+        backup_list=restored.backup_list,
+        shown_backup=restored.shown_backup,
+        validation=restored.validation,
+        owned_process=owned_process,
+    )
+
+
+def test_critical_path_owned_project_and_postgres_are_repeatable(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    runtime = state.runtime
+    assert state.manifest.is_file()
+    assert state.initialized_source_config == Path(".odcli/odoo.conf")
+    assert state.cluster.compose_file.parent.is_relative_to(runtime.root)
+    assert state.cluster.password_file.is_file()
+    assert state.status.get("state") == "healthy"
+    assert _cluster_state(state.status) == _cluster_state(state.repeated_status)
+    assert state.uv_version.split()[1] == E2E_PINS.uv
+    _record(
+        record_property,
+        "E2E-CP-01",
+        {
+            "manifest": str(state.manifest),
+            "status": state.status,
+            "repeated_status": state.repeated_status,
+        },
+    )
+
+
+def test_critical_path_environment_is_bound_to_pinned_source_and_python(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    environment = state.environment
+    assert environment["state"] == "ready"
+    assert environment["branch"] == "MYL-166"
+    assert environment.get("python_environment_owned") is True
+    assert Path(str(environment["generated_config_path"])).is_file()
+    assert Path(str(environment["python_environment_path"])).is_dir()
+    assert Path(str(environment["worktree_path"])).is_dir()
+    assert state.source_commit == E2E_PINS.odoo_source_commit
+    assert state.python_version == f"Python {E2E_PINS.cpython}"
+    assert state.persisted_python == state.python
+    assert state.persisted_odoo_bin == state.registered_worktree / "odoo-bin"
+    assert state.persisted_source_config == state.generated_config
+    _record(
+        record_property,
+        "E2E-CP-02",
+        {
+            "commit": state.source_commit,
+            "environment": state.environment_id,
+            "python": state.python_version,
+        },
+    )
+
+
+def test_critical_path_environment_registration_and_paths_are_stable(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    environment = state.environment
+    assert state.environment_id in json.dumps(state.listed)
+    assert _environment_state(state.listed, state.environment_id) == _environment_state(
+        state.repeated_listed, state.environment_id
+    )
+    assert state.path_result["worktree_path"] == environment["worktree_path"]
+    _record(record_property, "E2E-CP-03", state.path_result)
+
+
+def test_critical_path_hash_locked_dependencies_and_base_runtime(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    assert state.sync == state.repeated_sync
+    assert state.deps.get("pip_check_ok") is True
+    assert state.deps.get("missing_imports") == []
+    assert state.base_init_status == 0
+    assert (
+        Path(state.cli_environment["ODCLI_E2E_CATALOG"]).resolve()
+        == state.catalog.db_path.resolve()
+    )
+    _record(
+        record_property,
+        "E2E-CP-04",
+        {
+            "python": E2E_PINS.cpython,
+            "uv": E2E_PINS.uv,
+            "resolution_lock": E2E_PINS.odoo_python_lock_sha256,
+            "dependencies": state.deps,
+        },
+    )
+
+
+def test_critical_path_public_stop_and_probe_module_discovery(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    instance = state.instance
+    owned = _start_owned(instance, state.runtime)
+    try:
+        wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
+        stop = _invoke(
+            state.runner,
+            state.project,
+            state.cli_environment,
+            "--env",
+            state.environment_id,
+            "stop",
+        )
+        repeated_stop = _invoke(
+            state.runner,
+            state.project,
+            state.cli_environment,
+            "--env",
+            state.environment_id,
+            "stop",
+        )
+        stop_context = _expected_stop_context(
+            state, _environment_state(state.listed, state.environment_id)
+        )
+        assert stop == {**stop_context, "status": "stopped"}
+        assert repeated_stop == {**stop_context, "status": "already_stopped"}
+    finally:
+        _stop_owned(instance, owned)
+
+    assert (
+        instance.run_foreground(
+            args=(f"--init={_PROBE}", "--without-demo=all", "--stop-after-init")
+        )
+        == 0
+    )
+    modules = _invoke(
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "--env",
+        state.environment_id,
+        "module",
+        "list",
+        _PROBE,
+    )
+    assert _PROBE in json.dumps(modules)
+    assert state.initial_probe_state
+    _record(
+        record_property, "E2E-CP-05", {"stop": stop, "repeat": repeated_stop, "modules": modules}
+    )
+
+
+def test_critical_path_module_update_is_idempotent(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    assert (
+        state.instance.run_foreground(
+            args=(f"--init={_PROBE}", "--without-demo=all", "--stop-after-init")
+        )
+        == 0
+    )
+    update = _invoke(
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "--env",
+        state.environment_id,
+        "module",
+        "update",
+        _PROBE,
+        "--yes",
+    )
+    state_after_update = _invoke(
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "--env",
+        state.environment_id,
+        "module",
+        "list",
+        _PROBE,
+    )
+    repeated_update = _invoke(
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "--env",
+        state.environment_id,
+        "module",
+        "update",
+        _PROBE,
+        "--yes",
+    )
+    repeated_state = _invoke(
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "--env",
+        state.environment_id,
+        "module",
+        "list",
+        _PROBE,
+    )
+    assert state_after_update == repeated_state
+    _record(
+        record_property,
+        "E2E-CP-06",
+        {"first_update": update, "repeated_update": repeated_update, "state": state_after_update},
+    )
+
+
+def test_critical_path_public_native_module_test_passes(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    assert (
+        state.instance.run_foreground(
+            args=(f"--init={_PROBE}", "--without-demo=all", "--stop-after-init")
+        )
+        == 0
+    )
+    result = _invoke(
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "--env",
+        state.environment_id,
+        "test",
+        _PROBE,
+        "--tags",
+        f"/{_PROBE}",
+    )
+    assert result.get("exit_code") == 0
+    _record(record_property, "E2E-CP-07", result)
+
+
+def test_critical_path_backup_metadata_and_source_identity(
+    critical_path_restored_runtime: _RestoredRuntime,
+    record_property: Any,
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
+    source_server = state.source_server
+    backup = case.backup
+    assert case.restored_database
+    assert backup.get("id") == case.backup_id
+    assert isinstance(backup.get("sha256"), str) and len(str(backup["sha256"])) == 64
+    assert isinstance(backup.get("size_bytes"), int) and int(backup["size_bytes"]) > 0
+    assert state.source_backup.size_bytes > 0 and len(state.source_backup.sha256) == 64
+    _record(
+        record_property,
+        "E2E-CP-08",
+        {"database": case.restored_database, "backup": case.backup_id},
+    )
+    assert case.backup_list
+    shown = case.shown_backup
+    assert str(shown.get("id", shown.get("backup", {}).get("id", ""))) == case.backup_id
+    assert shown.get("size_bytes") == backup.get("size_bytes")
+    assert shown.get("sha256") == backup.get("sha256")
+    assert shown.get("source_base_url") == backup.get("source_base_url")
+    assert shown.get("database_name") == backup.get("database_name")
+    assert shown.get("source_git_branch") == backup.get("source_git_branch")
     assert (
         backup["source_base_url"] == f"http://127.0.0.1:{source_server.topology.source_odoo_port}"
     )
     assert backup["database_name"] == source_server.topology.source_database
     assert backup["source_git_branch"] == E2E_PINS.odoo_source_commit
-    validated = _invoke(runner, project, cli_environment, "backup", "validate", backup_id)
-    assert validated
-    _record(
-        record_property,
-        "E2E-CP-09",
-        {
-            "id": backup_id,
-            "size_bytes": backup["size_bytes"],
-            "sha256": backup["sha256"],
-            "source_base_url": backup["source_base_url"],
-            "database_name": backup["database_name"],
-            "source_git_branch": backup["source_git_branch"],
-            "shown": shown,
-        },
-    )
+    assert case.validation
+    _record(record_property, "E2E-CP-09", {**backup, "shown": shown})
 
-    _stop_owned(instance, second_process)
-    _switch_database_config(Path(env_obj.generated_config_path), restored_database)
-    env_obj = client.environments.get(environment_id)
-    instance = client.instance.from_environment(env_obj)
-    third_process = _start_owned(instance, runtime)
-    wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
-    name, attachment = xmlrpc_probe(instance.config.base_url, restored_database)
+
+def test_critical_path_restored_attachment_is_readable(
+    critical_path_restored_runtime: _RestoredRuntime,
+    record_property: Any,
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
+    name, attachment = xmlrpc_probe(state.instance.config.base_url, case.restored_database)
     assert name == "Pinned Odoo 19 fixture"
     assert attachment == _ATTACHMENT
     _record(
         record_property,
         "E2E-CP-10",
-        {"database": restored_database, "attachment_bytes": len(attachment)},
+        {"database": case.restored_database, "attachment_bytes": len(attachment)},
     )
+
+
+def test_critical_path_restored_model_marker_is_present(
+    critical_path_restored_runtime: _RestoredRuntime,
+    record_property: Any,
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
     evaluation = _invoke(
-        runner,
-        project,
-        cli_environment,
+        state.runner,
+        state.project,
+        state.cli_environment,
         "--env",
-        environment_id,
+        state.environment_id,
         "eval",
         "env['odcli.e2e.probe'].search_count([('marker', '=', 'ODCLI-E2E-RESTORED')])",
     )
     assert "1" in json.dumps(evaluation)
     _record(record_property, "E2E-CP-11", evaluation)
-    resources = _invoke(runner, project, cli_environment, "resource", "list")
-    resource_doctor = _invoke(runner, project, cli_environment, "resource", "doctor")
+
+
+def test_critical_path_restored_resource_inventory_is_healthy(
+    critical_path_restored_runtime: _RestoredRuntime,
+    record_property: Any,
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
+    resources = _invoke(state.runner, state.project, state.cli_environment, "resource", "list")
+    resource_doctor = _invoke(
+        state.runner, state.project, state.cli_environment, "resource", "doctor"
+    )
+    databases = _invoke(state.runner, state.project, state.cli_environment, "db", "list")
     assert isinstance(resources.get("resources"), list)
     assert isinstance(resource_doctor.get("findings"), list)
-    databases = _invoke(runner, project, cli_environment, "db", "list")
-    assert restored_database in json.dumps(databases)
+    assert case.restored_database in json.dumps(databases)
     _record(
         record_property,
         "E2E-CP-12",
         {"resources": resources, "resource_doctor": resource_doctor, "databases": databases},
     )
 
-    stop_result = _invoke(runner, project, cli_environment, "--env", environment_id, "stop")
-    repeated_stop_result = _invoke(
-        runner, project, cli_environment, "--env", environment_id, "stop"
+
+def test_critical_path_restored_runtime_stop_is_repeatable_and_owned(
+    critical_path_restored_runtime: _RestoredRuntime, record_property: Any
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
+    environment = _environment_state(
+        _invoke(state.runner, state.project, state.cli_environment, "env", "list"),
+        state.environment_id,
     )
-    assert stop_result == {"status": "stopped", "environment_id": environment_id}
-    assert repeated_stop_result == {
-        "status": "already_stopped",
-        "environment_id": environment_id,
-    }
-    _stop_owned(instance, third_process)
-    status_after_stop = _invoke(runner, project, cli_environment, "postgres", "status")
-    repeated_status_after_stop = _invoke(runner, project, cli_environment, "postgres", "status")
-    assert status_after_stop.get("state") == "healthy"
-    assert _cluster_state(status_after_stop) == _cluster_state(repeated_status_after_stop)
-    _record(
-        record_property,
-        "E2E-CP-13",
-        {"stop": stop_result, "repeated_stop": repeated_stop_result},
+    stop = _invoke(
+        state.runner, state.project, state.cli_environment, "--env", state.environment_id, "stop"
     )
-    doctor = _invoke(runner, project, cli_environment, "doctor")
-    repeated_doctor = _invoke(runner, project, cli_environment, "doctor")
+    repeated_stop = _invoke(
+        state.runner, state.project, state.cli_environment, "--env", state.environment_id, "stop"
+    )
+    context = _expected_stop_context(state, environment)
+    assert stop == {**context, "status": "stopped"}
+    assert repeated_stop == {**context, "status": "already_stopped"}
+    _stop_owned(state.instance, case.owned_process)
+    status = _invoke(state.runner, state.project, state.cli_environment, "postgres", "status")
+    repeated_status = _invoke(
+        state.runner, state.project, state.cli_environment, "postgres", "status"
+    )
+    assert status.get("state") == "healthy"
+    assert _cluster_state(status) == _cluster_state(repeated_status)
+    _record(record_property, "E2E-CP-13", {"stop": stop, "repeated_stop": repeated_stop})
+
+
+def test_critical_path_project_doctor_is_repeatable(
+    critical_path_case: _CriticalPathWorkspace, record_property: Any
+) -> None:
+    state = critical_path_case
+    doctor = _invoke(state.runner, state.project, state.cli_environment, "doctor")
+    repeated_doctor = _invoke(state.runner, state.project, state.cli_environment, "doctor")
     assert doctor == repeated_doctor
     _record(record_property, "E2E-CP-14", {"doctor": doctor, "repeated": repeated_doctor})
 
+
+def test_critical_path_environment_removal_is_idempotent(
+    critical_path_cleanup_runtime: _RestoredRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property: Any,
+) -> None:
+    case = critical_path_cleanup_runtime
+    state = case.workspace
     _invoke(
-        runner,
-        project,
-        cli_environment,
+        state.runner,
+        state.project,
+        state.cli_environment,
         "db",
         "drop",
-        restored_database,
+        case.restored_database,
         "--force-default",
         "--force-connections",
         "--yes",
     )
     fixture_status_before, fixture_status_after = _remove_owned_fixture_tree(
-        registered_worktree, probe_destination
+        state.registered_worktree, state.probe_destination
     )
-    _record(
-        record_property,
-        "E2E-CP-15",
-        {
-            "path": str(probe_destination),
-            "before": fixture_status_before,
-            "after": fixture_status_after,
-        },
+    removed = _invoke(
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "env",
+        "remove",
+        state.environment_id,
+        "--yes",
     )
-    removed = _invoke(runner, project, cli_environment, "env", "remove", environment_id, "--yes")
-    assert removed.get("id") == environment_id
+    assert removed.get("id") == state.environment_id
     assert removed.get("state") == "removed"
-    # The implicit command-context assertion above intentionally runs from
-    # the registered worktree.  Once the public removal succeeds that cwd is
-    # gone, so idempotent removal must resume from the still-live project root.
-    monkeypatch.chdir(project)
+    monkeypatch.chdir(state.project)
     removed_again = _invoke(
-        runner, project, cli_environment, "env", "remove", environment_id, "--yes"
+        state.runner,
+        state.project,
+        state.cli_environment,
+        "env",
+        "remove",
+        state.environment_id,
+        "--yes",
     )
     assert removed_again == removed
     assert (
         sum(
             1
-            for row in client.get_catalog().list_environments(include_removed=True)
-            if str(row["id"]) == environment_id
+            for row in state.client.get_catalog().list_environments(include_removed=True)
+            if str(row["id"]) == state.environment_id
         )
         == 1
     )
-    assert not Path(str(environment["worktree_path"])).exists()
-    assert not Path(str(environment["generated_config_path"])).exists()
-    postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
-    repeated_postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
-    assert postgres_stop == repeated_postgres_stop == {}
-    compose_down(
-        cluster.compose_file,
-        cluster.compose_project_name,
-        ports=(cluster.endpoint_port,),
-    )
-
-    audit = audit_no_leaks(
-        runtime.run_id,
-        # The module-scoped fixture is still needed by focused leaves.  Audit
-        # only the just-removed SDK project here; the fixture-wide audit runs
-        # in conftest finalization after every leaf has completed.
-        ports=(cluster.endpoint_port,),
-    )
-    assert audit.clean, audit.leaks
-    runtime.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    runtime.artifact_root.chmod(0o700)
-    _record(
-        record_property,
-        "E2E-CP-15",
+    assert not Path(str(state.environment["worktree_path"])).exists()
+    assert not Path(str(state.environment["generated_config_path"])).exists()
+    state.cleanup_evidence.update(
         {
+            "fixture_tree": {
+                "path": str(state.probe_destination),
+                "before": fixture_status_before,
+                "after": fixture_status_after,
+            },
             "removed": removed,
             "removed_again": removed_again,
-            "postgres_stop": postgres_stop,
-            "repeated_postgres_stop": repeated_postgres_stop,
-            "cleanup_audit": audit.leaks,
-        },
+        }
     )
-
-    evidence = runtime.artifact_root / "critical-path.json"
-    evidence.write_text(
-        json.dumps(
-            {
-                "run_id": runtime.run_id,
-                "source_commit": E2E_PINS.odoo_source_commit,
-                "python": E2E_PINS.cpython,
-                "uv": E2E_PINS.uv,
-                "backup": {
-                    "id": backup_id,
-                    "size_bytes": backup["size_bytes"],
-                    "sha256": backup["sha256"],
-                    "source_base_url": backup["source_base_url"],
-                    "database_name": backup["database_name"],
-                    "source_git_branch": backup["source_git_branch"],
-                },
-                "restored_database": restored_database,
-                "cleanup": {"clean": audit.clean, "leaks": audit.leaks},
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    evidence.chmod(0o600)
-    assert evidence.is_file()
-    assert evidence.stat().st_mode & 0o777 == 0o600
-    assert 0 < evidence.stat().st_size < 2 * 1024 * 1024
+    _record(record_property, "E2E-CP-15", state.cleanup_evidence)

@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,11 @@ from tests.integration.real_odoo.cleanup import (
     terminate_owned_process_group,
 )
 from tests.integration.real_odoo.compose import ComposeLifecycle
-from tests.integration.real_odoo.conftest import E2ERuntime, _finalize
+from tests.integration.real_odoo.conftest import (
+    E2ERuntime,
+    PinnedOdooBootstrap,
+    _finalize,
+)
 from tests.integration.real_odoo.failures import (
     assert_secret_free,
     run_recovery_action,
@@ -42,6 +47,7 @@ from tests.integration.real_odoo.focused_support import (
     observe_failure as _observe_failure,
     project_filestore,
     record as _record,
+    registered_project_id,
     registered_worktree as _registered_worktree,
     seed_backup as _seed_backup,
 )
@@ -58,6 +64,7 @@ _RECOVERY_BACKUP_IDS = {
     "recovery-timeout": "00000000-0000-0000-0000-00000000000a",
     "partial": "00000000-0000-0000-0000-00000000000b",
 }
+_PARTIAL_NEWER_BACKUP_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def _prepare_recovery_case(
@@ -67,23 +74,55 @@ def _prepare_recovery_case(
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
     name: str,
+    bootstrap: PinnedOdooBootstrap,
 ) -> tuple[str, Path, str, Path, dict[str, str]]:
     run_id = target_runtime.run_id
-    archive_path = target_runtime.root / f"{name}-{run_id}.zip"
-    shutil.copy2(source_backup.path, archive_path)
+    staged_archive = target_runtime.root / f"{name}-{run_id}.zip"
+    shutil.copy2(source_backup.path, staged_archive)
+    if name == "recovery":
+        temporary = staged_archive.with_suffix(".tmp.zip")
+        with zipfile.ZipFile(staged_archive) as source, zipfile.ZipFile(temporary, "w") as target:
+            for member in source.infolist():
+                contents = source.read(member.filename)
+                if member.filename == source_backup.dump_member:
+                    contents += b"\nSELECT pg_sleep(30);\n"
+                target.writestr(member, contents)
+        temporary.replace(staged_archive)
+
+    project = _project(
+        target_runtime, target_runtime.root / f"{name}-{run_id}", bootstrap=bootstrap
+    )
+    catalog_path = _isolated_catalog(
+        _catalog_for_project(target_runtime, project), tmp_path / f"{name}-catalog"
+    )
+    _ensure_isolated_environment(catalog_path, project)
+    project_id = registered_project_id(catalog_path, project)
+    backup_home = catalog_path.parent.parent / ".odcli" / "backups"
+    backup_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    archive_path = backup_home / staged_archive.name
+    staged_archive.replace(archive_path)
     backup_id = _RECOVERY_BACKUP_IDS[name]
-    catalog_path = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
     _seed_backup(
         catalog_path,
         archive_path,
         backup_id=backup_id,
         database=source_backup_plan.database,
+        project_id=project_id,
     )
-    project = _project(target_runtime, target_runtime.root / f"{name}-{run_id}")
-    catalog_path = _isolated_catalog(
-        _catalog_for_project(target_runtime, project), tmp_path / f"{name}-catalog"
-    )
-    _ensure_isolated_environment(catalog_path, project)
+    if name == "partial":
+        # The public policy protects the newest available backup in a source
+        # group. Seed a newer disposable peer so cleanup can delete this
+        # scenario's older backup through the public command without weakening
+        # that policy. Both files and the isolated catalog live under tmp_path.
+        newer_archive = backup_home / f"partial-newer-{run_id}.zip"
+        shutil.copy2(source_backup.path, newer_archive)
+        _seed_backup(
+            catalog_path,
+            newer_archive,
+            backup_id=_PARTIAL_NEWER_BACKUP_ID,
+            database=source_backup_plan.database,
+            project_id=project_id,
+        )
     environment = {
         **os.environ,
         **target_runtime.environment,
@@ -101,6 +140,7 @@ def test_sigint_recovery_without_leaks(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     resource_ledger: ResourceLedger,
     record_property: object,
 ) -> None:
@@ -111,6 +151,7 @@ def test_sigint_recovery_without_leaks(
         source_backup_plan,
         failure_evidence,
         "recovery",
+        pinned_odoo_bootstrap,
     )
     target = f"odcli_interrupt_{run_id.replace('-', '')[:20]}"
     command = shutil.which("odcli")
@@ -171,6 +212,7 @@ def test_timeout_recovery_without_leaks(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     resource_ledger: ResourceLedger,
     record_property: object,
 ) -> None:
@@ -181,6 +223,7 @@ def test_timeout_recovery_without_leaks(
         source_backup_plan,
         failure_evidence,
         "recovery-timeout",
+        pinned_odoo_bootstrap,
     )
     command = shutil.which("odcli")
     if command is None:
@@ -240,6 +283,7 @@ def test_partial_publication_recovery_without_leaks(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     resource_ledger: ResourceLedger,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -251,6 +295,7 @@ def test_partial_publication_recovery_without_leaks(
         source_backup_plan,
         failure_evidence,
         "partial",
+        pinned_odoo_bootstrap,
     )
     catalog_path = Path(environment["ODCLI_E2E_CATALOG"])
     database = f"odcli_partial_{run_id.replace('-', '')[:20]}"
@@ -385,6 +430,7 @@ def test_failed_debug_retention_contains_only_sanitized_files(
     source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -397,6 +443,7 @@ def test_failed_debug_retention_contains_only_sanitized_files(
         target_runtime,
         target_runtime.root / f"retention-{target_runtime.run_id}",
         source=source_backup_plan,
+        bootstrap=pinned_odoo_bootstrap,
     )
     catalog_path = _isolated_catalog(_catalog_for_project(target_runtime, project), tmp_path)
     _ensure_isolated_environment(catalog_path, project)
