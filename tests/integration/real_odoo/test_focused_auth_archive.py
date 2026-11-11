@@ -18,7 +18,7 @@ from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.models import BackupState
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence
-from tests.integration.real_odoo.conftest import E2ERuntime
+from tests.integration.real_odoo.conftest import E2ERuntime, PinnedOdooBootstrap
 from tests.integration.real_odoo.failures import (
     assert_secret_free,
     write_archive_variant,
@@ -61,6 +61,7 @@ def test_remote_auth_and_unreachable_source_fail_closed(
     record_property: object,
     focused_project: Path,
     focused_catalog: Path,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The public refresh command must fail before creating a local backup."""
@@ -116,6 +117,7 @@ def test_remote_auth_and_unreachable_source_fail_closed(
         runtime,
         runtime.root / f"unreachable-project-{runtime.run_id}",
         source=unreachable_plan,
+        bootstrap=pinned_odoo_bootstrap,
     )
     unreachable_source_catalog = _catalog_for_project(runtime, unreachable_project)
     unreachable_catalog = _isolated_catalog(

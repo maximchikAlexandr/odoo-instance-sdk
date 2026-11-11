@@ -152,6 +152,7 @@ def test_recovery_input_is_removed_while_diagnostics_are_retained(
             SourceBackupPlan("http://127.0.0.1", "source", source),
             evidence,
             name,
+            Mock(spec=fixtures.PinnedOdooBootstrap),
         )
     staged_archive = runtime.root / f"{name}-{run_id}.zip"
     assert staged_archive.is_file()
@@ -200,6 +201,7 @@ def test_partial_recovery_seed_is_disposable_and_keeps_newest_backup_protected(
         SourceBackupPlan("http://127.0.0.1:8069", "source-db", source),
         FailureEvidence(run_id, "canary", tmp_path / "evidence"),
         "partial",
+        Mock(spec=fixtures.PinnedOdooBootstrap),
     )
 
     assert run_id_result == run_id

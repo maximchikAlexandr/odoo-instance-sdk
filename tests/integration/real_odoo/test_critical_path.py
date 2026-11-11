@@ -29,10 +29,11 @@ from .cleanup import audit_no_leaks, compose_down, write_odoo_config
 from .compose import new_run_id, wait_for_http
 from .conftest import (
     E2ERuntime,
+    PinnedOdooBootstrap,
     _finalize,
     _make_runtime,
     _register_runtime_ownership,
-    odoo_runtime_python,
+    verify_odoo_runtime_python,
 )
 
 pytestmark = [
@@ -500,6 +501,7 @@ def _build_critical_path_workspace(
     runtime: E2ERuntime,
     source_server: E2ERuntime,
     source_backup: ArchiveIdentity,
+    bootstrap: PinnedOdooBootstrap,
 ) -> _CriticalPathWorkspace:
     """Build pinned project/environment prerequisites under one owned runtime."""
     source_repository, odoo_bin_relative = _source_repository()
@@ -541,7 +543,7 @@ def _build_critical_path_workspace(
         "worktree", project.name, lambda: shutil.rmtree(project, ignore_errors=True)
     )
     odoo_bin_path = project / odoo_bin_relative
-    odoo_python = odoo_runtime_python(runtime, project, odoo_bin_path)
+    odoo_python = verify_odoo_runtime_python(bootstrap, project, odoo_bin_path)
 
     bootstrap_config = runtime.root / "critical-path-bootstrap.conf"
     shutil.copy2(runtime.config_file, bootstrap_config)
@@ -642,9 +644,7 @@ def _build_critical_path_workspace(
     status = _invoke(runner, project, cli_environment, "postgres", "status")
     repeated_status = _invoke(runner, project, cli_environment, "postgres", "status")
 
-    uv_version = subprocess.run(
-        ["uv", "--version"], capture_output=True, shell=False, text=True, check=True
-    ).stdout.strip()
+    uv_version = bootstrap.uv_version
     runtime.reservations[3].release()
     checkout = _invoke(
         runner,
@@ -797,10 +797,11 @@ def critical_path_workspace(
     critical_path_runtime: E2ERuntime,
     source_server: E2ERuntime,
     source_backup: ArchiveIdentity,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
 ) -> _CriticalPathWorkspace:
     """Share expensive pinned prerequisites among non-destructive focused nodes."""
     return _build_critical_path_workspace(
-        request, critical_path_runtime, source_server, source_backup
+        request, critical_path_runtime, source_server, source_backup, pinned_odoo_bootstrap
     )
 
 
@@ -826,6 +827,7 @@ def critical_path_cleanup_runtime(
     request: pytest.FixtureRequest,
     source_server: E2ERuntime,
     source_backup: ArchiveIdentity,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     tmp_path_factory: pytest.TempPathFactory,
     record_property: Any,
 ) -> Iterator[_RestoredRuntime]:
@@ -835,7 +837,9 @@ def critical_path_cleanup_runtime(
     )
     try:
         _register_runtime_ownership(runtime)
-        workspace = _build_critical_path_workspace(request, runtime, source_server, source_backup)
+        workspace = _build_critical_path_workspace(
+            request, runtime, source_server, source_backup, pinned_odoo_bootstrap
+        )
         original_instance = workspace.instance
         original_process = _start_owned(original_instance, runtime)
         wait_for_http(original_instance.config.base_url + "/web/health", timeout=180.0)

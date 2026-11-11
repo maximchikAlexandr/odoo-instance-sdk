@@ -25,7 +25,11 @@ from tests.integration.real_odoo.cleanup import (
     terminate_owned_process_group,
 )
 from tests.integration.real_odoo.compose import ComposeLifecycle
-from tests.integration.real_odoo.conftest import E2ERuntime, _finalize
+from tests.integration.real_odoo.conftest import (
+    E2ERuntime,
+    PinnedOdooBootstrap,
+    _finalize,
+)
 from tests.integration.real_odoo.failures import (
     assert_secret_free,
     run_recovery_action,
@@ -70,6 +74,7 @@ def _prepare_recovery_case(
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
     name: str,
+    bootstrap: PinnedOdooBootstrap,
 ) -> tuple[str, Path, str, Path, dict[str, str]]:
     run_id = target_runtime.run_id
     staged_archive = target_runtime.root / f"{name}-{run_id}.zip"
@@ -84,7 +89,9 @@ def _prepare_recovery_case(
                 target.writestr(member, contents)
         temporary.replace(staged_archive)
 
-    project = _project(target_runtime, target_runtime.root / f"{name}-{run_id}")
+    project = _project(
+        target_runtime, target_runtime.root / f"{name}-{run_id}", bootstrap=bootstrap
+    )
     catalog_path = _isolated_catalog(
         _catalog_for_project(target_runtime, project), tmp_path / f"{name}-catalog"
     )
@@ -133,6 +140,7 @@ def test_sigint_recovery_without_leaks(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     resource_ledger: ResourceLedger,
     record_property: object,
 ) -> None:
@@ -143,6 +151,7 @@ def test_sigint_recovery_without_leaks(
         source_backup_plan,
         failure_evidence,
         "recovery",
+        pinned_odoo_bootstrap,
     )
     target = f"odcli_interrupt_{run_id.replace('-', '')[:20]}"
     command = shutil.which("odcli")
@@ -203,6 +212,7 @@ def test_timeout_recovery_without_leaks(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     resource_ledger: ResourceLedger,
     record_property: object,
 ) -> None:
@@ -213,6 +223,7 @@ def test_timeout_recovery_without_leaks(
         source_backup_plan,
         failure_evidence,
         "recovery-timeout",
+        pinned_odoo_bootstrap,
     )
     command = shutil.which("odcli")
     if command is None:
@@ -272,6 +283,7 @@ def test_partial_publication_recovery_without_leaks(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     resource_ledger: ResourceLedger,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -283,6 +295,7 @@ def test_partial_publication_recovery_without_leaks(
         source_backup_plan,
         failure_evidence,
         "partial",
+        pinned_odoo_bootstrap,
     )
     catalog_path = Path(environment["ODCLI_E2E_CATALOG"])
     database = f"odcli_partial_{run_id.replace('-', '')[:20]}"
@@ -417,6 +430,7 @@ def test_failed_debug_retention_contains_only_sanitized_files(
     source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -429,6 +443,7 @@ def test_failed_debug_retention_contains_only_sanitized_files(
         target_runtime,
         target_runtime.root / f"retention-{target_runtime.run_id}",
         source=source_backup_plan,
+        bootstrap=pinned_odoo_bootstrap,
     )
     catalog_path = _isolated_catalog(_catalog_for_project(target_runtime, project), tmp_path)
     _ensure_isolated_environment(catalog_path, project)

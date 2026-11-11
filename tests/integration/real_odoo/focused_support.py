@@ -30,7 +30,7 @@ from scripts.real_odoo_pins import E2E_PINS
 from .archive import SourceBackupPlan
 from .cleanup import FailureEvidence, compose_down, replace_http_port
 from .compose import ComposeLifecycle, reserve_ports
-from .conftest import E2ERuntime, odoo_runtime_python
+from .conftest import E2ERuntime, PinnedOdooBootstrap, verify_odoo_runtime_python
 from .failures import assert_secret_free, write_failure_evidence
 from .test_critical_path import _remove_owned_fixture_tree
 
@@ -243,12 +243,17 @@ def project_filestore(project: Path, database: str) -> Path:
 
 
 @pytest.fixture(scope="module")
-def focused_project(target_runtime: E2ERuntime, source_backup_plan: SourceBackupPlan) -> Path:
+def focused_project(
+    target_runtime: E2ERuntime,
+    source_backup_plan: SourceBackupPlan,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
+) -> Path:
     """Reuse one checked-out SDK-owned project across focused leaves."""
     return _project(
         target_runtime,
         target_runtime.root / f"focused-project-{target_runtime.run_id}",
         source=source_backup_plan,
+        bootstrap=pinned_odoo_bootstrap,
     )
 
 
@@ -313,7 +318,13 @@ def _ensure_isolated_environment(catalog_path: Path, project: Path) -> str:
     return _assert_project_state_preflight(project, catalog_path)
 
 
-def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
+def _project(
+    runtime: E2ERuntime,
+    root: Path,
+    *,
+    bootstrap: PinnedOdooBootstrap,
+    source: SourceBackupPlan | None = None,
+) -> Path:
     """Create a project using the public pinned source/uv lifecycle."""
     repository_value = os.environ.get("ODCLI_E2E_ODOO_SOURCE_REPO") or os.environ.get(
         "ODCLI_E2E_ODOO_SOURCE_CACHE"
@@ -408,7 +419,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     with bootstrap_config.open("a", encoding="utf-8") as stream:
         stream.write(f"logfile = {bootstrap_log}\n")
     bootstrap_config.chmod(0o600)
-    odoo_python = odoo_runtime_python(runtime, root, bootstrap_odoo_bin)
+    odoo_python = verify_odoo_runtime_python(bootstrap, root, bootstrap_odoo_bin)
     command = shutil.which("odcli")
     if command is None:
         pytest.fail("odcli executable is required for focused public leaves")
