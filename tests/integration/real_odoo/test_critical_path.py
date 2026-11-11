@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +25,15 @@ from tests.fixtures.xmlrpc_probe import xmlrpc_probe
 
 from .archive import ArchiveIdentity
 from .cleanup import audit_no_leaks, compose_down, write_odoo_config
-from .compose import ComposeLifecycle, wait_for_http
-from .conftest import E2ERuntime, odoo_runtime_python
+from .compose import ComposeLifecycle, new_run_id, wait_for_http
+from .conftest import E2ERuntime, _finalize, _make_runtime, _provision, odoo_runtime_python
 
-pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
+pytestmark = [
+    pytest.mark.real_odoo,
+    pytest.mark.e2e_full,
+    pytest.mark.serial,
+    pytest.mark.timeout(600),
+]
 
 _PROBE = "odcli_e2e_probe"
 _PROBE_MARKER = "ODCLI-E2E-RESTORED"
@@ -415,6 +420,7 @@ class _CriticalPathWorkspace:
     deps: dict[str, Any]
     base_init_status: int
     initial_probe_state: dict[str, Any]
+    cleanup_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def _patch_runtime_environment(runtime: E2ERuntime, runtime_patch: pytest.MonkeyPatch) -> None:
@@ -468,17 +474,15 @@ def _patch_catalog_call_sites(runtime_patch: pytest.MonkeyPatch, run_catalog_pat
         runtime_patch.setattr(target, run_catalog_path)
 
 
-@pytest.fixture(scope="module")
-def critical_path_workspace(
+def _build_critical_path_workspace(
     request: pytest.FixtureRequest,
-    target_runtime: E2ERuntime,
+    runtime: E2ERuntime,
     source_server: E2ERuntime,
     source_backup: ArchiveIdentity,
-) -> Iterator[_CriticalPathWorkspace]:
-    """Build the shared pinned project/environment prerequisites for focused nodes."""
+) -> _CriticalPathWorkspace:
+    """Build pinned project/environment prerequisites under one owned runtime."""
     source_repository, odoo_bin_relative = _source_repository()
     runner = CliRunner()
-    runtime = target_runtime
     runtime_patch = pytest.MonkeyPatch()
     request.addfinalizer(runtime_patch.undo)
     _patch_runtime_environment(runtime, runtime_patch)
@@ -726,7 +730,7 @@ def critical_path_workspace(
     initial_probe_state = _invoke(
         runner, project, cli_environment, "--env", environment_id, "module", "list", _PROBE
     )
-    yield _CriticalPathWorkspace(
+    return _CriticalPathWorkspace(
         runtime=runtime,
         source_server=source_server,
         source_backup=source_backup,
@@ -762,6 +766,180 @@ def critical_path_workspace(
         base_init_status=base_init_status,
         initial_probe_state=initial_probe_state,
     )
+
+
+@pytest.fixture(scope="module")
+def critical_path_workspace(
+    request: pytest.FixtureRequest,
+    target_runtime: E2ERuntime,
+    source_server: E2ERuntime,
+    source_backup: ArchiveIdentity,
+) -> _CriticalPathWorkspace:
+    """Share expensive pinned prerequisites among non-destructive focused nodes."""
+    return _build_critical_path_workspace(request, target_runtime, source_server, source_backup)
+
+
+@pytest.fixture
+def critical_path_cleanup_runtime(
+    request: pytest.FixtureRequest,
+    source_server: E2ERuntime,
+    source_backup: ArchiveIdentity,
+    tmp_path_factory: pytest.TempPathFactory,
+    record_property: Any,
+) -> Iterator[_RestoredRuntime]:
+    """Own a disposable restored runtime for environment removal and final cleanup."""
+    runtime = _make_runtime(
+        tmp_path_factory.mktemp("odcli-critical-cleanup"), new_run_id(), scope="target"
+    )
+    try:
+        _provision(runtime)
+        workspace = _build_critical_path_workspace(request, runtime, source_server, source_backup)
+        original_instance = workspace.instance
+        original_process = _start_owned(original_instance, runtime)
+        wait_for_http(original_instance.config.base_url + "/web/health", timeout=180.0)
+        refresh = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "db",
+            "refresh",
+            "--restore",
+            "--source-branch",
+            E2E_PINS.odoo_source_commit,
+        )
+        restored_database = str(refresh["restored_database"])
+        backup = refresh.get("backup")
+        assert isinstance(backup, dict)
+        backup_id = str(backup["id"])
+        backup_list = _invoke(
+            workspace.runner, workspace.project, workspace.cli_environment, "backup", "list"
+        )
+        shown_backup = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "backup",
+            "show",
+            backup_id,
+        )
+        validation = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "backup",
+            "validate",
+            backup_id,
+        )
+        _stop_owned(original_instance, original_process)
+        _switch_database_config(workspace.generated_config, restored_database)
+        workspace.env_obj = workspace.client.environments.get(workspace.environment_id)
+        workspace.instance = workspace.client.instance.from_environment(workspace.env_obj)
+        owned_process = _start_owned(workspace.instance, runtime)
+        wait_for_http(workspace.instance.config.base_url + "/web/health", timeout=180.0)
+        environment = _environment_state(
+            _invoke(workspace.runner, workspace.project, workspace.cli_environment, "env", "list"),
+            workspace.environment_id,
+        )
+        stop = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "--env",
+            workspace.environment_id,
+            "stop",
+        )
+        repeated_stop = _invoke(
+            workspace.runner,
+            workspace.project,
+            workspace.cli_environment,
+            "--env",
+            workspace.environment_id,
+            "stop",
+        )
+        stop_context = _expected_stop_context(workspace, environment)
+        assert stop == {**stop_context, "status": "stopped"}
+        assert repeated_stop == {**stop_context, "status": "already_stopped"}
+        _stop_owned(workspace.instance, owned_process)
+        workspace.cleanup_evidence["stop"] = stop
+        workspace.cleanup_evidence["repeated_stop"] = repeated_stop
+        yield _RestoredRuntime(
+            workspace=workspace,
+            refresh=refresh,
+            restored_database=restored_database,
+            backup_id=backup_id,
+            backup=backup,
+            backup_list=backup_list,
+            shown_backup=shown_backup,
+            validation=validation,
+            owned_process=owned_process,
+        )
+        postgres_stop = _invoke(
+            workspace.runner, workspace.project, workspace.cli_environment, "postgres", "stop"
+        )
+        repeated_postgres_stop = _invoke(
+            workspace.runner, workspace.project, workspace.cli_environment, "postgres", "stop"
+        )
+        assert postgres_stop == repeated_postgres_stop == {}
+        compose_down(
+            workspace.cluster.compose_file,
+            workspace.cluster.compose_project_name,
+            ports=(workspace.cluster.endpoint_port,),
+        )
+        audit = audit_no_leaks(runtime.run_id, ports=(workspace.cluster.endpoint_port,))
+        assert audit.clean, audit.leaks
+        _record(
+            record_property,
+            "E2E-CP-15",
+            {
+                **workspace.cleanup_evidence,
+                "postgres_stop": postgres_stop,
+                "repeated_postgres_stop": repeated_postgres_stop,
+                "cleanup_audit": audit.leaks,
+            },
+        )
+        runtime.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        runtime.artifact_root.chmod(0o700)
+        evidence = runtime.artifact_root / "critical-path.json"
+        evidence.write_text(
+            json.dumps(
+                {
+                    "run_id": runtime.run_id,
+                    "source_commit": E2E_PINS.odoo_source_commit,
+                    "python": E2E_PINS.cpython,
+                    "uv": E2E_PINS.uv,
+                    "backup": {
+                        key: backup[key]
+                        for key in (
+                            "id",
+                            "size_bytes",
+                            "sha256",
+                            "source_base_url",
+                            "database_name",
+                            "source_git_branch",
+                        )
+                    },
+                    "restored_database": restored_database,
+                    "cleanup": {
+                        "postgres_stop": postgres_stop,
+                        "repeated_postgres_stop": repeated_postgres_stop,
+                        "clean": audit.clean,
+                        "leaks": audit.leaks,
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        evidence.chmod(0o600)
+        assert evidence.is_file()
+        assert evidence.stat().st_mode & 0o777 == 0o600
+        assert 0 < evidence.stat().st_size < 2 * 1024 * 1024
+    except BaseException as error:
+        _finalize(runtime, error)
+        raise
+    else:
+        _finalize(runtime)
 
 
 @pytest.fixture
@@ -1071,7 +1249,7 @@ def test_critical_path_public_native_module_test_passes(
     _record(record_property, "E2E-CP-07", result)
 
 
-def test_critical_path_backup_restore_and_restored_runtime(
+def test_critical_path_backup_metadata_and_source_identity(
     critical_path_restored_runtime: _RestoredRuntime,
     record_property: Any,
 ) -> None:
@@ -1089,7 +1267,6 @@ def test_critical_path_backup_restore_and_restored_runtime(
         "E2E-CP-08",
         {"database": case.restored_database, "backup": case.backup_id},
     )
-
     assert case.backup_list
     shown = case.shown_backup
     assert str(shown.get("id", shown.get("backup", {}).get("id", ""))) == case.backup_id
@@ -1106,6 +1283,13 @@ def test_critical_path_backup_restore_and_restored_runtime(
     assert case.validation
     _record(record_property, "E2E-CP-09", {**backup, "shown": shown})
 
+
+def test_critical_path_restored_attachment_is_readable(
+    critical_path_restored_runtime: _RestoredRuntime,
+    record_property: Any,
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
     name, attachment = xmlrpc_probe(state.instance.config.base_url, case.restored_database)
     assert name == "Pinned Odoo 19 fixture"
     assert attachment == _ATTACHMENT
@@ -1114,6 +1298,14 @@ def test_critical_path_backup_restore_and_restored_runtime(
         "E2E-CP-10",
         {"database": case.restored_database, "attachment_bytes": len(attachment)},
     )
+
+
+def test_critical_path_restored_model_marker_is_present(
+    critical_path_restored_runtime: _RestoredRuntime,
+    record_property: Any,
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
     evaluation = _invoke(
         state.runner,
         state.project,
@@ -1125,6 +1317,14 @@ def test_critical_path_backup_restore_and_restored_runtime(
     )
     assert "1" in json.dumps(evaluation)
     _record(record_property, "E2E-CP-11", evaluation)
+
+
+def test_critical_path_restored_resource_inventory_is_healthy(
+    critical_path_restored_runtime: _RestoredRuntime,
+    record_property: Any,
+) -> None:
+    case = critical_path_restored_runtime
+    state = case.workspace
     resources = _invoke(state.runner, state.project, state.cli_environment, "resource", "list")
     resource_doctor = _invoke(
         state.runner, state.project, state.cli_environment, "resource", "doctor"
@@ -1178,24 +1378,13 @@ def test_critical_path_project_doctor_is_repeatable(
     _record(record_property, "E2E-CP-14", {"doctor": doctor, "repeated": repeated_doctor})
 
 
-def test_critical_path_environment_removal_and_resource_cleanup(
-    critical_path_restored_runtime: _RestoredRuntime,
+def test_critical_path_environment_removal_is_idempotent(
+    critical_path_cleanup_runtime: _RestoredRuntime,
     monkeypatch: pytest.MonkeyPatch,
     record_property: Any,
 ) -> None:
-    case = critical_path_restored_runtime
+    case = critical_path_cleanup_runtime
     state = case.workspace
-    stop = _invoke(
-        state.runner, state.project, state.cli_environment, "--env", state.environment_id, "stop"
-    )
-    repeated_stop = _invoke(
-        state.runner, state.project, state.cli_environment, "--env", state.environment_id, "stop"
-    )
-    context = _expected_stop_context(state, state.environment)
-    assert stop == {**context, "status": "stopped"}
-    assert repeated_stop == {**context, "status": "already_stopped"}
-    _stop_owned(state.instance, case.owned_process)
-
     _invoke(
         state.runner,
         state.project,
@@ -1242,23 +1431,7 @@ def test_critical_path_environment_removal_and_resource_cleanup(
     )
     assert not Path(str(state.environment["worktree_path"])).exists()
     assert not Path(str(state.environment["generated_config_path"])).exists()
-    postgres_stop = _invoke(state.runner, state.project, state.cli_environment, "postgres", "stop")
-    repeated_postgres_stop = _invoke(
-        state.runner, state.project, state.cli_environment, "postgres", "stop"
-    )
-    assert postgres_stop == repeated_postgres_stop == {}
-    compose_down(
-        state.cluster.compose_file,
-        state.cluster.compose_project_name,
-        ports=(state.cluster.endpoint_port,),
-    )
-    audit = audit_no_leaks(state.runtime.run_id, ports=(state.cluster.endpoint_port,))
-    assert audit.clean, audit.leaks
-    state.runtime.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    state.runtime.artifact_root.chmod(0o700)
-    _record(
-        record_property,
-        "E2E-CP-15",
+    state.cleanup_evidence.update(
         {
             "fixture_tree": {
                 "path": str(state.probe_destination),
@@ -1267,39 +1440,6 @@ def test_critical_path_environment_removal_and_resource_cleanup(
             },
             "removed": removed,
             "removed_again": removed_again,
-            "postgres_stop": postgres_stop,
-            "repeated_postgres_stop": repeated_postgres_stop,
-            "cleanup_audit": audit.leaks,
-        },
+        }
     )
-    evidence = state.runtime.artifact_root / "critical-path.json"
-    evidence.write_text(
-        json.dumps(
-            {
-                "run_id": state.runtime.run_id,
-                "source_commit": E2E_PINS.odoo_source_commit,
-                "python": E2E_PINS.cpython,
-                "uv": E2E_PINS.uv,
-                "backup": {
-                    key: case.backup[key]
-                    for key in (
-                        "id",
-                        "size_bytes",
-                        "sha256",
-                        "source_base_url",
-                        "database_name",
-                        "source_git_branch",
-                    )
-                },
-                "restored_database": case.restored_database,
-                "cleanup": {"clean": audit.clean, "leaks": audit.leaks},
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    evidence.chmod(0o600)
-    assert evidence.is_file()
-    assert evidence.stat().st_mode & 0o777 == 0o600
-    assert 0 < evidence.stat().st_size < 2 * 1024 * 1024
+    _record(record_property, "E2E-CP-15", state.cleanup_evidence)

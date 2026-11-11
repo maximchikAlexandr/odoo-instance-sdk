@@ -71,27 +71,21 @@ EVIDENCE_EXECUTORS: Final[dict[str, tuple[str, ...]]] = {
     "E2E-CP-06": (_critical_path_executor("test_critical_path_module_update_is_idempotent"),),
     "E2E-CP-07": (_critical_path_executor("test_critical_path_public_native_module_test_passes"),),
     "E2E-CP-08": (
-        _critical_path_executor("test_critical_path_backup_restore_and_restored_runtime"),
+        _critical_path_executor("test_critical_path_backup_metadata_and_source_identity"),
     ),
     "E2E-CP-09": (
-        _critical_path_executor("test_critical_path_backup_restore_and_restored_runtime"),
+        _critical_path_executor("test_critical_path_backup_metadata_and_source_identity"),
     ),
-    "E2E-CP-10": (
-        _critical_path_executor("test_critical_path_backup_restore_and_restored_runtime"),
-    ),
-    "E2E-CP-11": (
-        _critical_path_executor("test_critical_path_backup_restore_and_restored_runtime"),
-    ),
+    "E2E-CP-10": (_critical_path_executor("test_critical_path_restored_attachment_is_readable"),),
+    "E2E-CP-11": (_critical_path_executor("test_critical_path_restored_model_marker_is_present"),),
     "E2E-CP-12": (
-        _critical_path_executor("test_critical_path_backup_restore_and_restored_runtime"),
+        _critical_path_executor("test_critical_path_restored_resource_inventory_is_healthy"),
     ),
     "E2E-CP-13": (
         _critical_path_executor("test_critical_path_restored_runtime_stop_is_repeatable_and_owned"),
     ),
     "E2E-CP-14": (_critical_path_executor("test_critical_path_project_doctor_is_repeatable"),),
-    "E2E-CP-15": (
-        _critical_path_executor("test_critical_path_environment_removal_and_resource_cleanup"),
-    ),
+    "E2E-CP-15": (_critical_path_executor("test_critical_path_environment_removal_is_idempotent"),),
     "E2E-FC-01": (
         (
             "tests/integration/real_odoo/test_focused_auth_archive.py::"

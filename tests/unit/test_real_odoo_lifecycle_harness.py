@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import cast
 
@@ -62,3 +64,44 @@ def test_critical_path_preserves_post_start_and_cleanup_failures(
     assert owned.reap_result and owned.reap_result[0] != -1
     assert not owned.reaper.is_alive()
     assert ledger.records == ()
+
+
+def test_critical_path_cleanup_node_has_isolated_fixture_closure_and_timeout() -> None:
+    script = """
+import pytest
+
+class LayoutProbe:
+    def pytest_collection_finish(self, session):
+        for item in session.items:
+            timeout = item.get_closest_marker("timeout")
+            print("LAYOUT|" + item.name + "|" + str(timeout.args[0] if timeout else None)
+                  + "|" + ",".join(item.fixturenames))
+
+raise SystemExit(pytest.main([
+    "--collect-only", "-q", "-o", "addopts=",
+    "tests/integration/real_odoo/test_critical_path.py::test_critical_path_environment_removal_is_idempotent",
+    "tests/integration/real_odoo/test_critical_path.py::test_critical_path_environment_registration_and_paths_are_stable",
+], plugins=[LayoutProbe()]))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = [line for line in result.stdout.splitlines() if line.startswith("LAYOUT|")]
+    assert len(rows) == 2, result.stdout
+    assert "environment_removal_is_idempotent" in rows[0]
+    assert "environment_registration_and_paths_are_stable" in rows[1]
+    cleanup = next(row for row in rows if "environment_removal_is_idempotent" in row)
+    ordinary = next(row for row in rows if "environment_registration_and_paths_are_stable" in row)
+    assert cleanup.split("|", 2)[1:2] == ["test_critical_path_environment_removal_is_idempotent"]
+    assert cleanup.split("|", 3)[2] == "600"
+    cleanup_fixtures = set(cleanup.split("|", 3)[3].split(","))
+    assert "critical_path_cleanup_runtime" in cleanup_fixtures
+    assert "critical_path_workspace" not in cleanup_fixtures
+    assert "target_runtime" not in cleanup_fixtures
+    assert ordinary.split("|", 3)[2] == "600"
+    ordinary_fixtures = set(ordinary.split("|", 3)[3].split(","))
+    assert "critical_path_workspace" in ordinary_fixtures
