@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import secrets
 import shutil
 import stat
@@ -175,11 +176,25 @@ def _build_pinned_odoo_bootstrap(root: Path) -> PinnedOdooBootstrap:
     lock_sha256 = sha256(PYTHON_RESOLUTION_LOCK.read_bytes()).hexdigest()
     if lock_sha256 != E2E_PINS.odoo_python_lock_sha256:
         raise AssertionError("pinned Odoo dependency lock digest changed")
+    host_python = subprocess.run(
+        [sys.executable, "--version"], capture_output=True, text=True, check=False
+    )
+    rendered_host_python = (host_python.stdout + host_python.stderr).strip()
+    if host_python.returncode or rendered_host_python != f"Python {E2E_PINS.cpython}":
+        raise AssertionError("pinned Odoo bootstrap host interpreter version mismatch")
+    uv_executable = shutil.which("uv")
+    if uv_executable is None:
+        raise AssertionError("pinned uv executable is unavailable on PATH")
+    uv = subprocess.run([uv_executable, "--version"], capture_output=True, text=True, check=False)
+    rendered_uv = uv.stdout.strip()
+    expected_uv_output = rf"uv {re.escape(E2E_PINS.uv)}(?: \([^()\r\n]+\))?"
+    if uv.returncode or re.fullmatch(expected_uv_output, rendered_uv) is None:
+        raise AssertionError("pinned uv version mismatch for Odoo bootstrap")
     root.mkdir(mode=0o700)
     environment = root / "venv"
     python = environment / "bin" / "python"
     created = subprocess.run(
-        ["uv", "venv", "--python", sys.executable, str(environment)],
+        [uv_executable, "venv", "--python", sys.executable, str(environment)],
         capture_output=True,
         text=True,
         check=False,
@@ -188,7 +203,7 @@ def _build_pinned_odoo_bootstrap(root: Path) -> PinnedOdooBootstrap:
         raise AssertionError(f"pinned Odoo bootstrap venv creation failed: {created.returncode}")
     synced = subprocess.run(
         [
-            "uv",
+            uv_executable,
             "pip",
             "sync",
             "--python",
@@ -208,10 +223,6 @@ def _build_pinned_odoo_bootstrap(root: Path) -> PinnedOdooBootstrap:
     rendered_version = (version.stdout + version.stderr).strip()
     if version.returncode or rendered_version != f"Python {E2E_PINS.cpython}":
         raise AssertionError("pinned Odoo bootstrap interpreter version mismatch")
-    uv = subprocess.run(["uv", "--version"], capture_output=True, text=True, check=False)
-    rendered_uv = uv.stdout.strip().split()
-    if uv.returncode or len(rendered_uv) != 2 or rendered_uv[1] != E2E_PINS.uv:
-        raise AssertionError("pinned uv version mismatch for Odoo bootstrap")
     _make_bootstrap_read_only(root)
     return PinnedOdooBootstrap(
         root=root,

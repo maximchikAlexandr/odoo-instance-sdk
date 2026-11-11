@@ -6,6 +6,7 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
+from shutil import which
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
@@ -37,15 +38,26 @@ def _write_consumer_checkout(root: Path) -> Path:
 class BootstrapSubprocess:
     def __init__(self) -> None:
         self.uv_calls: list[tuple[str, ...]] = []
+        self.uv_executables: list[str] = []
         self.import_probes: list[tuple[str, ...]] = []
         self.commands: list[list[str]] = []
         self.source_commit = E2E_PINS.odoo_source_commit
+        self.uv_version_output = f"uv {E2E_PINS.uv} (build metadata)\n"
+        self.uv_returncode = 0
         self.real_run = subprocess.run
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.commands.append(argv)
-        if argv[0] == "uv":
+        if Path(argv[0]).name == "uv":
+            self.uv_executables.append(argv[0])
             self.uv_calls.append(tuple(argv[1:]))
+            if argv[1:] == ["--version"]:
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=self.uv_returncode,
+                    stdout=self.uv_version_output,
+                    stderr="",
+                )
             if argv[1] == "venv":
                 environment = Path(argv[-1])
                 (environment / "bin").mkdir(parents=True)
@@ -75,14 +87,59 @@ def bootstrap_subprocess(monkeypatch: pytest.MonkeyPatch) -> BootstrapSubprocess
 
 
 @pytest.fixture
-def pinned_bootstrap(
-    tmp_path: Path, bootstrap_subprocess: BootstrapSubprocess
-) -> Iterator[tuple[Path, e2e_fixtures.PinnedOdooBootstrap]]:
+def bootstrap_root(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
     root = tmp_path / "pinned"
+    request.addfinalizer(lambda: e2e_fixtures._remove_bootstrap_root(root, tmp_path, None))
+    return root
+
+
+@pytest.fixture
+def pinned_bootstrap(
+    bootstrap_root: Path, bootstrap_subprocess: BootstrapSubprocess
+) -> Iterator[tuple[Path, e2e_fixtures.PinnedOdooBootstrap]]:
+    root = bootstrap_root
     bootstrap = e2e_fixtures._build_pinned_odoo_bootstrap(root)
     bootstrap_subprocess.commands.clear()
-    yield root, bootstrap
-    e2e_fixtures._remove_bootstrap_root(root, tmp_path, bootstrap.filesystem_state)
+    yield bootstrap_root, bootstrap
+    e2e_fixtures._remove_bootstrap_root(root, root.parent, bootstrap.filesystem_state)
+
+
+def test_bootstrap_accepts_exact_uv_pin_with_build_metadata_before_sync(
+    bootstrap_subprocess: BootstrapSubprocess, bootstrap_root: Path
+) -> None:
+    bootstrap = e2e_fixtures._build_pinned_odoo_bootstrap(bootstrap_root)
+
+    assert bootstrap.uv_version == bootstrap_subprocess.uv_version_output.strip()
+    assert bootstrap_subprocess.uv_calls[0] == ("--version",)
+    assert bootstrap_subprocess.uv_calls[1][0] == "venv"
+    assert bootstrap_subprocess.uv_calls[2][0:2] == ("pip", "sync")
+    assert bootstrap_subprocess.uv_executables == [which("uv")] * 3
+
+
+@pytest.mark.parametrize(
+    ("version_output", "returncode"),
+    [
+        pytest.param("uv 0.13.40", 0, id="wrong-exact-version"),
+        pytest.param("other-tool 0.13.4", 0, id="wrong-tool"),
+        pytest.param("uv 0.13.4 (unterminated", 0, id="malformed-metadata"),
+        pytest.param("", 0, id="empty-output"),
+        pytest.param("uv 0.13.4 (build metadata)", 1, id="nonzero-exit"),
+    ],
+)
+def test_bootstrap_rejects_invalid_uv_identity_before_venv_or_sync(
+    bootstrap_subprocess: BootstrapSubprocess,
+    bootstrap_root: Path,
+    version_output: str,
+    returncode: int,
+) -> None:
+    bootstrap_subprocess.uv_version_output = version_output
+    bootstrap_subprocess.uv_returncode = returncode
+
+    with pytest.raises(AssertionError, match="pinned uv version mismatch"):
+        e2e_fixtures._build_pinned_odoo_bootstrap(bootstrap_root)
+
+    assert bootstrap_subprocess.uv_calls == [("--version",)]
+    assert not bootstrap_root.exists()
 
 
 def test_bootstrap_is_built_once_and_each_consumer_runs_its_own_pinned_import(
@@ -105,8 +162,8 @@ def test_bootstrap_is_built_once_and_each_consumer_runs_its_own_pinned_import(
     )
     assert Path(bootstrap_subprocess.import_probes[1][1]).parent == consumer_a.parent
 
-    assert [call[0] for call in bootstrap_subprocess.uv_calls] == ["venv", "pip", "--version"]
-    assert "--require-hashes" in bootstrap_subprocess.uv_calls[1]
+    assert [call[0] for call in bootstrap_subprocess.uv_calls] == ["--version", "venv", "pip"]
+    assert "--require-hashes" in bootstrap_subprocess.uv_calls[2]
     assert len(bootstrap_subprocess.import_probes) == 2
     assert all(
         not (path.lstat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
