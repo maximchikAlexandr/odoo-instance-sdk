@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
 
 _CSRF_PATTERNS = (
+    re.compile(rb"\['csrf_token'\] = '([^']+)'"),
     re.compile(rb"name=\"csrf-token\"\s+content=\"([^\"]+)\"", re.IGNORECASE),
     re.compile(rb"name='csrf-token'\s+content='([^']+)'", re.IGNORECASE),
     re.compile(rb"csrfToken\s*[:=]\s*\"([^\"]+)\""),
@@ -58,7 +59,8 @@ def unlock_master_password(port: int, password: str, *, deadline: float) -> None
         urllib.request.HTTPCookieProcessor(CookieJar()),
         _LoopbackRedirect(),
     )
-    page = _read(opener, urllib.request.Request(root), deadline)
+    _read(opener, urllib.request.Request(root), deadline)
+    page = _read(opener, urllib.request.Request(f"{root}browser/js/utils.js"), deadline)
     request = urllib.request.Request(
         f"{root}browser/master_password",
         data=json.dumps({"password": password, "submit_password": True}).encode(),
@@ -67,7 +69,7 @@ def unlock_master_password(port: int, password: str, *, deadline: float) -> None
     request.add_header("Content-Type", "application/json")
     request.add_header("Accept", "application/json")
     token = _csrf_token(page)
-    if token is not None:
+    if token:
         request.add_header("X-pgA-CSRFToken", token)
     _require_present(_read(opener, request, deadline))
 

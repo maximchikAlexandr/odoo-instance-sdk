@@ -113,8 +113,10 @@ def test_unlock_posts_password_only_in_the_body(monkeypatch: pytest.MonkeyPatch)
             requests.append(request)
             method = getattr(request, "get_method")()
             url = getattr(request, "full_url")
+            if method == "GET" and str(url).endswith("utils.js"):
+                return _Response(b"pgAdmin['csrf_token'] = 'token';", url)
             if method == "GET":
-                return _Response(b'<meta name="csrf-token" content="token">', url)
+                return _Response(b"<html></html>", url)
             return _Response(
                 b'{"data":{"present":true,"is_error":false,"errmsg":null}}',
                 url,
@@ -122,7 +124,7 @@ def test_unlock_posts_password_only_in_the_body(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(urllib.request, "build_opener", lambda *_args, **_kwargs: _Opener())
     unlock_master_password(5050, "secret-value", deadline=time.monotonic() + 5)
-    post = requests[1]
+    post = next(item for item in requests if getattr(item, "get_method")() == "POST")
     assert getattr(post, "full_url") == "http://127.0.0.1:5050/browser/master_password"
     assert b"secret-value" in getattr(post, "data")
     assert "secret-value" not in getattr(post, "full_url")
