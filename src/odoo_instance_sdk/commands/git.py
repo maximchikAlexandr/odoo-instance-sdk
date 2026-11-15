@@ -15,17 +15,21 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
+from odoo_instance_sdk.codex_integration import INSTALL_HINT, generated_description
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
+    OutputMode,
     bordered_table,
+    emit,
     fail,
     model_to_dict,
     output_options,
     render_rich_text,
     resolve_output_mode,
     run_or_preview,
+    success_document,
 )
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.models import GitCheckResult, StartConfig
@@ -89,11 +93,78 @@ _MEMBER_ID_HELP = (
 )
 
 
+def _commit_description(
+    ctx: CliContext,
+    resource: GitResource,
+    description: str | None,
+    *,
+    generate: bool,
+    contexts: tuple[str, ...],
+    model: str | None,
+    dry_run: bool,
+    mode: OutputMode,
+) -> str:
+    """Resolve a generated description, or return the text the caller already supplied."""
+    if generate and dry_run:
+        _preview_generated_commit(ctx, resource, contexts, model, mode)
+    if generate:
+        return generated_description(
+            resource,
+            contexts=contexts,
+            model=model,
+            project_root=cli_context.resolve_project_path(ctx),
+        )
+    if description is None:
+        raise click.UsageError("pass one description, '-' for stdin, or --generate")
+    return description
+
+
+def _preview_generated_commit(
+    ctx: CliContext,
+    resource: GitResource,
+    contexts: tuple[str, ...],
+    model: str | None,
+    mode: OutputMode,
+) -> None:
+    """Show the Codex request plan and stop before a model call or git commit."""
+    try:
+        from odcli_codex.client import CodexOdooClient
+    except ImportError as exc:
+        from odoo_instance_sdk.exceptions import ConfigError
+
+        raise ConfigError(INSTALL_HINT) from exc
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
+
+    root = cli_context.resolve_project_path(ctx)
+    command = CodexOdooClient(
+        OdooClient(config=OdooClientConfig(executable="odoo"))
+    ).git.message_command(
+        resource,
+        project_root=root,
+        contexts=contexts,
+        model=model,
+    )
+    raise click.exceptions.Exit(
+        emit(
+            success_document(
+                command="git.commit",
+                result=model_to_dict(command.plan),
+                dry_run=True,
+            ),
+            mode,
+            rich=_rich,
+        )
+    )
+
+
 @git_group.command(
     "commit",
     help="Create one staged Odoo commit; registered native checkouts need no local manifest, and --tag keeps the explicit Odoo prefix.",
 )
-@click.argument("description")
+@click.argument("description", required=False)
+@click.option("--generate", is_flag=True, help="Ask odcli-codex for the English description.")
+@click.option("--context", "contexts", multiple=True, help="Tracked context for --generate.")
+@click.option("--model", default=None, help="Codex model. Valid only with --generate.")
 @click.option("--ticket", default=None, help="Tracker-neutral Ticket key.")
 @click.option("--tag", default=None, help="Explicit uppercase commit prefix.")
 @click.option("--repo", default=None, type=click.Path(), help="Explicit Git repository root.")
@@ -108,7 +179,10 @@ _MEMBER_ID_HELP = (
 @pass_cli_context
 def git_commit(
     ctx: CliContext,
-    description: str,
+    description: str | None,
+    generate: bool,
+    contexts: tuple[str, ...],
+    model: str | None,
     ticket: str | None,
     tag: str | None,
     repo: str | None,
@@ -123,8 +197,30 @@ def git_commit(
         raise click.UsageError("--repo requires --member-id")
     if repo is not None and tag is not None:
         raise click.UsageError("--tag is valid only for project-aware Odoo commits")
+    if generate and repo is not None:
+        raise click.UsageError("--generate is valid only for project-aware commits")
+    if (contexts or model) and not generate:
+        raise click.UsageError("--context and --model require --generate")
+    from_stdin = description == "-"
+    positional = description is not None and not from_stdin
+    if sum((positional, from_stdin, generate)) != 1:
+        raise click.UsageError("pass one description, '-' for stdin, or --generate")
+    if from_stdin:
+        description = click.get_text_stream("stdin").read().strip()
+        if not description:
+            raise click.UsageError("stdin description is empty")
     try:
         resource = _generic_resource(repo) if repo is not None else _resource(ctx)
+        description = _commit_description(
+            ctx,
+            resource,
+            description,
+            generate=generate,
+            contexts=contexts,
+            model=model,
+            dry_run=dry_run,
+            mode=mode,
+        )
         status, _ = run_or_preview(
             lambda: (
                 resource.commit_command(
@@ -152,7 +248,7 @@ def git_commit(
             ),
             rich=_rich,
         )
-    except SystemExit:
+    except (SystemExit, click.exceptions.Exit):
         raise
     except Exception as error:
         fail(mode, "git.commit", error, dry_run=dry_run, error_code=_error_code(error))

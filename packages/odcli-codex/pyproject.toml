@@ -1,0 +1,36 @@
+[project]
+name = "odcli-codex"
+version = "0.1.0"
+description = "Codex-backed Odoo translation fill and commit descriptions for OdCLI"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "maximchikAlexandr", email = "maximchik.alexandr@yandex.ru" },
+]
+dependencies = [
+    "odoo-instance-sdk>=0.1.0,<0.2",
+    "openai-codex>=0.169.0",
+    "click>=8.2,<9",
+]
+
+[project.scripts]
+odcli-codex = "odcli_codex.cli:cli"
+
+[project.urls]
+Source = "https://github.com/maximchikAlexandr/odoo-instance-sdk"
+
+[build-system]
+requires = ["uv_build>=0.10.8,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+
+[tool.uv.sources]
+odoo-instance-sdk = { workspace = true }
+
+[dependency-groups]
+test = ["pytest>=8.0"]
+lint = ["ruff>=0.16.7,<0.17"]
+type-check = ["mypy>=2.0"]

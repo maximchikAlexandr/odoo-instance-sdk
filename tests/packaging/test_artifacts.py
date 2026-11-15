@@ -445,6 +445,7 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
     }
     assert provides_extra == {"dashboard"}
     assert "metrics" not in provides_extra
+    assert all(name != "openai-codex" for name, _specifiers, _marker in requirements)
 
 
 def test_dashboard_source_has_stable_monitor_affordances() -> None:

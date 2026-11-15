@@ -36,11 +36,15 @@ from odoo_instance_sdk.models import (
     GitCommitContext,
     GitRepositorySnapshot,
     GitSyncResult,
+    StagedPatch,
 )
 from odoo_instance_sdk.project import ProjectConfig, effective_ticket_settings
 from odoo_instance_sdk.resources import git_member_commit
 from odoo_instance_sdk.resources.git_generic import GenericGitMixin
-from odoo_instance_sdk.resources.git_runtime import worktree as _worktree
+from odoo_instance_sdk.resources.git_runtime import (
+    command_result as _command_result,
+    worktree as _worktree,
+)
 from odoo_instance_sdk.resources.gitlab_mr import GitLabMergeRequestMixin
 
 if TYPE_CHECKING:
@@ -77,23 +81,6 @@ def _cleanup_secret_channel(path: str | None) -> None:
     if path is not None:
         with contextlib.suppress(OSError):
             os.unlink(path)
-
-
-def _command_result(value: ProcessResult, step: PreparedStep) -> CommandResult:
-    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
-
-    secrets = step.secret_values
-    stdout = redacted_projection(_text(value.stdout), secrets=secrets, field="stdout")
-    stderr = redacted_projection(_text(value.stderr), secrets=secrets, field="stderr")
-    return CommandResult(
-        args=list(step.public_projection().argv),
-        returncode=value.returncode,
-        stdout=stdout if isinstance(stdout, str) else str(stdout),
-        stderr=stderr if isinstance(stderr, str) else str(stderr),
-        duration=value.duration,
-        cwd=value.cwd,
-        environment=step.public_projection().environment_overrides,
-    )
 
 
 def _step(
@@ -435,6 +422,16 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
             environment=environment,
             secret_values=secret_values,
         ).run()
+
+    def staged_patch_command(self) -> Command[StagedPatch]:
+        """Return one read-only redacted snapshot of the staged patch."""
+        from odoo_instance_sdk.resources.git_runtime import build_staged_patch_command
+
+        return build_staged_patch_command(self._instance)
+
+    def staged_patch(self) -> StagedPatch:
+        """Read the staged patch snapshot."""
+        return self.staged_patch_command().run()
 
     def commit_context_command(self, description: str, *, ticket: str | None = None, tag: str | None = None) -> Command[GitCommitContext]:  # fmt: skip
         from odoo_instance_sdk.execution import Command

@@ -27,6 +27,14 @@ class GitActivity(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_on
     state: GitActivityState
 
 
+class StagedPatch(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Bounded, redacted text of one staged patch."""
+
+    text: str
+    truncated: bool
+    byte_length: int
+
+
 class GitCommitContext(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     module: str
     tag: str
