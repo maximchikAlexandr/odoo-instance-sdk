@@ -254,6 +254,7 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
     networks = tuple(f"{project}_default" for project in projects)
     compose_runner = SubprocessComposeRunner()
     data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
     pgadmin_root = data_root / "pgadmin"
     private = pgadmin_root / "private"
     paths = pgadmin_files.PgAdminPaths(

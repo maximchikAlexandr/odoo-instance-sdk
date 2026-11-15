@@ -5,6 +5,7 @@ from __future__ import annotations
 import stat
 import subprocess
 import time
+import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -12,7 +13,7 @@ from typing import cast
 import pytest
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
-from odoo_instance_sdk.internal import pgadmin_container, pgadmin_files, pgadmin_master_password
+from odoo_instance_sdk.internal import pgadmin_authorization, pgadmin_files, pgadmin_master_password
 from odoo_instance_sdk.internal.pgadmin_files import PgAdminPaths
 from odoo_instance_sdk.internal.pgadmin_master_password import unlock_master_password
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
@@ -103,8 +104,8 @@ def test_unlock_posts_password_only_in_the_body(monkeypatch: pytest.MonkeyPatch)
         def __enter__(self) -> _Response:
             return self
 
-        def __exit__(self, *_args: object) -> bool:
-            return False
+        def __exit__(self, *_args: object) -> None:
+            return None
 
     class _Opener:
         def open(self, request: object, timeout: float) -> _Response:
@@ -119,9 +120,7 @@ def test_unlock_posts_password_only_in_the_body(monkeypatch: pytest.MonkeyPatch)
                 url,
             )
 
-    monkeypatch.setattr(
-        pgadmin_master_password.urllib.request, "build_opener", lambda *_args, **_kwargs: _Opener()
-    )
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args, **_kwargs: _Opener())
     unlock_master_password(5050, "secret-value", deadline=time.monotonic() + 5)
     post = requests[1]
     assert getattr(post, "full_url") == "http://127.0.0.1:5050/browser/master_password"
@@ -165,7 +164,7 @@ def test_existing_profile_without_a_file_is_not_reset(
         lambda *_args, **_kwargs: pytest.fail("reset or unlock"),
     )
     with pytest.raises(PgAdminUnavailableError):
-        pgadmin_container._authorize_selected_database(
+        pgadmin_authorization.authorize_selected_database(
             _preparation(local_paths),
             "demo",
             runner=cast("ComposeRunner", _Runner("1\n")),
@@ -177,7 +176,7 @@ def test_existing_profile_without_a_file_is_not_reset(
 
 def test_denied_database_authentication_fails_the_open(local_paths: PgAdminPaths) -> None:
     with pytest.raises(PgAdminUnavailableError):
-        pgadmin_container._authorize_selected_database(
+        pgadmin_authorization.authorize_selected_database(
             _preparation(local_paths),
             "demo",
             runner=cast("ComposeRunner", _Runner("0\n", authenticate=1)),
@@ -188,7 +187,7 @@ def test_denied_database_authentication_fails_the_open(local_paths: PgAdminPaths
 
 def test_unreadable_profile_does_not_create_a_password_file(local_paths: PgAdminPaths) -> None:
     with pytest.raises(PgAdminUnavailableError):
-        pgadmin_container._authorize_selected_database(
+        pgadmin_authorization.authorize_selected_database(
             _preparation(local_paths),
             "demo",
             runner=cast("ComposeRunner", _Runner("", probe_code=1)),
@@ -209,11 +208,11 @@ def test_unlock_rejects_a_different_loopback_port(monkeypatch: pytest.MonkeyPatc
         def __enter__(self) -> _Response:
             return self
 
-        def __exit__(self, *_args: object) -> bool:
-            return False
+        def __exit__(self, *_args: object) -> None:
+            return None
 
     monkeypatch.setattr(
-        pgadmin_master_password.urllib.request,
+        urllib.request,
         "build_opener",
         lambda *_args, **_kwargs: type(
             "_Opener", (), {"open": lambda self, request, timeout: _Response()}

@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
-from odoo_instance_sdk.internal import pgadmin_master_password, pgadmin_readiness
+from odoo_instance_sdk.internal import pgadmin_readiness
+from odoo_instance_sdk.internal.pgadmin_authorization import (
+    authenticate_argv,
+    authorize_selected_database,
+    probe_argv,
+)
 from odoo_instance_sdk.internal.pgadmin_files import (
     PGADMIN_CONTAINER_NAME,
     PGADMIN_CONTAINER_PORT,
@@ -26,9 +31,7 @@ from odoo_instance_sdk.internal.pgadmin_files import (
     PgAdminPaths,
     PgAdminPreparation,
     PostgresIdentity,
-    load_master_password,
     pgadmin_mounts,
-    store_new_master_password,
 )
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
 from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, active_context
@@ -60,32 +63,6 @@ _ACTIVE_PGPASS_REFRESH = (
     f'cp {PGADMIN_PGPASS_DESTINATION} "$temporary"; '
     'chmod 0600 "$temporary"; '
     f'mv -f "$temporary" {PGADMIN_DATA_DESTINATION}/.pgpass'
-)
-_PROFILE_PROBE = (
-    "import sqlite3\n"
-    "from pathlib import Path\n"
-    'path=Path("/var/lib/pgadmin/pgadmin4.db")\n'
-    "if not path.is_file():\n"
-    '    print("0")\n'
-    "else:\n"
-    "    try:\n"
-    '        db=sqlite3.connect("file:" + path.as_posix() + "?mode=ro", uri=True)\n'
-    '        row=db.execute("SELECT masterpass_check FROM user LIMIT 1").fetchone()\n'
-    "    except sqlite3.Error:\n"
-    "        raise SystemExit(1)\n"
-    "    else:\n"
-    '        print("1" if row is not None and row[0] not in (None, "") else "0")\n'
-)
-_SELECT_ONE = (
-    "import sys,psycopg\n"
-    "connection=psycopg.connect(host=sys.argv[1],port=int(sys.argv[2]),user=sys.argv[3],"
-    "dbname=sys.argv[4],passfile='/var/lib/pgadmin/.pgpass')\n"
-    "cursor=connection.cursor()\n"
-    "cursor.execute('SELECT 1')\n"
-    "row=cursor.fetchone()\n"
-    "cursor.close()\n"
-    "connection.close()\n"
-    "raise SystemExit(0 if row == (1,) else 1)\n"
 )
 _PGADMIN_EFFECTIVE_SERVER_QUERY = (
     "import json,sqlite3;"
@@ -170,7 +147,7 @@ def reconciliation_steps(
         ),
         PreparedStep(
             step_id="pgadmin.master_password.probe",
-            argv=_docker_probe_argv(PGADMIN_CONTAINER_NAME),
+            argv=probe_argv(PGADMIN_CONTAINER_NAME),
             read_only=True,
         ),
         PreparedAction(
@@ -181,7 +158,7 @@ def reconciliation_steps(
         ),
         PreparedStep(
             step_id="pgadmin.container.authenticate",
-            argv=_docker_authenticate_argv(
+            argv=authenticate_argv(
                 PGADMIN_CONTAINER_NAME,
                 postgres_host,
                 postgres_port,
@@ -256,34 +233,6 @@ def _docker_refresh_argv(container: str) -> tuple[str, ...]:
         "/bin/sh",
         "-c",
         _ACTIVE_PGPASS_REFRESH,
-    )
-
-
-def _docker_probe_argv(container: str) -> tuple[str, ...]:
-    return (
-        "docker",
-        "exec",
-        container,
-        "/venv/bin/python3",
-        "-c",
-        _PROFILE_PROBE,
-    )
-
-
-def _docker_authenticate_argv(
-    container: str, host: str, port: int, user: str, database: str
-) -> tuple[str, ...]:
-    return (
-        "docker",
-        "exec",
-        container,
-        "/venv/bin/python3",
-        "-c",
-        _SELECT_ONE,
-        host,
-        str(port),
-        user,
-        database,
     )
 
 
@@ -505,7 +454,7 @@ def reconcile_container(
                 planned=planned,
                 step_id="pgadmin.container.verify",
             )
-            _authorize_selected_database(
+            authorize_selected_database(
                 preparation,
                 database,
                 runner=runner,
@@ -575,7 +524,7 @@ def reconcile_container(
             planned=planned,
             step_id="pgadmin.container.verify",
         )
-        _authorize_selected_database(
+        authorize_selected_database(
             preparation,
             database,
             runner=runner,
@@ -924,80 +873,6 @@ def refresh_active_pgpass(
     )
     if result.returncode != 0:
         raise PgAdminUnavailableError()
-
-
-def _authorize_selected_database(
-    preparation: PgAdminPreparation,
-    database: str,
-    *,
-    runner: ComposeRunner,
-    deadline: float,
-    planned: bool,
-) -> None:
-    """Unlock the desktop master password and prove the selected database."""
-    container = PGADMIN_CONTAINER_NAME if planned else preparation.container_name
-    established = _profile_has_master_password(runner, container, deadline=deadline)
-    password = load_master_password(preparation.paths)
-    if password is None and established:
-        raise PgAdminUnavailableError()
-    if password is None:
-        password = store_new_master_password(preparation.paths)
-    context = active_context()
-    if context is not None and context.planned("pgadmin.master_password.unlock"):
-        context.action("pgadmin.master_password.unlock")
-    elif planned:
-        raise PgAdminUnavailableError()
-    pgadmin_master_password.unlock_master_password(preparation.port, password, deadline=deadline)
-    host, port, user = _selected_connection(preparation, database)
-    result = run_docker(
-        runner,
-        list(_docker_authenticate_argv(container, host, port, user, database)),
-        deadline=deadline,
-        step_id="pgadmin.container.authenticate",
-    )
-    if result.returncode != 0:
-        raise PgAdminUnavailableError()
-
-
-def _profile_has_master_password(runner: ComposeRunner, container: str, *, deadline: float) -> bool:
-    result = run_docker(
-        runner,
-        list(_docker_probe_argv(container)),
-        deadline=deadline,
-        step_id="pgadmin.master_password.probe",
-    )
-    if result.returncode != 0:
-        raise PgAdminUnavailableError()
-    token = result.stdout.strip()
-    if token == "1":
-        return True
-    if token == "0":
-        return False
-    raise PgAdminUnavailableError()
-
-
-def _selected_connection(preparation: PgAdminPreparation, database: str) -> tuple[str, int, str]:
-    try:
-        payload = json.loads(preparation.paths.servers_json.read_text(encoding="utf-8"))
-        server = payload["Servers"]["1"]
-    except (OSError, KeyError, TypeError, ValueError):
-        raise PgAdminUnavailableError() from None
-    if not isinstance(server, dict):
-        raise PgAdminUnavailableError()
-    host = server.get("Host")
-    port = server.get("Port")
-    user = server.get("Username")
-    if (
-        not isinstance(host, str)
-        or not host
-        or isinstance(port, bool)
-        or not isinstance(port, int)
-        or not isinstance(user, str)
-        or not user
-        or server.get("MaintenanceDB") != database
-    ):
-        raise PgAdminUnavailableError()
-    return host, port, user
 
 
 def verify_server(
