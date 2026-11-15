@@ -6,8 +6,9 @@ import json
 import os
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -170,8 +171,12 @@ def test_cursor_errors_have_stable_codes_and_no_paths(tmp_path: Path) -> None:
     logfile.write_bytes(_line("rewritten"))
     with pytest.raises(LogQueryError, match="reset") as reset:
         search_page(scope, None, LogFilters(), after=page.next_cursor)
+    previous = logfile.stat()
+    rotated = logfile.with_name(".odoo.log.next")
+    rotated.write_bytes(_line("rotated"))
     logfile.unlink()
-    (logfile.parent / "odoo.log").write_bytes(_line("rotated"))
+    os.replace(rotated, logfile)
+    assert (logfile.stat().st_dev, logfile.stat().st_ino) != (previous.st_dev, previous.st_ino)
     with pytest.raises(LogQueryError, match="no longer retained") as expired:
         search_page(scope, None, LogFilters(), after=page.next_cursor)
     for error in (invalid, wrong, reset, expired):
@@ -319,7 +324,7 @@ def test_search_json_page_and_jsonl_interrupt(tmp_path: Path) -> None:
         cursor="cursor-token",
     )
 
-    def follow(**_kwargs: object):
+    def follow(**_kwargs: object) -> Iterator[LogEvent]:
         yield event
         raise KeyboardInterrupt
 
@@ -370,7 +375,7 @@ def test_present_log_follow_checkpoint_exits_130() -> None:
         cursor="cursor-token",
     )
 
-    def events():
+    def events() -> Iterator[LogEvent]:
         yield event
         raise KeyboardInterrupt
 
@@ -392,7 +397,12 @@ def test_environment_removal_deletes_owned_logs_and_keeps_unrelated_directories(
     unrelated = tmp_path / "unrelated-logs"
     unrelated.mkdir()
     failures: list[str] = []
-    assert _PgadminMixin._remove_files(object(), generated, environment / "lock", failures) is False
+    assert (
+        _PgadminMixin._remove_files(
+            cast("_PgadminMixin", None), generated, environment / "lock", failures
+        )
+        is False
+    )
     assert not (environment / "logs").exists()
     assert (environment / "keep").is_dir()
     assert unrelated.is_dir()
