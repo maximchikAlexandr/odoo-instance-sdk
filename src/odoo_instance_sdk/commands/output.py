@@ -926,25 +926,33 @@ def fail(
     usage: bool = False,
     error_code: str | None = None,
     details: JsonObject | None = None,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
 ) -> Never:
     mode = output_mode
-    context = _failure_context(message if isinstance(message, BaseException) else None)
+    diagnostic_context = (
+        context
+        if context is not None
+        else _failure_context(message if isinstance(message, BaseException) else None)
+    )
+    document_context = diagnostic_context if mode is not OutputMode.RICH else context
     from odoo_instance_sdk.exceptions import PlanError
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropSafetyError
 
     if isinstance(message, DatabaseDropSafetyError) and details is None:
-        details = context
+        details = diagnostic_context
     if isinstance(message, PlanError):
         if error_code is None:
             error_code = message.code
         if details is None and message.details:
             details = message.details
-    rendered_message = _failure_message(message, context)
+    rendered_message = _failure_message(message, diagnostic_context)
     if mode is not OutputMode.RICH:
         emit(
             failure_document(
                 command=command,
-                context=context,
+                context=document_context,
+                provenance=provenance,
                 dry_run=dry_run,
                 error_code=error_code
                 or ("usage_error" if usage else command.replace(".", "_") + "_failed"),
@@ -957,6 +965,8 @@ def fail(
         emit(
             failure_document(
                 command=command,
+                context=document_context,
+                provenance=provenance,
                 dry_run=dry_run,
                 error_message=rendered_message,
                 error_details=details,

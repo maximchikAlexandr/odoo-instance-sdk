@@ -10,7 +10,7 @@ from typing import Literal
 from odcli_openspec.adapter import progress_from_parts
 from odcli_openspec.errors import OpenSpecError
 from odcli_openspec.models import OpenSpecProgress
-from odcli_openspec.probes import assess_probe, probe_steps, run_probe
+from odcli_openspec.probes import assess_probe, probe_steps, run_probe, trusted_executable
 from odcli_openspec.store import read_binding
 from odoo_instance_sdk.execution import ExternalEffects, external_command
 from odoo_instance_sdk.models import CheckoutRow, EnvironmentFactsSummary
@@ -61,9 +61,11 @@ class OpenSpecFactsProvider:
             return _summary_for(_unbound(row.environment_id))
         if time.monotonic() + self._probe_timeout > deadline:
             return _summary_for(_failed(binding.change_id, "probe_budget_exceeded"))
-        progress = _probe(
-            row.worktree_path, binding.executable, binding.change_id, self._probe_timeout
-        )
+        try:
+            executable = trusted_executable(binding.executable)
+        except OpenSpecError as exc:
+            return _summary_for(_failed(binding.change_id, exc.reason))
+        progress = _probe(row.worktree_path, executable, binding.change_id, self._probe_timeout)
         return _summary_for(progress)
 
 

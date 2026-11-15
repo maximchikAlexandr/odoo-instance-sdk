@@ -92,7 +92,7 @@ def _install_fakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     log.write_text("", encoding="utf-8")
     monkeypatch.setenv("ODCLI_FAKE_LOG", str(log))
     monkeypatch.setenv("ODCLI_USER_ROOT", str(tmp_path / "odcli"))
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
     return log
 
 

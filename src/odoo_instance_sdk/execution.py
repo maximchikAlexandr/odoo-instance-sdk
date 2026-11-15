@@ -208,7 +208,7 @@ class ExternalEffects:
         context: Ledger for the command that owns these steps.
     """
 
-    def __init__(self, context: RunContext[object]) -> None:
+    def __init__(self, context: RunContext[JsonValue]) -> None:
         self._context = context
 
     def process(self, step_id: str) -> CapturedProcessOutput:
@@ -329,7 +329,7 @@ def external_command(
     private_steps = tuple(_private_step(step) for step in steps)
 
     def run(context: RunContext[R]) -> R:
-        return callback(ExternalEffects(cast("RunContext[object]", context)))
+        return callback(ExternalEffects(cast("RunContext[JsonValue]", context)))
 
     return _command_from_private(private_steps, run)
 
@@ -373,7 +373,7 @@ def continue_command(
                 raise
         for step in prepared.steps:
             context.note_nested(step.step_id)
-        return callback(value, ExternalEffects(cast("RunContext[object]", context)))
+        return callback(value, ExternalEffects(cast("RunContext[JsonValue]", context)))
 
     return _command_from_private(
         private_steps,

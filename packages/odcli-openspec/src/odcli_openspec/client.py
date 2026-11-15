@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from odcli_openspec.adapter import parse_changes, progress_from_parts
+from odcli_openspec.adapter import parse_changes, progress_from_parts, require_change_id
 from odcli_openspec.errors import OpenSpecError
 from odcli_openspec.models import (
     OpenSpecBinding,
@@ -20,6 +20,7 @@ from odcli_openspec.probes import (
     openspec_executable,
     probe_steps,
     run_probe,
+    trusted_executable,
 )
 from odcli_openspec.store import delete_binding, read_binding, write_binding
 from odoo_instance_sdk import OdooClient
@@ -58,7 +59,6 @@ class OpenSpecChanges:
         Returns:
             The captured list command.
         """
-        del self._core
         root = str((cwd or Path.cwd()).resolve())
         executable = openspec_executable()
         step = ProcessStep(
@@ -114,6 +114,7 @@ class OpenSpecEnvironments:
         Returns:
             The captured bind command.
         """
+        require_change_id(change)
         environment = _resolve_environment(self._core, cwd)
         executable = openspec_executable()
         steps: tuple[ExecutionStep, ...] = (
@@ -151,6 +152,10 @@ class OpenSpecEnvironments:
             except OpenSpecError as exc:
                 effects.fail("openspec.bind", exc)
                 raise
+            except OSError as exc:
+                error = OpenSpecError("binding_io", "OpenSpec binding file could not be written")
+                effects.fail("openspec.bind", error)
+                raise error from exc
             effects.complete("openspec.bind")
             return binding
 
@@ -215,21 +220,29 @@ class OpenSpecEnvironments:
         environments = tuple(self._core.environments.list())
         steps: list[ProcessStep] = []
         bound_ids: list[str] = []
+        probed: set[str] = set()
         for environment in environments:
             binding = read_binding(environment.id)
             if binding is None:
+                continue
+            environment_id = str(environment.id)
+            try:
+                executable = trusted_executable(binding.executable)
+            except OpenSpecError:
+                bound_ids.append(environment_id)
                 continue
             prefix = f"openspec.progress.{environment.id}"
             steps.extend(
                 probe_steps(
                     prefix=prefix,
-                    executable=binding.executable,
+                    executable=executable,
                     change_id=binding.change_id,
                     cwd=environment.worktree_path,
                     timeout=_PROBE_TIMEOUT,
                 )
             )
-            bound_ids.append(str(environment.id))
+            bound_ids.append(environment_id)
+            probed.add(environment_id)
         bound_values: list[JsonValue] = list(bound_ids)
         action = ActionStep(
             step_id="openspec.progress",
@@ -244,7 +257,7 @@ class OpenSpecEnvironments:
             effects.begin("openspec.progress")
             try:
                 for environment in environments:
-                    rows.append(_progress_for_environment(environment, effects))
+                    rows.append(_progress_for_environment(environment, effects, probed))
             except Exception as exc:
                 effects.fail("openspec.progress", exc)
                 raise
@@ -297,10 +310,19 @@ def _resolve_environment(core: OdooClient, cwd: Path | None) -> DevelopmentEnvir
 def _progress_for_environment(
     environment: DevelopmentEnvironment,
     effects: ExternalEffects,
+    probed: set[str],
 ) -> OpenSpecProgress:
     binding = read_binding(environment.id)
     if binding is None:
-        return _unbound(str(environment.id))
+        return _unbound()
+    if str(environment.id) not in probed:
+        return progress_from_parts(
+            binding_state="unavailable",
+            change_id=binding.change_id,
+            root=None,
+            version=None,
+            reason="missing_executable",
+        )
     prefix = f"openspec.progress.{environment.id}"
     outputs, process_reason = run_probe(effects, prefix)
     return assess_probe(
@@ -310,8 +332,7 @@ def _progress_for_environment(
     )
 
 
-def _unbound(environment_id: str) -> OpenSpecProgress:
-    del environment_id
+def _unbound() -> OpenSpecProgress:
     return progress_from_parts(
         binding_state="unbound",
         change_id=None,

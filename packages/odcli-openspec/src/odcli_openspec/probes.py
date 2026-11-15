@@ -31,6 +31,33 @@ def openspec_executable() -> str:
     return shutil.which("openspec") or "openspec"
 
 
+def trusted_executable(stored: str) -> str:
+    """Return the current OpenSpec executable when a binding still names it.
+
+    Args:
+        stored: Executable recorded when the environment was bound.
+
+    Returns:
+        The executable resolved from the current PATH.
+
+    Raises:
+        OpenSpecError: The stored path is not the current ``openspec`` binary.
+    """
+    current = openspec_executable()
+    if stored in {current, "openspec"} and Path(current).name == "openspec":
+        return current
+    try:
+        same = Path(stored).name == "openspec" and Path(stored).resolve() == Path(current).resolve()
+    except OSError:
+        same = False
+    if not same:
+        raise OpenSpecError(
+            "missing_executable",
+            "stored OpenSpec executable does not match the current openspec",
+        )
+    return current
+
+
 def planned_worktree(argv: tuple[str, ...]) -> str:
     """Return the worktree path from a captured ``git worktree add`` argv.
 

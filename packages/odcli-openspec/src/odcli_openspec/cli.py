@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import NoReturn, TypeVar
+from typing import NoReturn, TypeVar, cast
 
 import click
 import msgspec
@@ -12,7 +12,7 @@ import msgspec
 from odcli_openspec.client import OpenSpecOdooClient
 from odcli_openspec.errors import OpenSpecError
 from odoo_instance_sdk import OdooClient, OdooClientConfig
-from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.execution import Command, JsonValue, canonical_plan_projection
 
 T = TypeVar("T")
 
@@ -75,10 +75,10 @@ def _run(build: Callable[[], Command[T]], dry_run: bool, output_format: str) -> 
     except OpenSpecError as exc:
         _fail(exc)
     if dry_run:
-        _emit(msgspec.to_builtins(command.plan), output_format)
+        _emit(canonical_plan_projection(command.plan), output_format)
         return
     try:
-        _emit(msgspec.to_builtins(command.run()), output_format)
+        _emit(cast("JsonValue", msgspec.to_builtins(command.run())), output_format)
     except OpenSpecError as exc:
         _fail(exc)
 
@@ -88,7 +88,7 @@ def _fail(exc: OpenSpecError) -> NoReturn:
     raise SystemExit(1)
 
 
-def _emit(payload: object, output_format: str) -> None:
+def _emit(payload: JsonValue, output_format: str) -> None:
     if output_format == "json":
         click.echo(json.dumps(payload, sort_keys=True))
         return

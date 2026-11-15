@@ -12,7 +12,9 @@ from odcli_openspec.errors import OpenSpecError
 from odcli_openspec.models import BindingState, OpenSpecChange, OpenSpecProgress
 
 _VERSION = re.compile(r"1\.(12|13)\.\d+\Z")
-_JSON_OBJECT = dict[str, object]
+_CHANGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+type JsonData = bool | int | float | str | list["JsonData"] | dict[str, "JsonData"] | None
+type JsonObject = dict[str, JsonData]
 
 
 def now_stamp() -> str:
@@ -30,6 +32,9 @@ def implementation_percent(completed: int, total: int) -> int | None:
     Returns:
         ``None`` when there are no tasks. Otherwise
         ``(completed * 100 + total // 2) // total``.
+
+    Raises:
+        OpenSpecError: Task counts are outside the documented range.
     """
     if total <= 0:
         return None
@@ -56,7 +61,23 @@ def supported_version(stdout: str) -> str:
     return text
 
 
-def decode_object(stdout: str) -> _JSON_OBJECT:
+def require_change_id(change: str) -> None:
+    """Reject a change id that is a path or an option.
+
+    Args:
+        change: Requested OpenSpec change id.
+
+    Raises:
+        OpenSpecError: The id is not a single change name.
+    """
+    if _CHANGE_ID.fullmatch(change) is None or ".." in change:
+        raise OpenSpecError(
+            "invalid_change",
+            "OpenSpec change id must be a single change name, not a path",
+        )
+
+
+def decode_object(stdout: str) -> JsonObject:
     """Decode one JSON object and reject every other payload.
 
     Args:
@@ -74,7 +95,7 @@ def decode_object(stdout: str) -> _JSON_OBJECT:
         raise OpenSpecError("malformed_json", "OpenSpec returned malformed JSON") from exc
     if not isinstance(value, dict):
         raise OpenSpecError("openspec_incompatible", "OpenSpec JSON root must be an object")
-    return cast("_JSON_OBJECT", value)
+    return cast("JsonObject", value)
 
 
 def parse_changes(stdout: str) -> tuple[OpenSpecChange, ...]:
@@ -96,7 +117,7 @@ def parse_changes(stdout: str) -> tuple[OpenSpecChange, ...]:
     return tuple(parsed)
 
 
-def _one_change(item: object) -> OpenSpecChange:
+def _one_change(item: JsonData) -> OpenSpecChange:
     if not isinstance(item, dict):
         raise OpenSpecError("openspec_incompatible", "OpenSpec change entry is not an object")
     name = item.get("name")
@@ -149,7 +170,7 @@ def planning_progress(stdout: str, change_id: str) -> tuple[int, int, str, str]:
     return complete, len(artifacts), state, root
 
 
-def _status_error(payload: _JSON_OBJECT, change_id: str) -> bool:
+def _status_error(payload: JsonObject, change_id: str) -> bool:
     status = payload.get("status")
     if not isinstance(status, list):
         reported = payload.get("changeName")
@@ -157,7 +178,7 @@ def _status_error(payload: _JSON_OBJECT, change_id: str) -> bool:
     return any(isinstance(item, dict) and item.get("code") == "change_error" for item in status)
 
 
-def _root_path(payload: _JSON_OBJECT) -> str:
+def _root_path(payload: JsonObject) -> str:
     root = payload.get("root")
     path = root.get("path") if isinstance(root, dict) else None
     if not isinstance(path, str):
@@ -254,6 +275,9 @@ def progress_from_parts(
 
     Returns:
         The frozen progress row.
+
+    Raises:
+        OpenSpecError: ``binding_state`` is not a documented state.
     """
     if binding_state not in {"bound", "missing", "invalid", "unavailable", "unbound"}:
         raise OpenSpecError("openspec_incompatible", "binding state is not supported")

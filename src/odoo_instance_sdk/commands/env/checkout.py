@@ -11,6 +11,7 @@ import msgspec
 
 if TYPE_CHECKING:
     import click
+    from odcli_openspec.models import OpenSpecCheckoutResult
     from rich.table import Table
 
     from odoo_instance_sdk.internal.proc import RunContext
@@ -502,10 +503,14 @@ def env_checkout(
         assert captured is not None
         finish_openspec_checkout(
             openspec_change,
-            captured,
+            cast("DevelopmentEnvironment | OpenSpecCheckoutResult", captured),
             plan=command.plan,
             output_mode=output_mode,
-            provenance=ticket_provenance,
+            provenance={
+                "project_source": _project_provenance(cli_ctx),
+                "environment_source": "null",
+                **(ticket_provenance or {}),
+            },
         )
         result = EnvironmentCheckoutResult(
             environment=cast("DevelopmentEnvironment", captured),

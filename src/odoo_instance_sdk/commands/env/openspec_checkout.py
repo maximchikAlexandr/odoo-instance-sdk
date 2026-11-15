@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import importlib
 import re
-from typing import cast
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputMode,
     emit,
     fail,
-    model_to_dict,
     success_document,
 )
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan, canonical_plan_projection
+
+if TYPE_CHECKING:
+    from odcli_openspec.models import OpenSpecCheckoutResult
 from odoo_instance_sdk.models import DevelopmentEnvironment
 
 _CHANGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -38,7 +40,7 @@ def guard_openspec_checkout(change: str | None) -> None:
 def attach_openspec_checkout(
     command: Command[DevelopmentEnvironment],
     change: str | None,
-) -> Command[DevelopmentEnvironment] | Command[object]:
+) -> Command[DevelopmentEnvironment] | Command[OpenSpecCheckoutResult]:
     """Keep the core command, or append OpenSpec steps to the same snapshot.
 
     Args:
@@ -55,7 +57,7 @@ def attach_openspec_checkout(
 
 def finish_openspec_checkout(
     change: str | None,
-    captured: object,
+    captured: DevelopmentEnvironment | OpenSpecCheckoutResult,
     *,
     plan: ExecutionPlan,
     output_mode: OutputMode,
@@ -104,7 +106,7 @@ def require_openspec_extension(change: str) -> None:
 def compose_openspec_checkout(
     command: Command[DevelopmentEnvironment],
     change: str,
-) -> Command[object]:
+) -> Command[OpenSpecCheckoutResult]:
     """Append OpenSpec validation to a captured checkout command.
 
     Args:
@@ -116,11 +118,11 @@ def compose_openspec_checkout(
     """
     from odcli_openspec.checkout import compose_checkout_command
 
-    return cast("Command[object]", compose_checkout_command(command, change))
+    return compose_checkout_command(command, change)
 
 
 def present_openspec_checkout(
-    captured: object,
+    captured: DevelopmentEnvironment | OpenSpecCheckoutResult,
     *,
     plan: ExecutionPlan,
     output_mode: OutputMode,
@@ -146,7 +148,11 @@ def present_openspec_checkout(
         "worktree_path": captured.worktree_path,
         "change_id": captured.change_id,
         "reason": captured.reason,
-        "plan": model_to_dict(plan),
+        "plan": canonical_plan_projection(plan),
+    }
+    context: JsonObject = {
+        "environment_id": captured.environment_id,
+        "worktree_path": captured.worktree_path,
     }
     if captured.binding_failed:
         fail(
@@ -156,11 +162,14 @@ def present_openspec_checkout(
             dry_run=False,
             error_code="binding_failed",
             details=payload,
+            context=context,
+            provenance=provenance,
         )
     emit(
         success_document(
             command="env.checkout",
             result=payload,
+            context=context,
             provenance=provenance,
             dry_run=False,
         ),

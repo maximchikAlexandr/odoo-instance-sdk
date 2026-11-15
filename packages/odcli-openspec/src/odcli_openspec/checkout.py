@@ -107,6 +107,8 @@ def compose_checkout_command(
                 write_binding(binding)
             except OpenSpecError as exc:
                 failure = exc
+            except OSError:
+                failure = OpenSpecError("binding_io", "OpenSpec binding file could not be written")
         if failure is not None or binding is None:
             effects.fail(
                 "openspec.bind",
