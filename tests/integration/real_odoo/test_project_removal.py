@@ -151,6 +151,8 @@ def _exercise_public_project_forget_reinit_and_purge(
         str(project / "odoo-bin"),
         "--python",
         str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        "--venv",
+        ".venv",
         "--config",
         str(target_runtime.config_file),
         "--test-url",
@@ -239,6 +241,8 @@ def _exercise_public_project_forget_reinit_and_purge(
         str(project / "odoo-bin"),
         "--python",
         str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        "--venv",
+        ".venv",
         "--config",
         str(target_runtime.config_file),
         "--test-url",
@@ -263,6 +267,13 @@ def _exercise_public_project_forget_reinit_and_purge(
         reinit_args.extend(("--http-port", str(reinit_config.preferred_http_port)))
     reinit = invoke(*reinit_args)
     assert reinit.returncode == 0, reinit.stdout + reinit.stderr
+    primary_venv = project / ".venv"
+    interpreter_links = tuple(path for path in primary_venv.rglob("*") if path.is_symlink())
+    assert interpreter_links, "OdCLI-created primary venv must contain interpreter symlinks"
+    external_referent = tmp_path / f"external-venv-referent-{target_runtime.run_id}"
+    external_referent.write_bytes(b"external interpreter referent remains unchanged\n")
+    (primary_venv / "bin" / "odcli-external-canary").symlink_to(external_referent)
+    external_referent_before = external_referent.read_bytes()
     catalog = BackupCatalog(db_path=catalog_path)
     reactivated = catalog.get_project_for_lifecycle(project_id)
     assert reactivated is not None
@@ -429,6 +440,8 @@ def _exercise_public_project_forget_reinit_and_purge(
     purge_document = _document(purge)
     assert purge_document["result"]["registration_state"] == "forgotten"
     assert_source_result(project, project_id, purge_document)
+    assert not primary_venv.exists()
+    assert external_referent.read_bytes() == external_referent_before
     assert not (project / ".odcli" / "project.toml").exists()
     assert (unrelated_project / "sentinel.txt").read_text(encoding="utf-8") == "unrelated\n"
     assert shared_resource.read_bytes() == b"shared resource\n"

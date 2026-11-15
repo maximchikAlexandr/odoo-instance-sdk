@@ -21,6 +21,8 @@ SCANNER = "pip-audit 2.10.1"
 FIXED_OVERRIDES = {
     "certifi": "2026.10.19",
     "pillow": "13.0.0",
+    "pyasn1": "0.6.5",
+    "soupsieve": "4.0",
     "urllib3": "2.8.0",
     "werkzeug": "3.1.9",
 }
