@@ -728,7 +728,7 @@ class GitResource(GitLabMergeRequestMixin, GenericGitMixin):
         root = _worktree(self._instance)
         resolved = _base_ref(self._instance, base)
         verified = _verified_base_ref(root, resolved)
-        args = ["-C", str(root), "--base", verified]
+        args = ["--base", verified]
         if dry_run:
             args.append("--dry-run")
         if and_rebase:

@@ -1018,7 +1018,12 @@ def test_absorb_reports_unmapped_hunks_from_stdout_and_stderr(
 
     assert result.returncode == 0
     assert result.unmapped_hunks == ("unmapped stdout", "not mapped stderr")
-    assert "--and-rebase" in args_file.read_text(encoding="utf-8")
+    assert args_file.read_text(encoding="utf-8").splitlines() == [
+        "--base",
+        _git(tmp_path, "rev-parse", "main").strip(),
+        "--dry-run",
+        "--and-rebase",
+    ]
 
 
 @pytest.mark.parametrize("lease_returncode", [0, 1])
