@@ -211,6 +211,7 @@ def _owned_pgadmin_container(*, network: str) -> bool:
     )
 
 
+@pytest.mark.timeout(300)
 def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
