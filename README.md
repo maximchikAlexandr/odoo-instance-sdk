@@ -407,6 +407,16 @@ non-terminating alternative.
 
 ### Prepare a project database
 
+COPY provenance accepts a pinned commit SHA or `origin/<backup-branch>` when
+local Git evidence places the selected commit and backup branch tip on one
+linear ancestry chain. The fetched `origin` branch takes precedence over a
+stale local branch. A planning HEAD containing only `openspec/` changes from
+the common branch ancestor is also accepted after the remote branch advances.
+Missing refs, unrelated histories, diverged runtime changes, and different
+named branches remain mismatches. Adoption checks the adopted checkout's Git
+repository, preserves the explicit base and resolved SHA, and never moves refs.
+Branch provenance establishes lineage, not the exact commit of a backup snapshot.
+
 Database refresh can use a pinned remote test instance while keeping its
 master password outside the manifest. This complete example refreshes backups
 older than 24 hours and verifies branch provenance against `main`:

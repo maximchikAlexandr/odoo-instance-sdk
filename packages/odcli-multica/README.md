@@ -35,6 +35,12 @@ Git passthrough, HTTPS GitLab synchronization, and exact-key merge-request
 publication each fail before remote work when their prerequisite is absent.
 The extension never stores a token or creates a second checkout binding.
 
+An agent-created root issue can pass checkout/context verification without a
+human creator. In that case the context's root-creator fields remain unset;
+personal GitLab credential resolution still fails closed until a human root
+creator is available. An agent or run originator is never substituted as the
+credential owner. Lineage cycle and workspace checks still apply.
+
 Git and GitLab operations run as the resolved human root creator. Remote URLs,
 argv, logs, and result documents contain only safe host/project identifiers;
 credentials are supplied to the child process for one command and redacted at
