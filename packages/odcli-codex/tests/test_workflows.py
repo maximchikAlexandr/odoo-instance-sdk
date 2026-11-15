@@ -126,7 +126,22 @@ def test_newline_escapes_must_survive_splicing(tmp_path: Path, proposal: str, fi
     assert actual_filled == filled
     assert rejected == (() if filled else ("Line\n",))
     if filled:
-        assert "\\n" in updated
+        assert 'msgstr "Строка\\n"' in updated
+
+
+def test_empty_plural_form_uses_the_singular_source(tmp_path: Path) -> None:
+    catalog = tmp_path / "ru.po"
+    catalog.write_text(
+        'msgid "One"\nmsgid_plural "%d files"\nmsgstr[0] ""\nmsgstr[1] "файлов %d"\n',
+        encoding="utf-8",
+    )
+    _original, entries = read_catalog(catalog)
+    updated, rejected, filled = apply_translations(entries, {"One": ("Один", "файлов %d")})
+
+    assert filled == 1
+    assert rejected == ()
+    assert 'msgstr[0] "Один"' in updated
+    assert 'msgstr[1] "файлов %d"' in updated
 
 
 def test_message_does_not_plan_the_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

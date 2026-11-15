@@ -10,7 +10,9 @@ from odcli_codex.errors import CodexWorkflowError
 _FIELD = re.compile(r"^(msgctxt|msgid|msgid_plural|msgstr(?:\[\d+\])?)(\s+)\"(.*)\"$")
 _CONTINUED = re.compile(r"^\"(.*)\"$")
 _LANGUAGE = re.compile(r"^[a-z]{2}(?:[_-][A-Za-z]{2})?$")
-_TOKEN = re.compile(r"%(?:\([^)]+\))?[sdifr]|%%|\{[^{}\n]+\}|</?[A-Za-z][^>\s]*|\\[nNt\"\\]|\n|\t")
+_TOKEN = re.compile(
+    r"%(?:\([^)]+\))?[sdifr]|%%|\{[^{}\n]+\}|</?[A-Za-z][^>\s]*|\\[nNt\"\\]|\n|\t|\r"
+)
 _HEADER_LANGUAGE = re.compile(r"Language:\s*([A-Za-z_]+)")
 
 
@@ -155,9 +157,11 @@ def _splice(entry: CatalogEntry, proposal: str | tuple[str, ...]) -> tuple[str, 
         if not isinstance(proposal, str):
             return entry.raw, False
         pairs = (("msgstr", proposal),)
-    source = entry.fields.get("msgid_plural") or entry.msgid
     for key, value in pairs:
-        if not value or any(ord(char) < 32 and char not in "\t\n" for char in value):
+        source = entry.fields.get("msgid_plural") or entry.msgid
+        if key in {"msgstr", "msgstr[0]"}:
+            source = entry.msgid
+        if not value or any(ord(char) < 32 and char not in "\t\n\r" for char in value):
             return entry.raw, False
         if tokens(source) != tokens(value):
             return entry.raw, False
@@ -170,7 +174,7 @@ def _splice(entry: CatalogEntry, proposal: str | tuple[str, ...]) -> tuple[str, 
 def _replace_empty(raw: str, pairs: tuple[tuple[str, str], ...]) -> str | None:
     text = raw
     for key, value in pairs:
-        escaped = _escape(value)
+        escaped = _escape(value).replace("\\", "\\\\")
         pattern = re.compile(rf"^{re.escape(key)}\s+\"\"$", re.MULTILINE)
         text, count = pattern.subn(f'{key} "{escaped}"', text, count=1)
         if count != 1:
@@ -195,7 +199,9 @@ def _unescape(value: str) -> str:
     while index < len(value):
         if value[index] == "\\" and index + 1 < len(value):
             output.append(
-                {"n": "\n", "t": "\t", "\\": "\\", '"': '"'}.get(value[index + 1], value[index + 1])
+                {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"'}.get(
+                    value[index + 1], "\\" + value[index + 1]
+                )
             )
             index += 2
             continue
@@ -205,4 +211,10 @@ def _unescape(value: str) -> str:
 
 
 def _escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
