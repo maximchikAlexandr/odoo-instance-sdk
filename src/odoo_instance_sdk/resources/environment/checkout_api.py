@@ -8,7 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
+import msgspec
+
+from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError, StalePlanError
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import (
     Backup,
@@ -36,6 +38,7 @@ from odoo_instance_sdk.resources.environment.checkout_stages import normalize_ch
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.git_worktree import _GitLineageObservation
     from odoo_instance_sdk.internal.proc import RunContext
     from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -44,6 +47,18 @@ if TYPE_CHECKING:
 class _CheckoutApiMixin:
     if TYPE_CHECKING:
         _client: OdooClient
+
+        def _audit_checkout_plan(
+            self,
+            project: ProjectConfig | Path,
+            branch: str,
+            options: EnvironmentCheckoutOptions,
+            *,
+            repository_root: Path | None = None,
+            lineage_step_prefix: str | None = None,
+            lineage_observations: list[_GitLineageObservation] | None = None,
+            branch_step_id: str | None = None,
+        ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]: ...
 
         def _build_checkout_snapshot(
             self,
@@ -67,12 +82,51 @@ class _CheckoutApiMixin:
             checkout_path: Path | None = None,
         ) -> _CheckoutPlan: ...
 
-        def _audit_checkout_plan(
-            self,
-            project: ProjectConfig | Path,
-            branch: str,
-            options: EnvironmentCheckoutOptions,
-        ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]: ...
+    def _revalidate_adopted_checkout_provenance(
+        self, plan: _CheckoutPlan, snapshot: _CheckoutSnapshot
+    ) -> None:
+        observations: list[_GitLineageObservation] = []
+        provenance, freshness, warnings = self._audit_checkout_plan(
+            plan.project,
+            plan.branch,
+            plan.options,
+            repository_root=plan.worktree,
+            lineage_step_prefix="checkout.validate.git.lineage",
+            lineage_observations=observations,
+        )
+        if tuple(observations) != plan.adopted_lineage_evidence:
+            raise StalePlanError("checkout Git lineage evidence changed after planning")
+        provenance = msgspec.structs.replace(
+            provenance,
+            source_name=plan.source_name,
+            source_base_url=plan.source_base_url,
+            resolved_base_revision=plan.base_revision,
+            backup_id=(plan.selected_backup.id if plan.selected_backup else provenance.backup_id),
+        )
+        if (
+            provenance != snapshot.public.provenance
+            or freshness != snapshot.public.freshness
+            or warnings != snapshot.public.warnings
+        ):
+            raise StalePlanError("checkout provenance changed after planning")
+
+    def _validate_adoption_retry_identity(self, plan: _CheckoutPlan) -> None:
+        """Re-capture adoption evidence before reusing a ready catalog row."""
+        current_project = ProjectConfig.load(plan.project.repository_root)
+        current_source = self._copy_source_metadata(current_project, plan.options)
+        current_fingerprint = self._adoption_fingerprint(
+            plan.project_id or "",
+            plan.worktree,
+            Path(plan.git_common_dir),
+            plan.options,
+            source_name=current_source[0],
+            source_base_url=current_source[1],
+            source_git_branch=current_source[2],
+            source_database=current_source[3],
+            selected_backup_id=(current_source[4].id if current_source[4] is not None else None),
+        )
+        if current_fingerprint != plan.adoption_input_fingerprint:
+            raise StalePlanError("adoption resolved base or source identity changed after planning")
 
     def _copy_source_metadata(
         self, project: ProjectConfig, options: EnvironmentCheckoutOptions
@@ -279,7 +333,20 @@ class _CheckoutApiMixin:
             project_id=project_id,
             adoption_input_fingerprint=fingerprint,
         )
-        provenance, freshness, warnings = self._audit_checkout_plan(project_cfg, branch, options)
+        lineage_observations: list[_GitLineageObservation] = []
+        provenance, freshness, warnings = self._audit_checkout_plan(
+            project_cfg,
+            branch,
+            options,
+            repository_root=actual_root,
+            lineage_step_prefix="checkout.validate.git.lineage",
+            lineage_observations=lineage_observations,
+        )
+        private = replace(
+            private,
+            adopted_lineage_evidence=tuple(lineage_observations),
+            provenance_git_branch=provenance.recorded_branch,
+        )
         normalized = normalize_checkout_projections(
             _CheckoutPlanningState(
                 private=private,

@@ -53,6 +53,7 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _CheckoutPlan as _CheckoutPlan,
     _CheckoutPlanningState as _CheckoutPlanningState,
     _CheckoutSnapshot as _CheckoutSnapshot,
+    _checkout_git_steps as _checkout_git_steps,
     _configured_addons as _configured_addons,
     _dependency_evidence as _dependency_evidence,
     _ExpressionApi as _ExpressionApi,
@@ -451,7 +452,6 @@ def _restore_audit_backup_from_sqlite(
 
 
 def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
-    """Return the private steps that are projected and consumed by checkout."""
     from odoo_instance_sdk.internal.pg.builder import build_psql_specification
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
@@ -478,6 +478,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
             ),
             read_only=True,
         ),
+        *_checkout_git_steps(plan),
         PreparedAction(
             step_id="checkout.catalog",
             action="record_environment",
@@ -513,9 +514,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
             )
         )
     if plan.branch_revalidator is not None:
-        # Ticket allocation revalidation is part of the immutable checkout
-        # boundary.  Capture its Git reads here so the callback cannot open an
-        # unplanned default ``process`` step while the command is running.
+        # Keep ticket Git reads captured so callbacks cannot spawn unplanned processes.
         steps.extend(
             (
                 PreparedStep(

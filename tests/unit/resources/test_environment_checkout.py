@@ -32,6 +32,7 @@ from odoo_instance_sdk.exceptions import (
     SecretStoreCorruptError,
     SecretStoreRecordError,
     StalePlanError,
+    UnplannedStepError,
 )
 from odoo_instance_sdk.execution import Command, JsonValue, ProcessStep
 from odoo_instance_sdk.internal.applied_settings import (
@@ -317,6 +318,20 @@ def _record_backup(env_client: OdooClient, backup: Backup) -> None:
         backup.sha256,
         downloaded_at=backup.downloaded_at,
     )
+
+
+def _record_restored_provenance(env_client: OdooClient, tmp_path: Path, branch: str) -> Backup:
+    backup = _valid_retained_backup(tmp_path, branch=branch)
+    _record_backup(env_client, backup)
+    env_client.get_catalog().record_restore("localhost", 5432, "comerta", str(backup.id))
+    return backup
+
+
+def _select_checkout_provenance_ref(project_manifest: Path, *, origin: bool) -> None:
+    git = ["git", "-C", str(project_manifest)]
+    subprocess.run([*git, "update-ref", "-d", "refs/remotes/origin/main"], check=False)
+    if origin:
+        subprocess.run([*git, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
 
 
 def _add_test_instance_config(
@@ -1419,6 +1434,147 @@ class TestCheckoutPreflight:
         )
         assert branches.stdout.strip() == ""
 
+    @pytest.mark.parametrize(
+        ("recorded_branch", "pin_parent"),
+        [("main^{commit}", False), ("main~1", True), ("main..x", False)],
+    )
+    @pytest.mark.parametrize("origin", [True, False], ids=["origin", "local-fallback"])
+    def test_checkout_capture_rejects_malformed_pinned_provenance_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+        recorded_branch: str,
+        pin_parent: bool,
+        origin: bool,
+    ) -> None:
+        if pin_parent:
+            subprocess.run(
+                ["git", "-C", str(project_manifest), "commit", "--allow-empty", "-m", "tip"],
+                check=True,
+                capture_output=True,
+            )
+        head = subprocess.check_output(
+            ["git", "-C", str(project_manifest), "rev-parse", "HEAD"], text=True
+        ).strip()
+        pinned_base = subprocess.check_output(
+            ["git", "-C", str(project_manifest), "rev-parse", "HEAD~1" if pin_parent else "HEAD"],
+            text=True,
+        ).strip()
+        _select_checkout_provenance_ref(project_manifest, origin=origin)
+        backup = _record_restored_provenance(env_client, tmp_path, recorded_branch)
+        catalog = env_client.get_catalog()
+
+        with pytest.raises(EnvironmentConflictError, match="does not match"):
+            env_client.environments.checkout_command(
+                project_manifest,
+                "feat/malformed-pinned-provenance",
+                options=EnvironmentCheckoutOptions(base_ref=pinned_base),
+            )
+
+        assert head
+        assert env_client.environments.list(project=project_manifest) == []
+        latest = catalog.latest_restore_provenance("localhost", 5432, "comerta")
+        row = catalog.get_by_id(str(backup.id))
+        assert latest is not None and latest.id == backup.id
+        assert row is not None and row["state"] == "available"
+
+    @pytest.mark.parametrize("recorded_branch", ["main^{commit}", "main~1"])
+    def test_checkout_capture_rejects_equal_text_malformed_provenance(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+        recorded_branch: str,
+    ) -> None:
+        if recorded_branch == "main~1":
+            subprocess.run(
+                ["git", "-C", str(project_manifest), "commit", "--allow-empty", "-m", "tip"],
+                check=True,
+                capture_output=True,
+            )
+        backup = _record_restored_provenance(env_client, tmp_path, recorded_branch)
+        catalog = env_client.get_catalog()
+
+        with pytest.raises(EnvironmentConflictError, match="does not match"):
+            env_client.environments.checkout_command(
+                project_manifest,
+                "feat/equal-text-malformed-provenance",
+                options=EnvironmentCheckoutOptions(base_ref=recorded_branch),
+            )
+
+        assert env_client.environments.list(project=project_manifest) == []
+        latest = catalog.latest_restore_provenance("localhost", 5432, "comerta")
+        row = catalog.get_by_id(str(backup.id))
+        assert latest is not None and latest.id == backup.id
+        assert row is not None and row["state"] == "available"
+
+    @pytest.mark.parametrize("origin", [True, False], ids=["origin", "local-fallback"])
+    def test_checkout_execution_rejects_changed_provenance_ref_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+        origin: bool,
+    ) -> None:
+        _select_checkout_provenance_ref(project_manifest, origin=origin)
+        initial = _record_restored_provenance(env_client, tmp_path, "main")
+        pinned_base = subprocess.check_output(
+            ["git", "-C", str(project_manifest), "rev-parse", "HEAD"], text=True
+        ).strip()
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/provenance-ref-drift",
+            options=EnvironmentCheckoutOptions(base_ref=pinned_base),
+        )
+        prepared_ids = {step.step_id for step in command._prepared().steps}
+        assert "checkout.validate.git.branch" in prepared_ids
+
+        changed = _record_restored_provenance(env_client, tmp_path, "main^{commit}")
+        catalog = env_client.get_catalog()
+        assert changed.id != initial.id
+
+        with pytest.raises(UnplannedStepError):
+            command.run()
+
+        assert env_client.environments.list(project=project_manifest) == []
+        latest = catalog.latest_restore_provenance("localhost", 5432, "comerta")
+        row = catalog.get_by_id(str(changed.id))
+        assert latest is not None and latest.id == changed.id
+        assert row is not None and row["state"] == "available"
+
+    @pytest.mark.parametrize("origin", [True, False], ids=["origin", "local-fallback"])
+    def test_checkout_capture_accepts_literal_slash_provenance_branch(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+        origin: bool,
+    ) -> None:
+        subprocess.run(
+            ["git", "-C", str(project_manifest), "branch", "features/slash-name", "HEAD"],
+            check=True,
+        )
+        _select_checkout_provenance_ref(project_manifest, origin=origin)
+        _record_restored_provenance(env_client, tmp_path, "features/slash-name")
+        pinned_base = subprocess.check_output(
+            ["git", "-C", str(project_manifest), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/literal-slash-provenance",
+            options=EnvironmentCheckoutOptions(base_ref=pinned_base),
+        )
+
+        branch_probe = next(
+            step
+            for step in command._prepared().steps
+            if step.step_id == "checkout.validate.git.branch"
+        )
+        assert isinstance(branch_probe, PreparedStep)
+        assert branch_probe.argv[-1] == "refs/heads/features/slash-name"
+
     def test_checkout_with_plan_returns_secret_free_final_plan(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
@@ -2474,6 +2630,7 @@ class TestCheckoutCopy:
             "checkout.validate.git.toplevel",
             "checkout.validate.git.common-dir",
             "checkout.validate.git.base",
+            "checkout.validate.git.branch",
         ]
         restore.assert_not_called()
         assert env_client.environments.list(project=project_manifest) == []
@@ -3721,8 +3878,12 @@ class TestOwnedRuntimePreflight:
             project: ProjectConfig | Path,
             branch: str,
             options: EnvironmentCheckoutOptions,
+            *,
+            branch_step_id: str | None = None,
         ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]:
-            comparison, freshness, warnings = original_audit(self, project, branch, options)
+            comparison, freshness, warnings = original_audit(
+                self, project, branch, options, branch_step_id=branch_step_id
+            )
             return (
                 BackupProvenanceComparison(
                     status=BackupProvenanceStatus.MATCHED,
