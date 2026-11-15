@@ -1646,7 +1646,7 @@ def test_production_restore_reset_uses_python_selector_from_path(
     assert executor.executed[-1].argv[0] == str(Path(resolved_python).absolute())
 
 
-def test_production_restore_command_rolls_back_after_odoo_child_failure(
+def test_production_restore_reset_failure_without_proof_does_not_claim_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     command, executor, project, backup, write = _production_restore_command(
@@ -1657,12 +1657,84 @@ def test_production_restore_command_rolls_back_after_odoo_child_failure(
         command.run()
 
     assert getattr(failure.value, "failure_context").retained_backup_id == backup.id
-    assert getattr(failure.value, "failure_context").retained_database is None
+    context = getattr(failure.value, "failure_context")
+    assert context.database_confirmed is False
+    assert context.retained_database is None
     assert project.default_source_database == "old"
     write.assert_not_called()
     assert tuple(step.step_id for step in executor.executed) == tuple(
         step.step_id for step in command.plan.process_steps
     )
+
+
+def test_reset_failure_after_completed_restore_records_completion_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.models import PostRestoreCheckpoint
+
+    observed: dict[str, object] = {}
+    command, _executor, project, _backup_value, write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        odoo_returncode=1,
+        observed=observed,
+        restore_probe_results=("false\n", "123\n"),
+    )
+    monkeypatch.setattr(
+        type(observed["cluster"]),
+        "_restore_provenance",
+        lambda _cluster: ("cluster-id", None),
+    )
+    source_config = project.source_config
+    assert source_config is not None
+    source_config.write_text(source_config.read_text() + f"data_dir = {tmp_path / 'data'}\n")
+    catalog = cast("MagicMock", observed["client"]).get_catalog.return_value
+    catalog._latest_restore_binding.side_effect = lambda _host, _port, database_name: {
+        "database_name": database_name,
+        "state": RestoreState.COMPLETE.value,
+        "post_restore_checkpoint": None,
+        "cluster_id": "cluster-id",
+        "data_directory": str(tmp_path / "data"),
+        "backup_id": str(_backup_value.id),
+        "source_kind": "catalogue",
+        "source_sha256": None,
+        "database_oid": 123,
+        "sequence": 7,
+    }
+    catalog._retain_reset_pending_restore.return_value = True
+    from odoo_instance_sdk.internal.dbprep import materialize_steps
+
+    retention_outcomes: list[object] = []
+    retain_reset_pending = cast(
+        "Callable[..., object]", materialize_steps._retain_reset_pending_restore
+    )
+
+    def capture_retention_outcome(*args: object, **kwargs: object) -> object:
+        outcome = retain_reset_pending(*args, **kwargs)
+        retention_outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(preparation, "_retain_reset_pending_restore", capture_retention_outcome)
+
+    with pytest.raises(Exception, match="Administrator password reset failed") as failure:
+        command.run()
+
+    assert getattr(failure.value, "restore_stage_id", None) == "admin_reset"
+    context = getattr(failure.value, "failure_context")
+    assert context.database_confirmed is True, retention_outcomes
+    assert context.post_restore_checkpoint is PostRestoreCheckpoint.RESET_PENDING
+    catalog._retain_reset_pending_restore.assert_called_once()
+    assert catalog._retain_reset_pending_restore.call_args.kwargs["expected_sequence"] == 7
+    assert catalog._retain_reset_pending_restore.call_args.kwargs["database_oid"] == 123
+    assert catalog.record_restore.call_count == 0
+    assert len(retention_outcomes) == 1
+    assert getattr(retention_outcomes[0], "retained") is True
+    assert getattr(retention_outcomes[0], "diagnostic") == "reset_pending_cas=true"
+    assert context.completed_stages == ("db_restore", "db_verify", "filestore_restore")
+    assert context.pending_stage == "admin_reset"
+    assert project.default_source_database == "old"
+    write.assert_not_called()
 
 
 def test_restore_failure_before_attempt_does_not_consume_or_record_probe_evidence(
@@ -1701,7 +1773,7 @@ def test_restore_failure_after_attempt_persists_valid_incomplete_evidence(
         tmp_path,
         monkeypatch,
         observed=observed,
-        restore_probe_results=("false\n", "true\n"),
+        restore_probe_results=("false\n", "123\n"),
     )
     client = cast("MagicMock", observed["client"])
     local = cast("MagicMock", observed["local"])
@@ -2950,6 +3022,9 @@ def test_restore_admin_reset_failure_does_not_claim_target_without_proof(
             admin_password="test-secret",
         )
 
+    context = getattr(failure.value, "failure_context")
+    assert context.database_confirmed is False
+    assert context.retained_database is None
     assert "retained database" not in " ".join(failure.value.__notes__ or ())
     assert not list(tmp_path.glob(".odcli-refresh-*.conf"))
     assert project.default_source_database == "old"

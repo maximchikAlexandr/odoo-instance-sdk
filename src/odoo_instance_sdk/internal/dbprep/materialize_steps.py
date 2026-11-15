@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
 import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import (
     AdminPasswordRequiredError,
     ConfigError,
+    InstanceConfigurationError,
 )
 from odoo_instance_sdk.internal.dbprep.source import (
+    RestorePreflight,
     SelectedBackupRestorePayload,
     _load_project,
     _LocalArchiveRestoreSource,
@@ -25,11 +30,18 @@ from odoo_instance_sdk.internal.dbprep.source_binding import (
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.project_env import load_project_environment
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
-from odoo_instance_sdk.models import DatabaseRefreshOptions, StartConfig
+from odoo_instance_sdk.models import (
+    Backup,
+    DatabaseRefreshOptions,
+    PostRestoreCheckpoint,
+    RestoreState,
+    StartConfig,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
     from odoo_instance_sdk.models import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -77,13 +89,234 @@ def _captured_restore_exists(step_id: str) -> bool | None:
     }.get(output.strip().lower())
 
 
-def _restore_failure_probe_evidence() -> tuple[bool | None, bool | None]:
+def _restore_failure_probe_evidence() -> tuple[bool | None, bool | None, int | None]:
     if not _restore_probe_consumed("database.restore.exists-before"):
-        return None, None
+        return None, None, None
+    from odoo_instance_sdk.internal.proc import ProcessResult, active_context
+
+    context = active_context()
+    try:
+        raw = (
+            context.process("database.restore.exists-after")
+            if context is not None
+            and context.planned("database.restore.exists-after")
+            and not context.consumed("database.restore.exists-after")
+            else context.results.get("database.restore.exists-after")
+            if context is not None
+            else None
+        )
+    except BaseException:
+        raw = None
+    if not isinstance(raw, ProcessResult) or raw.returncode != 0:
+        oid = None
+    else:
+        output = (
+            raw.stdout.decode(errors="replace") if isinstance(raw.stdout, bytes) else raw.stdout
+        )
+        try:
+            parsed = int(output.strip()) if isinstance(output, str) else 0
+            oid = parsed if parsed > 0 else None
+        except ValueError:
+            oid = None
     return (
         _captured_restore_exists("database.restore.exists-before"),
-        _captured_restore_exists("database.restore.exists-after"),
+        oid is not None,
+        oid,
     )
+
+
+def _record_incomplete_restore(  # noqa: C901
+    client: OdooClient,
+    preflight: RestorePreflight,
+    *,
+    exists_before: bool | None,
+    exists_after: bool | None,
+    backup: Backup | None,
+    local_restore: SelectedBackupRestorePayload | None,
+    post_restore_checkpoint: PostRestoreCheckpoint | None = None,
+    database_oid: int | None = None,
+) -> bool:
+    """Record exact recovery evidence, returning false for any missing proof."""
+    if exists_before is not False or exists_after is not True:
+        return False
+    provenance = getattr(preflight.postgres_cluster, "_restore_provenance", None)
+    if not callable(provenance):
+        return False
+    try:
+        cluster_id, data_directory = provenance()
+    except Exception:
+        return False
+    if not isinstance(cluster_id, str) or not cluster_id:
+        return False
+    if data_directory is None:
+        try:
+            start_config = StartConfig.from_odoo_config(preflight.source_config)
+            if isinstance(start_config.data_dir, str) and start_config.data_dir:
+                from odoo_instance_sdk.internal.odoo_config import _resolve_data_dir
+
+                data_directory = str(
+                    _resolve_data_dir(start_config.data_dir, preflight.source_config)
+                )
+        except (ConfigError, OSError, ValueError, InstanceConfigurationError):
+            return False
+    source = preflight.restore_source
+    if isinstance(source, _LocalArchiveRestoreSource):
+        if local_restore is None:
+            return False
+        source_kind = "local_archive"
+        source_sha256 = local_restore.verified_sha256
+        backup_id = None
+    else:
+        if backup is None:
+            return False
+        source_kind = "catalogue"
+        source_sha256 = None
+        backup_id = str(backup.id)
+    if data_directory is not None and not isinstance(data_directory, str | Path):
+        return False
+    try:
+        client.get_catalog().record_restore(
+            preflight.postgres_cluster.endpoint_host,
+            preflight.postgres_cluster.endpoint_port,
+            preflight.target_database,
+            backup_id,
+            source_kind=source_kind,
+            source_sha256=source_sha256,
+            cluster_id=cluster_id,
+            data_directory=data_directory,
+            database_oid=database_oid,
+            state=RestoreState.INCOMPLETE,
+            post_restore_checkpoint=post_restore_checkpoint,
+        )
+    except Exception:
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class _ResetPendingRetention:
+    retained: bool | None
+    diagnostic: str
+
+
+def _reset_pending_binding_failures(
+    row: Mapping[str, str | int | None] | sqlite3.Row,
+    *,
+    preflight: RestorePreflight,
+    cluster_id: str,
+    data_directory: str,
+    source_kind: str,
+    source_sha256: str | None,
+    backup_id: str | None,
+) -> tuple[str, ...]:
+    oid = row["database_oid"]
+    predicates = {
+        "database_name_matches": row["database_name"] == preflight.target_database,
+        "binding_is_complete": row["state"] == RestoreState.COMPLETE.value,
+        "checkpoint_is_clear": row["post_restore_checkpoint"] is None,
+        "cluster_id_matches": row["cluster_id"] == cluster_id,
+        "data_directory_matches": row["data_directory"] == data_directory,
+        "backup_id_matches": row["backup_id"] == backup_id,
+        "source_kind_matches": row["source_kind"] == source_kind,
+        "source_digest_matches": row["source_sha256"] == source_sha256,
+        "database_oid_is_positive_int": type(oid) is int and oid > 0,
+    }
+    return tuple(name for name, passed in predicates.items() if not passed)
+
+
+def _retain_reset_pending_restore(  # noqa: C901
+    client: OdooClient,
+    preflight: RestorePreflight,
+    *,
+    backup: Backup | None,
+    local_restore: SelectedBackupRestorePayload | None,
+) -> _ResetPendingRetention:
+    """Retain the exact completed restore as reset-pending without another event."""
+    try:
+        cluster_id, data_directory = preflight.postgres_cluster._restore_provenance()
+        if cluster_id is None:
+            return _ResetPendingRetention(False, "cluster_id_available=false")
+        if data_directory is None:
+            start_config = StartConfig.from_odoo_config(preflight.source_config)
+            if not start_config.data_dir:
+                return _ResetPendingRetention(None, "data_directory_available=false")
+            from odoo_instance_sdk.internal.odoo_config import _resolve_data_dir
+
+            data_directory = str(_resolve_data_dir(start_config.data_dir, preflight.source_config))
+        data_directory = str(data_directory)
+        catalog = client.get_catalog()
+        latest = getattr(catalog, "_latest_restore_binding", None)
+        if not callable(latest):
+            return _ResetPendingRetention(False, "latest_binding_reader_available=false")
+        row = latest(
+            preflight.postgres_cluster.endpoint_host,
+            preflight.postgres_cluster.endpoint_port,
+            preflight.target_database,
+        )
+        if row is None:
+            return _ResetPendingRetention(None, "latest_binding_present=false")
+        if isinstance(preflight.restore_source, _LocalArchiveRestoreSource):
+            if local_restore is None:
+                return _ResetPendingRetention(False, "local_archive_source_available=false")
+            source_kind, source_sha256, backup_id = (
+                "local_archive",
+                local_restore.verified_sha256,
+                None,
+            )
+        else:
+            if backup is None:
+                return _ResetPendingRetention(False, "backup_source_available=false")
+            source_kind, source_sha256, backup_id = "catalogue", None, str(backup.id)
+        failed_predicates = _reset_pending_binding_failures(
+            row,
+            preflight=preflight,
+            cluster_id=str(cluster_id),
+            data_directory=data_directory,
+            source_kind=source_kind,
+            source_sha256=source_sha256,
+            backup_id=backup_id,
+        )
+        if failed_predicates:
+            return _ResetPendingRetention(
+                False,
+                ",".join(f"{name}=false" for name in failed_predicates),
+            )
+        oid = row["database_oid"]
+        assert type(oid) is int
+        retain = getattr(catalog, "_retain_reset_pending_restore", None)
+        if not callable(retain):
+            return _ResetPendingRetention(False, "reset_pending_cas_available=false")
+        retained = bool(
+            retain(
+                preflight.postgres_cluster.endpoint_host,
+                preflight.postgres_cluster.endpoint_port,
+                preflight.target_database,
+                expected_sequence=row["sequence"],
+                backup_id=backup_id,
+                source_kind=source_kind,
+                source_sha256=source_sha256,
+                cluster_id=str(cluster_id),
+                data_directory=data_directory,
+                database_oid=oid,
+            )
+        )
+        return _ResetPendingRetention(retained, f"reset_pending_cas={str(retained).lower()}")
+    except Exception as exc:
+        return _ResetPendingRetention(False, f"exception_type={type(exc).__name__}")
+
+
+def _post_restore_failure_checkpoint(
+    *, database_confirmed: bool, failed_stage: str | None, reset_completed: bool
+) -> PostRestoreCheckpoint | None:
+    if database_confirmed and failed_stage == "admin_reset":
+        return PostRestoreCheckpoint.RESET_PENDING
+    if failed_stage == "default_switch":
+        return (
+            PostRestoreCheckpoint.RESET_COMPLETE
+            if reset_completed
+            else PostRestoreCheckpoint.RESET_NOT_REQUESTED
+        )
+    return None
 
 
 def _preparation_process_steps(
@@ -258,7 +491,7 @@ def _default_switch_git_steps(root: Path, mode: str) -> tuple[PreparedStep, ...]
     from odoo_instance_sdk.internal.proc import PreparedStep
 
     generated = project_generated_config_path(root)
-    if mode != "compose" or not (root / ".git").exists() or not generated.is_file():
+    if mode != "compose" or not (root / ".git").exists() or not generated.exists():
         return ()
     return tuple(
         PreparedStep(

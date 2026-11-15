@@ -280,6 +280,15 @@ def _isolated_catalog(source: Path, root: Path) -> Path:
     return destination
 
 
+def focused_cli_environment(base_environment: dict[str, str], catalog_path: Path) -> dict[str, str]:
+    """Isolate the catalogue while retaining the HOME that owns project resources."""
+    environment = dict(base_environment)
+    home = Path(environment.get("HOME", Path.home())).expanduser().resolve()
+    environment.setdefault("ODCLI_USER_ROOT", str(home / ".odcli"))
+    environment["ODCLI_E2E_CATALOG"] = str(catalog_path)
+    return environment
+
+
 def _ensure_isolated_environment(catalog_path: Path, project: Path) -> str:
     """Require each leaf to start from the active environment in its catalog."""
     return _assert_project_state_preflight(project, catalog_path)
@@ -691,6 +700,33 @@ def _project_database_probe(
         f"SELECT datname FROM pg_database WHERE datname = '{database}';",
         timeout=30.0,
     )
+
+
+def project_database_oid(project: Path, database: str, *, home: str) -> int:
+    """Read one exact PostgreSQL OID from the project-owned cluster."""
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    with pytest.MonkeyPatch.context() as paths:
+        paths.setenv("HOME", home)
+        cluster = PostgresCluster.from_project(project)
+        lifecycle = ComposeLifecycle(cluster.compose_file, cluster.compose_project_name)
+    result = lifecycle.run(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "odoo",
+        "-d",
+        "postgres",
+        "-At",
+        "-c",
+        f"SELECT oid FROM pg_database WHERE datname = '{database}';",
+        timeout=30.0,
+    )
+    if result.returncode != 0 or not result.stdout.strip().isdigit():
+        raise AssertionError(f"database OID query failed with status {result.returncode}")
+    return int(result.stdout.strip())
 
 
 def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> None:

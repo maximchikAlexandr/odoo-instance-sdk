@@ -282,6 +282,7 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     target = explicit_env if explicit else project_env
     displaced = tmp_path / "displaced-env"
     replacement = tmp_path / "replacement-env"
+    retained_inode = os.open(target, os.O_RDONLY)
     original_open = os.open
     swapped = False
 
@@ -304,8 +305,11 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     monkeypatch.setattr(os, "O_NOFOLLOW", 0)
     monkeypatch.setattr(os, "open", replace_before_open)
     monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {original_open})
-    with pytest.raises(ProjectEnvironmentError) as failure:
-        load_environment_file(target)
+    try:
+        with pytest.raises(ProjectEnvironmentError) as failure:
+            load_environment_file(target)
+    finally:
+        os.close(retained_inode)
 
     assert swapped
     assert "attacker-token" not in str(failure.value)

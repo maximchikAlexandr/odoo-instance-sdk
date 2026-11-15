@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -39,7 +39,8 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.git_worktree import _GitLineageObservation
-    from odoo_instance_sdk.internal.proc import RunContext
+    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
+    from odoo_instance_sdk.models import RestoreCompletionResult
     from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -127,6 +128,45 @@ class _CheckoutApiMixin:
         )
         if current_fingerprint != plan.adoption_input_fingerprint:
             raise StalePlanError("adoption resolved base or source identity changed after planning")
+
+    def complete_restore(
+        self,
+        project: ProjectConfig | Path,
+        target_database: str,
+        *,
+        update_modules: Sequence[str] = (),
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
+    ) -> RestoreCompletionResult:
+        return self.complete_restore_command(
+            project,
+            target_database,
+            update_modules=update_modules,
+            admin_password=admin_password,
+            admin_password_provenance=admin_password_provenance,
+        ).run()
+
+    def complete_restore_command(
+        self,
+        project: ProjectConfig | Path,
+        target_database: str,
+        *,
+        update_modules: Sequence[str] = (),
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
+        executor: ProcessExecutor | None = None,
+    ) -> Command[RestoreCompletionResult]:
+        from odoo_instance_sdk.internal.dbprep.completion import complete_restore_command
+
+        return complete_restore_command(
+            self._client,
+            project,
+            target_database,
+            update_modules=update_modules,
+            admin_password=admin_password,
+            admin_password_provenance=admin_password_provenance,
+            executor=executor,
+        )
 
     def _copy_source_metadata(
         self, project: ProjectConfig, options: EnvironmentCheckoutOptions

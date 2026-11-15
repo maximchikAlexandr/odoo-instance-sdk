@@ -501,6 +501,8 @@ PUBLIC_METHOD_EXPECTATIONS = (
             "checkout_inventory",
             "checkout_inventory_command",
             "checkout_with_plan",
+            "complete_restore",
+            "complete_restore_command",
             "get",
             "list",
             "list_command",
