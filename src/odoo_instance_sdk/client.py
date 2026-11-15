@@ -14,6 +14,7 @@ from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.environment import EnvironmentResource
 from odoo_instance_sdk.resources.instance import InstanceFactory
 from odoo_instance_sdk.resources.publication import PublicationResource
+from odoo_instance_sdk.resources.scaffold import ScaffoldResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ class OdooClient:
     environments: EnvironmentResource = field(init=False)
     publication: PublicationResource = field(init=False)
     projects: ProjectResource = field(init=False)
+    scaffolds: ScaffoldResource = field(init=False)
 
     def __post_init__(self) -> None:
         self.instance = InstanceFactory(_client=self)
@@ -43,6 +45,7 @@ class OdooClient:
         from odoo_instance_sdk.resources.project import ProjectResource
 
         self.projects = ProjectResource(_client=self)
+        self.scaffolds = ScaffoldResource(_client=self)
         atexit.register(self._cleanup_secret_configs)
 
     def __repr__(self) -> str:

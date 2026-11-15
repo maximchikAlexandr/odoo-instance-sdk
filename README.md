@@ -814,6 +814,8 @@ sentence; use the entry's `--help` for exact options.
 - `odcli remove` — Forget or ownership-safely purge one project by its canonical lifecycle command.
 - `odcli rm` — Short alias for the same project forget/purge operation.
 - `odcli prepare-venv` — Create or refresh the primary project virtual environment.
+- `odcli scaffold` — Create an Odoo addon through the native scaffold renderer.
+- `odcli config path` — Print the user configuration file path.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
 - `odcli remote ls` — List named remote sources without contacting them.
 - `odcli remote add` — Add one named remote source without accepting credentials.
@@ -899,6 +901,49 @@ shell's normal completion directory, for example:
 _ODCLI_COMPLETE=zsh_source odcli
 _ODCLI_COMPLETE=bash_source odcli
 _ODCLI_COMPLETE=fish_source odcli
+```
+
+### Scaffold an addon
+
+`odcli scaffold` composes a known Odoo 19 addon and lets the configured `odoo-bin scaffold --template` renderer write it. The destination defaults to the current directory. Baseline files are `__manifest__.py`, `__init__.py`, `models`, `security`, and `views`. Optional bundles are `wizard`, `controllers`, `data`, `demo`, `report`, `tests`, and `static/description`.
+
+User defaults live in the file printed by `odcli config path` (`~/.odcli/config/config.toml`, or under `ODCLI_USER_ROOT`). A missing file means built-in defaults. The same `[scaffold]` table in `.odcli/project.toml` overrides the user file, and command flags override both. Manifest keys are shallow overrides. `include`, `exclude`, and `omit_manifest` apply at each layer, and a higher layer can reverse an earlier optional component. `name`, `author`, and `license` cannot be omitted. `author` must be set in user config, project config, or `--manifest`. `data` and `demo` follow the selected files.
+
+```toml
+[scaffold]
+include = ["wizard", "tests"]
+exclude = ["demo"]
+
+[scaffold.manifest]
+author = "My Company"
+license = "LGPL-3"
+depends = ["base"]
+```
+
+```bash
+odcli config path
+odcli scaffold sale_extension --dry-run
+odcli scaffold sale_extension ./addons --with wizard --without demo \
+  --manifest summary="Sale workflow extensions" \
+  --manifest 'depends=["base", "sale"]'
+```
+
+```python
+from pathlib import Path
+
+from odoo_instance_sdk import OdooClient, OdooClientConfig
+from odoo_instance_sdk.project import ProjectConfig
+
+client = OdooClient(config=OdooClientConfig(executable="odoo-bin"))
+command = client.scaffolds.create_command(
+    project=ProjectConfig.load("."),
+    module_name="sale_extension",
+    destination=Path("addons"),
+    include=("wizard",),
+    manifest={"summary": "Sale workflow extensions", "depends": ["base", "sale"]},
+)
+print(command.plan)
+result = command.run()
 ```
 
 ## Python SDK

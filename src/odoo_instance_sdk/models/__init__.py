@@ -22,5 +22,6 @@ from odoo_instance_sdk.models.postgres import *  # noqa: F403
 from odoo_instance_sdk.models.process_inventory import *  # noqa: F403
 from odoo_instance_sdk.models.project_removal import *  # noqa: F403
 from odoo_instance_sdk.models.runtime import *  # noqa: F403
+from odoo_instance_sdk.models.scaffold import *  # noqa: F403
 from odoo_instance_sdk.models.testing import *  # noqa: F403
 from odoo_instance_sdk.models.update import *  # noqa: F403

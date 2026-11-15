@@ -129,6 +129,22 @@ class PlanValidationError(PlanError):
     code = "plan_validation"
 
 
+class ScaffoldError(PlanError):
+    """A scaffold plan was rejected or the native renderer failed."""
+
+    code = "scaffold_failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "scaffold_failed",
+        details: Mapping[str, PlanJsonValue] | None = None,
+    ) -> None:
+        super().__init__(message, details=details)
+        self.code = code
+
+
 class ProjectRemovalError(PlanError):
     """A project removal plan or one of its guarded actions failed."""
 

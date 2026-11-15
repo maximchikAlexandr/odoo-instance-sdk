@@ -174,6 +174,8 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
     assert set(cli.list_commands(click.Context(cli))) == {
         "init",
         "prepare-venv",
+        "scaffold",
+        "config",
         "env",
         "backup",
         "bug-report",

@@ -83,6 +83,12 @@ def get_user_root(*, ensure_exists: bool = True) -> Path:
     return _user_root(ensure_exists=ensure_exists)
 
 
+def get_user_config_path(*, ensure_exists: bool = False) -> Path:
+    """Return the user configuration file without creating it."""
+
+    return get_config_root(ensure_exists=ensure_exists) / "config.toml"
+
+
 def get_config_root(*, ensure_exists: bool = True) -> Path:
     root = _user_root(ensure_exists=ensure_exists) / "config"
     if ensure_exists:
