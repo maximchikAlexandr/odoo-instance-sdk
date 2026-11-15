@@ -151,6 +151,7 @@ def manifest_dict(
             "JsonValue", [item["password_key"] for item in remote_instances]
         ),
         "preferred_http_port": config.preferred_http_port,
+        "assigned_http_port": config.assigned_http_port,
         "requirements": list(config.requirements),
         "default_run_args": list(config.default_run_args),
         "runtime_cwd": str(config.runtime_cwd) if config.runtime_cwd else None,
@@ -201,7 +202,9 @@ def write_project_generated_config(
         repo_root=root,
         worktree=root,
         http_interface=source_start.http_interface,
-        http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
+        http_port=resolve_project_http_port(
+            config.preferred_http_port, source_start.http_port, config.assigned_http_port
+        ),
         db_name=config.default_source_database or source_start.db_name or "",
         db_host=cluster.endpoint_host,
         db_port=cluster.endpoint_port,
@@ -281,7 +284,9 @@ def _rewrite_project_generated_database(
         repo_root=root,
         worktree=root,
         http_interface=start.http_interface or parsed.get("http_interface", "0.0.0.0"),
-        http_port=resolve_project_http_port(config.preferred_http_port, start.http_port),
+        http_port=resolve_project_http_port(
+            config.preferred_http_port, start.http_port, config.assigned_http_port
+        ),
         db_name=config.default_source_database or "",
         db_host=cluster.endpoint_host,
         db_port=cluster.endpoint_port,
@@ -428,7 +433,9 @@ def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> 
             repo_root=project_path,
             worktree=project_path,
             http_interface=source_start.http_interface,
-            http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
+            http_port=resolve_project_http_port(
+                config.preferred_http_port, source_start.http_port, config.assigned_http_port
+            ),
             db_name=config.default_source_database or source_start.db_name or "",
             db_host=cluster.endpoint_host,
             db_port=cluster.endpoint_port,

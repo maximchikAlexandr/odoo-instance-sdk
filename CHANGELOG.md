@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Automatic main-project HTTP port assignment with persisted restart reuse,
+  explicit-pin conflict guidance, and detached output provenance
 - CLI-first project and environment workflows, including changed-test selection,
   module operations, dependency verification, translation export, and VS Code generation
 - Manifest-safe module discovery, deterministic dependency planning, optional `msgfmt`

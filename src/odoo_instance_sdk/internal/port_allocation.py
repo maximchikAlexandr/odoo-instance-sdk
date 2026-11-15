@@ -32,11 +32,11 @@ def find_free_port(
     project: ProjectConfig | None = None,
     reserved_ports: Sequence[int] = (),
 ) -> int:
-    """Find a free loopback port by scanning existing catalog + project manifests + generated configs.
+    """Find a free loopback port by scanning projects + environments + generated configs.
 
     Single source of truth is the existing config files, not a separate registry.
-    ``catalog`` provides environment rows (project roots + generated_config paths).
-    Project manifests provide postgres ports and preferred HTTP ports.
+    ``catalog`` provides registered project roots and environment rows.
+    Project manifests provide postgres ports and assigned/preferred HTTP ports.
     Generated ``odoo.conf`` files provide per-env HTTP ports.
     ``probe_address`` provides the live check.
 
@@ -96,11 +96,13 @@ def _collect_used_ports(
     project_roots: set[Path] = set()
     exclude_resolved = exclude_project.resolve() if exclude_project is not None else None
 
-    rows = (
-        catalog.list_environments()
-        if catalog is not None
-        else _read_environment_paths(_paths.get_catalog_path(ensure_exists=False))
-    )
+    catalog_path = _paths.get_catalog_path(ensure_exists=False)
+    if catalog is None:
+        rows = _read_environment_paths(catalog_path)
+        project_roots.update(_read_registered_project_paths(catalog_path))
+    else:
+        rows = catalog.list_environments()
+        project_roots.update(Path(str(row["repository_root"])) for row in catalog.list_projects())
     for row in rows:
         repo_root = Path(str(row["repository_root"]))
         project_roots.add(repo_root)
@@ -134,6 +136,21 @@ def _read_environment_paths(path: Path) -> list[sqlite3.Row]:
         connection.close()
 
 
+def _read_registered_project_paths(path: Path) -> set[Path]:
+    if not path.is_file():
+        return set()
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {
+            Path(str(row[0]))
+            for row in connection.execute(
+                "SELECT repository_root FROM projects WHERE registration_state = 'registered'"
+            )
+        }
+    finally:
+        connection.close()
+
+
 def _add_manifest_ports(repo_root: Path, used: set[int]) -> None:
     manifest = repo_root / ".odcli" / "project.toml"
     if not manifest.is_file():
@@ -144,6 +161,8 @@ def _add_manifest_ports(repo_root: Path, used: set[int]) -> None:
         return
     if cfg.preferred_http_port is not None:
         used.add(cfg.preferred_http_port)
+    if cfg.assigned_http_port is not None:
+        used.add(cfg.assigned_http_port)
     if cfg.postgres is not None and cfg.postgres.port is not None:
         used.add(cfg.postgres.port)
 

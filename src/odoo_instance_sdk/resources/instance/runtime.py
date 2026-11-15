@@ -327,7 +327,7 @@ class InstanceFactory:
 
         start_cfg = StartConfig.from_odoo_config(config_path)
         start_cfg.http_port = resolve_project_http_port(
-            project.preferred_http_port, start_cfg.http_port
+            project.preferred_http_port, start_cfg.http_port, project.assigned_http_port
         )
         database, binding_path = binding
         start_cfg.db_name = database

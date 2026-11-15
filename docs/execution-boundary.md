@@ -18,6 +18,25 @@ The normal path confirms only after planning and runs that same command object.
 error with exit code `2`. Rich, JSON, and TOON are projections, not independent
 planners.
 
+The live main-project `run` leaf has a narrow endpoint-preparation exception:
+before it constructs the instance and captures the command, it selects the
+HTTP endpoint under the project lifecycle lock, persists an automatic
+`assigned_http_port`, and reconciles an owned generated config. This keeps the
+captured command bound to the endpoint selected and persisted in the project
+manifest. This does not reserve the socket: another process can claim the port
+between the availability probe and process bind, so the final availability
+check fails closed if the endpoint is no longer free. Preview
+performs only the pure selection and emits the prospective plan; it does not
+persist the assignment, reconcile config, or execute any action. The plan's
+`project_http_port.revalidate_and_repair_owned_config` action describes the
+remaining post-capture work: under the same lock it rejects stale project
+state, rechecks endpoint availability without selecting another port, and
+repairs owned generated config if it has drifted. It is marked mutating because
+that repair can write config. The action does not represent the earlier live
+assignment persistence; that has already completed before command capture.
+Explicit pins still fail closed if unavailable, and the final spawn check
+remains in place.
+
 `update` with a mutable ref is the explicit two-stage exception: it first runs
 the captured read-only resolver command, then captures the resolved full-SHA
 mutation command. The second command is the only command shown for mutation
@@ -253,7 +272,7 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:563-564` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:400-401` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
 - `src/odoo_instance_sdk/commands/cli_parts/registration.py:479` — documented
@@ -261,17 +280,17 @@ documented by `OUTPUT_WRITE_REASONS`:
   replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/backup.py:355` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/output.py:115` — in-memory Rich serialization
+- `src/odoo_instance_sdk/commands/output.py:116` — in-memory Rich serialization
   boundary; it writes only to an in-memory buffer and never to terminal output.
-- `src/odoo_instance_sdk/commands/output.py:287` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:288` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:502` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:505` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:504` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:507` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:511` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:514` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:513` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:516` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/internal/self_update.py:822-824` — maintenance child
   JSON stdout transport.

@@ -136,6 +136,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     addon_roots: tuple[Path, ...] = ()
     server_wide_modules: tuple[str, ...] = ()
     preferred_http_port: int | None = None
+    assigned_http_port: int | None = None
     requirements: tuple[str, ...] = ()
     default_run_args: tuple[str, ...] = ()
     runtime_cwd: Path | None = None
@@ -151,6 +152,12 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         root = self.repository_root.resolve()
         if self.default_source_database is not None:
             validate_db_name(self.default_source_database)
+        for field_name in ("preferred_http_port", "assigned_http_port"):
+            port = getattr(self, field_name)
+            if port is not None and (
+                not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535
+            ):
+                raise ConfigError(f"project.{field_name} must be between 1 and 65535")
         if self.managed_filestore is not None:
             _validate_project_path(root, self.managed_filestore, "managed_filestore")
         seen_repositories: set[Path] = set()
@@ -295,6 +302,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             addon_roots=tuple(_path_list(data.get("addon_roots"))),
             server_wide_modules=tuple(_str_list(data.get("server_wide_modules"))),
             preferred_http_port=_int_or_none(data.get("preferred_http_port")),
+            assigned_http_port=_int_or_none(data.get("assigned_http_port")),
             requirements=tuple(_str_list(data.get("requirements"))),
             default_run_args=tuple(_str_list(data.get("default_run_args"))),
             runtime_cwd=_path_or_none(data.get("runtime_cwd")),
@@ -358,6 +366,8 @@ def _append_project_manifest_fields(lines: list[str], config: ProjectConfig) -> 
         lines.append(f"refresh_after_hours = {config.refresh_after_hours!r}")
     if config.preferred_http_port is not None:
         lines.append(f"preferred_http_port = {config.preferred_http_port}")
+    if config.assigned_http_port is not None:
+        lines.append(f"assigned_http_port = {config.assigned_http_port}")
     if config.ticket_link_enabled is not None:
         lines.append(f"ticket_link_enabled = {str(config.ticket_link_enabled).lower()}")
         lines.append(f'ticket_base_url = "{_toml_str(config.ticket_base_url or "")}"')
