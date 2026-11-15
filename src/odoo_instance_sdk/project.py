@@ -40,6 +40,38 @@ class PostgresProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         )
 
 
+_LOG_LEVELS = frozenset({"debug", "info", "warning", "error", "critical", "notset"})
+_LOG_HANDLER_RE = re.compile(r"[^:\s]+:[A-Za-z]+\Z")
+
+
+class OdooLoggingConfig(msgspec.Struct, frozen=True, kw_only=True):
+    """Optional ``[logging.odoo]`` settings. Secrets never belong in this table."""
+
+    structured: bool = False
+    level: str | None = None
+    handlers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.structured) is not bool:
+            raise ConfigError("logging.odoo.structured must be a boolean")
+        if self.level is not None:
+            level = self.level.strip().lower()
+            if level not in _LOG_LEVELS:
+                raise ConfigError("logging.odoo.level is invalid")
+            msgspec.structs.force_setattr(self, "level", level)
+        handlers: list[str] = []
+        for handler in self.handlers:
+            if not isinstance(handler, str) or _LOG_HANDLER_RE.fullmatch(handler) is None:
+                raise ConfigError("logging.odoo.handlers entries must be logger:LEVEL")
+            handlers.append(handler)
+        if tuple(handlers) != self.handlers:
+            msgspec.structs.force_setattr(self, "handlers", tuple(handlers))
+
+    def is_default(self) -> bool:
+        """True when the table would not change today's run or log behavior."""
+        return not self.structured and self.level is None and not self.handlers
+
+
 class TestInstanceProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     """Non-secret remote test instance settings used by database preparation.
 
@@ -146,6 +178,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     refresh_after_hours: float | None = None
     ticket_link_enabled: bool | None = None
     ticket_base_url: str | None = None
+    odoo_logging: OdooLoggingConfig | None = None
 
     def __post_init__(self) -> None:  # noqa: C901
         root = self.repository_root.resolve()
@@ -227,6 +260,9 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         postgres_data: JsonValue = None
         if isinstance(data, dict) and "postgres" in data:
             postgres_data = data["postgres"]
+        logging_data: JsonValue = None
+        if isinstance(data, dict) and "logging" in data:
+            logging_data = data["logging"]
         return cls._from_mapping(
             section,
             repository_root=root.resolve(),
@@ -235,6 +271,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             remote_instances_data=(
                 data.get("remote_instances") if isinstance(data, dict) else None
             ),
+            logging_data=logging_data,
         )
 
     @classmethod
@@ -246,6 +283,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         postgres_data: JsonValue | Mapping[str, JsonValue] = None,
         test_instance_data: JsonValue | Mapping[str, JsonValue] = None,
         remote_instances_data: JsonValue | Mapping[str, JsonValue] = None,
+        logging_data: JsonValue | Mapping[str, JsonValue] = None,
     ) -> ProjectConfig:
         legacy_enabled = data.get("jira_enabled")
         legacy_url = data.get("jira_base_url")
@@ -305,6 +343,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             refresh_after_hours=_float_or_none(data.get("refresh_after_hours")),
             ticket_link_enabled=ticket_enabled,
             ticket_base_url=_ticket_url_or_none(ticket_url),
+            odoo_logging=_logging_from_mapping(cast("JsonValue", logging_data)),
         )
 
     def to_manifest(self) -> str:
@@ -321,6 +360,10 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         for source in sorted(self.remote_instances, key=lambda item: item.name):
             lines.append("")
             lines.append(_remote_source_to_manifest(source))
+        logging_block = _logging_to_manifest(self.odoo_logging)
+        if logging_block is not None:
+            lines.append("")
+            lines.append(logging_block)
         return "\n".join(lines) + "\n"
 
 
@@ -455,6 +498,50 @@ def _remote_source_to_manifest(config: RemoteSourceConfig) -> str:
     if config.database is not None:
         lines.append(f'database = "{_toml_str(config.database)}"')
     lines.append(f'git_branch = "{_toml_str(config.git_branch)}"')
+    return "\n".join(lines)
+
+
+def _logging_from_mapping(value: JsonValue) -> OdooLoggingConfig | None:
+    """Parse the optional top-level ``[logging.odoo]`` table."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"odoo"}:
+        raise ConfigError("invalid [logging] manifest section")
+    raw = value.get("odoo")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"structured", "level", "handlers"}:
+        raise ConfigError("invalid [logging.odoo] manifest section")
+    structured = raw.get("structured", False)
+    level = raw.get("level")
+    handlers = raw.get("handlers", ())
+    if type(structured) is not bool:
+        raise ConfigError("logging.odoo.structured must be a boolean")
+    if level is not None and not isinstance(level, str):
+        raise ConfigError("logging.odoo.level must be a string")
+    if isinstance(handlers, str) or not isinstance(handlers, (list, tuple)):
+        raise ConfigError("logging.odoo.handlers must be an array")
+    parsed_handlers = tuple(item for item in handlers if isinstance(item, str))
+    if len(parsed_handlers) != len(handlers):
+        raise ConfigError("logging.odoo.handlers entries must be strings")
+    config = OdooLoggingConfig(
+        structured=structured,
+        level=level,
+        handlers=parsed_handlers,
+    )
+    return None if config.is_default() else config
+
+
+def _logging_to_manifest(config: OdooLoggingConfig | None) -> str | None:
+    """Serialize a non-default Odoo logging table."""
+    if config is None or config.is_default():
+        return None
+    lines = ["[logging.odoo]", f"structured = {str(config.structured).lower()}"]
+    if config.level is not None:
+        lines.append(f'level = "{_toml_str(config.level)}"')
+    if config.handlers:
+        rendered = ", ".join(f'"{_toml_str(handler)}"' for handler in config.handlers)
+        lines.append(f"handlers = [{rendered}]")
     return "\n".join(lines)
 
 

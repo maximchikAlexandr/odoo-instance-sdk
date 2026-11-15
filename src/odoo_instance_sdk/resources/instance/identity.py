@@ -17,6 +17,7 @@ from odoo_instance_sdk.exceptions import (
     LockConflictError,
 )
 from odoo_instance_sdk.internal.locks import exclusive_lock, shared_lock
+from odoo_instance_sdk.internal.logs.launch import ForegroundRun
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -339,9 +340,10 @@ class _IdentityMixin:
         )
         secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
         executable_prefix = self._executable_prefix()
+        logs = ForegroundRun.bind(cast("OdooInstance", self))
         step = PreparedStep(
             step_id="instance.foreground",
-            argv=(*executable_prefix, *cli_args, *validated_args),
+            argv=(*executable_prefix, *cli_args, *logs.argv, *validated_args),
             cwd=None if resolved_cwd is None else str(resolved_cwd),
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
@@ -360,7 +362,7 @@ class _IdentityMixin:
         )
 
         bootstrap_plan = project_bootstrap_tmp_plan(cast("OdooInstance", self))
-        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (
+        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = logs.prefix(
             *dependency_steps,
             *(bootstrap_plan.execution_steps if bootstrap_plan is not None else ()),
             step,
@@ -418,6 +420,7 @@ class _IdentityMixin:
                     if secret_path is not None:
                         _write_secret_config(snapshot, secret_path)
                         secret_created = True
+                    logs.open(context)
                     try:
                         handle = context.spawn(step.step_id)
                         if self._runtime_binding is not None or self._environment_id is not None:
@@ -429,6 +432,7 @@ class _IdentityMixin:
                                 len(executable_prefix),
                                 context=context,
                             )
+                        logs.record(None if handle is None else handle.pid)
                     except BaseException:
                         if handle is not None:
                             with contextlib.suppress(BaseException):
@@ -441,12 +445,10 @@ class _IdentityMixin:
                 # The wait must NOT hold the shared artifact lock; a parallel
                 # ``stop`` reads the persisted runtime identity under the
                 # exclusive lock and terminates the registered runtime.
-                from odoo_instance_sdk.internal.server import wait_foreground_process
-
                 if handle is None:  # pragma: no cover - re-raised above
                     raise RuntimeError("foreground spawn produced no handle")
                 try:
-                    return wait_foreground_process(handle)
+                    return logs.wait(handle)
                 except BaseException:
                     with contextlib.suppress(BaseException):
                         terminate(
@@ -465,6 +467,7 @@ class _IdentityMixin:
                 while True:
                     try:
                         with self._artifact_lock():
+                            logs.close()
                             self._clear_runtime_identity()
                             if secret_created:
                                 cleanup_secret_config(secret_path)

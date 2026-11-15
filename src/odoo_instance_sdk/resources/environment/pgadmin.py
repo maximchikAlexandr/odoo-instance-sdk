@@ -99,6 +99,16 @@ class _PgadminMixin:
             except OSError as e:
                 failed = True
                 failures.append(f"{p}: {e}")
+        logs = generated_cfg.parent / "logs"
+        if logs.is_symlink():
+            failed = True
+            failures.append("logs: refused symlink")
+        elif logs.is_dir():
+            try:
+                shutil.rmtree(logs)
+            except OSError as e:
+                failed = True
+                failures.append(f"logs: {e}")
         return failed
 
     def _remove_venv(self, env_root: Path, venv: Path | None, failures: list[str]) -> bool:

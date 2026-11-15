@@ -850,6 +850,12 @@ sentence; use the entry's `--help` for exact options.
 - `odcli backup prune` — Preview or remove eligible archives with execution-time rechecks.
 - `odcli run` — Start resolved Odoo in the foreground from a project or environment.
 - `odcli logs` — Read retained Odoo logs, optionally following new output.
+- `odcli logs search` — Search structured Odoo log events inside a frozen cursor window.
+- `odcli logs cursor` — Print one opaque cursor for the current or selected run boundary.
+- `odcli logs mark create` — Create or replace one private structured-log mark.
+- `odcli logs mark show` — Show one private structured-log mark.
+- `odcli logs mark list` — List private structured-log marks for the selected environment.
+- `odcli logs mark delete` — Delete one private structured-log mark.
 - `odcli shell` — Open an interactive Odoo shell in the selected environment.
 - `odcli eval` — Evaluate one Python expression through the Odoo shell boundary.
 - `odcli exec` — Execute a Python script through the Odoo shell boundary.

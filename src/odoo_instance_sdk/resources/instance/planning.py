@@ -12,6 +12,12 @@ from odoo_instance_sdk.exceptions import (
     DetachedLaunchCleanupError,
     InstanceConfigurationError,
 )
+from odoo_instance_sdk.internal.logs.launch import (
+    finish_structured_run,
+    logging_argv,
+    prepare_structured_run,
+    structured_launch,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -280,6 +286,10 @@ class _PlanningMixin:
                         context.action(action_ids[3])
                         context.complete_action(action_ids[3])
                         context.action(action_ids[4])
+                        with contextlib.suppress(OSError):
+                            cast("OdooInstance", self)._finish_structured_pid(
+                                identity.root_pid, state="stale"
+                            )
                         self._clear_runtime_identity_if_matches(identity)
                         context.complete_action(action_ids[4])
                         return result("already_stopped", identity)
@@ -298,6 +308,10 @@ class _PlanningMixin:
                     )
                     context.complete_action(action_ids[3])
                     context.action(action_ids[4])
+                    with contextlib.suppress(OSError):
+                        cast("OdooInstance", self)._finish_structured_pid(
+                            identity.root_pid, state="interrupted"
+                        )
                     self._clear_runtime_identity_if_matches(identity)
                     context.complete_action(action_ids[4])
                     return result("stopped", identity)
@@ -370,6 +384,9 @@ class _PlanningMixin:
         effective_logfile = resolve_effective_logfile(
             config, Path(resolved_cwd) if resolved_cwd is not None else None
         )
+        launch = structured_launch(cast("OdooInstance", self), action_id="instance.detached.runlog")
+        if launch is not None:
+            effective_logfile = launch.logfile
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         environment_snapshot, environment_overrides = captured_child_environment(
             env, project_environment=self.config.project_environment
@@ -383,6 +400,7 @@ class _PlanningMixin:
                 *cli_args,
                 "--logfile",
                 str(effective_logfile),
+                *logging_argv(cast("OdooInstance", self)),
                 *validated_args,
             ),
             cwd=None if resolved_cwd is None else str(resolved_cwd),
@@ -448,12 +466,29 @@ class _PlanningMixin:
             for step_id in action_ids
         )
         command_steps = (*prepared_steps, *actions)
+        if launch is not None:
+            command_steps = (
+                PreparedAction(
+                    step_id=launch.action_id,
+                    action=launch.action_id,
+                    description="Create the private Odoo run logfile",
+                    details={"run_id": launch.run_id, "logfile": str(launch.logfile)},
+                    mutating=True,
+                ),
+                *command_steps,
+            )
         process_executor = SubprocessExecutor()
         logfile_path = str(effective_logfile)
 
         def execute(context: RunContext[DetachedLaunchResult]) -> DetachedLaunchResult:  # noqa: C901
             if type(process_executor) is SubprocessExecutor:
                 _assert_http_port_free(config)
+            run_prepared = False
+            if launch is not None:
+                context.action(launch.action_id)
+                prepare_structured_run(launch)
+                run_prepared = True
+                context.complete_action(launch.action_id)
             _ensure_logfile_writable(effective_logfile)
             context.action(action_ids[0])
             context.complete_action(action_ids[0])
@@ -494,6 +529,10 @@ class _PlanningMixin:
                             context=context,
                         )
                         runtime_persisted = True
+                        if launch is not None:
+                            cast("OdooInstance", self)._record_structured_process(
+                                launch, handle.pid
+                            )
                         if wait_ready:
                             persisted_identity = self._read_runtime_identity()
                     context.complete_action(action_ids[3])
@@ -522,6 +561,9 @@ class _PlanningMixin:
                         log_path=logfile_path,
                     )
                 except BaseException as error:
+                    if launch is not None and run_prepared:
+                        with contextlib.suppress(BaseException):
+                            finish_structured_run(launch, state="interrupted", exit_code=None)
                     if handle is not None:
                         if wait_ready:
                             owner_kind, owner_id = _runtime_owner(

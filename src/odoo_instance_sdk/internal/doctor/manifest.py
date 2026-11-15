@@ -26,6 +26,7 @@ from odoo_instance_sdk.internal.doctor.components import (
     paired_component as _paired_component,
     python_artifact_available as _python_artifact_available,
 )
+from odoo_instance_sdk.internal.doctor.logging import odoo_logging_check
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
 from odoo_instance_sdk.internal.generated_config import _rebase_path
 from odoo_instance_sdk.internal.git_worktree import rev_parse_verify
@@ -186,6 +187,7 @@ def run_doctor(
         else:
             report.context["project_source"] = "explicit" if project_path is not None else "cwd"
         _check_manifest(report, project_root)
+        _check_odoo_logging(report, project_root)
         if remote_name is not None:
             _check_remote_source(report, project_root, remote_name)
         if resolved_context is not None and not isinstance(resolved_context.source, ProjectConfig):
@@ -668,6 +670,15 @@ def _resolve_project_root(project_path: Path | None) -> Path | None:
             return None
         current = parent
     return None
+
+
+def _check_odoo_logging(report: DoctorReport, project_root: Path) -> None:
+    """Report Odoo logging settings without failing the doctor run."""
+    loaded = odoo_logging_check(project_root)
+    if loaded is None:
+        return
+    detail, facts = loaded
+    report.checks.append(CheckResult("logging", STATUS_OK, detail, facts=facts))
 
 
 def _check_manifest(report: DoctorReport, project_root: Path) -> None:

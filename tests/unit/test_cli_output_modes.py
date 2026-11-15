@@ -812,6 +812,62 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="bounded subscription/cancellation and redaction",
     ),
     PublicLeafCase(
+        ("logs", "search"),
+        ("logs", "search"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="OdooInstance.search_log_events",
+        variants=("jsonl-stream",),
+        exception_reason="JSONL follow is a streaming transport over the same bounded page",
+        e2e_disposition="not-applicable",
+        e2e_rationale="structured search is covered by unit tests",
+    ),
+    PublicLeafCase(
+        ("logs", "cursor"),
+        ("logs", "cursor"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="OdooInstance.log_cursor",
+        e2e_disposition="not-applicable",
+        e2e_rationale="cursor tokens are covered by unit tests",
+    ),
+    PublicLeafCase(
+        ("logs", "mark", "create"),
+        ("logs", "mark", "create", "checkpoint", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="OdooInstance.create_log_mark_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="mark creation is covered by unit tests",
+    ),
+    PublicLeafCase(
+        ("logs", "mark", "show"),
+        ("logs", "mark", "show", "checkpoint"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="OdooInstance.show_log_mark",
+        e2e_disposition="not-applicable",
+        e2e_rationale="mark reads are covered by unit tests",
+    ),
+    PublicLeafCase(
+        ("logs", "mark", "list"),
+        ("logs", "mark", "list"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="OdooInstance.list_log_marks",
+        e2e_disposition="not-applicable",
+        e2e_rationale="mark reads are covered by unit tests",
+    ),
+    PublicLeafCase(
+        ("logs", "mark", "delete"),
+        ("logs", "mark", "delete", "checkpoint", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="OdooInstance.delete_log_mark_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="mark deletion is covered by unit tests",
+    ),
+    PublicLeafCase(
         ("shell",),
         ("shell",),
         exception_reason="normal execution owns interactive Odoo streams; dry-run is still required",
@@ -993,11 +1049,14 @@ def _matrix_environment() -> SimpleNamespace:
 def _cli_leaf_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
     if not isinstance(command, click.Group):
         return {prefix}
-    return {
+    paths = {
         leaf_path
         for name, child in command.commands.items()
         for leaf_path in _cli_leaf_paths(child, (*prefix, name))
     }
+    if prefix and command.invoke_without_command:
+        paths.add(prefix)
+    return paths
 
 
 validate_leaf_metadata(
@@ -2428,6 +2487,69 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.bug_report.bug_report_submit_preview",
             fail_operation if failing else lambda _report_id: preview,
+        )
+        return
+
+    if path[:1] == ("logs",) and path != ("logs",):
+        from odoo_instance_sdk.models.logs import (
+            LogCursor,
+            LogEvent,
+            LogMark,
+            LogMarkDeletion,
+            LogMarkList,
+            LogPage,
+        )
+
+        event = LogEvent(
+            schema_version=1,
+            source="odoo",
+            timestamp=None,
+            level="ERROR",
+            message="deadlock detected",
+            project_id="project",
+            environment_id="env",
+            run_id="run",
+            pid=None,
+            database=None,
+            logger=None,
+            parsed=True,
+            attributes={},
+            cursor="cursor-token",
+        )
+        page = LogPage(
+            events=(event,),
+            next_cursor="cursor-token",
+            has_more=False,
+            window_end_cursor="cursor-token",
+            complete=True,
+        )
+        mark = LogMark(
+            name="checkpoint",
+            cursor="cursor-token",
+            created_at="2020-01-01T00:00:00.000Z",
+            environment_id="env",
+            run_id="run",
+            project_id="project",
+        )
+        instance = MagicMock()
+        instance.search_log_events.return_value = page
+        instance.log_cursor.return_value = LogCursor(cursor="cursor-token", run_id="run")
+        instance.show_log_mark.return_value = mark
+        instance.list_log_marks.return_value = LogMarkList(marks=(mark,))
+        instance.create_log_mark_command.return_value = _matrix_command(mark)
+        instance.delete_log_mark_command.return_value = _matrix_command(
+            LogMarkDeletion(name="checkpoint", deleted=True)
+        )
+        if failing:
+            instance.search_log_events.side_effect = fail_operation
+            instance.log_cursor.side_effect = fail_operation
+            instance.show_log_mark.side_effect = fail_operation
+            instance.list_log_marks.side_effect = fail_operation
+            instance.create_log_mark_command.side_effect = fail_operation
+            instance.delete_log_mark_command.side_effect = fail_operation
+        monkeypatch.setattr(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), _matrix_public_environment(), instance),
         )
         return
 

@@ -36,6 +36,8 @@ def _leaf_commands(group: click.Group, prefix: tuple[str, ...] = ()) -> set[str]
     for name, command in group.commands.items():
         path = (*prefix, name)
         if isinstance(command, click.Group):
+            if command.invoke_without_command:
+                leaves.add(" ".join(path))
             leaves.update(_leaf_commands(command, path))
         else:
             leaves.add(" ".join(path))
@@ -51,6 +53,8 @@ def _documented_to_cli_spelling(group: click.Group, prefix: tuple[str, ...] = ()
         path = (*prefix, name)
         primary = " ".join(path)
         if isinstance(command, click.Group):
+            if command.invoke_without_command:
+                spellings[primary] = primary
             spellings.update(_documented_to_cli_spelling(command, path))
         else:
             spellings[primary] = primary

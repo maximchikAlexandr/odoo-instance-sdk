@@ -29,6 +29,7 @@ from odoo_instance_sdk.commands.context import (
     ResolvedContext,
     pass_cli_context,
 )
+from odoo_instance_sdk.commands.logs import register_log_commands
 from odoo_instance_sdk.commands.module import register_module_commands
 from odoo_instance_sdk.commands.output import (
     JsonObject,
@@ -57,7 +58,6 @@ from odoo_instance_sdk.commands.pg import (
 from odoo_instance_sdk.commands.translations import register_translation_commands
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
-    LogfileAccessError,
 )
 from odoo_instance_sdk.internal.automation import (
     eval_expression_command,
@@ -552,26 +552,6 @@ def _rich_detached_status(document: OutputDocument) -> str:
     return render_rich_text(table)
 
 
-@cli.command(help="Read or follow retained Odoo logs.")
-@click.option("-n", "--tail", type=click.IntRange(min=1), default=100, show_default=True)
-@click.option("-f", "--follow", is_flag=True, default=False)
-@pass_cli_context
-def logs(ctx: CliContext, tail: int, follow: bool) -> None:
-    try:
-        runtime_context = _ready_instance(ctx)
-        for line in runtime_context.instance.iter_logs(tail=tail, follow=follow):
-            sys.stdout.write(line)
-            sys.stdout.flush()
-    except KeyboardInterrupt:
-        sys.exit(130)
-    except LogfileAccessError as e:
-        fail(OutputMode.RICH, "logs", str(e), dry_run=False)
-    except InstanceConfigurationError as e:
-        fail(OutputMode.RICH, "logs", str(e), dry_run=False)
-    except Exception as e:
-        fail(OutputMode.RICH, "logs", str(e), dry_run=False)
-
-
 @cli.command(help="Open an interactive Odoo shell.")
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @command_options
@@ -946,6 +926,7 @@ def _register_short_alias(group_name: str, canonical: str, alternate: str) -> No
 # Keep these calls at the composition boundary so later packages need not edit
 # this registry's individual leaf callbacks.
 register_module_commands(cli)
+register_log_commands(cli)
 register_translation_commands(cli)
 register_monitor_command(cli)
 for _group, _canonical, _alternate in (
