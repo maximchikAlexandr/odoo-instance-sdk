@@ -431,6 +431,12 @@ def _load_test_command() -> click.Command:
     return test_command
 
 
+def _load_inspect_group() -> click.Group:
+    from odoo_instance_sdk.commands.inspect import inspect_group
+
+    return inspect_group
+
+
 def _lazy_command(*, name: str, help: str, loader: Callable[[], click.Command]) -> click.Command:
     return _LazyCommand(name=name, help=help, loader=loader)
 
@@ -542,6 +548,7 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
                     "name": "Development",
                     "commands": [
                         "test",
+                        "inspect",
                         "module",
                         "git",
                         "translations",
@@ -590,6 +597,14 @@ cli.add_command(
 cli.add_command(
     _lazy_command(name="test", help="Select and run Odoo tests.", loader=_load_test_command),
     name="test",
+)
+cli.add_command(
+    _LazyGroup(
+        name="inspect",
+        help="Read bounded Odoo model, field, and XML-ID metadata.",
+        loader=_load_inspect_group,
+    ),
+    name="inspect",
 )
 cli.add_command(db_group, name="db")
 cli.add_command(backup_group, name="backup")

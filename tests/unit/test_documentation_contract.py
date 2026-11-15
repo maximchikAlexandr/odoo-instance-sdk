@@ -22,7 +22,10 @@ INVENTORY = re.compile(
     r"<!-- cli-command-inventory:start -->(.*?)<!-- cli-command-inventory:end -->",
     re.DOTALL,
 )
-COMMAND = re.compile(r"^- `odcli ([^`]+)` — \S.+\.$", re.MULTILINE)
+COMMAND = re.compile(
+    r"^- `odcli ((?:[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*))` — \S.+\.$",
+    re.MULTILINE,
+)
 FENCE = re.compile(r"^```([^\n]*)\n(.*?)^```\s*$", re.MULTILINE | re.DOTALL)
 LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 OUTPUT_ALLOWLIST_SECTION = re.compile(

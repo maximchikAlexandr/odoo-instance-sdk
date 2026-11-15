@@ -5,6 +5,7 @@ from typing import Literal
 import msgspec
 
 from odoo_instance_sdk.models.backup import Backup
+from odoo_instance_sdk.models.inspection import OdooTestProfile
 
 
 class CommandResult(msgspec.Struct):
@@ -37,6 +38,7 @@ class OdooTestSpec(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     test_tags: str
     reload_tests: bool = False
     allow_empty: bool = False
+    profile: bool = False
 
     def __post_init__(self) -> None:
         if not self.modules:
@@ -45,6 +47,8 @@ class OdooTestSpec(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
             raise ValueError("OdooTestSpec.modules must be sorted and unique")
         if not isinstance(self.test_tags, str) or not self.test_tags.strip():
             raise ValueError("OdooTestSpec.test_tags must not be blank")
+        if type(self.profile) is not bool:
+            raise TypeError("OdooTestSpec.profile must be a boolean")
 
 
 class OdooTestResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -54,6 +58,7 @@ class OdooTestResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     failures: bool
     zero_tests: bool
     exit_code: int
+    profile: OdooTestProfile | None = None
 
     def __post_init__(self) -> None:
         required = {"tests", "successful", "failed", "errors", "skipped"}
@@ -61,6 +66,8 @@ class OdooTestResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
             raise ValueError("OdooTestResult.counts must contain exactly five count keys")
         if any(type(value) is not int or value < 0 for value in self.counts.values()):
             raise ValueError("OdooTestResult.counts values must be non-negative integers")
+        if self.profile is not None and not isinstance(self.profile, OdooTestProfile):
+            raise TypeError("OdooTestResult.profile must be an OdooTestProfile or None")
 
 
 class OdooProcess(msgspec.Struct):
