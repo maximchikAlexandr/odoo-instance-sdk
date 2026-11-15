@@ -27,6 +27,15 @@ class GitRepositoryIdentityError(GitError):
     """Git remote syntax cannot be converted to a safe repository identity."""
 
 
+@dataclass(frozen=True, slots=True)
+class _GitLineageObservation:
+    selected_ref: str
+    base_sha: str
+    tip_sha: str
+    merge_base_sha: str
+    changed_paths: tuple[str, ...]
+
+
 @dataclass(slots=True, kw_only=True)
 class WorktreeInfo:
     worktree: str
@@ -106,8 +115,12 @@ def rev_parse_git_common_dir(path: Path) -> Path:
     return common_dir.resolve()
 
 
-def rev_parse_verify(repo_root: Path, ref: str) -> str:
-    proc = _run(["git", "-C", str(repo_root), "rev-parse", "--verify", ref], check=False)
+def rev_parse_verify(repo_root: Path, ref: str, *, step_id: str | None = None) -> str:
+    proc = _run(
+        ["git", "-C", str(repo_root), "rev-parse", "--verify", ref],
+        check=False,
+        step_id=step_id,
+    )
     if proc.returncode != 0:
         raise GitError(f"ref {ref!r} not found in {repo_root}: {proc.stderr.strip()}")
     return proc.stdout.strip()
@@ -124,6 +137,137 @@ def rev_parse_branch(repo_root: Path) -> str:
             "detached_checkout", f"checkout is detached; a local branch is required: {repo_root}"
         )
     return proc.stdout.strip()
+
+
+def _is_literal_branch(
+    branch: str, *, repo_root: Path | None = None, step_id: str | None = None
+) -> bool:
+    """Accept only a literal branch name, never a Git revision expression."""
+    if not branch or branch != branch.strip():
+        return False
+    name = branch.removeprefix("refs/heads/")
+    if not name or name.startswith("refs/heads/"):
+        return False
+    argv = ["git"]
+    if repo_root is not None:
+        argv.extend(("-C", str(repo_root)))
+    argv.extend(("check-ref-format", f"refs/heads/{name}"))
+    result = _run(argv, check=False, step_id=step_id)
+    return result.returncode == 0
+
+
+def _skip_lineage_steps(step_prefix: str | None, *suffixes: str) -> None:
+    if step_prefix is not None:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        if context is not None:
+            for suffix in suffixes:
+                step_id = f"{step_prefix}.{suffix}"
+                if context.planned(step_id):
+                    context.skip(step_id)
+
+
+def refs_share_lineage(
+    repo_root: Path,
+    base_ref: str,
+    branch: str,
+    *,
+    step_prefix: str | None = None,
+    observations: list[_GitLineageObservation] | None = None,
+) -> bool:
+    """Compare commits without moving refs; prefer origin over a stale local branch."""
+
+    branch = branch.removeprefix("refs/heads/")
+    try:
+        tip_ref = f"refs/remotes/origin/{branch}"
+        base = rev_parse_verify(
+            repo_root,
+            f"{base_ref}^{{commit}}",
+            step_id=f"{step_prefix}.base" if step_prefix else None,
+        )
+        try:
+            tip = rev_parse_verify(
+                repo_root,
+                f"refs/remotes/origin/{branch}^{{commit}}",
+                step_id=f"{step_prefix}.origin" if step_prefix else None,
+            )
+        except GitError:
+            tip_ref = f"refs/heads/{branch}"
+            tip = rev_parse_verify(
+                repo_root,
+                f"refs/heads/{branch}^{{commit}}",
+                step_id=f"{step_prefix}.local" if step_prefix else None,
+            )
+    except GitError:
+        _skip_lineage_steps(
+            step_prefix,
+            "origin",
+            "local",
+            "origin.merge-base",
+            "origin.diff",
+            "local.merge-base",
+            "local.diff",
+        )
+        return False
+    if tip_ref.startswith("refs/remotes"):
+        _skip_lineage_steps(step_prefix, "local", "local.merge-base", "local.diff")
+    else:
+        _skip_lineage_steps(step_prefix, "origin.merge-base", "origin.diff")
+    result = _run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "merge-base",
+            base_ref if step_prefix else base,
+            tip_ref if step_prefix else tip,
+        ],
+        check=False,
+        step_id=f"{step_prefix}.{'origin' if tip_ref.startswith('refs/remotes') else 'local'}.merge-base"
+        if step_prefix
+        else None,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        _skip_lineage_steps(
+            step_prefix, f"{'origin' if tip_ref.startswith('refs/remotes') else 'local'}.diff"
+        )
+        return False
+    fork = result.stdout.strip()
+    if fork == base:
+        _skip_lineage_steps(
+            step_prefix, f"{'origin' if tip_ref.startswith('refs/remotes') else 'local'}.diff"
+        )
+        if observations is not None:
+            observations.append(_GitLineageObservation(tip_ref, base, tip, fork, ()))
+        return True
+    # A planning HEAD remains compatible when origin advances independently:
+    # only OpenSpec artifacts may differ from the common branch ancestor.
+    changes = _run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "diff",
+            "--name-only",
+            "-z",
+            f"{tip_ref}...{base_ref}" if step_prefix else fork,
+            *(() if step_prefix else (base,)),
+        ],
+        check=False,
+        step_id=f"{step_prefix}.{'origin' if tip_ref.startswith('refs/remotes') else 'local'}.diff"
+        if step_prefix
+        else None,
+    )
+    paths = tuple(changes.stdout.rstrip("\0").split("\0")) if changes.stdout else ()
+    accepted = (
+        changes.returncode == 0
+        and (fork == tip or bool(paths))
+        and all(path.startswith("openspec/") for path in paths)
+    )
+    if changes.returncode == 0 and observations is not None:
+        observations.append(_GitLineageObservation(tip_ref, base, tip, fork, paths))
+    return accepted
 
 
 def remote_url(repo_root: Path, name: str = "origin") -> str | None:

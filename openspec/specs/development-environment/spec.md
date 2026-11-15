@@ -932,6 +932,8 @@ Before checkout creates a catalog row, worktree, config, Python environment, bac
 
 A known mismatch SHALL abort before any mutation in shared and copy modes. Checkout SHALL not automatically reset the administrator.
 
+The recorded source branch SHALL be validated as a literal Git branch name before it is used in a ref or revision expression; revision-expression aliases SHALL fail closed even when their text matches the requested base. When normalized refs differ, a pinned commit SHALL be accepted only when it is in the lineage of the recorded source branch as resolved from `refs/remotes/origin/<branch>`; a stale local branch SHALL be considered only when that origin tracking ref is absent. A shared ancestor permits planning-only divergence only when every changed path from that ancestor to the pinned commit is under `openspec/`. Runtime, unrelated, or different-branch history SHALL remain mismatched. Adoption SHALL perform this comparison in the actual caller-owned checkout root and retain the original pinned base. Its immutable prepared Git observations SHALL capture the literal selected origin or local ref, resolved base and tip commits, merge base, and relevant pinned-side OpenSpec diff. Before its first catalogue or database mutation, adoption SHALL repeat the audit through the same prepared command snapshot and reject any change in selected ref, resolved tip, lineage, or relevant diff evidence, including a still-compatible origin advance.
+
 #### Scenario: Known branch matches
 
 - **WHEN** effective base and mapped backup source branch are both `release/19`
@@ -946,6 +948,29 @@ A known mismatch SHALL abort before any mutation in shared and copy modes. Check
 
 - **WHEN** the mapped backup records `release/18`, the effective base is `release/19`, and the archive was deleted
 - **THEN** provenance is `mismatched` and checkout rejects it rather than applying the legacy-unknown exception; freshness separately reports unavailable
+
+#### Scenario: Pinned commit follows preferred origin history
+- **WHEN** the effective base is a pinned commit on the recorded source branch's origin history, even if a local branch is stale
+- **THEN** provenance is `matched` using the origin tracking ref
+
+#### Scenario: Planning-only OpenSpec divergence is allowed
+- **WHEN** the pinned commit and preferred origin branch share an ancestor and its only pinned-side changes are under `openspec/`
+- **THEN** provenance is `matched` for planning
+
+#### Scenario: Runtime or unrelated history is rejected
+- **WHEN** the pinned commit is unrelated, follows a different branch, or includes runtime changes after the common ancestor
+- **THEN** provenance is `mismatched` and checkout rejects before mutation
+
+#### Scenario: Compatible origin advance makes an adoption plan stale
+
+- **WHEN** an adoption command is captured from a matched pinned base and the preferred origin ref advances to another lineage-compatible commit before execution
+- **THEN** execution rejects the stale plan before catalogue or database mutation, even when the checkout HEAD, pinned base, and clean state are unchanged
+- **AND** local fallback selection is revalidated when the origin tracking ref is absent
+
+#### Scenario: Revision expressions are not source branch names
+
+- **WHEN** recorded source branch metadata contains a Git revision expression such as `main^{commit}`, `main~1`, or `main..x`
+- **THEN** provenance rejects it as an invalid branch name even when the recorded text matches the requested base
 
 ### Requirement: Legacy unknown provenance policy
 
@@ -1277,6 +1302,8 @@ Adoption SHALL require COPY mode, an explicit compatible base and exactly one ex
 
 Adoption and ordinary checkout SHALL use the same internal provenance normalization and the same public/execution projection builders after their mode-specific validation. The captured `base_revision` SHALL populate `plan.provenance.resolved_base_revision` for both paths; adoption SHALL retain its separate caller-owned checkout and repository-identity checks.
 
+For adoption, provenance SHALL be evaluated against the actual adopted checkout root. Before the first catalogue or database mutation, execution SHALL repeat the preferred-origin lineage audit through the immutable prepared Git command snapshot and compare it with the captured plan evidence. A changed origin ref, lineage, or relevant OpenSpec diff SHALL reject the stale plan without mutation; this revalidation SHALL retain the initial pinned base.
+
 Removal of an adopted COPY environment on an SDK-owned Compose PostgreSQL cluster SHALL validate the exact caller-owned checkout and endpoint claim, then reuse the managed cluster's volume, restore-binding, database and filestore ownership guards. An external PostgreSQL target SHALL retain its separate exact restore-provenance guard. A foreign cluster binding or changed adoption claim SHALL fail before database mutation.
 
 #### Scenario: COPY adoption reserves the auxiliary restore HTTP port
@@ -1326,6 +1353,10 @@ Removal of an adopted COPY environment on an SDK-owned Compose PostgreSQL cluste
 
 - **WHEN** `adopt_command()` captures a valid explicit base and its public plan is inspected before execution
 - **THEN** `plan.provenance.resolved_base_revision` equals the captured resolved commit and the execution projection uses the same normalized provenance
+
+#### Scenario: Adopted origin lineage changes after capture
+- **WHEN** the command captures a matched pinned-base plan and only the recorded origin tracking ref moves to unrelated history before execution
+- **THEN** execution rejects the stale provenance before catalogue or database mutation while preserving the caller-owned checkout
 
 ### Requirement: Code ownership is separate from environment artifact ownership
 

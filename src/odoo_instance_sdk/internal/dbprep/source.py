@@ -29,6 +29,8 @@ from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.dbprep import source_restore as _source_restore
 from odoo_instance_sdk.internal.generated_config import project_generated_config_path
 from odoo_instance_sdk.internal.git_worktree import (
+    _GitLineageObservation,
+    _is_literal_branch,
     rev_parse_git_common_dir,
     rev_parse_toplevel,
 )
@@ -324,18 +326,56 @@ def normalize_ref(value: str) -> str:
 
 
 def compare_provenance(
-    expected_base_ref: str, recorded_branch: str | None
+    expected_base_ref: str,
+    recorded_branch: str | None,
+    *,
+    repository_root: Path | None = None,
+    lineage_step_prefix: str | None = None,
+    lineage_observations: list[_GitLineageObservation] | None = None,
+    branch_step_id: str | None = None,
 ) -> BackupProvenanceComparison:
     expected = normalize_ref(expected_base_ref)
     if recorded_branch is None:
         status = BackupProvenanceStatus.UNKNOWN
     else:
-        recorded = recorded_branch.strip()
+        recorded = recorded_branch
+        branch_step_id = branch_step_id or (
+            f"{lineage_step_prefix}.branch" if lineage_step_prefix is not None else None
+        )
+        literal_branch = _is_literal_branch(
+            recorded,
+            repo_root=repository_root,
+            step_id=branch_step_id,
+        )
         status = (
             BackupProvenanceStatus.MATCHED
-            if normalize_ref(recorded) == expected
+            if literal_branch and normalize_ref(recorded) == expected
             else BackupProvenanceStatus.MISMATCHED
         )
+        recorded_ref = normalize_ref(recorded)
+        git_base = bool(
+            re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", expected)
+            or expected in (f"origin/{recorded_ref}", f"refs/remotes/origin/{recorded_ref}")
+        )
+        if (
+            repository_root is not None
+            and literal_branch
+            and git_base
+            and (status is BackupProvenanceStatus.MISMATCHED or lineage_step_prefix is not None)
+        ):
+            from odoo_instance_sdk.internal.git_worktree import refs_share_lineage
+
+            shares_lineage = refs_share_lineage(
+                repository_root,
+                expected,
+                recorded_ref,
+                step_prefix=lineage_step_prefix,
+                observations=lineage_observations,
+            )
+            if status is BackupProvenanceStatus.MISMATCHED and shares_lineage:
+                status = BackupProvenanceStatus.MATCHED
+            elif status is BackupProvenanceStatus.MATCHED and not shares_lineage:
+                status = BackupProvenanceStatus.MISMATCHED
     return BackupProvenanceComparison(
         status=status,
         expected_base_ref=expected,

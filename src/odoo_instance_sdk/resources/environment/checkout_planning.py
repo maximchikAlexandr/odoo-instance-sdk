@@ -44,6 +44,7 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.git_worktree import _GitLineageObservation
     from odoo_instance_sdk.internal.pgadmin_files import (
         PgAdminFingerprintInputs,
         PgAdminPaths,
@@ -215,6 +216,7 @@ class _CheckoutPlan:
     source_name: str | None = None
     source_base_url: str | None = None
     source_git_branch: str | None = None
+    provenance_git_branch: str | None = None
     selected_backup: Backup | None = None
     branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
     data_dir: Path | None = None
@@ -225,6 +227,48 @@ class _CheckoutPlan:
     artifact_root: Path | None = None
     adoption_input_fingerprint: str | None = None
     adopted: bool = False
+    adopted_lineage_evidence: tuple[_GitLineageObservation, ...] = ()
+
+
+def _checkout_git_steps(plan: _CheckoutPlan) -> tuple[PreparedStep, ...]:
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    branch_identity = plan.provenance_git_branch or plan.source_git_branch
+    if branch_identity is None:
+        return ()
+    prefix = "checkout.validate.git.lineage" if plan.adopted else "checkout.validate.git"
+    base_ref = plan.options.base_ref or branch_identity
+    branch = branch_identity.removeprefix("refs/heads/")
+    observations: list[tuple[str, tuple[str, ...]]] = []
+    observations.append(("branch", ("check-ref-format", f"refs/heads/{branch}")))
+    if plan.adopted and (
+        re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", base_ref)
+        or base_ref
+        in (
+            f"origin/{branch}",
+            f"refs/remotes/origin/{branch}",
+        )
+    ):
+        origin_ref, local_ref = f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"
+        observations.extend(
+            (
+                ("base", ("rev-parse", "--verify", f"{base_ref}^{{commit}}")),
+                ("origin", ("rev-parse", "--verify", f"{origin_ref}^{{commit}}")),
+                ("local", ("rev-parse", "--verify", f"{local_ref}^{{commit}}")),
+                ("origin.merge-base", ("merge-base", base_ref, origin_ref)),
+                ("origin.diff", ("diff", "--name-only", "-z", f"{origin_ref}...{base_ref}")),
+                ("local.merge-base", ("merge-base", base_ref, local_ref)),
+                ("local.diff", ("diff", "--name-only", "-z", f"{local_ref}...{base_ref}")),
+            )
+        )
+    return tuple(
+        PreparedStep(
+            step_id=f"{prefix}.{suffix}",
+            argv=("git", "-C", str(plan.worktree if plan.adopted else plan.repo_root), *args),
+            read_only=True,
+        )
+        for suffix, args in observations
+    )
 
 
 @dataclass(frozen=True, slots=True)

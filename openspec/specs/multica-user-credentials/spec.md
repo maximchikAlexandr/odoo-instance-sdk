@@ -3,22 +3,38 @@
 ## Purpose
 TBD - created by archiving change extend-odcli-automation-primitives. Update Purpose after archive.
 ## Requirements
-### Requirement: Verified Multica context resolves one root human creator
-The existing `odcli-multica` integration SHALL start from its already verified `VerifiedTaskContext` issue and workspace identity, use public typed `multica-py` issue and project reads to follow `parent_id` within that workspace until the root issue, reject cycles, missing parents, cross-workspace parents, and incomplete creator evidence, and require the root creator to be a human member. A parent in another project is valid only when that project's typed workspace identity matches the verified workspace. It SHALL NOT rediscover the checkout binding, duplicate context/preparation/adoption, or persist another binding. The caller SHALL NOT supply a user ID and the resolver SHALL NOT substitute the current agent, workspace owner, machine account, child-issue creator, or issue assignee.
+### Requirement: Verified Multica context resolves the root creator
+The existing `odcli-multica` integration SHALL start from its already verified `VerifiedTaskContext` issue and workspace identity, use public typed `multica-py` issue and project reads to follow `parent_id` within that workspace until the root issue, and reject cycles, missing parents, cross-workspace parents, and incomplete creator evidence. The typed root issue SHALL provide its creator actor type and identifier; `VerifiedTaskContext` binds the verified issue and workspace and does not add creator-actor fields. The root creator may be an agent for verified context resolution. A parent in another project is valid only when that project's typed workspace identity matches the verified workspace. It SHALL NOT rediscover the checkout binding, duplicate context/preparation/adoption, or persist another binding. The caller SHALL NOT supply a user ID and the resolver SHALL NOT substitute the current agent, workspace owner, machine account, child-issue creator, or issue assignee.
 
-#### Scenario: Child issue resolves its root creator
+#### Scenario: Agent-created root resolves verified context
+- **WHEN** the verified task context names a child issue whose finite parent chain ends at a root issue created by an agent
+- **THEN** typed issue evidence identifies the root issue and agent creator, and typed project evidence verifies the workspace while the task context remains valid
+- **AND** this verified context alone does not authorize credential-dependent operations
+- **AND** no Git remote or GitLab request occurs during resolution
+
+#### Scenario: Child issue resolves its human root creator
 - **WHEN** the verified task context names a child issue whose finite parent chain ends at a root issue created by a human
 - **THEN** the typed context identifies that root issue, workspace, and human creator
 - **AND** no Git remote or GitLab request occurs during resolution
 
 #### Scenario: Invalid lineage fails closed
-- **WHEN** verified issue/workspace evidence is incomplete, a parent is missing or crosses workspaces, the chain cycles, or the root creator is not a human
+- **WHEN** verified issue/workspace evidence is incomplete, creator evidence is incomplete, a parent is missing or crosses workspaces, or the chain cycles
 - **THEN** resolution fails with a stable sanitized reason before any repository mutation or remote request
 
-### Requirement: Host-scoped GitLab credential mapping
-For every credential-dependent bridge operation, `odcli-multica` SHALL resolve the verified root creator and exact normalized GitLab HTTPS host, then invoke the existing core GitLab credential resolver with that member/host pair, the selected project mapping path, the project's existing token dotenv path, and the supplied process environment. A matching encrypted-store record SHALL provide both login mapping and token and SHALL take precedence over every legacy value. Only exact encrypted-record absence SHALL continue to the existing project mapping-file plus token-environment order, including explicit mapping-path and process-environment overrides. A present but invalid encrypted record, encrypted-store failure, missing or ambiguous legacy mapping, empty token, malformed host, or different member/host SHALL fail closed without ambient Git credentials, cross-account fallback, or another lookup chain. Legacy mapping token key names SHALL retain the reserved `ODCLI_GITLAB_TOKEN_` prefix; legacy token files remain owner-only and process environment retains precedence.
+#### Scenario: Agent root is not invalid lineage
+- **WHEN** verified issue/workspace evidence is complete and the root issue's typed creator evidence identifies an agent
+- **THEN** verified context resolution succeeds without treating the agent root as invalid lineage
+- **AND** credential-dependent operations still require a verified human root creator
 
-#### Scenario: Encrypted-only root creator credentials resolve
+### Requirement: Host-scoped GitLab credentials require the verified human root creator
+For every credential-dependent bridge operation, `odcli-multica` SHALL resolve a verified root creator who is a human member and the exact normalized GitLab HTTPS host, then invoke the existing core GitLab credential resolver with that member/host pair, the selected project mapping path, the project's existing token dotenv path, and the supplied process environment. An agent-created root MAY provide verified context, but SHALL NOT authorize credential lookup. A matching encrypted-store record SHALL provide both login mapping and token and SHALL take precedence over every legacy value. Only exact encrypted-record absence SHALL continue to the existing project mapping-file plus token-environment order, including explicit mapping-path and process-environment overrides. A present but invalid encrypted record, encrypted-store failure, missing or ambiguous legacy mapping, empty token, malformed host, or different member/host SHALL fail closed without ambient Git credentials, cross-account fallback, or another lookup chain. Legacy mapping token key names SHALL retain the reserved `ODCLI_GITLAB_TOKEN_` prefix; legacy token files remain owner-only and process environment retains precedence.
+
+#### Scenario: Agent root cannot authorize credential lookup
+- **WHEN** verified context resolves a root issue created by an agent
+- **THEN** every credential-dependent operation fails before Git or GitLab access
+- **AND** it does not fall back to the agent, workspace owner, machine account, or another creator
+
+#### Scenario: Encrypted-only human root creator credentials resolve
 - **WHEN** the verified root creator and exact normalized GitLab host have one valid encrypted-store record and no project mapping file or token environment value exists
 - **THEN** the bridge returns one private credential snapshot containing that record's login and token for the selected host
 - **AND** Git push, native Git passthrough, synchronization, and merge-request publication can consume that same bridge resolution contract

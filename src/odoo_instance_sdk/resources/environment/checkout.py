@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.dbprep.source import _RestoreSourceInput
+    from odoo_instance_sdk.internal.git_worktree import _GitLineageObservation
     from odoo_instance_sdk.internal.proc import (
         ProcessExecutor,
         ProcessResult,
@@ -476,11 +477,17 @@ class _CheckoutMixin(_CheckoutApiMixin):
         project: ProjectConfig | Path,
         branch: str,
         options: EnvironmentCheckoutOptions,
+        *,
+        repository_root: Path | None = None,
+        lineage_step_prefix: str | None = None,
+        lineage_observations: list[_GitLineageObservation] | None = None,
+        branch_step_id: str | None = None,
     ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]:
         """Resolve provenance and freshness without creating checkout artifacts."""
         project_config = (
             project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
         )
+        audit_root = repository_root or project_config.repository_root
         if options.db_mode is EnvironmentDatabaseMode.COPY and (
             options.remote_name is not None or options.backup_id is not None
         ):
@@ -495,7 +502,14 @@ class _CheckoutMixin(_CheckoutApiMixin):
                     "backup_provenance_unknown",
                     "retained backup provenance is unknown; pass --base explicitly",
                 )
-            comparison = compare_provenance(effective_base, source_branch)
+            comparison = compare_provenance(
+                effective_base,
+                source_branch,
+                repository_root=audit_root,
+                lineage_step_prefix=lineage_step_prefix,
+                lineage_observations=lineage_observations,
+                branch_step_id=branch_step_id,
+            )
             if comparison.status is BackupProvenanceStatus.MISMATCHED:
                 raise EnvironmentConflictError(
                     "backup_provenance_mismatch",
@@ -552,7 +566,13 @@ class _CheckoutMixin(_CheckoutApiMixin):
         recorded_branch = (
             provenance_backup.source_git_branch if provenance_backup is not None else None
         )
-        comparison = compare_provenance(effective_base, recorded_branch)
+        comparison = compare_provenance(
+            effective_base,
+            recorded_branch,
+            repository_root=audit_root,
+            lineage_step_prefix=lineage_step_prefix,
+            branch_step_id=branch_step_id,
+        )
         if comparison.status is BackupProvenanceStatus.MISMATCHED:
             raise EnvironmentConflictError(
                 "backup_provenance_mismatch",
@@ -643,6 +663,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
         try:
             provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
             private = self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
+            private = replace(private, provenance_git_branch=provenance.recorded_branch)
             return _PlanningOutcome(
                 state=_CheckoutPlanningState(
                     private=private,
@@ -808,24 +829,6 @@ class _CheckoutMixin(_CheckoutApiMixin):
             context.complete_action("checkout.catalog")
             return result
 
-    def _validate_adoption_retry_identity(self, plan: _CheckoutPlan) -> None:
-        """Re-capture adoption evidence before reusing a ready catalog row."""
-        current_project = ProjectConfig.load(plan.project.repository_root)
-        current_source = self._copy_source_metadata(current_project, plan.options)
-        current_fingerprint = self._adoption_fingerprint(
-            plan.project_id or "",
-            plan.worktree,
-            Path(plan.git_common_dir),
-            plan.options,
-            source_name=current_source[0],
-            source_base_url=current_source[1],
-            source_git_branch=current_source[2],
-            source_database=current_source[3],
-            selected_backup_id=(current_source[4].id if current_source[4] is not None else None),
-        )
-        if current_fingerprint != plan.adoption_input_fingerprint:
-            raise StalePlanError("adoption resolved base or source identity changed after planning")
-
     def _validate_checkout_snapshot(  # noqa: C901 -- snapshot validation keeps all drift guards together
         self,
         snapshot: _CheckoutSnapshot,
@@ -914,6 +917,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
                     "caller-owned checkout HEAD does not match the explicit base",
                     details={"expected_base": plan.base_revision, "actual_head": current_head},
                 )
+            self._revalidate_adopted_checkout_provenance(plan, snapshot)
             return
 
         current_project = ProjectConfig.load(plan.repo_root)
@@ -951,7 +955,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
             raise StalePlanError("checkout resolved inputs changed after planning")
 
         current_provenance, current_freshness, current_warnings = self._audit_checkout_plan(
-            plan.repo_root, plan.branch, plan.options
+            plan.repo_root, plan.branch, plan.options, branch_step_id="checkout.validate.git.branch"
         )
         current_provenance = msgspec.structs.replace(
             current_provenance,

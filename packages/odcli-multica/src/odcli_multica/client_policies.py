@@ -143,6 +143,7 @@ def optional_root_creator(
         project_id=project_id,
         issues=issues,
         projects=projects,
+        allow_agent_root=True,
     )
 
 
@@ -153,7 +154,7 @@ def resolve_root_creator(
         issue = issues.get(context.issue_id)
     except Exception as exc:
         raise ContextVerificationError("issue lineage evidence is unavailable") from exc
-    return resolve_root_creator_from_issue(
+    result = resolve_root_creator_from_issue(
         issue,
         issue_id=context.issue_id,
         workspace_id=context.workspace_id,
@@ -161,6 +162,9 @@ def resolve_root_creator(
         issues=issues,
         projects=projects,
     )
+    if result is None:
+        raise ContextVerificationError("root issue human creator evidence is unavailable")
+    return result
 
 
 def resolve_root_creator_from_issue(
@@ -171,7 +175,8 @@ def resolve_root_creator_from_issue(
     project_id: str,
     issues: IssueStore,
     projects: ProjectStore,
-) -> RootCreatorContext:
+    allow_agent_root: bool = False,
+) -> RootCreatorContext | None:
     visited: set[str] = set()
     current_id = issue_id
     issue = first_issue
@@ -186,6 +191,10 @@ def resolve_root_creator_from_issue(
         if parent_id is None or not parent_id.strip():
             creator_type = (issue.creator_type or "").strip().casefold()
             creator_id = (issue.creator_id or "").strip()
+            # Checkout ownership is verified independently of personal Git credentials.
+            # Credentialed operations still require a human via resolve_root_creator().
+            if allow_agent_root and creator_type == "agent" and creator_id:
+                return None
             if creator_type != "member" or not creator_id:
                 raise ContextVerificationError("root issue human creator evidence is unavailable")
             return RootCreatorContext(
