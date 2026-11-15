@@ -870,6 +870,15 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="upstream Git policy inspection is covered by unit contracts",
     ),
     PublicLeafCase(
+        ("git", "rename-branch"),
+        ("git", "rename-branch", "ICODE-91", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="GitResource.rename_branch_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="isolated numbered Git rename is verified by the independent GRB walkthrough, outside the Odoo lifecycle matrix",
+    ),
+    PublicLeafCase(
         ("git", "absorb"),
         ("git", "absorb", "--dry-run"),
         classification="mutating-or-spawning",
@@ -1623,7 +1632,7 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path[:2] == ("env", "create"):
-        from odoo_instance_sdk.commands.env.checkout import _TicketAllocation
+        from odoo_instance_sdk.internal.ticket_branch_allocation import TicketAllocation
 
         ticket = path[2] if len(path) > 2 else "PROJ-123"
         plan = _matrix_checkout_plan()
@@ -1632,7 +1641,7 @@ def _patch_leaf_external(  # noqa: C901
             private_projection=plan,
             error=RuntimeError("isolated external operation failed") if failing else None,
         )
-        allocation = _TicketAllocation(
+        allocation = TicketAllocation(
             ticket=ticket,
             branch=ticket,
             repo_root=tmp_path,
@@ -1645,7 +1654,7 @@ def _patch_leaf_external(  # noqa: C901
 
         def build_ticket_checkout(
             *_args: object, **_kwargs: object
-        ) -> tuple[Command[Any], _TicketAllocation]:
+        ) -> tuple[Command[Any], TicketAllocation]:
             if failing:
                 raise RuntimeError("isolated external operation failed")
             return checkout_command, allocation
@@ -1977,6 +1986,7 @@ def _patch_leaf_external(  # noqa: C901
             resource.sync_command.side_effect = fail_operation
             resource.generic_sync_command.side_effect = fail_operation
             resource.merge_request_command.side_effect = fail_operation
+            resource.rename_branch_command.side_effect = fail_operation
         else:
             resource.commit_command.return_value = _matrix_command(
                 _command_result(0, {"result": {"status": "committed"}})
@@ -1986,6 +1996,13 @@ def _patch_leaf_external(  # noqa: C901
             )
             resource.clone_command.return_value = _matrix_command(
                 _command_result(0, {"result": {"status": "cloned"}})
+            )
+            resource.rename_branch_command.return_value = _matrix_command(
+                __import__(
+                    "odoo_instance_sdk.models", fromlist=["GitBranchRenameResult"]
+                ).GitBranchRenameResult(
+                    previous_branch="feature", selected_branch="ICODE-91", renamed=True
+                )
             )
         resource.check_command.return_value = _matrix_command(
             __import__("odoo_instance_sdk.models", fromlist=["GitCheckResult"]).GitCheckResult(

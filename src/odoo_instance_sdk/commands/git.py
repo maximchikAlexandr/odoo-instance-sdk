@@ -27,6 +27,7 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     run_or_preview,
 )
+from odoo_instance_sdk.commands.ticket import TICKET
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.models import GitCheckResult, StartConfig
 from odoo_instance_sdk.resources.git import GitResource
@@ -186,6 +187,36 @@ def git_check(
         raise
     except Exception as error:
         fail(mode, "git.check", error, dry_run=False, error_code=_error_code(error))
+    raise click.exceptions.Exit(status)
+
+
+@git_group.command("rename-branch", help="Rename the current branch to the next free Ticket name.")
+@click.argument("ticket", metavar="TICKET", type=TICKET)
+@click.option("--dry-run", is_flag=True, help="Plan only.")
+@output_options
+@pass_cli_context
+def git_rename_branch(
+    ctx: CliContext,
+    ticket: str,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    mode = resolve_output_mode(output_format, json_output)
+    try:
+        resource = _resource(ctx)
+        status, _ = run_or_preview(
+            lambda: resource.rename_branch_command(ticket),
+            command_name="git.rename-branch",
+            mode=mode,
+            dry_run=dry_run,
+            result=lambda value: model_to_dict(value) if value is not None else {},
+            rich=_rich,
+        )
+    except SystemExit:
+        raise
+    except Exception as error:
+        fail(mode, "git.rename-branch", error, dry_run=dry_run, error_code=_error_code(error))
     raise click.exceptions.Exit(status)
 
 
