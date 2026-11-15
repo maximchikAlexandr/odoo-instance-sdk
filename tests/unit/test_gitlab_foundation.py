@@ -54,6 +54,44 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.git import _command_result
 
+
+class _ReplaceEnvironmentBeforeOpen:
+    def __init__(
+        self,
+        target: Path,
+        displaced: Path,
+        replacement: Path,
+        original_open: Callable[..., int],
+    ) -> None:
+        self._original_open = original_open
+        self._actions: dict[tuple[str, int | None], Callable[[], None]] = {
+            (str(target), None): lambda: self._replace(target, displaced, replacement)
+        }
+
+    @staticmethod
+    def _replace(target: Path, displaced: Path, replacement: Path) -> None:
+        target.rename(displaced)
+        replacement.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
+        replacement.chmod(0o600)
+        replacement.replace(target)
+
+    def __call__(
+        self,
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        action = self._actions.pop((os.fsdecode(path), dir_fd), lambda: None)
+        action()
+        return self._original_open(path, flags, mode, dir_fd=dir_fd)
+
+    @property
+    def replacement_consumed(self) -> bool:
+        return not self._actions
+
+
 MEMBER_A = "11111111-1111-4111-8111-111111111111"
 MEMBER_B = "22222222-2222-4222-8222-222222222222"
 
@@ -333,31 +371,17 @@ def test_dotenv_loader_detects_atomic_replace_without_nofollow(
     displaced = tmp_path / "displaced-env"
     replacement = tmp_path / "replacement-env"
     original_open = os.open
-    swapped = False
-
-    def replace_before_open(
-        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        flags: int,
-        mode: int = 0o777,
-        *,
-        dir_fd: int | None = None,
-    ) -> int:
-        nonlocal swapped
-        if path == target and dir_fd is None and not swapped:
-            target.rename(displaced)
-            replacement.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-            replacement.chmod(0o600)
-            replacement.replace(target)
-            swapped = True
-        return original_open(path, flags, mode, dir_fd=dir_fd)
+    replacement_open = _ReplaceEnvironmentBeforeOpen(target, displaced, replacement, original_open)
 
     monkeypatch.setattr(os, "O_NOFOLLOW", 0)
-    monkeypatch.setattr(os, "open", replace_before_open)
+    monkeypatch.setattr(os, "open", replacement_open)
     monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {original_open})
     with pytest.raises(ProjectEnvironmentError) as failure:
         load_environment_file(target)
 
-    assert swapped
+    assert replacement_open.replacement_consumed
+    assert displaced.is_file()
+    assert replacement.is_file() is False
     assert "attacker-token" not in str(failure.value)
 
 

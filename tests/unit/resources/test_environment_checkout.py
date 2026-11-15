@@ -551,6 +551,36 @@ def test_checkout_http_port_selection(
     assert env.http_port == expected
 
 
+def _pin_current_commit(project: Path) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+
+def _pin_parent_commit(project: Path) -> str:
+    subprocess.run(
+        ["git", "-C", str(project), "commit", "--allow-empty", "-m", "tip"],
+        check=True,
+        capture_output=True,
+    )
+    return subprocess.check_output(
+        ["git", "-C", str(project), "rev-parse", "HEAD~1"], text=True
+    ).strip()
+
+
+def _recorded_commitish(project: Path) -> str:
+    return "main^{commit}"
+
+
+def _recorded_parent_commitish(project: Path) -> str:
+    subprocess.run(
+        ["git", "-C", str(project), "commit", "--allow-empty", "-m", "tip"],
+        check=True,
+        capture_output=True,
+    )
+    return "main~1"
+
+
 class TestCheckoutPreflight:
     @pytest.fixture
     def _fake_auxiliary_lifecycle(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1435,31 +1465,28 @@ class TestCheckoutPreflight:
         assert branches.stdout.strip() == ""
 
     @pytest.mark.parametrize(
-        ("recorded_branch", "pin_parent"),
-        [("main^{commit}", False), ("main~1", True), ("main..x", False)],
+        ("recorded_branch", "pin_base_factory", "origin"),
+        [
+            pytest.param("main^{commit}", _pin_current_commit, True, id="origin-head"),
+            pytest.param("main^{commit}", _pin_current_commit, False, id="local-head"),
+            pytest.param("main~1", _pin_parent_commit, True, id="origin-parent"),
+            pytest.param("main~1", _pin_parent_commit, False, id="local-parent"),
+            pytest.param("main..x", _pin_current_commit, True, id="origin-range"),
+            pytest.param("main..x", _pin_current_commit, False, id="local-range"),
+        ],
     )
-    @pytest.mark.parametrize("origin", [True, False], ids=["origin", "local-fallback"])
     def test_checkout_capture_rejects_malformed_pinned_provenance_before_mutation(
         self,
         env_client: OdooClient,
         project_manifest: Path,
         tmp_path: Path,
         recorded_branch: str,
-        pin_parent: bool,
+        pin_base_factory: Callable[[Path], str],
         origin: bool,
     ) -> None:
-        if pin_parent:
-            subprocess.run(
-                ["git", "-C", str(project_manifest), "commit", "--allow-empty", "-m", "tip"],
-                check=True,
-                capture_output=True,
-            )
+        pinned_base = pin_base_factory(project_manifest)
         head = subprocess.check_output(
             ["git", "-C", str(project_manifest), "rev-parse", "HEAD"], text=True
-        ).strip()
-        pinned_base = subprocess.check_output(
-            ["git", "-C", str(project_manifest), "rev-parse", "HEAD~1" if pin_parent else "HEAD"],
-            text=True,
         ).strip()
         _select_checkout_provenance_ref(project_manifest, origin=origin)
         backup = _record_restored_provenance(env_client, tmp_path, recorded_branch)
@@ -1479,20 +1506,21 @@ class TestCheckoutPreflight:
         assert latest is not None and latest.id == backup.id
         assert row is not None and row["state"] == "available"
 
-    @pytest.mark.parametrize("recorded_branch", ["main^{commit}", "main~1"])
+    @pytest.mark.parametrize(
+        "recorded_branch_factory",
+        [
+            pytest.param(_recorded_commitish, id="commitish"),
+            pytest.param(_recorded_parent_commitish, id="parent-commitish"),
+        ],
+    )
     def test_checkout_capture_rejects_equal_text_malformed_provenance(
         self,
         env_client: OdooClient,
         project_manifest: Path,
         tmp_path: Path,
-        recorded_branch: str,
+        recorded_branch_factory: Callable[[Path], str],
     ) -> None:
-        if recorded_branch == "main~1":
-            subprocess.run(
-                ["git", "-C", str(project_manifest), "commit", "--allow-empty", "-m", "tip"],
-                check=True,
-                capture_output=True,
-            )
+        recorded_branch = recorded_branch_factory(project_manifest)
         backup = _record_restored_provenance(env_client, tmp_path, recorded_branch)
         catalog = env_client.get_catalog()
 

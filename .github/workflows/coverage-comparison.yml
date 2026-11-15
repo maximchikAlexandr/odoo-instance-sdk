@@ -290,27 +290,42 @@ jobs:
                   f"{branch_percent:.4f}% |"
               )
               files = json.loads(path.read_text(encoding="utf-8"))["files"]
-              for suffix in ("client.py", "git_execution.py"):
-                  module = next(
+              module_scopes = (
+                  (
+                      "client.py + context_verification.py",
+                      ("client.py", "context_verification.py"),
+                  ),
+                  ("git_execution.py", ("git_execution.py",)),
+              )
+              for scope_name, suffixes in module_scopes:
+                  modules = [
                       info["summary"]
                       for source, info in files.items()
-                      if source.endswith(f"odcli_multica/{suffix}")
+                      if any(source.endswith(f"odcli_multica/{suffix}") for suffix in suffixes)
+                  ]
+                  if not modules:
+                      raise SystemExit(f"{label} coverage is missing module data for {scope_name}")
+                  module_lines = sum(
+                      module["covered_lines"] + module["missing_lines"] for module in modules
                   )
-                  module_lines = module["covered_lines"] + module["missing_lines"]
-                  module_branches = module["num_branches"]
+                  module_covered_lines = sum(module["covered_lines"] for module in modules)
+                  module_branches = sum(module["num_branches"] for module in modules)
+                  module_covered_branches = sum(
+                      module["covered_branches"] for module in modules
+                  )
                   module_line_percent = (
-                      100 * module["covered_lines"] / module_lines if module_lines else 100.0
+                      100 * module_covered_lines / module_lines if module_lines else 100.0
                   )
                   module_branch_percent = (
-                      100 * module["covered_branches"] / module_branches
+                      100 * module_covered_branches / module_branches
                       if module_branches
                       else 100.0
                   )
                   module_rows.append(
-                      f"| {label} | `{sha}` | `{suffix}` | "
-                      f"{module['covered_lines']} / {module_lines} | "
+                      f"| {label} | `{sha}` | `{scope_name}` | "
+                      f"{module_covered_lines} / {module_lines} | "
                       f"{module_line_percent:.4f}% | "
-                      f"{module['covered_branches']} / {module_branches} | "
+                      f"{module_covered_branches} / {module_branches} | "
                       f"{module_branch_percent:.4f}% |"
                   )
           rows.extend(
