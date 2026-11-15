@@ -166,6 +166,10 @@ def _linux_phase_gap_command(  # noqa: C901
             port=5050,
             network="project_default",
             fingerprint="captured-hmac",
+            database="demo",
+            postgres_host="db",
+            postgres_port=5432,
+            postgres_user="odoo",
             secret_values=("captured-hmac", "database-password"),
         ),
     )
@@ -337,6 +341,10 @@ def test_reconciliation_phase_gap_rejects_changed_key_before_reinspection(
             port=5050,
             network="project_default",
             fingerprint="captured-hmac",
+            database="demo",
+            postgres_host="db",
+            postgres_port=5432,
+            postgres_user="odoo",
             secret_values=("captured-hmac", "database-secret"),
         ),
     )
@@ -519,6 +527,10 @@ def test_captured_and_stale_fingerprints_are_redacted_everywhere(
         port=5050,
         network="project_default",
         fingerprint=old,
+        database="demo",
+        postgres_host="db",
+        postgres_port=5432,
+        postgres_user="odoo",
         secret_values=(old, new, "database-password"),
     )
     run_step = next(step for step in steps if step.step_id == "pgadmin.container.run")
@@ -533,6 +545,7 @@ def test_captured_and_stale_fingerprints_are_redacted_everywhere(
         raise OSError(f"captured={old} stale={new}")
 
     monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fail_spawn)
+    assert isinstance(run_step, PreparedStep)
     with pytest.raises(ProcessSpawnError) as exc_info:
         SubprocessExecutor().execute(run_step)
     assert old not in repr(exc_info.value)
@@ -693,6 +706,9 @@ def test_phase_result_reinspects_after_phase_completion(
             "pgadmin.container.refresh.inspect",
             "pgadmin.container.refresh",
             "pgadmin.container.verify",
+            "pgadmin.master_password.probe",
+            "pgadmin.master_password.unlock",
+            "pgadmin.container.authenticate",
             "pgadmin.container.inspect.2",
             "pgadmin.container.cleanup.remove",
         ):
@@ -832,6 +848,11 @@ def _run_backend_identity_lifecycle_case(  # noqa: C901
                 assert self.pgadmin_inspect is not None
                 return subprocess.CompletedProcess(args, 0, json.dumps([self.pgadmin_inspect]), "")
             if args[1:2] == ["exec"]:
+                script = " ".join(args)
+                if "masterpass_check" in script:
+                    return subprocess.CompletedProcess(args, 0, "0\n", "")
+                if "SELECT 1" in script:
+                    return subprocess.CompletedProcess(args, 0, "", "")
                 return subprocess.CompletedProcess(
                     args,
                     0,
@@ -1067,6 +1088,7 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
                             "User": str(pgadmin_files.PGADMIN_RUNTIME_UID),
                             "Env": [
                                 "PGADMIN_CONFIG_SERVER_MODE=False",
+                                "PGADMIN_CONFIG_USE_OS_SECRET_STORAGE=False",
                                 "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
                                 f"PGADMIN_DEFAULT_EMAIL={pgadmin_files.PGADMIN_DEFAULT_EMAIL}",
                                 f"PGADMIN_DEFAULT_PASSWORD_FILE={pgadmin_files.PGADMIN_PASSWORD_DESTINATION}",
@@ -1085,6 +1107,11 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
                     }
                     return subprocess.CompletedProcess(args, 0, "pgadmin-id\n", "")
                 if args[1:2] == ["exec"]:
+                    script = " ".join(args)
+                    if "masterpass_check" in script:
+                        return subprocess.CompletedProcess(args, 0, "0\n", "")
+                    if "SELECT 1" in script:
+                        return subprocess.CompletedProcess(args, 0, "", "")
                     return subprocess.CompletedProcess(
                         args,
                         0,

@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Card, Group, Select, SimpleGrid, Stack, Text, Title } from "@mantine/core";
 import {
   getMonitorSnapshot,
+  openPgAdmin,
   startRuntime,
   stopRuntime,
+  PgAdminEligibilityState,
+  type PgAdminEligibility,
   type RuntimeActionRequest,
   type BackupFreshnessSnapshot,
   type PublicationSnapshot,
@@ -181,6 +184,8 @@ export default function App() {
                 storage={env.storage}
                 database={env.database}
                 lifecycleState={env.lifecycle_state}
+                pgadmin={env.pgadmin}
+                environmentId={env.id}
                 testId="environment-card"
                 actionTestId="open-odoo"
               />
@@ -204,6 +209,8 @@ function RuntimeCard({
   storage,
   database,
   lifecycleState,
+  pgadmin,
+  environmentId,
   testId,
   actionTestId,
 }: {
@@ -218,12 +225,16 @@ function RuntimeCard({
   storage: { total_bytes: number | null; complete: boolean; backup_bytes?: number | null };
   database: string | null | undefined;
   lifecycleState?: string;
+  pgadmin?: PgAdminEligibility;
+  environmentId?: string;
   testId: string;
   actionTestId: string;
 }) {
   const [pending, setPending] = useState<"start" | "stop" | null>(null);
   const pendingAction = useRef(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pgadminPending, setPgadminPending] = useState(false);
+  const [pgadminError, setPgadminError] = useState<string | null>(null);
   const [completedState, setCompletedState] = useState<"started" | "stopped" | null>(null);
   const runtimeLive = runtime?.state === "ready" || runtime?.state === "not_ready";
   useEffect(() => {
@@ -260,6 +271,29 @@ function RuntimeCard({
     }
   };
   const externalUrl = publication?.state === "available" ? publication.external_url : null;
+  const pgadminEligible = pgadmin?.state === PgAdminEligibilityState.ELIGIBLE;
+  const openPgAdminBrowser = async () => {
+    if (!pgadminEligible || !environmentId || pgadminPending) return;
+    setPgadminPending(true);
+    setPgadminError(null);
+    try {
+      const result = await openPgAdmin({
+        client,
+        body: { environment_id: environmentId },
+        throwOnError: true,
+      });
+      const url = result.data.url;
+      if (!url.startsWith("http://127.0.0.1:") && !url.startsWith("http://localhost:")) {
+        setPgadminError("pgAdmin could not be opened.");
+        return;
+      }
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      setPgadminError("pgAdmin could not be opened.");
+    } finally {
+      setPgadminPending(false);
+    }
+  };
 
   return (
     <Card data-testid={testId} className="instance-card" withBorder padding="lg" radius="sm">
@@ -336,12 +370,40 @@ function RuntimeCard({
           >
             {pending === "start" ? "Starting…" : pending === "stop" ? "Stopping…" : live ? "Stop" : "Start"}
           </Button>
+          {pgadmin && environmentId ? (
+            <Button
+              data-testid="open-pgadmin"
+              variant="outline"
+              size="sm"
+              disabled={!pgadminEligible || pgadminPending}
+              loading={pgadminPending}
+              title={pgadminExplanation(pgadmin.state)}
+              onClick={() => void openPgAdminBrowser()}
+            >
+              Open pgAdmin
+            </Button>
+          ) : null}
         </Group>
         {actionError ? <Text size="xs" c="red" role="alert">{actionError}</Text> : null}
-        {/* TODO(#147): Restore Open pgAdmin and its status after automatic credential provisioning and authorization are ready. */}
+        {pgadminError ? <Text data-testid="pgadmin-error" size="xs" c="red" role="alert">{pgadminError}</Text> : null}
       </div>
     </Card>
   );
+}
+
+function pgadminExplanation(state: PgAdminEligibilityState): string {
+  switch (state) {
+    case PgAdminEligibilityState.ELIGIBLE:
+      return "Open pgAdmin for this environment";
+    case PgAdminEligibilityState.ENVIRONMENT_NOT_READY:
+      return "Environment is not ready for pgAdmin";
+    case PgAdminEligibilityState.DATABASE_UNRESOLVED:
+      return "Database is not resolved for pgAdmin";
+    case PgAdminEligibilityState.CLUSTER_NOT_OWNED:
+      return "PostgreSQL cluster is not owned by OdCLI";
+    case PgAdminEligibilityState.CLUSTER_UNHEALTHY:
+      return "PostgreSQL cluster is not healthy";
+  }
 }
 
 function formatAge(seconds: number): string {

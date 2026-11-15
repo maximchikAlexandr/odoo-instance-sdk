@@ -78,8 +78,9 @@ _MP_PHASE_BARRIER: Any = None
 
 def _run_public_pgadmin_in_process(result_queue: Any) -> None:  # noqa: C901
     """Run a captured public command with an optional phase-completion barrier."""
-    from odoo_instance_sdk.internal import pgadmin_container, pgadmin_files
+    from odoo_instance_sdk.internal import pgadmin_container, pgadmin_files, pgadmin_master_password
 
+    pgadmin_master_password.unlock_master_password = lambda *_args, **_kwargs: None
     try:
         recording = RecordingExecutor()
 
@@ -163,6 +164,7 @@ def _run_public_pgadmin_in_process(result_queue: Any) -> None:  # noqa: C901
                         "User": str(pgadmin_files.PGADMIN_RUNTIME_UID),
                         "Env": [
                             "PGADMIN_CONFIG_SERVER_MODE=False",
+                            "PGADMIN_CONFIG_USE_OS_SECRET_STORAGE=False",
                             "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
                             f"PGADMIN_DEFAULT_EMAIL={pgadmin_files.PGADMIN_DEFAULT_EMAIL}",
                             f"PGADMIN_DEFAULT_PASSWORD_FILE={pgadmin_files.PGADMIN_PASSWORD_DESTINATION}",
@@ -182,6 +184,8 @@ def _run_public_pgadmin_in_process(result_queue: Any) -> None:  # noqa: C901
                         _MP_STORE["container"] = container
                         _MP_STORE["runs"] += 1
                 return ProcessResult(argv, 0, "pgadmin-id\n", "", 0.0, None, ())
+            if step_id == "pgadmin.master_password.probe":
+                return ProcessResult(argv, 0, "0\n", "", 0.0, None, ())
             if step_id == "pgadmin.container.verify":
                 return ProcessResult(
                     argv,
@@ -883,6 +887,7 @@ def _build_pgadmin_ledger_scenario(  # noqa: C901
             "User": str(pgadmin_files.PGADMIN_RUNTIME_UID),
             "Env": [
                 "PGADMIN_CONFIG_SERVER_MODE=False",
+                "PGADMIN_CONFIG_USE_OS_SECRET_STORAGE=False",
                 "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
                 f"PGADMIN_DEFAULT_EMAIL={pgadmin_files.PGADMIN_DEFAULT_EMAIL}",
                 f"PGADMIN_DEFAULT_PASSWORD_FILE={pgadmin_files.PGADMIN_PASSWORD_DESTINATION}",
@@ -950,6 +955,7 @@ def _build_pgadmin_ledger_scenario(  # noqa: C901
             (), 0, '{"Labels":{"com.docker.compose.project":"odcli_pg_project"}}', "", 0.0, None, ()
         ),
         "pgadmin.container.refresh": ProcessResult((), 0, "", "", 0.0, None, ()),
+        "pgadmin.master_password.probe": ProcessResult((), 0, "0\n", "", 0.0, None, ()),
         "pgadmin.container.verify": ProcessResult(
             (),
             0,

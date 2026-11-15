@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
 from odoo_instance_sdk.internal import pgadmin_readiness
+from odoo_instance_sdk.internal.pgadmin_authorization import (
+    authenticate_argv,
+    authorize_selected_database,
+    probe_argv,
+)
 from odoo_instance_sdk.internal.pgadmin_files import (
     PGADMIN_CONTAINER_NAME,
     PGADMIN_CONTAINER_PORT,
@@ -29,11 +34,11 @@ from odoo_instance_sdk.internal.pgadmin_files import (
     pgadmin_mounts,
 )
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, active_context
 from odoo_instance_sdk.models import PgAdminOpenResult, PgAdminOpenState
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.proc import PreparedStep
 
 
 class PostgresIdentityCluster(Protocol):
@@ -68,14 +73,30 @@ _PGADMIN_EFFECTIVE_SERVER_QUERY = (
 )
 
 
+def required_pgadmin_environment() -> tuple[str, ...]:
+    """Return the non-secret environment contract for one pgAdmin container."""
+    return (
+        "PGADMIN_CONFIG_SERVER_MODE=False",
+        "PGADMIN_CONFIG_USE_OS_SECRET_STORAGE=False",
+        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
+        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
+        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
+        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
+    )
+
+
 def reconciliation_steps(
     *,
     paths: PgAdminPaths,
     port: int,
     network: str,
     fingerprint: str,
+    database: str,
+    postgres_host: str,
+    postgres_port: int,
+    postgres_user: str,
     secret_values: tuple[str, ...] = (),
-) -> tuple[PreparedStep, ...]:
+) -> tuple[PreparedStep | PreparedAction, ...]:
     """Capture the post-preparation Docker phase for one exact command.
 
     The phase creates this second immutable instance with the real HMAC only
@@ -83,8 +104,6 @@ def reconciliation_steps(
     Keeping this manifest in one place prevents the phase boundary from
     drifting between preview and execution.
     """
-    from odoo_instance_sdk.internal.proc import PreparedStep
-
     return (
         PreparedStep(
             step_id="pgadmin.container.inspect.1",
@@ -127,6 +146,28 @@ def reconciliation_steps(
             read_only=True,
         ),
         PreparedStep(
+            step_id="pgadmin.master_password.probe",
+            argv=probe_argv(PGADMIN_CONTAINER_NAME),
+            read_only=True,
+        ),
+        PreparedAction(
+            step_id="pgadmin.master_password.unlock",
+            action="pgadmin_master_password_unlock",
+            description="Unlock the pgAdmin desktop master password over loopback",
+            mutating=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.authenticate",
+            argv=authenticate_argv(
+                PGADMIN_CONTAINER_NAME,
+                postgres_host,
+                postgres_port,
+                postgres_user,
+                database,
+            ),
+            read_only=True,
+        ),
+        PreparedStep(
             step_id="pgadmin.container.inspect.2",
             argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
             read_only=True,
@@ -141,8 +182,6 @@ def reconciliation_steps(
 
 def reconciliation_inspect_step() -> PreparedStep:
     """Capture the lock-adjacent inspection that starts reconciliation."""
-    from odoo_instance_sdk.internal.proc import PreparedStep
-
     return PreparedStep(
         step_id="pgadmin.reconciliation.inspect.0",
         argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
@@ -169,17 +208,9 @@ def _docker_run_argv(preparation: PgAdminPreparation, *, network: str) -> tuple[
         f"{PGADMIN_LABEL_FINGERPRINT}={preparation.fingerprint}",
         "--label",
         f"{PGADMIN_LABEL_NETWORK}={network}",
-        "--env",
-        "PGADMIN_CONFIG_SERVER_MODE=False",
-        "--env",
-        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
-        "--env",
-        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
-        "--env",
-        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
-        "--env",
-        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
     ]
+    for item in required_pgadmin_environment():
+        args.extend(("--env", item))
     for mount in preparation.mounts:
         args.extend(
             (
@@ -218,8 +249,6 @@ def _docker_verify_argv(container: str) -> tuple[str, ...]:
 
 def _skip_reconciliation_steps(*step_ids: str) -> None:
     """Record an explicit branch omission in the active phase ledger."""
-    from odoo_instance_sdk.internal.proc import active_context
-
     context = active_context()
     if context is None:
         return
@@ -425,6 +454,13 @@ def reconcile_container(
                 planned=planned,
                 step_id="pgadmin.container.verify",
             )
+            authorize_selected_database(
+                preparation,
+                database,
+                runner=runner,
+                deadline=deadline,
+                planned=planned,
+            )
             _skip_reconciliation_steps(
                 "pgadmin.container.inspect.2",
                 "pgadmin.container.cleanup.remove",
@@ -487,6 +523,13 @@ def reconcile_container(
             deadline=deadline,
             planned=planned,
             step_id="pgadmin.container.verify",
+        )
+        authorize_selected_database(
+            preparation,
+            database,
+            runner=runner,
+            deadline=deadline,
+            planned=planned,
         )
         _skip_reconciliation_steps(
             "pgadmin.container.inspect.2", "pgadmin.container.cleanup.remove"
@@ -586,8 +629,6 @@ def run_docker(
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise PgAdminUnavailableError()
-    from odoo_instance_sdk.internal.proc import active_context
-
     context = active_context()
     if context is not None and step_id is not None:
         from odoo_instance_sdk.exceptions import UnplannedStepError
@@ -693,13 +734,7 @@ def container_matches(
         return False
     if labels.get(PGADMIN_LABEL_NETWORK) != network:
         return False
-    expected_env = {
-        "PGADMIN_CONFIG_SERVER_MODE=False",
-        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
-        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
-        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
-        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
-    }
+    expected_env = set(required_pgadmin_environment())
     env = config.get("Env")
     if not isinstance(env, list) or not all(isinstance(item, str) for item in env):
         return False

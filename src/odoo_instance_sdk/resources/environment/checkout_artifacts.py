@@ -989,10 +989,11 @@ def _pgadmin_command_steps(
                     port=inputs.port,
                     network=identity.network,
                     fingerprint=inputs.fingerprint_inputs.fingerprint,
-                    secret_values=(
-                        inputs.fingerprint_inputs.fingerprint,
-                        inputs.password,
-                    ),
+                    database=inputs.database,
+                    postgres_host=identity.host,
+                    postgres_port=identity.port,
+                    postgres_user=identity.user,
+                    secret_values=(inputs.fingerprint_inputs.fingerprint, inputs.password),
                 ),
             ]
         )

@@ -1,7 +1,7 @@
 # local-pgadmin Specification
 
 ## Purpose
-Define the local SDK-managed pgAdmin lifecycle, typed open operation, readiness checks and private credential storage without claiming the deferred dashboard authorization flow is complete.
+Define the local SDK-managed pgAdmin lifecycle, typed open operation, readiness checks, private master-password provisioning, and dashboard open action.
 ## Requirements
 ### Requirement: Public typed pgAdmin operation
 

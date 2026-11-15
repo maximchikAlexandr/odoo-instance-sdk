@@ -211,6 +211,7 @@ def _owned_pgadmin_container(*, network: str) -> bool:
     )
 
 
+@pytest.mark.timeout(300)
 def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -246,6 +247,7 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
     networks = tuple(f"{project}_default" for project in projects)
     compose_runner = SubprocessComposeRunner()
     data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
     pgadmin_root = data_root / "pgadmin"
     private = pgadmin_root / "private"
     paths = pgadmin_files.PgAdminPaths(
@@ -341,6 +343,17 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
         )
         assert started.state is PgAdminOpenState.STARTED
         assert started.url.startswith("http://127.0.0.1:")
+        master_env = pgadmin_root / "master.env"
+        mode = master_env.stat().st_mode
+        assert master_env.is_file() and not master_env.is_symlink()
+        assert (mode & 0o777) == 0o600
+        assert master_env.read_text(encoding="utf-8").startswith("PGADMIN_MASTER_PASSWORD=")
+        inspected = _run(["docker", "inspect", pgadmin_files.PGADMIN_CONTAINER_NAME], timeout=20.0)
+        assert inspected.returncode == 0
+        assert "PGADMIN_MASTER_PASSWORD" not in inspected.stdout
+        assert "master.env" not in inspected.stdout
+        restarted = _run(["docker", "restart", pgadmin_files.PGADMIN_CONTAINER_NAME], timeout=90.0)
+        assert restarted.returncode == 0, restarted.stderr
         old_container_id = _pgadmin_container_id()
         old_mode, old_active_pgpass = _active_pgpass(old_container_id)
         assert old_mode == "600"
