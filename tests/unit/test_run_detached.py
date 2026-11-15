@@ -273,7 +273,8 @@ def test_detached_launch_persists_identity_and_returns_promptly(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
@@ -324,7 +325,8 @@ def test_detached_persists_identity_from_exact_executed_step(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
@@ -369,7 +371,8 @@ def test_detached_immediate_exit_returns_error_and_no_stale_record(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
         pytest.raises(InstanceConfigurationError, match="exited immediately"),
@@ -412,7 +415,8 @@ def test_detached_no_logfile_resolves_fallback_next_to_config(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
@@ -1129,7 +1133,8 @@ def test_detached_stop_targets_persisted_runtime(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
@@ -1180,7 +1185,8 @@ def test_cli_run_detach_returns_typed_result(env_id: str, http_port: int, tmp_pa
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
@@ -1240,7 +1246,7 @@ def test_public_cli_run_wait_ready_accepts_registered_legacy_environment(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time",
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
             return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
@@ -1470,7 +1476,8 @@ def test_detached_explicit_logfile_has_priority_over_fallback(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
@@ -1560,7 +1567,8 @@ def test_detached_main_checkout_fallback_next_to_config(
             return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):

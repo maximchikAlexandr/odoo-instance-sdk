@@ -736,7 +736,7 @@ odcli --env feature/customer-credit shell --dry-run --format toon -- --dev
 respective machine-readable forms. Supplying either output format without
 `--dry-run` is rejected by Click with exit `2` before SDK resolution or process
 launch. `logs
---follow`, the monitor server, and normal interactive shell/run streams are
+--follow`, `monitor start`, and normal interactive shell/run streams are
 documented native transports because they are intentionally unbounded or
 interactive rather than finite plan documents.
 
@@ -764,8 +764,16 @@ the tokens after it are preserved in order and repeated values are allowed.
 The SDK rejects managed runtime overrides before capture, including config and
 database/credential, addons/upgrade/data-path, HTTP/gevent/longpolling bind or
 port, and logfile option families. Dry-run captures and redacts the same argv
-without recording use or starting Odoo; normal `run` forwards native stdin,
-stdout, and stderr and returns Odoo's exit code.
+without recording use or starting Odoo. On Unix, catalogue-owned `run` and
+`run --detach` register a foreground child of OdCLI's private Supervisor.
+`run --detach` returns after that process is alive; HTTP readiness stays a
+separate check. Foreground Ctrl-C stops log follow, exits 130, and leaves Odoo
+running. `odcli stop` stops only that saved program, and a repeated stop is
+success. A machine reboot does not start the daemon or any program again.
+Managed run, stop, and monitor are unsupported on Windows. `odcli monitor`
+starts a separate program; `monitor stop`, `restart`, `status`, and `logs`
+talk to Supervisor even when the HTTP API is down, and stopping one does not
+stop the other.
 
 ### Bug reports and self-upgrade
 
@@ -888,7 +896,11 @@ sentence; use the entry's `--help` for exact options.
 - `odcli publish` — Publish a ready project or environment through the owned Caddy route.
 - `odcli unpublish` — Remove an owned Caddy publication idempotently.
 - `odcli ps` — Show process and resource inventory from one monitor snapshot.
-- `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
+- `odcli monitor start` — Start the observability monitor in headless or dashboard mode.
+- `odcli monitor stop` — Stop the supervised monitor without stopping Odoo.
+- `odcli monitor restart` — Restart the supervised monitor without rereading its command.
+- `odcli monitor status` — Show Supervisor status for the monitor.
+- `odcli monitor logs` — Show the captured monitor log.
 - `odcli update` — Self-upgrade an OdCLI uv-tool install.
 <!-- cli-command-inventory:end -->
 

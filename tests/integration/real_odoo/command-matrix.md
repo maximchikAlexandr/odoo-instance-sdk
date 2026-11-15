@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 69-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 73-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -62,7 +62,11 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `run` | native-passthrough | yes | critical | E2E-CP-07 / E2E-CP-13: HTTP-ready lifecycle and SIGINT |
 | `logs` | jsonl-stream | no | focused | E2E-FC-13: bounded subscription/cancellation and redaction |
 | `shell` | native-passthrough | yes | focused | E2E-FC-06: exact target database and exit semantics |
-| `monitor` | native-passthrough | no | not-applicable | Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle |
+| `monitor start` | native-passthrough | no | not-applicable | Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle |
+| `monitor stop` | mutating-or-spawning | yes | not-applicable | Supervisor monitor stop is outside the disposable Odoo fixture |
+| `monitor restart` | mutating-or-spawning | yes | not-applicable | Supervisor monitor restart is outside the disposable Odoo fixture |
+| `monitor status` | bounded-read-only | no | not-applicable | Supervisor monitor status is outside the disposable Odoo fixture |
+| `monitor logs` | bounded-read-only | no | not-applicable | Supervisor monitor logs are outside the disposable Odoo fixture |
 | `git commit` | mutating-or-spawning | yes | not-applicable | upstream Git workflow is outside the disposable Odoo fixture |
 | `git clone` | mutating-or-spawning | yes | not-applicable | authenticated GitLab clone is covered by generic Git contract tests and private E2E |
 | `git check` | bounded-read-only | no | not-applicable | upstream Git policy inspection is covered by unit contracts |

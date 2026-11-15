@@ -19,6 +19,7 @@ from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.internal.proc import (
     ProcessHandle,
     RecordingExecutor,
+    RunContext,
     StepObserver,
     SubprocessExecutor,
 )
@@ -190,6 +191,15 @@ def env_id(real_catalog: BackupCatalog) -> str:
     return eid
 
 
+@pytest.fixture(autouse=True)
+def keep_direct_foreground_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these identity tests on the direct child they already assert."""
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.production_executor",
+        lambda _executor: False,
+    )
+
+
 @pytest.fixture()
 def http_port() -> int:
     """Provide a free loopback port so tests ignore operator-owned listeners."""
@@ -234,7 +244,8 @@ def test_persist_called_with_expected_fields(
         http_port=http_port,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.identity._process_create_time", lambda _: 1.0
+        "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+        lambda _: 1.0,
     )
 
     exit_code = inst.run_foreground(args=("--stop-after-init",))
@@ -291,7 +302,8 @@ def test_foreground_persists_identity_from_exact_executed_step(
         ),
         patch("odoo_instance_sdk.internal.server.wait_foreground_process", return_value=0),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
     ):
         assert inst.run_foreground(config) == 0
@@ -355,6 +367,55 @@ def test_clear_on_crash_exception_propagates(env_id: str, http_port: int, tmp_pa
 
 
 @pytest.mark.unit
+def test_supervised_foreground_interrupt_keeps_the_runtime_row(
+    env_id: str, http_port: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog()
+    client = _client_with_catalog(fake)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.production_executor",
+        lambda _executor: True,
+    )
+
+    def fake_activate(context: RunContext[int], **_kwargs: object) -> int:
+        for step_id in (
+            "instance.supervisor.program",
+            "instance.supervisor.daemon",
+            "instance.supervisor.status",
+            "instance.supervisor.update",
+            "instance.supervisor.start",
+            "instance.supervisor.confirm",
+        ):
+            if context.planned(step_id):
+                context.skip(step_id)
+        return 4321
+
+    def fake_follow(context: RunContext[int]) -> int:
+        context.skip("instance.supervisor.tail")
+        return 130
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.activate_program",
+        fake_activate,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.follow_program",
+        fake_follow,
+    )
+    assert inst.run_foreground() == 130
+    assert fake.upsert_calls
+    assert fake.clear_calls == []
+
+
 def test_clear_on_keyboard_interrupt(env_id: str, http_port: int, tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
@@ -537,7 +598,8 @@ def test_core_psutil_persists_exact_identity(
     )
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.identity._process_create_time", lambda _: 123.0
+        "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+        lambda _: 123.0,
     )
     assert inst.run_foreground() == 0
     assert fake.upsert_calls[0][1]["create_time"] == 123.0

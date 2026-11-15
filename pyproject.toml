@@ -26,6 +26,7 @@ dependencies = [
     "expression>=5,<6",
     "alembic>=1.13,<2",
     "sqlalchemy>=2,<3",
+    "supervisor>=4.2.5,<5 ; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]

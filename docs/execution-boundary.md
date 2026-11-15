@@ -145,7 +145,12 @@ and reasons; no parallel eligibility table is permitted.
 `run` is a native foreground/stream leaf, but `run -d` / `--detach` is a
 bounded detached launch: its `--dry-run` captures the detached plan without
 spawning, and execution returns a typed `DetachedLaunchResult` once Odoo is
-alive. The SDK sibling is `instance.run_detached_command()`.
+alive. The SDK sibling is `instance.run_detached_command()`. On Unix the
+owned runtime is a foreground child of OdCLI's private Supervisor. Ctrl-C in
+foreground `run` exits 130 and leaves that program running. `monitor start`
+is the native monitor leaf; `monitor stop`, `monitor restart`, `monitor status`,
+and `monitor logs` are bounded Supervisor leaves. Windows has no managed
+Supervisor lifecycle. A reboot does not start the private daemon.
 `resolve_effective_logfile()` chooses one path for detached spawn, `logs`,
 structured results, and runtime metadata: explicit non-empty `logfile` in
 effective `odoo.conf` wins; otherwise `odoo.log` next to the effective config
@@ -282,7 +287,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/internal/git_askpass.py:72` — Git askpass child
   transport; the value is selected from the owner-only credential channel and
   is never emitted by the public SDK boundary.
-- `src/odoo_instance_sdk/resources/instance/identity.py:508` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/foreground_runtime.py:40` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 - `src/odoo_instance_sdk/internal/alternate_tool.py:980` — shared

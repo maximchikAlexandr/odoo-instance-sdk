@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -25,6 +25,21 @@ from odoo_instance_sdk.internal.server import (
     _write_secret_config,
     cleanup_secret_config,
     get_process_status,
+)
+from odoo_instance_sdk.internal.supervisor_runtime import (
+    WINDOWS_MESSAGE,
+    abort_launch,
+    activate_program,
+    finish_launch,
+    launch_steps,
+    owned_program_name,
+    production_executor,
+    program_installed,
+    skip_launch,
+    stop_program,
+    stop_steps,
+    supervisor_reachable,
+    windows_unsupported,
 )
 from odoo_instance_sdk.models import (
     DetachedLaunchResult,
@@ -62,6 +77,14 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.internal.proc import RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+def _owned_program(binding: _RuntimeBinding | None, environment_id: str | None) -> str | None:
+    return owned_program_name(
+        owner_kind=None if binding is None else binding.owner_kind,
+        owner_id=None if binding is None else binding.owner_id,
+        environment_id=environment_id,
+    )
 
 
 def _raise_if_exited(exited: bool, handle: ProcessHandle | None = None) -> None:
@@ -190,6 +213,40 @@ class _PlanningMixin:
             timeout=timeout, legacy_environment=False, step_prefix=step_prefix
         )
 
+    def _finish_supervised_stop(
+        self,
+        context: RunContext[dict[str, str | None]],
+        *,
+        owned: str,
+        identity: _RuntimeIdentity,
+        control: tuple[PreparedStep, ...],
+        action_ids: tuple[str, ...],
+        step_prefix: str,
+        result: Callable[[str, _RuntimeIdentity | None], dict[str, str | None]],
+    ) -> dict[str, str | None]:
+        """Stop one saved Supervisor program and clear its runtime row."""
+        if supervisor_reachable():
+            outcome = stop_program(
+                context,
+                owned,
+                expected_argv=identity.expected_argv,
+                sensitive_indices=identity.expected_sensitive_argv_indices,
+                executable_prefix_length=identity.expected_executable_prefix_length,
+                status_step=f"{step_prefix}instance.supervisor.status",
+                stop_step=f"{step_prefix}instance.supervisor.stop",
+            )
+        else:
+            for control_step in control:
+                context.skip(control_step.step_id)
+            outcome = "already_stopped"
+        context.skip(action_ids[2])
+        context.action(action_ids[3])
+        context.complete_action(action_ids[3])
+        context.action(action_ids[4])
+        self._clear_runtime_identity_if_matches(identity)
+        context.complete_action(action_ids[4])
+        return result(outcome, identity)
+
     def _stop_runtime_command(  # noqa: C901
         self, *, timeout: float, legacy_environment: bool, step_prefix: str = ""
     ) -> Command[dict[str, str | None]]:
@@ -262,6 +319,14 @@ class _PlanningMixin:
             )
             for step_id in action_ids
         )
+        owned = _owned_program(self._runtime_binding, self._environment_id)
+        supervisor_owned = (
+            owned is not None and program_installed(owned) and not windows_unsupported()
+        )
+        control: tuple[PreparedStep, ...] = (
+            stop_steps(owned, prefix=step_prefix) if supervisor_owned and owned else ()
+        )
+        command_steps: tuple[PreparedStep | PreparedAction, ...] = (*control, *actions)
 
         def execute(context: RunContext[dict[str, str | None]]) -> dict[str, str | None]:
             context.action(action_ids[0])
@@ -271,6 +336,22 @@ class _PlanningMixin:
                     identity = self._read_runtime_identity()
                     self._assert_runtime_identity_unchanged(planned_identity, identity)
                     context.complete_action(action_ids[1])
+                    if supervisor_owned and owned is not None and identity is not None:
+                        return self._finish_supervised_stop(
+                            context,
+                            owned=owned,
+                            identity=identity,
+                            control=control,
+                            action_ids=action_ids,
+                            step_prefix=step_prefix,
+                            result=result,
+                        )
+                    if control:
+                        for control_step in control:
+                            if context.planned(control_step.step_id) and not context.consumed(
+                                control_step.step_id
+                            ):
+                                context.skip(control_step.step_id)
                     if identity is None:
                         for step_id in action_ids[2:]:
                             context.skip(step_id)
@@ -309,10 +390,11 @@ class _PlanningMixin:
 
         return Command.create(
             ExecutionPlan(
-                steps=tuple(step.public_projection() for step in actions),
+                steps=tuple(step.public_projection() for step in command_steps),
             ),
             execute,
-            actions,
+            command_steps,
+            executor=SubprocessExecutor() if control else None,
         )
 
     def run_detached(
@@ -448,11 +530,17 @@ class _PlanningMixin:
             for step_id in action_ids
         )
         command_steps = (*prepared_steps, *actions)
+        owned = _owned_program(self._runtime_binding, self._environment_id)
+        unix_owned = owned is not None and not windows_unsupported()
+        if unix_owned and owned is not None:
+            command_steps = (*command_steps, *launch_steps(owned, follow=False))
         process_executor = SubprocessExecutor()
         logfile_path = str(effective_logfile)
 
         def execute(context: RunContext[DetachedLaunchResult]) -> DetachedLaunchResult:  # noqa: C901
-            if type(process_executor) is SubprocessExecutor:
+            if owned and windows_unsupported() and production_executor(process_executor):
+                raise InstanceConfigurationError(WINDOWS_MESSAGE)
+            if type(process_executor) is SubprocessExecutor and not unix_owned:
                 _assert_http_port_free(config)
             _ensure_logfile_writable(effective_logfile)
             context.action(action_ids[0])
@@ -475,18 +563,35 @@ class _PlanningMixin:
                 handle: ProcessHandle | None = None
                 runtime_persisted = False
                 persisted_identity: _RuntimeIdentity | None = None
+                keep_secret = False
                 try:
                     context.action(action_ids[1])
-                    handle = context.spawn(step.step_id)
+                    if unix_owned and owned is not None and production_executor(process_executor):
+                        context.skip(step.step_id)
+                        pid = activate_program(
+                            context,
+                            program=owned,
+                            argv=step.argv,
+                            cwd=step.cwd,
+                            environment=step.environment,
+                            secrets=secrets,
+                            before_start=lambda: _assert_http_port_free(config),
+                        )
+                    else:
+                        if unix_owned:
+                            skip_launch(context, follow=False)
+                        handle = context.spawn(step.step_id)
+                        pid = handle.pid
                     context.complete_action(action_ids[1])
                     context.action(action_ids[2])
-                    exited = handle.poll() is not None
+                    if handle is not None:
+                        exited = handle.poll() is not None
+                        _raise_if_exited(exited, handle)
                     context.complete_action(action_ids[2])
-                    _raise_if_exited(exited, handle)
                     context.action(action_ids[3])
                     if self._runtime_binding is not None or self._environment_id is not None:
                         self._persist_runtime_identity(
-                            handle.pid,
+                            pid,
                             snapshot,
                             resolved_cwd,
                             step,
@@ -504,7 +609,7 @@ class _PlanningMixin:
                                 config,
                                 step,
                                 timeout=readiness_timeout,
-                                pid=handle.pid,
+                                pid=pid,
                             )
                         except BaseException as error:
                             context.fail_action(action_ids[4], error)
@@ -514,14 +619,20 @@ class _PlanningMixin:
                     owner_kind, owner_id = _runtime_owner(
                         self._runtime_binding, self._environment_id
                     )
+                    if unix_owned and production_executor(process_executor):
+                        finish_launch(context)
+                        keep_secret = True
                     return DetachedLaunchResult(
-                        pid=handle.pid,
+                        pid=pid,
                         owner_kind=owner_kind,
                         owner_id=owner_id,
                         http_endpoint=f"http://{config.http_interface}:{config.http_port}",
                         log_path=logfile_path,
                     )
                 except BaseException as error:
+                    if handle is None and unix_owned and production_executor(process_executor):
+                        with contextlib.suppress(BaseException):
+                            abort_launch(context)
                     if handle is not None:
                         if wait_ready:
                             owner_kind, owner_id = _runtime_owner(
@@ -571,7 +682,7 @@ class _PlanningMixin:
                         context.skip(action_ids[5])
                     raise
                 finally:
-                    if secret_created:
+                    if secret_created and not keep_secret:
                         cleanup_secret_config(secret_path)
 
         from odoo_instance_sdk.execution import Command

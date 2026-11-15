@@ -584,8 +584,9 @@ def test_runtime_dependency_inventory_is_exact_and_bounded() -> None:
         "expression>=5,<6",
         "alembic>=1.13,<2",
         "sqlalchemy>=2,<3",
+        "supervisor>=4.2.5,<5 ; sys_platform != 'win32'",
     ]
-    assert len(project["dependencies"]) == 12
+    assert len(project["dependencies"]) == 13
     assert project["optional-dependencies"] == {
         "dashboard": [
             "fastapi>=0.141,<1.0",

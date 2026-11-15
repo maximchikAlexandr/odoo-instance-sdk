@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import secrets
 import socket
-import webbrowser
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -238,44 +238,34 @@ def run_server(
     no_open: bool = False,
     external_proxy: ExternalProxyConfig | None = None,
     publication_settings: PublicationSettings | None = None,
+    settings_path: Path | None = None,
+    detach: bool = False,
 ) -> None:
-    """Start the monitor server; dashboard dependencies are imported lazily."""
+    """Start the supervised monitor; dashboard dependencies are imported lazily."""
     if not _is_loopback_host(host):
         raise SystemExit("monitor command only supports loopback hosts; refusing network bind")
     if publication_settings is not None and external_proxy is None:
         raise SystemExit("publication settings require an external proxy configuration")
-    try:
-        import fastapi  # noqa: F401
-        import uvicorn
-    except ImportError as exc:
+    if settings_path is not None and publication_settings is None:
+        raise SystemExit("publication settings require an external proxy configuration")
+    if importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("uvicorn") is None:
         raise SystemExit(
-            f"monitor command requires the dashboard extra: "
-            f"pip install odoo-instance-sdk[dashboard] ({exc})"
-        ) from exc
+            "monitor command requires the dashboard extra: pip install odoo-instance-sdk[dashboard]"
+        )
 
-    chosen = _select_port(host, port)
-    app = create_app(headless=headless, external_proxy=external_proxy)
-
+    browser_url = None
     if publication_settings is not None:
-        from odoo_instance_sdk.resources.publication import monitor_route_command
+        browser_url = (
+            f"https://{publication_settings.panel_host_label}.{publication_settings.domain_suffix}/"
+        )
+    from odoo_instance_sdk.resources.monitor import serve_monitor
 
-        monitor_route_command(f"http://{host}:{chosen}", settings=publication_settings).run()
-
-    if not headless and not no_open:
-        if publication_settings is not None:
-            browser_url = (
-                f"https://{publication_settings.panel_host_label}."
-                f"{publication_settings.domain_suffix}/"
-            )
-        else:
-            url_host = f"[{host}]" if ":" in host else host
-            browser_url = f"http://{url_host}:{chosen}/"
-        webbrowser.open(browser_url)
-
-    uvicorn.run(
-        app,
+    serve_monitor(
         host=host,
-        port=chosen,
-        proxy_headers=False,
-        forwarded_allow_ips="",
+        port=port,
+        headless=headless,
+        no_open=no_open,
+        settings=settings_path,
+        detach=detach,
+        browser_url=browser_url,
     )

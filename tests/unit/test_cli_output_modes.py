@@ -823,14 +823,48 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="exact target database and exit semantics",
     ),
     PublicLeafCase(
-        ("monitor",),
-        ("monitor",),
+        ("monitor", "start"),
+        ("monitor", "start", "--headless", "--no-open"),
         exception_reason="long-running monitor server has no finite bounded output plan",
         classification="native-passthrough",
         requires_dry_run=False,
         cli_only_reason="live monitor terminal presentation boundary",
         e2e_disposition="not-applicable",
         e2e_rationale="Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle",
+    ),
+    PublicLeafCase(
+        ("monitor", "stop"),
+        ("monitor", "stop", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="stop_monitor_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Supervisor monitor stop is outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("monitor", "restart"),
+        ("monitor", "restart", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="restart_monitor_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Supervisor monitor restart is outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("monitor", "status"),
+        ("monitor", "status"),
+        classification="bounded-read-only",
+        sdk_primitive="monitor_status_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Supervisor monitor status is outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("monitor", "logs"),
+        ("monitor", "logs"),
+        classification="bounded-read-only",
+        sdk_primitive="monitor_logs_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Supervisor monitor logs are outside the disposable Odoo fixture",
     ),
     PublicLeafCase(
         ("git", "commit"),
@@ -2428,6 +2462,39 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.bug_report.bug_report_submit_preview",
             fail_operation if failing else lambda _report_id: preview,
+        )
+        return
+
+    if path == ("monitor", "stop"):
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.cli_parts.monitor.stop_monitor_command",
+            fail_operation
+            if failing
+            else lambda: _matrix_command({"status": "stopped", "program": "odcli-monitor"}),
+        )
+        return
+    if path == ("monitor", "restart"):
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.cli_parts.monitor.restart_monitor_command",
+            fail_operation
+            if failing
+            else lambda: _matrix_command({"status": "restarted", "program": "odcli-monitor"}),
+        )
+        return
+    if path == ("monitor", "status"):
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.cli_parts.monitor.monitor_status_command",
+            fail_operation
+            if failing
+            else lambda: _matrix_command({"status": "STOPPED", "program": "odcli-monitor"}),
+        )
+        return
+    if path == ("monitor", "logs"):
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.cli_parts.monitor.monitor_logs_command",
+            fail_operation
+            if failing
+            else lambda: _matrix_command({"status": "ok", "program": "odcli-monitor", "log": ""}),
         )
         return
 
