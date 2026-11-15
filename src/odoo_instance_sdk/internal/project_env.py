@@ -144,10 +144,7 @@ def _read_environment_descriptor(
     )
     try:
         metadata = os.fstat(descriptor)
-        if before is not None and (metadata.st_dev, metadata.st_ino) != (
-            before.st_dev,
-            before.st_ino,
-        ):
+        if before is not None and not _same_identity(before, metadata):
             raise ProjectEnvironmentError(f"{path}: dotenv path changed while opening")
         if not stat.S_ISREG(metadata.st_mode):
             raise ProjectEnvironmentError(
@@ -158,10 +155,7 @@ def _read_environment_descriptor(
             parent_after = _validate_environment_directory(
                 path.parent, require_owner_only_directory
             )
-            if (parent_after.st_dev, parent_after.st_ino) != (
-                parent_before.st_dev,
-                parent_before.st_ino,
-            ):
+            if not _same_identity(parent_before, parent_after):
                 raise ProjectEnvironmentError(f"{path}: dotenv directory changed while opening")
         chunks: list[bytes] = []
         while chunk := os.read(descriptor, 64 * 1024):
@@ -170,6 +164,27 @@ def _read_environment_descriptor(
     finally:
         with contextlib.suppress(OSError):
             os.close(descriptor)
+
+
+def _same_identity(before: os.stat_result, after: os.stat_result) -> bool:
+    """Return whether two stats still name the same unreplaced file.
+
+    Device and inode are not enough: a Linux filesystem can recycle the inode
+    as soon as the original file is unlinked. Size and timestamp catch that
+    replacement.
+    """
+
+    return (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
 
 
 def _validate_environment_file(path: Path, metadata: os.stat_result) -> None:
@@ -212,7 +227,7 @@ def _open_environment_directory(path: Path, *, require_owner_only: bool) -> int 
         raise ProjectEnvironmentError(f"{path}: unable to read dotenv directory") from exc
     metadata = os.fstat(descriptor)
     if not stat.S_ISDIR(metadata.st_mode) or (
-        before is not None and (metadata.st_dev, metadata.st_ino) != (before.st_dev, before.st_ino)
+        before is not None and not _same_identity(before, metadata)
     ):
         os.close(descriptor)
         raise ProjectEnvironmentError(f"{path}: dotenv directory must be a regular directory")

@@ -13,6 +13,8 @@ from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundErr
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.sanitize import sanitize_terminal_text
 from odoo_instance_sdk.internal.urls import normalize_base_url
+from odoo_instance_sdk.models.scaffold import ScaffoldConfig
+from odoo_instance_sdk.scaffold_config import render_scaffold_toml, scaffold_from_toml
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
@@ -146,6 +148,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     refresh_after_hours: float | None = None
     ticket_link_enabled: bool | None = None
     ticket_base_url: str | None = None
+    scaffold: ScaffoldConfig | None = None
 
     def __post_init__(self) -> None:  # noqa: C901
         root = self.repository_root.resolve()
@@ -235,6 +238,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             remote_instances_data=(
                 data.get("remote_instances") if isinstance(data, dict) else None
             ),
+            scaffold_data=data.get("scaffold") if isinstance(data, dict) else None,
         )
 
     @classmethod
@@ -246,6 +250,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         postgres_data: JsonValue | Mapping[str, JsonValue] = None,
         test_instance_data: JsonValue | Mapping[str, JsonValue] = None,
         remote_instances_data: JsonValue | Mapping[str, JsonValue] = None,
+        scaffold_data: JsonValue | Mapping[str, JsonValue] = None,
     ) -> ProjectConfig:
         legacy_enabled = data.get("jira_enabled")
         legacy_url = data.get("jira_base_url")
@@ -284,6 +289,11 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
                 else data.get("remote_instances"),
             )
         )
+        scaffold = (
+            scaffold_from_toml(cast("JsonValue", scaffold_data))
+            if scaffold_data is not None
+            else None
+        )
         return cls(
             repository_root=repository_root,
             odoo_bin=_path_or_none(data.get("odoo_bin")),
@@ -305,6 +315,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             refresh_after_hours=_float_or_none(data.get("refresh_after_hours")),
             ticket_link_enabled=ticket_enabled,
             ticket_base_url=_ticket_url_or_none(ticket_url),
+            scaffold=scaffold,
         )
 
     def to_manifest(self) -> str:
@@ -321,6 +332,9 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         for source in sorted(self.remote_instances, key=lambda item: item.name):
             lines.append("")
             lines.append(_remote_source_to_manifest(source))
+        if self.scaffold is not None:
+            lines.append("")
+            lines.append(render_scaffold_toml(self.scaffold).rstrip("\n"))
         return "\n".join(lines) + "\n"
 
 

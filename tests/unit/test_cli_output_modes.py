@@ -224,6 +224,41 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         failure_args=("prepare-venv", "--python", sys.executable, "--venv", ".venv", "--dry-run"),
     ),
     PublicLeafCase(
+        ("scaffold",),
+        (
+            "scaffold",
+            "sale_extension",
+            "--dry-run",
+            "--manifest",
+            "author=Matrix Author",
+            "--project",
+        ),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="ScaffoldResource.create_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="native addon scaffolding is covered by the focused real-Odoo scaffold test",
+        success_path_argument=True,
+        failure_args=(
+            "scaffold",
+            "sale_extension",
+            "--dry-run",
+            "--manifest",
+            "author=Matrix Author",
+            "--project",
+            "/no/such/odcli/project",
+        ),
+    ),
+    PublicLeafCase(
+        ("config", "path"),
+        ("config", "path"),
+        classification="bounded-read-only",
+        requires_dry_run=False,
+        sdk_primitive="user_config_path",
+        e2e_disposition="not-applicable",
+        e2e_rationale="user config path is a local filesystem projection",
+    ),
+    PublicLeafCase(
         ("remove",),
         ("remove", "--project-id", "project-test", "--dry-run"),
         classification="mutating-or-spawning",
@@ -1468,6 +1503,26 @@ def _patch_leaf_external(  # noqa: C901
                 "odoo_instance_sdk.commands.prepare_venv.prepare_venv_command", fail_operation
             )
         return
+    if path == ("scaffold",):
+        binary = tmp_path / "odoo-bin"
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o755)
+        manifest_dir = tmp_path / ".odcli"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "project.toml").write_text(
+            f'[project]\nodoo_bin = "{binary}"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ODCLI_USER_ROOT", str(tmp_path / "user-root"))
+        monkeypatch.chdir(tmp_path)
+        return
+    if path == ("config", "path"):
+        if failing:
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.config.user_config_path",
+                fail_operation,
+            )
+        return
     if path == ("remove",):
 
         def remove_command(*_args: object, **_kwargs: object) -> object:
@@ -2582,7 +2637,7 @@ def test_ps_formats_execute_one_captured_process_inventory(
 
 def _rich_case_args(case: PublicLeafCase, tmp_path: Path) -> list[str]:
     args = list(case.args)
-    if case.path == ("prepare-venv",):
+    if case.path in {("prepare-venv",), ("scaffold",)}:
         args.append(str(tmp_path))
     if case.path in (("backup", "ls"), ("resource", "ls")):
         args.append("--all-projects")
