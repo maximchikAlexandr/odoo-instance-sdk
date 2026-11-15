@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 69-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 75-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -61,6 +61,12 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `psql` | native-passthrough | yes | focused | E2E-FC-12: inherited stream and dry-run plan |
 | `run` | native-passthrough | yes | critical | E2E-CP-07 / E2E-CP-13: HTTP-ready lifecycle and SIGINT |
 | `logs` | jsonl-stream | no | focused | E2E-FC-13: bounded subscription/cancellation and redaction |
+| `logs search` | bounded-read-only | no | not-applicable | structured search is covered by unit tests |
+| `logs cursor` | bounded-read-only | no | not-applicable | cursor tokens are covered by unit tests |
+| `logs mark create` | mutating-or-spawning | yes | not-applicable | mark creation is covered by unit tests |
+| `logs mark show` | bounded-read-only | no | not-applicable | mark reads are covered by unit tests |
+| `logs mark list` | bounded-read-only | no | not-applicable | mark reads are covered by unit tests |
+| `logs mark delete` | mutating-or-spawning | yes | not-applicable | mark deletion is covered by unit tests |
 | `shell` | native-passthrough | yes | focused | E2E-FC-06: exact target database and exit semantics |
 | `monitor` | native-passthrough | no | not-applicable | Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle |
 | `git commit` | mutating-or-spawning | yes | not-applicable | upstream Git workflow is outside the disposable Odoo fixture |

@@ -136,7 +136,7 @@ def _other_files_bytes(
     total = 0
     paths = [generated_config_path, dependency_lock_path]
     if environment_root is not None:
-        paths.extend(environment_root / name for name in ("odoo.log", "cache", "artifacts"))
+        paths.extend(environment_root / name for name in ("odoo.log", "cache", "artifacts", "logs"))
     for p in paths:
         try:
             if p.is_file():

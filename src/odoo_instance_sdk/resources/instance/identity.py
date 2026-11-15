@@ -17,6 +17,12 @@ from odoo_instance_sdk.exceptions import (
     LockConflictError,
 )
 from odoo_instance_sdk.internal.locks import exclusive_lock, shared_lock
+from odoo_instance_sdk.internal.logs.launch import (
+    finish_structured_run,
+    logging_argv,
+    prepare_structured_run,
+    structured_launch,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -339,9 +345,15 @@ class _IdentityMixin:
         )
         secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
         executable_prefix = self._executable_prefix()
+        launch = structured_launch(
+            cast("OdooInstance", self), action_id="instance.foreground.runlog"
+        )
+        log_argv = logging_argv(cast("OdooInstance", self))
+        if launch is not None:
+            log_argv = ("--logfile", str(launch.logfile), *log_argv)
         step = PreparedStep(
             step_id="instance.foreground",
-            argv=(*executable_prefix, *cli_args, *validated_args),
+            argv=(*executable_prefix, *cli_args, *log_argv, *validated_args),
             cwd=None if resolved_cwd is None else str(resolved_cwd),
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
@@ -365,6 +377,17 @@ class _IdentityMixin:
             *(bootstrap_plan.execution_steps if bootstrap_plan is not None else ()),
             step,
         )
+        if launch is not None:
+            prepared_steps = (
+                PreparedAction(
+                    step_id=launch.action_id,
+                    action=launch.action_id,
+                    description="Create the private Odoo run logfile",
+                    details={"run_id": launch.run_id, "logfile": str(launch.logfile)},
+                    mutating=True,
+                ),
+                *prepared_steps,
+            )
         if (
             self._runtime_binding is not None or self._environment_id is not None
         ) and resolved_cwd is not None:
@@ -413,11 +436,18 @@ class _IdentityMixin:
             # for cleanup/revalidation.  See server-lifecycle spec and #74 item 1.
             handle: ProcessHandle | None = None
             secret_created = False
+            run_prepared = False
+            exit_code: int | None = None
             try:
                 with self._artifact_lock():
                     if secret_path is not None:
                         _write_secret_config(snapshot, secret_path)
                         secret_created = True
+                    if launch is not None:
+                        context.action(launch.action_id)
+                        prepare_structured_run(launch)
+                        run_prepared = True
+                        context.complete_action(launch.action_id)
                     try:
                         handle = context.spawn(step.step_id)
                         if self._runtime_binding is not None or self._environment_id is not None:
@@ -428,6 +458,10 @@ class _IdentityMixin:
                                 step,
                                 len(executable_prefix),
                                 context=context,
+                            )
+                        if launch is not None and handle is not None:
+                            cast("OdooInstance", self)._record_structured_process(
+                                launch, handle.pid
                             )
                     except BaseException:
                         if handle is not None:
@@ -446,7 +480,7 @@ class _IdentityMixin:
                 if handle is None:  # pragma: no cover - re-raised above
                     raise RuntimeError("foreground spawn produced no handle")
                 try:
-                    return wait_foreground_process(handle)
+                    exit_code = wait_foreground_process(handle)
                 except BaseException:
                     with contextlib.suppress(BaseException):
                         terminate(
@@ -455,6 +489,8 @@ class _IdentityMixin:
                             timeout=5.0,
                         )
                     raise
+                else:
+                    return exit_code
             finally:
                 # Re-acquire the same shared artifact lock for cleanup and
                 # revalidation so the identity row is not left stale.  A
@@ -465,6 +501,10 @@ class _IdentityMixin:
                 while True:
                     try:
                         with self._artifact_lock():
+                            if launch is not None and run_prepared:
+                                state = "finished" if exit_code == 0 else "interrupted"
+                                with contextlib.suppress(BaseException):
+                                    finish_structured_run(launch, state=state, exit_code=exit_code)
                             self._clear_runtime_identity()
                             if secret_created:
                                 cleanup_secret_config(secret_path)

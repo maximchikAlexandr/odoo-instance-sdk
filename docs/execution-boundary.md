@@ -253,9 +253,13 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:563-564` — documented
-  `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
-  transport.
+- `src/odoo_instance_sdk/commands/logs.py:69-70` — documented raw `logs`
+  stream; remove when that stream gets an explicit bounded transport.
+- `src/odoo_instance_sdk/commands/logs.py:174` — documented cursor token
+  written alone so a shell can substitute it; remove when rich output can
+  print that token without an envelope.
+- `src/odoo_instance_sdk/commands/logs.py:387-388` — documented `logs search`
+  JSONL stream; remove when that stream gets an explicit bounded transport.
 - `src/odoo_instance_sdk/commands/cli_parts/registration.py:479` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
@@ -282,7 +286,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/internal/git_askpass.py:72` — Git askpass child
   transport; the value is selected from the owner-only credential channel and
   is never emitted by the public SDK boundary.
-- `src/odoo_instance_sdk/resources/instance/identity.py:508` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:548` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 - `src/odoo_instance_sdk/internal/alternate_tool.py:980` — shared

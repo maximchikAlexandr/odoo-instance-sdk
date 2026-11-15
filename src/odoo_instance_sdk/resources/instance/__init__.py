@@ -15,6 +15,7 @@ from odoo_instance_sdk.resources.instance.auxiliary_restore import (
     resolve_runtime_argv,
 )
 from odoo_instance_sdk.resources.instance.identity import _IdentityMixin
+from odoo_instance_sdk.resources.instance.logs import _LogsMixin
 from odoo_instance_sdk.resources.instance.planning import _PlanningMixin
 from odoo_instance_sdk.resources.instance.runtime import (
     InstanceFactory,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True, kw_only=True)
-class OdooInstance(_IdentityMixin, _PlanningMixin):
+class OdooInstance(_LogsMixin, _IdentityMixin, _PlanningMixin):
     config: InstanceConfig
     _client: OdooClient
     databases: DatabaseResource = field(init=False)

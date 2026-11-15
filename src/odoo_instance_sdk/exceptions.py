@@ -320,6 +320,21 @@ class LogfileAccessError(InstanceConfigurationError):
         )
 
 
+class LogQueryError(OdooInstanceSdkError):
+    """Stable structured-log failure that never includes a filesystem path."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, str] | None = None,
+    ) -> None:
+        self.code = code
+        self.details = dict(details or {})
+        super().__init__(message)
+
+
 class LogfileUnwritableError(InstanceConfigurationError):
     """The resolved fallback logfile cannot be created or opened for writing."""
 

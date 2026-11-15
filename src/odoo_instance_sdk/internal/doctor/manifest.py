@@ -4,6 +4,7 @@ import configparser
 import shutil
 import sqlite3
 import sys
+import tomllib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -186,6 +187,7 @@ def run_doctor(
         else:
             report.context["project_source"] = "explicit" if project_path is not None else "cwd"
         _check_manifest(report, project_root)
+        _check_odoo_logging(report, project_root)
         if remote_name is not None:
             _check_remote_source(report, project_root, remote_name)
         if resolved_context is not None and not isinstance(resolved_context.source, ProjectConfig):
@@ -668,6 +670,28 @@ def _resolve_project_root(project_path: Path | None) -> Path | None:
             return None
         current = parent
     return None
+
+
+def _check_odoo_logging(report: DoctorReport, project_root: Path) -> None:
+    """Report Odoo logging settings without failing the doctor run."""
+    try:
+        project = ProjectConfig.load(project_root)
+    except (ProjectManifestNotFoundError, ConfigError, tomllib.TOMLDecodeError):
+        return
+    config = project.odoo_logging
+    structured = config is not None and config.structured
+    report.checks.append(
+        CheckResult(
+            "logging",
+            STATUS_OK,
+            "structured Odoo logging" if structured else "structured Odoo logging disabled",
+            facts={
+                "structured": structured,
+                "level": None if config is None else config.level,
+                "handlers": [] if config is None else list(config.handlers),
+            },
+        )
+    )
 
 
 def _check_manifest(report: DoctorReport, project_root: Path) -> None:
