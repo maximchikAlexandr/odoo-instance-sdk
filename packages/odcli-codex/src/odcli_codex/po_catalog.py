@@ -10,7 +10,7 @@ from odcli_codex.errors import CodexWorkflowError
 _FIELD = re.compile(r"^(msgctxt|msgid|msgid_plural|msgstr(?:\[\d+\])?)(\s+)\"(.*)\"$")
 _CONTINUED = re.compile(r"^\"(.*)\"$")
 _LANGUAGE = re.compile(r"^[a-z]{2}(?:[_-][A-Za-z]{2})?$")
-_TOKEN = re.compile(r"%(?:\([^)]+\))?[sdifr]|%%|\{[^{}\n]+\}|</?[A-Za-z][^>\s]*|\\[nNt\"\\]")
+_TOKEN = re.compile(r"%(?:\([^)]+\))?[sdifr]|%%|\{[^{}\n]+\}|</?[A-Za-z][^>\s]*|\\[nNt\"\\]|\n|\t")
 _HEADER_LANGUAGE = re.compile(r"Language:\s*([A-Za-z_]+)")
 
 
@@ -144,14 +144,20 @@ def _splice(entry: CatalogEntry, proposal: str | tuple[str, ...]) -> tuple[str, 
     if plural_keys:
         if not isinstance(proposal, tuple) or len(proposal) != len(plural_keys):
             return entry.raw, False
-        pairs = tuple(zip(plural_keys, proposal, strict=True))
+        pairs = tuple(
+            (key, value)
+            for key, value in zip(plural_keys, proposal, strict=True)
+            if entry.fields.get(key) == ""
+        )
+        if not pairs:
+            return entry.raw, False
     else:
         if not isinstance(proposal, str):
             return entry.raw, False
         pairs = (("msgstr", proposal),)
     source = entry.fields.get("msgid_plural") or entry.msgid
     for key, value in pairs:
-        if not value or any(ord(char) < 32 and char != "\t" for char in value):
+        if not value or any(ord(char) < 32 and char not in "\t\n" for char in value):
             return entry.raw, False
         if tokens(source) != tokens(value):
             return entry.raw, False
@@ -174,7 +180,7 @@ def _replace_empty(raw: str, pairs: tuple[tuple[str, str], ...]) -> str | None:
 
 def _untranslated(entry: CatalogEntry) -> bool:
     keys = tuple(key for key in entry.fields if key.startswith("msgstr"))
-    return bool(keys) and all(entry.fields[key] == "" for key in keys)
+    return bool(keys) and any(entry.fields[key] == "" for key in keys)
 
 
 def _compatible(left: str, right: str) -> bool:
@@ -184,7 +190,18 @@ def _compatible(left: str, right: str) -> bool:
 
 
 def _unescape(value: str) -> str:
-    return value.replace(r"\\", "\\").replace(r"\"", '"').replace(r"\n", "\n").replace(r"\t", "\t")
+    output: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] == "\\" and index + 1 < len(value):
+            output.append(
+                {"n": "\n", "t": "\t", "\\": "\\", '"': '"'}.get(value[index + 1], value[index + 1])
+            )
+            index += 2
+            continue
+        output.append(value[index])
+        index += 1
+    return "".join(output)
 
 
 def _escape(value: str) -> str:

@@ -113,6 +113,54 @@ def test_empty_entries_are_filled_and_unsafe_replacements_stay_empty(
         assert 'msgstr "Привет' not in updated
 
 
+@pytest.mark.parametrize(
+    ("proposal", "filled"),
+    [("Строка", 0), ("Строка\n", 1)],
+)
+def test_newline_escapes_must_survive_splicing(tmp_path: Path, proposal: str, filled: int) -> None:
+    catalog = tmp_path / "ru.po"
+    catalog.write_text('msgid "Line\\n"\nmsgstr ""\n', encoding="utf-8")
+    _original, entries = read_catalog(catalog)
+    updated, rejected, actual_filled = apply_translations(entries, {"Line\n": proposal})
+
+    assert actual_filled == filled
+    assert rejected == (() if filled else ("Line\n",))
+    if filled:
+        assert "\\n" in updated
+
+
+def test_message_does_not_plan_the_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _project(tmp_path)
+    (tmp_path / "change.txt").write_text("staged\n", encoding="utf-8")
+    _git(tmp_path, "add", "change.txt")
+
+    def refuse(self: object, description: str, **_kwargs: object) -> object:
+        raise AssertionError(description)
+
+    monkeypatch.setattr("odoo_instance_sdk.resources.git.GitResource.commit_context", refuse)
+    text = _client(lambda _model, _prompt: "fix the total").git.message(
+        repository_resource(tmp_path), project_root=tmp_path, model="test-model"
+    )
+
+    assert text == "fix the total"
+
+
+def test_rejected_fill_keeps_the_catalog_bytes(tmp_path: Path) -> None:
+    _project(tmp_path)
+    path = tmp_path / "ru.po"
+    path.write_text('msgid "Hello %s"\nmsgstr ""\n', encoding="utf-8")
+    original = path.read_bytes()
+
+    def complete(_model: str, _prompt: str) -> str:
+        return json.dumps({"translations": {"Hello %s": "Привет"}})
+
+    result = _client(complete).translations.fill(path, project_root=tmp_path, model="test-model")
+
+    assert result.filled == 0
+    assert result.rejected == ("Hello %s",)
+    assert path.read_bytes() == original
+
+
 def test_failed_line_replace_is_rejected() -> None:
     entry = CatalogEntry('msgid "A"\nmsgstr "kept"', {"msgid": "A", "msgstr": ""}, False)
     _text, rejected, filled = apply_translations((entry,), {"A": "B"})

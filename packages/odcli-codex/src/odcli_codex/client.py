@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 
+from odcli_codex.codex_runtime import complete as default_complete, listed_models as default_listed
 from odcli_codex.config import effective_model, load_settings
 from odcli_codex.context_files import context_payload, select_context
 from odcli_codex.errors import CodexWorkflowError
@@ -92,6 +93,8 @@ class TranslationWorkflow:
                 )
             proposals = _parse_translations(self._complete(chosen, prompt))
             updated, rejected, filled = apply_translations(entries, proposals)
+            if filled == 0:
+                updated = original
             validation = _publish(catalog_path, original, updated)
             summary = counts(read_catalog(catalog_path)[1])
             holder["result"] = FillResult(
@@ -205,7 +208,6 @@ class GitMessageWorkflow:
                     f"model {chosen!r} is not available in the installed Codex runtime"
                 )
             description = _one_line(self._complete(chosen, prompt))
-            resource.commit_context(description)
             holder["result"] = CommitDescription(
                 description=description,
                 model=chosen,
@@ -250,11 +252,6 @@ class CodexOdooClient:
     ) -> None:
         self.core = core
         if complete is None or listed_models is None:
-            from odcli_codex.codex_runtime import (
-                complete as default_complete,
-                listed_models as default_listed,
-            )
-
             complete = complete or default_complete
             listed_models = listed_models or default_listed
         self.translations = TranslationWorkflow(complete, listed_models)

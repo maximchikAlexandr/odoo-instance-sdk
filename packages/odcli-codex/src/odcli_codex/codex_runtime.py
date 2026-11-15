@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Sequence
 from typing import Protocol, cast
 
@@ -25,8 +26,6 @@ class _ModelPage(Protocol):
 
 def complete(model: str, prompt: str) -> str:
     """Run one read-only Codex turn and return its text."""
-    import tempfile
-
     import openai_codex
 
     with (

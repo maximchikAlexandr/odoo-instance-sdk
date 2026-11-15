@@ -425,6 +425,7 @@ def translations_export(
     output_mode = resolve_output_mode(output_format, json_output)
     fill_after_export = auto_translate and not dry_run
     try:
+        filler = load_catalog_fill() if auto_translate else None
         runtime_context = cli_context.ready_instance(ctx)
         status, results = run_or_preview(
             lambda: export_translations_command(
@@ -445,12 +446,13 @@ def translations_export(
         )
         if fill_after_export and status == 0:
             exports = cast("list[TranslationExportResult]", results or [])
-            load_catalog_fill()(
-                tuple(item.path for item in exports),
-                contexts=contexts,
-                model=model,
-                project_root=runtime_context.worktree_path(),
-            )
+            if filler is not None:
+                filler(
+                    tuple(item.path for item in exports),
+                    contexts=contexts,
+                    model=model,
+                    project_root=runtime_context.worktree_path(),
+                )
             status = emit(
                 success_document(
                     command="translations.export",
