@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
@@ -653,6 +654,22 @@ class RunContext(Generic[T]):
         )
         return True
 
+    def note_nested(self, step_id: str) -> None:
+        """Account for a step already executed by a nested invocation.
+
+        The nested command used this same executor and emitted its own
+        lifecycle events. This marks the outer ledger without describing the
+        step as skipped and without launching it again.
+
+        Args:
+            step_id: Identifier of the step the nested command already ran.
+        """
+        self._consume(step_id)
+
+    def observes_output(self) -> bool:
+        """Return whether this invocation streams child output to the caller."""
+        return self._observe_output
+
     def skip(self, step_id: str) -> None:
         """Consume a captured step when its guarded effect is intentionally omitted.
 
@@ -727,6 +744,20 @@ def active_context() -> RunContext[PrivateJsonValue] | None:
     """Return the command context active on this execution thread."""
 
     return _ACTIVE_CONTEXT.get()
+
+
+@contextmanager
+def activate_context(context: RunContext[T]) -> Iterator[None]:
+    """Publish one invocation as the active command context.
+
+    Args:
+        context: Ledger that nested process lookups must use.
+    """
+    token = _ACTIVE_CONTEXT.set(cast("RunContext[PrivateJsonValue]", context))
+    try:
+        yield
+    finally:
+        _ACTIVE_CONTEXT.reset(token)
 
 
 Callback = Callable[[RunContext[T]], T]
@@ -809,6 +840,7 @@ __all__ = [
     "StepEvent",
     "StepObserver",
     "SubprocessExecutor",
+    "activate_context",
     "active_context",
     "bounded_process_inputs",
     "is_process_alive",

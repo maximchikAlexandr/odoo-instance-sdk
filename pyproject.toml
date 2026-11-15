@@ -51,7 +51,7 @@ build-backend = "build_backend"
 backend-path = ["."]
 
 [tool.uv.workspace]
-members = ["packages/odcli-multica"]
+members = ["packages/odcli-multica", "packages/odcli-openspec"]
 
 [tool.uv.build-backend]
 # Built React assets (web/dist/) live under the module root and are included

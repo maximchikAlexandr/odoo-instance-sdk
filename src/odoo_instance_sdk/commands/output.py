@@ -926,43 +926,37 @@ def fail(
     usage: bool = False,
     error_code: str | None = None,
     details: JsonObject | None = None,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
 ) -> Never:
     mode = output_mode
-    context = _failure_context(message if isinstance(message, BaseException) else None)
+    diagnostic_context = (
+        context
+        if context is not None
+        else _failure_context(message if isinstance(message, BaseException) else None)
+    )
     from odoo_instance_sdk.exceptions import PlanError
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropSafetyError
 
     if isinstance(message, DatabaseDropSafetyError) and details is None:
-        details = context
+        details = diagnostic_context
     if isinstance(message, PlanError):
-        if error_code is None:
-            error_code = message.code
-        if details is None and message.details:
-            details = message.details
-    rendered_message = _failure_message(message, context)
-    if mode is not OutputMode.RICH:
-        emit(
-            failure_document(
-                command=command,
-                context=context,
-                dry_run=dry_run,
-                error_code=error_code
-                or ("usage_error" if usage else command.replace(".", "_") + "_failed"),
-                error_message=rendered_message,
-                error_details=details,
-            ),
-            mode,
-        )
-    else:
-        emit(
-            failure_document(
-                command=command,
-                dry_run=dry_run,
-                error_message=rendered_message,
-                error_details=details,
-            ),
-            mode,
-        )
+        error_code = message.code if error_code is None else error_code
+        details = message.details if details is None and message.details else details
+    rendered_message = _failure_message(message, diagnostic_context)
+    code = error_code or ("usage_error" if usage else command.replace(".", "_") + "_failed")
+    emit(
+        failure_document(
+            command=command,
+            context=context if mode is OutputMode.RICH else diagnostic_context,
+            provenance=provenance,
+            dry_run=dry_run,
+            error_code=None if mode is OutputMode.RICH else code,
+            error_message=rendered_message,
+            error_details=details,
+        ),
+        mode,
+    )
     if usage:
         raise click.exceptions.Exit(2)
     sys.exit(1)

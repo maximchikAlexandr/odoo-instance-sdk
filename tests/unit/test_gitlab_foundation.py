@@ -308,6 +308,42 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     assert "attacker-token" not in str(failure.value)
 
 
+def test_dotenv_loader_rejects_reused_inode_when_metadata_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / "explicit.env"
+    env_file.write_text("ODCLI_GITLAB_TOKEN_ALICE=selected-token\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    original_fstat = os.fstat
+
+    def reused_inode(descriptor: int) -> os.stat_result:
+        metadata = original_fstat(descriptor)
+        return os.stat_result(
+            (
+                metadata.st_mode,
+                metadata.st_ino,
+                metadata.st_dev,
+                metadata.st_nlink,
+                metadata.st_uid,
+                metadata.st_gid,
+                metadata.st_size + 1,
+                metadata.st_atime,
+                metadata.st_mtime + 1,
+                metadata.st_ctime + 1,
+            ),
+            {
+                "st_atime_ns": metadata.st_atime_ns,
+                "st_mtime_ns": metadata.st_mtime_ns + 1,
+                "st_ctime_ns": metadata.st_ctime_ns + 1,
+            },
+        )
+
+    monkeypatch.setattr(os, "O_NOFOLLOW", 0)
+    monkeypatch.setattr(os, "fstat", reused_inode)
+    with pytest.raises(ProjectEnvironmentError, match="changed while opening"):
+        load_environment_file(env_file)
+
+
 def test_dotenv_loader_sanitizes_open_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -144,10 +144,9 @@ def _read_environment_descriptor(
     )
     try:
         metadata = os.fstat(descriptor)
-        if before is not None and (metadata.st_dev, metadata.st_ino) != (
-            before.st_dev,
-            before.st_ino,
-        ):
+        if before is not None and _environment_file_identity(
+            metadata
+        ) != _environment_file_identity(before):
             raise ProjectEnvironmentError(f"{path}: dotenv path changed while opening")
         if not stat.S_ISREG(metadata.st_mode):
             raise ProjectEnvironmentError(
@@ -170,6 +169,16 @@ def _read_environment_descriptor(
     finally:
         with contextlib.suppress(OSError):
             os.close(descriptor)
+
+
+def _environment_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _validate_environment_file(path: Path, metadata: os.stat_result) -> None:

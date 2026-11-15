@@ -11,6 +11,7 @@ import msgspec
 
 if TYPE_CHECKING:
     import click
+    from odcli_openspec.models import OpenSpecCheckoutResult
     from rich.table import Table
 
     from odoo_instance_sdk.internal.proc import RunContext
@@ -33,6 +34,11 @@ from odoo_instance_sdk.commands.env.display import (
     _env_columns_for_width,
     _plan_lines,
     _provider_columns,
+)
+from odoo_instance_sdk.commands.env.openspec_checkout import (
+    attach_openspec_checkout,
+    finish_openspec_checkout,
+    guard_openspec_checkout,
 )
 from odoo_instance_sdk.commands.monitor_context import resolve_monitor_project_id
 from odoo_instance_sdk.commands.output import (
@@ -399,6 +405,11 @@ def env_group() -> None:
 )
 @click.option("--http-port", "http_port", type=int, default=None, help="HTTP port.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
+@click.option(
+    "--openspec-change",
+    default=None,
+    help="Bind an OpenSpec change in the new worktree.",
+)
 @output_options
 @pass_cli_context
 def env_checkout(
@@ -418,6 +429,7 @@ def env_checkout(
     hash_lock_sha256: str | None,
     http_port: int | None,
     dry_run: bool,
+    openspec_change: str | None,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -429,6 +441,7 @@ def env_checkout(
             _checkout_public_plan,
         )
 
+        guard_openspec_checkout(openspec_change)
         project_path = resolve_project_path(cli_ctx)
         client = OdooClient(config=OdooClientConfig(executable="odoo"))
         options = EnvironmentCheckoutOptions(
@@ -446,10 +459,11 @@ def env_checkout(
             hash_lock_sha256=hash_lock_sha256,
             http_port=http_port,
         )
-        command, allocation = _build_ticket_checkout_command(
+        checkout_command, allocation = _build_ticket_checkout_command(
             client, project_path, ticket, base_ref, options
         )
-        plan = _checkout_public_plan(command)
+        command = attach_openspec_checkout(checkout_command, openspec_change)
+        plan = _checkout_public_plan(checkout_command)
         ticket_provenance = _ticket_provenance(allocation) if allocation is not None else None
 
         def checkout_rich(document: OutputDocument) -> str:
@@ -487,7 +501,21 @@ def env_checkout(
         if dry_run:
             return
         assert captured is not None
-        result = EnvironmentCheckoutResult(environment=captured, plan=plan)
+        finish_openspec_checkout(
+            openspec_change,
+            cast("DevelopmentEnvironment | OpenSpecCheckoutResult", captured),
+            plan=command.plan,
+            output_mode=output_mode,
+            provenance={
+                "project_source": _project_provenance(cli_ctx),
+                "environment_source": "null",
+                **(ticket_provenance or {}),
+            },
+        )
+        result = EnvironmentCheckoutResult(
+            environment=cast("DevelopmentEnvironment", captured),
+            plan=plan,
+        )
     except Exception as e:
         fail(output_mode, "env.checkout", e, dry_run=dry_run)
     data = model_to_dict(result)
