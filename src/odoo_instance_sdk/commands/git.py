@@ -15,7 +15,10 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from odoo_instance_sdk.codex_integration import INSTALL_HINT, generated_description
+from odoo_instance_sdk.codex_integration import (
+    generated_description,
+    load_commit_description_command,
+)
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
@@ -127,22 +130,11 @@ def _preview_generated_commit(
     mode: OutputMode,
 ) -> None:
     """Show the Codex request plan and stop before a model call or git commit."""
-    try:
-        from odcli_codex.client import CodexOdooClient
-    except ImportError as exc:
-        from odoo_instance_sdk.exceptions import ConfigError
-
-        raise ConfigError(INSTALL_HINT) from exc
-    from odoo_instance_sdk import OdooClient, OdooClientConfig
-
-    root = cli_context.resolve_project_path(ctx)
-    command = CodexOdooClient(
-        OdooClient(config=OdooClientConfig(executable="odoo"))
-    ).git.message_command(
+    command = load_commit_description_command()(
         resource,
-        project_root=root,
         contexts=contexts,
         model=model,
+        project_root=cli_context.resolve_project_path(ctx),
     )
     raise click.exceptions.Exit(
         emit(

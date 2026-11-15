@@ -253,6 +253,7 @@ def test_missing_extension_does_not_commit(tmp_path: Path, monkeypatch: pytest.M
 def test_generate_dry_run_previews_the_request_without_committing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("odcli_codex")
     _repo(tmp_path)
     (tmp_path / "change.txt").write_text("UNIQUE_PATCH_BODY\n", encoding="utf-8")
     _git(tmp_path, "add", "change.txt")

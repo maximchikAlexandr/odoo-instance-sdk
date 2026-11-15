@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from odcli_codex.client import CodexOdooClient
-from odcli_codex.models import FillResult
+from odcli_codex.models import CommitDescription, FillResult
 from odoo_instance_sdk import OdooClient, OdooClientConfig
+from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.resources.git import GitResource
 
 
@@ -41,6 +42,22 @@ def generate_commit_description(
 ) -> str:
     """Return one description and leave commit planning to core."""
     return _client().git.message(
+        resource,
+        project_root=project_root,
+        contexts=contexts,
+        model=model,
+    )
+
+
+def commit_description_command(
+    resource: GitResource,
+    *,
+    contexts: tuple[str, ...],
+    model: str | None,
+    project_root: Path,
+) -> Command[CommitDescription]:
+    """Capture the description request and leave the model call unrun."""
+    return _client().git.message_command(
         resource,
         project_root=project_root,
         contexts=contexts,

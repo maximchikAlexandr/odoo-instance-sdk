@@ -297,6 +297,9 @@ documented by `OUTPUT_WRITE_REASONS`:
   alternate-tool JSON transport used by the canonical-interpreter bootstrap;
   remove these entries only when lifecycle delegation has a centralized
   machine-output adapter.
+- `src/odoo_instance_sdk/commands/plain_line.py:10` — plain stdout for one
+  description piped into `odcli git commit -`; remove when that pipe uses the
+  shared output boundary.
 
 ### Production type annotations
 
