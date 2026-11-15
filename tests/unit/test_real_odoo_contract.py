@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,51 @@ from tests.integration.real_odoo.contracts import (
     check_matrix_document,
 )
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+
+
+def test_odoo19_probe_tags_are_class_level_selectors() -> None:
+    fixture = Path("tests/fixtures/addons/odcli_e2e_probe/tests/test_probe.py").read_text(
+        encoding="utf-8"
+    )
+    module = ast.parse(fixture)
+    tagged = [
+        (
+            node.name,
+            tuple(arg.value for arg in decorator.args if isinstance(arg, ast.Constant)),
+            tuple(
+                member.name
+                for member in node.body
+                if isinstance(member, ast.FunctionDef) and member.name.startswith("test_")
+            ),
+        )
+        for node in module.body
+        if isinstance(node, ast.ClassDef)
+        for decorator in node.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Name)
+        and decorator.func.id == "tagged"
+    ]
+    method_tags = [
+        member.name
+        for member in ast.walk(module)
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Name)
+            and decorator.func.id == "tagged"
+            for decorator in member.decorator_list
+        )
+    ]
+    expected = {
+        "odcli_e2e_pass": ("TestOdcliE2eProbePass", ("test_result_pass",)),
+        "odcli_e2e_fail": ("TestOdcliE2eProbeFail", ("test_result_fail",)),
+        "odcli_e2e_error": ("TestOdcliE2eProbeError", ("test_result_error",)),
+    }
+    assert len(tagged) == len(expected)
+    assert {values[1] for _, values, _ in tagged} == set(expected)
+    assert all(values == ("-standard", tag) for _, values, _ in tagged for tag in values[1:])
+    assert {values[1]: (name, methods) for name, values, methods in tagged} == expected
+    assert method_tags == []
 
 
 def test_generated_matrix_matches_canonical_inventory() -> None:

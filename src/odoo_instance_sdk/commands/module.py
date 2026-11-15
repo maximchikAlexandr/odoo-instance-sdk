@@ -640,6 +640,7 @@ def module_test(
                 if value is not None
                 else {}
             ),
+            diagnostic=lambda value: value[1] if value is not None else None,
             rich=lambda document: rich_test_result(cast("dict[str, JsonValue]", document.result)),
             progress=True,
         )

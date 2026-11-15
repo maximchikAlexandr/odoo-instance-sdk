@@ -1,6 +1,6 @@
 import base64
 
-from odoo.tests import TransactionCase
+from odoo.tests import TransactionCase, tagged
 
 
 class TestOdcliE2eProbe(TransactionCase):
@@ -14,3 +14,22 @@ class TestOdcliE2eProbe(TransactionCase):
         )
         self.assertTrue(attachment.store_fname)
         self.assertEqual(base64.b64decode(attachment.datas), b"OdCLI filestore probe\n")
+
+
+@tagged("-standard", "odcli_e2e_pass")
+class TestOdcliE2eProbePass(TransactionCase):
+    def test_result_pass(self):
+        self.assertGreater(self.env["ir.model"].search_count([("model", "=", "res.partner")]), 0)
+
+
+@tagged("-standard", "odcli_e2e_fail")
+class TestOdcliE2eProbeFail(TransactionCase):
+    def test_result_fail(self):
+        self.fail("ODCLI_EXPECTED_FAILURE")
+
+
+@tagged("-standard", "odcli_e2e_error")
+class TestOdcliE2eProbeError(TransactionCase):
+    def test_result_error(self):
+        self.assertGreater(self.env["ir.model"].search_count([("model", "=", "res.partner")]), 0)
+        raise RuntimeError("ODCLI_EXPECTED_ERROR")
