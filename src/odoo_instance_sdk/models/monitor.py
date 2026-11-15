@@ -159,15 +159,16 @@ class EnvironmentFactsSummary(
     """One frozen environment-facts summary from a single provider.
 
     The minimal summary contains ``provider``, ``state``, ``text``, and
-    concrete typed details. ``Any``, ``object``, and Rich renderables are
-    not used. A failed/incompatible/slow provider SHALL NOT hide core rows
-    or other providers' summaries.
+    concrete typed details. Detail values keep strings, integers, booleans,
+    and null so counts survive JSON and TOON. ``Any``, ``object``, and Rich
+    renderables are not used. A failed, incompatible, or slow provider does
+    not hide core rows or other providers' summaries.
     """
 
     provider: str
     state: Literal["available", "unavailable", "error"]
     text: str
-    details: tuple[tuple[str, str], ...] = ()
+    details: tuple[tuple[str, str | int | bool | None], ...] = ()
 
 
 class CheckoutRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
