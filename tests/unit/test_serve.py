@@ -121,16 +121,7 @@ def test_select_port_none_all_occupied(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # --------------------------------------------------------------------- import guard
 def test_run_server_missing_dashboard_extra(monkeypatch: pytest.MonkeyPatch) -> None:
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "uvicorn":
-            raise ImportError("no module named 'uvicorn'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr("odoo_instance_sdk.http.app.importlib.util.find_spec", lambda _name: None)
     with pytest.raises(SystemExit) as exc:
         serve.run_server(headless=True)
     msg = str(exc.value)
@@ -142,16 +133,17 @@ def test_run_server_missing_dashboard_extra(monkeypatch: pytest.MonkeyPatch) -> 
 def test_run_server_missing_each_dashboard_dependency(
     monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
-    import builtins
+    import importlib.util
+    from importlib.machinery import ModuleSpec
 
-    real_import = builtins.__import__
+    real_find = importlib.util.find_spec
 
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+    def fake_find(name: str, package: str | None = None) -> ModuleSpec | None:
         if name == missing:
-            raise ImportError(f"no module named {missing}")
-        return real_import(name, *args, **kwargs)
+            return None
+        return real_find(name, package)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr("odoo_instance_sdk.http.app.importlib.util.find_spec", fake_find)
     with pytest.raises(SystemExit) as exc:
         serve.run_server(headless=True)
     # ``SystemExit(<message>)`` is a process exit status of 1 while retaining
@@ -166,48 +158,56 @@ def test_run_server_rejects_unauthenticated_network_bind(host: str) -> None:
         serve.run_server(host=host, headless=True)
 
 
-def test_run_server_external_mode_registers_panel_and_disables_uvicorn_proxy_trust(
+def test_monitor_child_external_mode_registers_panel_and_disables_uvicorn_proxy_trust(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from odoo_instance_sdk.http.app import ExternalProxyConfig
-
     captured: dict[str, Any] = {}
-    settings = types.SimpleNamespace(panel_host_label="panel", domain_suffix="example.test")
+    settings = types.SimpleNamespace(
+        panel_host_label="panel",
+        domain_suffix="example.test",
+        trusted_proxy_addresses=("10.0.0.2",),
+    )
     fake_uvicorn = types.ModuleType("uvicorn")
     setattr(fake_uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
-    monkeypatch.setitem(sys.modules, "fastapi", types.ModuleType("fastapi"))
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
-    monkeypatch.setattr(serve, "_select_port", lambda _host, _port: 8123)
+    from odoo_instance_sdk.internal import monitor_program
+
+    monkeypatch.setattr(monitor_program, "uvicorn", fake_uvicorn)
     monkeypatch.setattr(
-        serve, "create_app", lambda **kwargs: captured.update(app=kwargs) or object()
+        monitor_program,
+        "create_app",
+        lambda **kwargs: captured.update(app=kwargs) or object(),
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.publication.monitor_route_command",
+        monitor_program.PublicationSettings,
+        "load",
+        classmethod(lambda cls, path=None: settings),
+    )
+    monkeypatch.setattr(
+        monitor_program,
+        "monitor_route_command",
         lambda endpoint, *, settings: types.SimpleNamespace(
             run=lambda: captured.update(route=(endpoint, settings))
         ),
     )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.http.app.webbrowser.open",
-        lambda url: captured.update(browser_url=url),
-    )
+    opened: list[str] = []
 
-    proxy = ExternalProxyConfig(
-        allowed_hosts=("panel.example.test",),
-        trusted_proxy_addresses=("10.0.0.2",),
-    )
-    serve.run_server(
+    def remember(url: str) -> None:
+        opened.append(url)
+
+    monkeypatch.setattr("webbrowser.open", remember)
+
+    monitor_program.serve(
         host="127.0.0.1",
         port=8123,
         headless=False,
-        no_open=False,
-        external_proxy=proxy,
-        publication_settings=settings,  # type: ignore[arg-type]
+        settings=Path("/tmp/publication.toml"),
     )
 
     assert captured["route"] == ("http://127.0.0.1:8123", settings)
-    assert captured["app"]["external_proxy"] is proxy
-    assert captured["browser_url"] == "https://panel.example.test/"
+    assert captured["app"]["external_proxy"].allowed_hosts == ("panel.example.test",)
+    assert captured["app"]["external_proxy"].trusted_proxy_addresses == ("10.0.0.2",)
+    assert opened == []
     assert captured["proxy_headers"] is False
     assert captured["forwarded_allow_ips"] == ""
 

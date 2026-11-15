@@ -35,6 +35,18 @@ from odoo_instance_sdk.internal.server import (
     _write_secret_config,
     cleanup_secret_config,
 )
+from odoo_instance_sdk.internal.supervisor_runtime import (
+    WINDOWS_MESSAGE,
+    abort_launch,
+    activate_program,
+    finish_launch,
+    follow_program,
+    launch_steps,
+    owned_program_name,
+    production_executor,
+    skip_launch,
+    windows_unsupported,
+)
 from odoo_instance_sdk.models import (
     CommandResult,
     OdooProcess,
@@ -386,12 +398,22 @@ class _IdentityMixin:
                 ),
             )
 
+        owned = owned_program_name(
+            owner_kind=None if self._runtime_binding is None else self._runtime_binding.owner_kind,
+            owner_id=None if self._runtime_binding is None else self._runtime_binding.owner_id,
+            environment_id=self._environment_id,
+        )
+        unix_owned = owned is not None and not windows_unsupported()
+        if unix_owned and owned is not None:
+            prepared_steps = (*prepared_steps, *launch_steps(owned, follow=True))
         process_executor = SubprocessExecutor()
 
         def execute(context: RunContext[int]) -> int:  # noqa: C901
             # The planning probe is intentionally repeated at this mutation
             # boundary.  A stale preview must never turn into a spawn.
-            if type(process_executor) is SubprocessExecutor:
+            if owned and windows_unsupported() and production_executor(process_executor):
+                raise InstanceConfigurationError(WINDOWS_MESSAGE)
+            if type(process_executor) is SubprocessExecutor and not unix_owned:
                 _assert_http_port_free(config)
             self._ensure_dependencies_ready(
                 context,
@@ -413,22 +435,44 @@ class _IdentityMixin:
             # for cleanup/revalidation.  See server-lifecycle spec and #74 item 1.
             handle: ProcessHandle | None = None
             secret_created = False
+            client_detached = False
             try:
                 with self._artifact_lock():
                     if secret_path is not None:
                         _write_secret_config(snapshot, secret_path)
                         secret_created = True
                     try:
-                        handle = context.spawn(step.step_id)
+                        if (
+                            unix_owned
+                            and owned is not None
+                            and production_executor(process_executor)
+                        ):
+                            context.skip(step.step_id)
+                            pid = activate_program(
+                                context,
+                                program=owned,
+                                argv=step.argv,
+                                cwd=step.cwd,
+                                environment=step.environment,
+                                secrets=secrets,
+                                before_start=lambda: _assert_http_port_free(config),
+                            )
+                        else:
+                            if unix_owned:
+                                skip_launch(context, follow=True)
+                            handle = context.spawn(step.step_id)
+                            pid = handle.pid
                         if self._runtime_binding is not None or self._environment_id is not None:
                             self._persist_runtime_identity(
-                                handle.pid,
+                                pid,
                                 snapshot,
                                 resolved_cwd,
                                 step,
                                 len(executable_prefix),
                                 context=context,
                             )
+                        if unix_owned and production_executor(process_executor):
+                            finish_launch(context)
                     except BaseException:
                         if handle is not None:
                             with contextlib.suppress(BaseException):
@@ -437,12 +481,19 @@ class _IdentityMixin:
                                     process_group_id=handle.process_group_id,
                                     timeout=5.0,
                                 )
+                        elif unix_owned and production_executor(process_executor):
+                            with contextlib.suppress(BaseException):
+                                abort_launch(context)
                         raise
                 # The wait must NOT hold the shared artifact lock; a parallel
                 # ``stop`` reads the persisted runtime identity under the
                 # exclusive lock and terminates the registered runtime.
                 from odoo_instance_sdk.internal.server import wait_foreground_process
 
+                if unix_owned and production_executor(process_executor):
+                    exit_code = follow_program(context)
+                    client_detached = exit_code == 130
+                    return exit_code
                 if handle is None:  # pragma: no cover - re-raised above
                     raise RuntimeError("foreground spawn produced no handle")
                 try:
@@ -461,8 +512,8 @@ class _IdentityMixin:
                 # parallel ``stop`` may momentarily hold the exclusive lock; the
                 # cleanup itself is best-effort, so a transient conflict is
                 # retried briefly and otherwise suppressed.
-                cleanup_deadline = time.monotonic() + 5.0
-                while True:
+                cleanup_deadline = None if client_detached else time.monotonic() + 5.0
+                while cleanup_deadline is not None:
                     try:
                         with self._artifact_lock():
                             self._clear_runtime_identity()
