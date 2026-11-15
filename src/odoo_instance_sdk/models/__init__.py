@@ -8,6 +8,7 @@ from odoo_instance_sdk.models._literals import (
     ServerUnavailabilityReason as ServerUnavailabilityReason,
 )
 from odoo_instance_sdk.models.backup import *  # noqa: F403
+from odoo_instance_sdk.models.browser_login import *  # noqa: F403
 from odoo_instance_sdk.models.bug_report import *  # noqa: F403
 from odoo_instance_sdk.models.command import *  # noqa: F403
 from odoo_instance_sdk.models.config import *  # noqa: F403

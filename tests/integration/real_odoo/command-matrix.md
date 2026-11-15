@@ -77,7 +77,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 ## Scenario coverage
 
 - E2E-SM-01..05: image-backed PR smoke; proves orchestration, backup/restore, validation, machine output, and cleanup only.
-- E2E-CP-01..15: one stateful source-backed full critical path, executed in order within one serial test.
+- E2E-CP-01..15: focused source-backed nodes for project/Postgres ownership, pinned environment and dependency setup, public stop/module behavior, backup metadata, restored attachments/model/resources, repeated stop, diagnosis, and environment removal. The destructive removal node provisions its own runtime and ledger; it cannot delete shared sibling state. The critical-path module retains the legacy 600-second per-test timeout for pinned source/venv setup. Each node owns its prerequisites when selected alone; the JUnit IDs remain the aggregate compatibility contract for the original critical-path assertions.
 - E2E-FC-01..04: incorrect password, unreachable source, truncated/incompatible archive, occupied/repeated restore.
 - E2E-FC-05..13: catalog restore, password reset, exec/module aliases, deletion, diagnostics, native streams, logs, and cleanup failures.
 - E2E-REC-01..03: SIGINT, timeout, and partial-publication cleanup/leak audit.

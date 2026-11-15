@@ -183,7 +183,12 @@ def root_imports_owned_route(root_config: Path, owned_route_file: Path) -> bool:
     return False
 
 
-def _route_block(route: PublicationRoute, settings: PublicationSettings) -> str:
+def _route_block(
+    route: PublicationRoute,
+    settings: PublicationSettings,
+    *,
+    panel_endpoint: str | None = None,
+) -> str:
     validate_route(route)
     if route.owner_kind == "panel":
         return render_panel_route(route.local_endpoint, settings)
@@ -197,8 +202,22 @@ def _route_block(route: PublicationRoute, settings: PublicationSettings) -> str:
         if settings.odoo_basic_auth_enabled
         else ""
     )
+    consume = ""
+    if panel_endpoint:
+        consume = (
+            "    @odcli_auth_consume method POST path /_odcli/auth/consume\n"
+            "    handle @odcli_auth_consume {\n"
+            f"        reverse_proxy {panel_endpoint} {{\n"
+            "            header_up X-Forwarded-Proto https\n"
+            "            header_up X-Forwarded-Host {host}\n"
+            "            header_up X-Real-IP {remote_host}\n"
+            "        }\n"
+            "    }\n"
+        )
     body = (
         "    encode gzip\n"
+        f"{consume}"
+        "    handle {\n"
         f"{auth}"
         "    @odoo_bus path /websocket /longpolling/poll /web/bus/*\n"
         f"    reverse_proxy @odoo_bus {endpoint} {{\n"
@@ -210,6 +229,7 @@ def _route_block(route: PublicationRoute, settings: PublicationSettings) -> str:
         "        header_up X-Forwarded-Proto https\n"
         "        header_up X-Forwarded-Host {host}\n"
         "        header_up X-Real-IP {remote_host}\n"
+        "    }\n"
         "    }\n"
     )
     return _site_block(address, body, settings)
@@ -282,7 +302,15 @@ def _render_routes(routes: Sequence[PublicationRoute], settings: PublicationSett
     ).encode("utf-8")
     encoded = base64.urlsafe_b64encode(payload).decode("ascii")
     text = f"{_ROUTE_MARKER}\n{_ROUTE_DATA_PREFIX}{encoded}\n\n"
-    text += "\n".join(_route_block(route, settings).rstrip("\n") for route in ordered)
+    panel = next((route for route in ordered if route.owner_kind == "panel"), None)
+    text += "\n".join(
+        _route_block(
+            route,
+            settings,
+            panel_endpoint=panel.local_endpoint if panel is not None else None,
+        ).rstrip("\n")
+        for route in ordered
+    )
     return (text.rstrip() + "\n").encode("utf-8")
 
 

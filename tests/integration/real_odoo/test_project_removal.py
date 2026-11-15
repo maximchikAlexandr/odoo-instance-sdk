@@ -28,7 +28,11 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from scripts.real_odoo_pins import E2E_PINS
 from tests.integration.real_odoo.archive import ArchiveIdentity, SourceBackupPlan
 from tests.integration.real_odoo.cleanup import FailureEvidence
-from tests.integration.real_odoo.conftest import E2ERuntime, odoo_runtime_python
+from tests.integration.real_odoo.conftest import (
+    E2ERuntime,
+    PinnedOdooBootstrap,
+    verify_odoo_runtime_python,
+)
 from tests.integration.real_odoo.focused_support import (
     _catalog_for_project,
     _project,
@@ -67,6 +71,7 @@ def _exercise_public_project_forget_reinit_and_purge(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    bootstrap: PinnedOdooBootstrap,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
     source_variant: str,
@@ -78,6 +83,7 @@ def _exercise_public_project_forget_reinit_and_purge(
         target_runtime,
         target_runtime.root / f"project-removal-{target_runtime.run_id}-{source_variant}",
         source=source_backup_plan,
+        bootstrap=bootstrap,
     )
     catalog_path = _catalog_for_project(target_runtime, project)
     catalog_environment = {
@@ -150,7 +156,7 @@ def _exercise_public_project_forget_reinit_and_purge(
         "--odoo-bin",
         str(project / "odoo-bin"),
         "--python",
-        str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        str(verify_odoo_runtime_python(bootstrap, project, project / "odoo-bin")),
         "--config",
         str(target_runtime.config_file),
         "--test-url",
@@ -238,7 +244,7 @@ def _exercise_public_project_forget_reinit_and_purge(
         "--odoo-bin",
         str(project / "odoo-bin"),
         "--python",
-        str(odoo_runtime_python(target_runtime, project, project / "odoo-bin")),
+        str(verify_odoo_runtime_python(bootstrap, project, project / "odoo-bin")),
         "--config",
         str(target_runtime.config_file),
         "--test-url",
@@ -553,6 +559,7 @@ def test_public_project_forget_reinit_and_purge_removes_owned_source(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -562,6 +569,7 @@ def test_public_project_forget_reinit_and_purge_removes_owned_source(
         source_backup,
         source_backup_plan,
         failure_evidence,
+        pinned_odoo_bootstrap,
         record_property,
         monkeypatch,
         "removed-source",
@@ -576,6 +584,7 @@ def test_public_project_forget_reinit_and_purge_retains_caller_source(
     source_backup: ArchiveIdentity,
     source_backup_plan: SourceBackupPlan,
     failure_evidence: FailureEvidence,
+    pinned_odoo_bootstrap: PinnedOdooBootstrap,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -585,6 +594,7 @@ def test_public_project_forget_reinit_and_purge_retains_caller_source(
         source_backup,
         source_backup_plan,
         failure_evidence,
+        pinned_odoo_bootstrap,
         record_property,
         monkeypatch,
         "retained-source",

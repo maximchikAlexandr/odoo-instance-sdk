@@ -1,7 +1,10 @@
 """evidence tests for the real-Odoo CI contract."""
 
 import json
+import subprocess
+import sys
 import tarfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Literal
 
@@ -394,3 +397,79 @@ def test_full_evidence_persists_exceeded_budget_details(
         )
     error = json.loads((tmp_path / "packaging-error.json").read_text())
     assert detail in error["error"]
+
+
+def test_over_budget_failure_upload_preserves_scanned_junit_and_audit(tmp_path: Path) -> None:
+    _evidence_contract(tmp_path)
+    (tmp_path / "junit.xml").write_text(
+        '<?xml version="1.0"?><testsuites tests="2" failures="0" errors="0">'
+        '<testsuite name="real-odoo-full" tests="2" failures="0" errors="0">'
+        '<properties><property name="selected_uid" value="9"/></properties>'
+        '<testcase name="browser_case" classname="source_browser" time="12.5"/>'
+        '<testcase name="critical_case" classname="critical_path" time="7.25"/>'
+        "</testsuite></testsuites>\n",
+        encoding="utf-8",
+    )
+    canary = tmp_path / "canary"
+    canary.write_text("canary-value-1234\n", encoding="utf-8")
+    registry = tmp_path / "secret-registry.json"
+    write_secret_registry(registry, ("private-runtime-secret",))
+    timing_value = json.loads((tmp_path / "timing.json").read_text(encoding="utf-8"))
+    timing_value["phases"]["test"]["duration_seconds"] = 1201
+    (tmp_path / "timing.json").write_text(json.dumps(timing_value), encoding="utf-8")
+    archive_path = tmp_path / "full-evidence.tar.gz"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.real_odoo_evidence",
+            "--source",
+            str(tmp_path),
+            "--output",
+            str(archive_path),
+            "--status",
+            "success",
+            "--canary-file",
+            str(canary),
+            "--secret-registry",
+            str(registry),
+            "--tier",
+            "full",
+            "--cache-class",
+            "warm",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert archive_path.is_file()
+    error = json.loads((tmp_path / "packaging-error.json").read_text(encoding="utf-8"))
+    assert error["ok"] is False
+    assert "test_seconds=1201 exceeds limit=1200" in error["error"]
+    assert "private-runtime-secret" not in json.dumps(error)
+    fallback = (tmp_path / "packaging-failure-junit.xml").read_text(encoding="utf-8")
+    assert 'tests="0" failures="1"' in fallback
+    assert 'value="redacted"' in fallback
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members: dict[str, bytes] = {}
+        for member in archive.getmembers():
+            content = archive.extractfile(member)
+            assert content is not None
+            members[member.name] = content.read()
+    assert {"junit.xml", "resource-manifest.json", "timing.json"} <= members.keys()
+    safe_junit = members["junit.xml"].decode("utf-8")
+    junit_root = ET.fromstring(safe_junit)
+    cases = junit_root.findall(".//testcase")
+    assert len(cases) == 2
+    assert {case.get("name") for case in cases} == {"browser_case", "critical_case"}
+    assert 'name="selected_uid" value="9"' in safe_junit
+    safe_resource = json.loads(members["resource-manifest.json"])
+    assert safe_resource["audit"]["state"] == "clean"
+    assert safe_resource["audit"]["runs"]
+    packed = b"".join(members.values())
+    assert b"canary-value-1234" not in packed
+    assert b"private-runtime-secret" not in packed

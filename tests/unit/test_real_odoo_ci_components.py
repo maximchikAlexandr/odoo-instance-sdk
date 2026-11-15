@@ -576,6 +576,9 @@ def test_e2e_workflows_pin_actions_and_gate_evidence_uploads() -> None:
         assert "if: always() && steps.package.outcome == 'success'" in success
         assert "if: always() && steps.package.outcome != 'success'" in failure
         assert "*-evidence.tar.gz" in success and "resource-manifest.json" in success
-        assert "junit.xml" in failure and "packaging-error.json" in failure
+        assert "*-evidence.tar.gz" in failure
+        assert "packaging-failure-junit.xml" in failure
+        assert "packaging-error.json" in failure
+        assert ".artifacts/real-odoo-e2e/junit.xml" not in failure
         assert "bootstrap.json" not in failure
         assert all("retention-days: 7" in upload for upload in uploads)

@@ -7,6 +7,10 @@ import {
   openPgAdmin,
   startRuntime,
   stopRuntime,
+  queryOdooBrowserLoginUsers,
+  issueOdooBrowserLoginTicket,
+  type BrowserLoginTicket,
+  type BrowserLoginUser,
   PgAdminEligibilityState,
   PgAdminOpenState,
   type EnvironmentSnapshot,
@@ -36,6 +40,8 @@ it("exports the flat Fetch operations and all generated files have headers", () 
   expect(typeof openPgAdmin).toBe("function");
   expect(typeof startRuntime).toBe("function");
   expect(typeof stopRuntime).toBe("function");
+  expect(typeof queryOdooBrowserLoginUsers).toBe("function");
+  expect(typeof issueOdooBrowserLoginTicket).toBe("function");
   expect(Object.keys(generatedSources).length).toBeGreaterThan(0);
 
   for (const source of Object.values(generatedSources)) {
@@ -46,6 +52,7 @@ it("exports the flat Fetch operations and all generated files have headers", () 
 
 it("preserves the exact generated enum values and required nullable boundaries", () => {
   expect(Object.values(HttpErrorCode)).toEqual([
+    "browser_login_unavailable",
     "database_not_found",
     "environment_not_found",
     "invalid_request",
@@ -69,6 +76,8 @@ it("preserves the exact generated enum values and required nullable boundaries",
   expectTypeOf<PgAdminOpenRequest["environment_id"]>().toEqualTypeOf<string>();
   expectTypeOf<PgAdminOpenResult["url"]>().toEqualTypeOf<string>();
   expectTypeOf<PgAdminOpenResult["state"]>().toEqualTypeOf<PgAdminOpenState>();
+  expectTypeOf<BrowserLoginTicket["handoff"]>().toEqualTypeOf<string>();
+  expectTypeOf<BrowserLoginUser["id"]>().toEqualTypeOf<number>();
   expectTypeOf<ProjectSummary["runtime"]>().toEqualTypeOf<RuntimeMetrics | null>();
   expectTypeOf<ProjectSummary["storage"]>().toEqualTypeOf<ProjectStorageFootprint>();
   expectTypeOf<ProjectStorageFootprint["total_bytes"]>().toEqualTypeOf<number | null>();

@@ -10,17 +10,81 @@ from odoo_instance_sdk.project import ProjectConfig
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
+    from odoo_instance_sdk.http.browser_login import LoginTarget
     from odoo_instance_sdk.http.monitor import SnapshotProvider
 
 
 class RuntimeController:
     """Resolve catalog identities and delegate to the public instance commands."""
 
-    def __init__(self, config: OdooClientConfig, monitor: SnapshotProvider) -> None:
+    def __init__(
+        self,
+        config: OdooClientConfig,
+        monitor: SnapshotProvider,
+        *,
+        panel_origin: str | None = None,
+    ) -> None:
         self.config = config
         self.client: OdooClient | None = None
         self.monitor = monitor
         self.lock = threading.Lock()
+        self.panel_origin = panel_origin
+
+    def resolve(self, owner_kind: Literal["project", "environment"], owner_id: str) -> LoginTarget:
+        from odoo_instance_sdk.http.browser_login import LoginTarget
+        from odoo_instance_sdk.models import RuntimeState
+
+        if not self.panel_origin:
+            raise LookupError("browser login unavailable")
+        with self.lock:
+            if self.client is None:
+                from odoo_instance_sdk.client import OdooClient
+
+                self.client = OdooClient(config=self.config)
+            if owner_kind == "project":
+                row = self.client.get_catalog().get_project(owner_id)
+                if row is None:
+                    raise LookupError("project not found")
+                instance = self.client.instance.from_project(
+                    ProjectConfig.load(row["repository_root"])
+                )
+                snapshot = self.monitor.snapshot(project_id=owner_id)
+                project_record = next(
+                    (item for item in snapshot.projects if item.id == owner_id), None
+                )
+                runtime = project_record.runtime if project_record else None
+                publication = project_record.publication if project_record else None
+            else:
+                environment = self.client.environments.get(owner_id)
+                instance = self.client.instance.from_environment(environment)
+                snapshot = self.monitor.snapshot(project_id=environment.project_id)
+                environment_record = next(
+                    (item for item in snapshot.environments if item.id == owner_id), None
+                )
+                runtime = environment_record.runtime if environment_record else None
+                publication = environment_record.publication if environment_record else None
+            if (
+                runtime is None
+                or runtime.state != RuntimeState.READY
+                or not runtime.database_name
+                or publication is None
+                or publication.state != "available"
+                or not publication.external_url
+            ):
+                raise LookupError("browser login unavailable")
+            identity = f"{runtime.root_pid}:{runtime.started_at}:{runtime.commit_sha}"
+            return LoginTarget(
+                owner_kind=owner_kind,
+                owner_id=owner_id,
+                runtime_id=identity,
+                database=runtime.database_name,
+                instance_url=publication.external_url,
+                panel_origin=self.panel_origin,
+                list_users=lambda query: instance.list_browser_login_users_command(query).run(),
+                create_session=lambda user_id: (
+                    instance.create_browser_session_command(user_id).run().sid
+                ),
+            )
 
     def __call__(
         self, action: Literal["start", "stop"], target: RuntimeActionRequest

@@ -284,7 +284,7 @@ def capture_cleanup(runtime: Any) -> Iterator[None]:
     _RESOURCE_SNAPSHOTS.append(_snapshot_resources(runtime))
     _remember_source_cache_consumption(Path(runtime.root))
     _capture_service_logs(runtime)
-    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
+    timing_path = real_odoo_timing.output_path()
     started = time.monotonic()
     try:
         yield
@@ -292,8 +292,8 @@ def capture_cleanup(runtime: Any) -> Iterator[None]:
         try:
             _write_resource_manifest()
         finally:
-            if configured:
-                real_odoo_timing.record(Path(configured), "cleanup", started, time.monotonic())
+            if timing_path is not None:
+                real_odoo_timing.record(timing_path, "cleanup", started, time.monotonic())
 
 
 def pytest_configure(config: object) -> None:

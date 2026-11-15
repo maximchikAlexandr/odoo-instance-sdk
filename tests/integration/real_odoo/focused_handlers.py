@@ -9,6 +9,7 @@ import selectors
 import shutil
 import signal
 import subprocess
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from .focused_support import (
     observe_failure,
     project_filestore,
     record,
+    registered_project_id,
     registered_worktree,
     seed_backup,
 )
@@ -72,16 +74,43 @@ def _invoke(state: _State, args: list[str], *, input: str | None = None) -> Resu
 def _backup_delete(state: _State) -> tuple[Result, dict[str, Any]]:
     first = _invoke(state, state.args)
     second = _invoke(state, state.args)
-    assert first.exit_code == second.exit_code == 0
+    assert first.exit_code == second.exit_code == 0, first.output + second.output
     first_document = json.loads(first.stdout)
     second_document = json.loads(second.stdout)
     assert first_document["ok"] is True and second_document["ok"] is True
     assert first_document["result"]["already_deleted"] is False
     assert second_document["result"]["already_deleted"] is True
     assert catalog_state(Path(state.environment["ODCLI_E2E_CATALOG"])) is BackupState.DELETED
-    assert not (
-        state.runtime.artifact_root / f"leaf-{state.runtime.run_id}-{state.case.path[-1]}.zip"
-    ).exists()
+    backup_path = (
+        Path(state.environment["HOME"])
+        / ".odcli"
+        / "backups"
+        / f"leaf-{state.runtime.run_id}-{state.case.path[-1]}.zip"
+    )
+    assert not backup_path.exists()
+    catalog_path = Path(state.environment["ODCLI_E2E_CATALOG"])
+    newest_id = "00000000-0000-0000-0000-000000000008"
+    newest_path = backup_path.with_name(f"leaf-{state.runtime.run_id}-protected.zip")
+    assert catalog_state(catalog_path, newest_id) is BackupState.AVAILABLE
+    assert newest_path.is_file()
+    protected_args = ["backup", "rm", newest_id, "--yes", "--format", "json"]
+    protected = _invoke(state, protected_args)
+    assert protected.exit_code != 0
+    protected_document, _ = observe_failure(
+        protected,
+        runtime=state.runtime,
+        evidence=state.evidence,
+        name="leaf-backup-protected-newest",
+        argv=protected_args,
+    )
+    assert protected_document is not None
+    assert protected_document["error"]["code"] == "backup_delete_failed"
+    assert (
+        "newest available backup in historical source group"
+        in protected_document["error"]["message"]
+    )
+    assert catalog_state(catalog_path, newest_id) is BackupState.AVAILABLE
+    assert newest_path.is_file()
     return first, first_document
 
 
@@ -299,6 +328,9 @@ def _exec(state: _State) -> tuple[Result, dict[str, Any]]:
 
 def _default(state: _State) -> tuple[Result, dict[str, Any] | None]:
     result = _invoke(state, state.args, input="raise RuntimeError('focused leaf failure')\n")
+    if state.case.path == ("prepare-venv",):
+        assert result.exit_code == 0, result.output
+        return result, None
     if state.case.path not in {("psql",), ("logs",)}:
         assert result.exit_code == 0, result.output
         document = json.loads(result.stdout)
@@ -352,19 +384,48 @@ def invoke_case(
         args[args.index("demo")] = runtime.topology.target_sentinel_database
     if case.requires_dry_run and "--dry-run" not in args:
         args.append("--dry-run")
+    if case.success_path_argument and case.path == ("prepare-venv",):
+        args.append(str(project))
     if case.path == ("logs",):
         args = ["logs", "--tail", "1"]
     if case.path in {("db", "drop"), ("db", "rm")}:
         args = ["db", "drop", runtime.topology.target_sentinel_database, "--yes"]
     if case.path in {("backup", "delete"), ("backup", "rm")}:
-        backup_path = runtime.artifact_root / f"leaf-{runtime.run_id}-{case.path[-1]}.zip"
+        active_catalog = catalog_path or Path(runtime.environment["ODCLI_E2E_CATALOG"])
+        backup_home = (
+            catalog_path.parent.parent
+            if catalog_path is not None
+            else Path(runtime.environment["HOME"])
+        )
+        backup_path = (
+            backup_home / ".odcli" / "backups" / f"leaf-{runtime.run_id}-{case.path[-1]}.zip"
+        )
+        backup_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with zipfile.ZipFile(backup_path, "w") as archive:
             archive.writestr("manifest.json", '{"db_name": "demo"}')
             archive.writestr("dump.sql", "-- database: demo\n")
             archive.writestr("filestore/demo/blob", b"fixture")
-        seed_backup(catalog_path or Path(runtime.environment["ODCLI_E2E_CATALOG"]), backup_path)
-        args = ["backup", "delete", BACKUP_ID, "--yes"]
-    if case.classification not in {"native-passthrough", "jsonl-stream"}:
+        seed_backup(
+            active_catalog,
+            backup_path,
+            project_id=registered_project_id(active_catalog, project),
+        )
+        time.sleep(1.05)  # Catalog timestamps have one-second precision.
+        protected_path = backup_path.with_name(f"leaf-{runtime.run_id}-protected.zip")
+        shutil.copy2(backup_path, protected_path)
+        seed_backup(
+            active_catalog,
+            protected_path,
+            backup_id="00000000-0000-0000-0000-000000000008",
+            database="demo",
+            source_base_url="http://127.0.0.1:8069",
+            project_id=registered_project_id(active_catalog, project),
+        )
+        args = ["backup", "rm", BACKUP_ID, "--yes"]
+    if case.path != ("prepare-venv",) and case.classification not in {
+        "native-passthrough",
+        "jsonl-stream",
+    }:
         args.extend(("--format", "json"))
     state = _State(
         case,
@@ -378,6 +439,7 @@ def invoke_case(
             **({"ODCLI_E2E_CATALOG": str(catalog_path)} if catalog_path else {}),
             "ODCLI_E2E_KEEP_FAILED": "1",
             "ODCLI_TEST_MASTER_PASSWORD": evidence.secret_canary,
+            "ODCLI_ADMIN_PASSWORD": evidence.secret_canary,
         },
         source_backup,
     )

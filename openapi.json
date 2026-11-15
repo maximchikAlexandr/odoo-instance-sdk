@@ -32,6 +32,122 @@
         "title": "BackupFreshnessSnapshot",
         "type": "object"
       },
+      "BrowserLoginTicket": {
+        "additionalProperties": false,
+        "properties": {
+          "action_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "handoff": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action_url",
+          "method",
+          "handoff",
+          "expires_at"
+        ],
+        "title": "BrowserLoginTicket",
+        "type": "object"
+      },
+      "BrowserLoginTicketRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "owner_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner_kind": {
+            "enum": [
+              "environment",
+              "project"
+            ]
+          },
+          "user_id": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "owner_kind",
+          "owner_id",
+          "user_id"
+        ],
+        "title": "BrowserLoginTicketRequest",
+        "type": "object"
+      },
+      "BrowserLoginUser": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "login": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "login",
+          "name"
+        ],
+        "title": "BrowserLoginUser",
+        "type": "object"
+      },
+      "BrowserLoginUsersRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "owner_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner_kind": {
+            "enum": [
+              "environment",
+              "project"
+            ]
+          },
+          "query": {
+            "default": "",
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner_kind",
+          "owner_id"
+        ],
+        "title": "BrowserLoginUsersRequest",
+        "type": "object"
+      },
+      "BrowserLoginUsersResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/BrowserLoginUser"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "users"
+        ],
+        "title": "BrowserLoginUsersResponse",
+        "type": "object"
+      },
       "ClusterContainer": {
         "additionalProperties": false,
         "properties": {
@@ -641,6 +757,7 @@
       },
       "HttpErrorCode": {
         "enum": [
+          "browser_login_unavailable",
           "database_not_found",
           "environment_not_found",
           "invalid_request",
@@ -1424,6 +1541,102 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/odoo/login-tickets": {
+      "post": {
+        "operationId": "issueOdooBrowserLoginTicket",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrowserLoginTicketRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserLoginTicket"
+                }
+              }
+            },
+            "description": "One-time instance-host handoff issued"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Browser login unavailable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "summary": "Issue"
+      }
+    },
+    "/api/v1/odoo/users/query": {
+      "post": {
+        "operationId": "queryOdooBrowserLoginUsers",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrowserLoginUsersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserLoginUsersResponse"
+                }
+              }
+            },
+            "description": "Eligible users returned"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Browser login unavailable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpError"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "summary": "Users"
+      }
+    },
     "/api/v1/pgadmin/open": {
       "post": {
         "operationId": "openPgAdmin",

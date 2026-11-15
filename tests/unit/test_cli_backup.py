@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 from zipfile import ZipFile
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
     from click.testing import Result
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import BackupState
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -174,6 +176,82 @@ def test_backup_delete_dry_run_and_machine_confirmation_gate_precede_mutation(
     assert confirmed.exit_code == 1
     assert "unknown or unowned ownership" in confirmed.stdout
     assert backup_path.is_file()
+
+
+def _seed_owned_backup_siblings(tmp_path: Path) -> tuple[Path, Path, Path, Path, str, str]:
+    project = tmp_path / "project"
+    common = project / ".git"
+    common.mkdir(parents=True)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    project_id = f"project_{repo_key(project, common)}"
+    catalog._register_project(project_id, project, common)
+    target_id = BACKUP_ID
+    newest_id = "00000000-0000-0000-0000-000000000008"
+    from odoo_instance_sdk.internal.paths import get_backups_dir
+
+    backup_directory = get_backups_dir()
+    backup_directory.mkdir(parents=True, exist_ok=True)
+    backup_paths = (backup_directory / "older.zip", backup_directory / "newest.zip")
+    for backup_id, backup_path in zip((target_id, newest_id), backup_paths, strict=True):
+        with ZipFile(backup_path, "w") as archive:
+            archive.writestr("manifest.json", json.dumps({"db_name": "owned_db"}))
+            archive.writestr("dump.sql", "-- database: owned_db\n")
+        catalog.start_download(
+            backup_id,
+            "http://localhost:8069",
+            "owned_db",
+            "zip",
+            True,
+            backup_path,
+            project_id=project_id,
+        )
+        catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "digest")
+        if backup_id == target_id:
+            time.sleep(1.05)  # Backup catalog timestamps have one-second precision.
+    catalog.close()
+    return project, catalog_path, backup_paths[0], backup_paths[1], target_id, newest_id
+
+
+def test_backup_rm_deletes_owned_older_item_and_preserves_newest_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, catalog_path, older_path, newest_path, older_id, _newest_id = (
+        _seed_owned_backup_siblings(tmp_path)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: catalog_path
+    )
+    removed = CliRunner().invoke(
+        cli,
+        ["--project", str(project), "backup", "rm", older_id, "--yes", "--format", "json"],
+    )
+
+    assert removed.exit_code == 0, removed.output
+    assert json.loads(removed.stdout)["result"]["already_deleted"] is False
+    assert not older_path.exists()
+    assert newest_path.is_file()
+
+
+def test_backup_rm_refuses_newest_owned_sibling_without_deleting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, catalog_path, older_path, newest_path, _older_id, newest_id = (
+        _seed_owned_backup_siblings(tmp_path)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: catalog_path
+    )
+    refused = CliRunner().invoke(
+        cli,
+        ["--project", str(project), "backup", "rm", newest_id, "--yes", "--format", "json"],
+    )
+    assert refused.exit_code == 1
+    refusal = json.loads(refused.stdout)
+    assert refusal["error"]["code"] == "backup_delete_failed"
+    assert "newest available backup in historical source group" in refusal["error"]["message"]
+    assert older_path.is_file()
+    assert newest_path.is_file()
 
 
 def test_backup_delete_rich_confirmation_shows_immutable_preview(

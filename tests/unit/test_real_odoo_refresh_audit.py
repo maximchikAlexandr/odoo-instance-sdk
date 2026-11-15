@@ -12,8 +12,9 @@ from scripts.real_odoo_refresh_audit import AuditRefreshError, updated_manifest
 AUDIT_PATH = Path("tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.audit.json")
 LOCK_PATH = Path("tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.lock")
 FIXED_VERSIONS = {
-    "certifi": "2026.10.19",
+    "certifi": "2026.10.23",
     "pillow": "13.0.0",
+    "pyasn1": "0.6.5",
     "urllib3": "2.8.0",
     "werkzeug": "3.1.9",
 }
@@ -25,6 +26,7 @@ def _refreshed_lock() -> bytes:
         old_version = {
             "certifi": b"2026.7.22",
             "pillow": b"12.3.0",
+            "pyasn1": b"0.6.4",
             "urllib3": b"2.6.3",
             "werkzeug": b"3.1.6",
         }[package]

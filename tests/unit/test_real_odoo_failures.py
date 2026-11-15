@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -93,9 +94,31 @@ def test_secret_scan_rejects_each_variant_inside_a_binary_zip(tmp_path: Path, va
         assert_secret_free((path,), "focused-secret-canary")
 
 
-@pytest.mark.parametrize("name", ["recovery", "recovery-timeout", "partial"])
+def _assert_recovery_archive_mutation(path: Path, source: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        assert b"SELECT pg_sleep(30);" in archive.read("dump.sql")
+    assert path.read_bytes() != source.read_bytes()
+
+
+def _assert_recovery_archive_preserved(path: Path, source: Path) -> None:
+    assert path.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("name", "assert_archive"),
+    [
+        pytest.param("recovery", _assert_recovery_archive_mutation, id="recovery-mutates"),
+        pytest.param(
+            "recovery-timeout", _assert_recovery_archive_preserved, id="timeout-preserves"
+        ),
+        pytest.param("partial", _assert_recovery_archive_preserved, id="partial-preserves"),
+    ],
+)
 def test_recovery_input_is_removed_while_diagnostics_are_retained(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    assert_archive: Callable[[Path, Path], None],
 ) -> None:
     from tests.integration.real_odoo import conftest as fixtures, test_focused_recovery as recovery
     from tests.integration.real_odoo.archive import SourceBackupPlan, archive_identity
@@ -118,8 +141,6 @@ def test_recovery_input_is_removed_while_diagnostics_are_retained(
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr("dump.sql", "SELECT 1;")
         archive.writestr("filestore/blob", "fixture")
-    seed = Mock()
-    monkeypatch.setattr(recovery, "_seed_backup", seed)
     monkeypatch.setattr(
         recovery, "_project", Mock(side_effect=RuntimeError("stop before provisioning"))
     )
@@ -131,10 +152,71 @@ def test_recovery_input_is_removed_while_diagnostics_are_retained(
             SourceBackupPlan("http://127.0.0.1", "source", source),
             evidence,
             name,
+            Mock(spec=fixtures.PinnedOdooBootstrap),
         )
-    copied_archive = seed.call_args.args[1]
-    assert copied_archive.read_bytes() == source.read_bytes()
+    staged_archive = runtime.root / f"{name}-{run_id}.zip"
+    assert staged_archive.is_file()
+    assert_archive(staged_archive, source)
     monkeypatch.setenv("ODCLI_E2E_KEEP_FAILED", "1")
     fixtures._remove_runtime_files(runtime)
-    assert not copied_archive.exists()
+    assert not staged_archive.exists()
     assert set(runtime.artifact_root.iterdir()) == set(diagnostics)
+
+
+def test_partial_recovery_seed_is_disposable_and_keeps_newest_backup_protected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.integration.real_odoo import conftest as fixtures, test_focused_recovery as recovery
+    from tests.integration.real_odoo.archive import SourceBackupPlan, archive_identity
+
+    run_id = "c" * 32
+    runtime = Mock(
+        spec=fixtures.E2ERuntime,
+        run_id=run_id,
+        root=tmp_path / f"runtime-{run_id}",
+        environment={"HOME": str(tmp_path / "target-home")},
+    )
+    runtime.root.mkdir()
+    source = tmp_path / "source.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("dump.sql", "SELECT 1;")
+        archive.writestr("filestore/blob", "fixture")
+    project = tmp_path / "partial-project"
+    project.mkdir()
+    isolated_catalog = tmp_path / "partial-home" / ".odcli" / "catalog.sqlite3"
+    isolated_catalog.parent.mkdir(parents=True)
+    seed = Mock()
+    monkeypatch.setattr(recovery, "_project", Mock(return_value=project))
+    monkeypatch.setattr(recovery, "_catalog_for_project", Mock(return_value=tmp_path / "base.db"))
+    monkeypatch.setattr(recovery, "_isolated_catalog", Mock(return_value=isolated_catalog))
+    monkeypatch.setattr(recovery, "_ensure_isolated_environment", Mock())
+    monkeypatch.setattr(recovery, "registered_project_id", Mock(return_value="project-owned"))
+    monkeypatch.setattr(recovery, "_seed_backup", seed)
+    monkeypatch.setattr(recovery, "_approve_project_postgres", Mock())
+
+    run_id_result, archive_path, backup_id, _, environment = recovery._prepare_recovery_case(
+        tmp_path,
+        runtime,
+        archive_identity(source),
+        SourceBackupPlan("http://127.0.0.1:8069", "source-db", source),
+        FailureEvidence(run_id, "canary", tmp_path / "evidence"),
+        "partial",
+        Mock(spec=fixtures.PinnedOdooBootstrap),
+    )
+
+    assert run_id_result == run_id
+    assert backup_id == recovery._RECOVERY_BACKUP_IDS["partial"]
+    assert archive_path.is_file()
+    assert environment["ODCLI_E2E_CATALOG"] == str(isolated_catalog)
+    assert seed.call_count == 2
+    primary, newer = seed.call_args_list
+    assert primary.args[0] == newer.args[0] == isolated_catalog
+    assert Path(primary.args[1]).is_relative_to(tmp_path)
+    assert primary.kwargs["backup_id"] == backup_id
+    assert newer.kwargs["backup_id"] == recovery._PARTIAL_NEWER_BACKUP_ID
+    assert newer.kwargs["backup_id"] < backup_id
+    assert primary.kwargs["project_id"] == newer.kwargs["project_id"] == "project-owned"
+    assert primary.kwargs["database"] == newer.kwargs["database"] == "source-db"
+    newer_archive = Path(newer.args[1])
+    assert newer_archive.is_file()
+    assert newer_archive.is_relative_to(tmp_path)

@@ -407,6 +407,26 @@ def test_monitor_route_is_reconciled_and_preserved_by_runtime_publication(
     }
 
 
+def test_browser_consume_route_is_exact_post_and_precedes_basic_auth() -> None:
+    settings = _settings()
+    project = publication_routes.PublicationRoute(
+        owner_kind="project",
+        owner_id="project_abc",
+        project_id="project_abc",
+        environment_id=None,
+        local_endpoint="http://127.0.0.1:8069",
+        external_url="https://project.example.test",
+        route_identity="route_1234",
+    )
+    panel = publication_routes.panel_route("http://127.0.0.1:8123", settings)
+    rendered = publication_routes._render_routes((project, panel), settings).decode()
+    block = rendered[rendered.index("project.example.test {") :]
+    assert "@odcli_auth_consume method POST path /_odcli/auth/consume" in block
+    assert block.index("handle @odcli_auth_consume") < block.index("basic_auth")
+    assert "reverse_proxy http://127.0.0.1:8123" in block
+    assert "path /_odcli/auth/*" not in block
+
+
 @pytest.mark.parametrize("recovery_fails", [False, True], ids=["recovery-ok", "recovery-fails"])
 def test_upstream_reload_failure_restores_prior_route_and_checks_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery_fails: bool

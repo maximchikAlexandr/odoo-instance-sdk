@@ -25,10 +25,11 @@
     "@vitejs/plugin-react": "^4",
     "jsdom": "^26.1.0",
     "typescript": "^5",
-    "vite": "^6.4.3",
-    "vitest": "^4.1.11"
+    "vite": "^6.4.6",
+    "vitest": "^4.1.12"
   },
   "overrides": {
-    "js-yaml": "^4.3.1"
+    "js-yaml": "^4.3.1",
+    "source-map-js": "^1.2.2"
   }
 }

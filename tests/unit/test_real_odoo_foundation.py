@@ -263,6 +263,56 @@ def test_target_fixture_provisions_only_target_and_retains_host_http_port(
     assert not runtime.artifact_root.exists()
 
 
+def test_sdk_owned_runtime_registers_cleanup_without_container_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = e2e_fixtures._make_runtime(tmp_path, "f" * 32)
+    commands: list[tuple[str, ...]] = []
+    events: list[str] = []
+
+    class FakeLifecycle:
+        def __init__(self, compose_file: Path, project_name: str) -> None:
+            assert compose_file == runtime.compose_file
+            assert project_name == runtime.topology.project_name
+
+        def run(self, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+            del timeout
+            commands.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(e2e_fixtures, "ComposeLifecycle", FakeLifecycle)
+    monkeypatch.setattr(
+        e2e_fixtures, "compose_down", lambda *args, **kwargs: events.append("compose-down")
+    )
+    monkeypatch.setattr(
+        e2e_fixtures, "audit_no_leaks", lambda *args, **kwargs: events.append("audit")
+    )
+
+    e2e_fixtures._register_runtime_ownership(runtime)
+    records = {record.kind for record in runtime.ledger.records}
+    assert {
+        "runtime-root",
+        "compose-project",
+        "port",
+        "docker-resource",
+        "database",
+        "filestore",
+        "catalog",
+    } <= records
+    assert runtime.container_data_may_have_written is False
+    assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations[:3])
+    assert runtime.reservations[3].socket.fileno() != -1
+
+    e2e_fixtures._finalize(runtime)
+
+    assert commands == []
+    assert events == ["compose-down", "audit"]
+    assert runtime.ledger.records == ()
+    assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations)
+    assert not runtime.root.exists()
+    assert not runtime.artifact_root.exists()
+
+
 def test_source_fixture_does_not_provision_target_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -300,6 +350,229 @@ def test_source_fixture_does_not_provision_target_resources(
         command[:7] == ("run", "--rm", "--no-deps", "--user", "root", "source_odoo", "sh")
         for command in commands
     )
+
+
+class _InjectedProvisionFailureLifecycle:
+    def __init__(
+        self,
+        runtime: e2e_fixtures.E2ERuntime,
+        failure_point: str,
+        events: list[str],
+        injected: RuntimeError,
+    ) -> None:
+        self.runtime = runtime
+        self.failure_point = failure_point
+        self.events = events
+        self.injected = injected
+        self.failure_injected = False
+        self.chmod_attempts = 0
+
+    def run(self, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if args and args[0] == "up":
+            self.events.append("up")
+            if self.failure_point == "up":
+                self.events.append("partial-write")
+                raise self.injected
+        if any(argument.startswith("--init=") for argument in args):
+            self.events.append("init")
+            if self.failure_point == "init":
+                self.events.append("partial-write")
+                raise self.injected
+        data_service = "source_odoo" if self.runtime.scope == "source" else "target_init"
+        if args[:7] == (
+            "run",
+            "--rm",
+            "--no-deps",
+            "--user",
+            "root",
+            data_service,
+            "sh",
+        ):
+            self.chmod_attempts += 1
+            self.events.append("normalize")
+            if self.failure_point == "first-chmod" and not self.failure_injected:
+                self.failure_injected = True
+                raise self.injected
+            self.events.append("normalized")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+@pytest.mark.parametrize(
+    ("scope", "failure_point"),
+    [
+        ("source", "up"),
+        ("source", "init"),
+        ("target", "init"),
+        ("source", "first-chmod"),
+        ("target", "first-chmod"),
+    ],
+)
+def test_provision_failure_normalizes_maybe_written_container_data_before_unwind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    failure_point: str,
+) -> None:
+    runtime = e2e_fixtures._make_runtime(
+        tmp_path, ("1" if scope == "source" else "2") * 32, scope=scope
+    )
+    events: list[str] = []
+    audits = []
+    injected = RuntimeError(f"partial-write-{scope}-{failure_point}")
+    original_remove = e2e_cleanup.remove_owned_root
+    lifecycle = _InjectedProvisionFailureLifecycle(runtime, failure_point, events, injected)
+    monkeypatch.setattr(e2e_fixtures, "ComposeLifecycle", lambda *args: lifecycle)
+    monkeypatch.setattr(e2e_fixtures, "wait_for_compose_pg_isready", lambda *args: None)
+    monkeypatch.setattr(e2e_fixtures, "wait_for_http", lambda *args, **kwargs: None)
+    monkeypatch.setattr(e2e_fixtures, "_publish_failure_logs", lambda *args: events.append("logs"))
+    monkeypatch.setattr(
+        e2e_fixtures,
+        "compose_down",
+        lambda *args, **kwargs: events.append("compose-down"),
+    )
+
+    def run_audit(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        report = audit_no_leaks(
+            runtime.run_id,
+            probes={
+                category: lambda _run_id: ()
+                for category in (
+                    "process",
+                    "container",
+                    "network",
+                    "volume",
+                    "port",
+                    "database",
+                    "filestore",
+                    "worktree",
+                    "catalog",
+                    "runtime-root",
+                )
+            },
+        )
+        audits.append(report)
+        events.append("audit")
+
+    monkeypatch.setattr(e2e_fixtures, "audit_no_leaks", run_audit)
+
+    def remove_owned(path: Path, *, run_id: str) -> None:
+        if path == runtime.root:
+            events.append("root-remove")
+        original_remove(path, run_id=run_id)
+
+    monkeypatch.setattr(e2e_fixtures, "remove_owned_root", remove_owned)
+    try:
+        with pytest.raises(RuntimeError) as provision_error:
+            e2e_fixtures._provision(runtime)
+        assert provision_error.value is injected
+        assert runtime.container_data_may_have_written is True
+
+        with pytest.raises(RuntimeError) as finalize_error:
+            e2e_fixtures._finalize(runtime, provision_error.value)
+        assert finalize_error.value is injected
+
+        assert events.index("normalized") < events.index("compose-down")
+        assert events.index("compose-down") < events.index("root-remove")
+        assert events[-1] == "audit"
+        assert len(audits) == 1 and audits[0].clean
+        assert runtime.ledger.records == ()
+        assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations)
+        assert not runtime.root.exists()
+        assert lifecycle.chmod_attempts == (2 if failure_point == "first-chmod" else 1)
+    finally:
+        e2e_fixtures._finalize(runtime)
+
+
+@pytest.mark.parametrize("scope", ["source", "target"])
+def test_finalize_retains_init_and_container_normalization_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+) -> None:
+    runtime = e2e_fixtures._make_runtime(tmp_path, "3" * 32, scope=scope)
+    events: list[str] = []
+    audits = []
+    primary = RuntimeError(f"partial-{scope}-init")
+    cleanup = OSError(f"{scope}-container-normalization-failed")
+
+    class FailingLifecycle:
+        def __init__(self, compose_file: Path, project_name: str) -> None:
+            del compose_file, project_name
+
+        def run(self, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+            del timeout
+            if any(argument.startswith("--init=") for argument in args):
+                events.append("partial-write")
+                raise primary
+            if args[:7] == (
+                "run",
+                "--rm",
+                "--no-deps",
+                "--user",
+                "root",
+                "source_odoo" if scope == "source" else "target_init",
+                "sh",
+            ):
+                events.append("normalize-failed")
+                raise cleanup
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(e2e_fixtures, "ComposeLifecycle", FailingLifecycle)
+    monkeypatch.setattr(e2e_fixtures, "wait_for_compose_pg_isready", lambda *args: None)
+    monkeypatch.setattr(e2e_fixtures, "wait_for_http", lambda *args, **kwargs: None)
+    monkeypatch.setattr(e2e_fixtures, "_publish_failure_logs", lambda *args: None)
+    monkeypatch.setattr(
+        e2e_fixtures, "compose_down", lambda *args, **kwargs: events.append("compose-down")
+    )
+
+    def run_audit(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        report = audit_no_leaks(
+            runtime.run_id,
+            probes={
+                category: lambda _run_id: ()
+                for category in (
+                    "process",
+                    "container",
+                    "network",
+                    "volume",
+                    "port",
+                    "database",
+                    "filestore",
+                    "worktree",
+                    "catalog",
+                    "runtime-root",
+                )
+            },
+        )
+        audits.append(report)
+        events.append("audit")
+
+    monkeypatch.setattr(e2e_fixtures, "audit_no_leaks", run_audit)
+
+    with pytest.raises(RuntimeError) as provision_error:
+        e2e_fixtures._provision(runtime)
+    assert provision_error.value is primary
+
+    with pytest.raises(BaseExceptionGroup) as finalize_error:
+        e2e_fixtures._finalize(runtime, primary)
+
+    def nested_errors(error: BaseException) -> list[BaseException]:
+        if isinstance(error, BaseExceptionGroup):
+            return [item for child in error.exceptions for item in nested_errors(child)]
+        return [error]
+
+    flattened = nested_errors(finalize_error.value)
+    assert primary in flattened
+    assert cleanup in flattened
+    assert events.index("normalize-failed") < events.index("compose-down")
+    assert events[-1] == "audit"
+    assert len(audits) == 1 and audits[0].clean
+    assert runtime.ledger.records == ()
+    assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations)
+    assert not runtime.root.exists()
 
 
 def test_failed_runtime_keeps_only_sanitized_artifacts_when_requested(
@@ -516,20 +789,10 @@ def test_fixture_failure_publishes_bounded_sanitized_compose_logs(
         assert commands == [
             ("logs", "--no-color", "--tail", "200", "target_postgres"),
             ("logs", "--no-color", "--tail", "200", "target_init"),
-            (
-                "run",
-                "--rm",
-                "--no-deps",
-                "--user",
-                "root",
-                "target_init",
-                "sh",
-                "-c",
-                "chmod -R a+rwX -- /var/lib/odoo-target",
-            ),
         ]
+        assert runtime.container_data_may_have_written is False
         e2e_fixtures._finalize(runtime)
-        assert len(commands) == 3
+        assert len(commands) == 2
         logs = sorted(runtime.artifact_root.glob("*.log"))
         assert {path.name for path in logs} == {"odoo.log", "postgres.log"}
         assert all("runtime-secret" not in path.read_text(encoding="utf-8") for path in logs)

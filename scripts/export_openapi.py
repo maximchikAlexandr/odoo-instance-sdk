@@ -64,6 +64,7 @@ def build_openapi() -> dict[str, Any]:
     from pwdlib import PasswordHash
 
     from odoo_instance_sdk.http.admin_auth import AdminSettings
+    from odoo_instance_sdk.http.app import ExternalProxyConfig
 
     settings = AdminSettings(
         password_hash=PasswordHash.recommended().hash(secrets.token_urlsafe(32)),
@@ -76,6 +77,10 @@ def build_openapi() -> dict[str, Any]:
             monitor=_SchemaMonitor(),
             pgadmin_opener=_schema_pgadmin_opener,
             runtime_controller=_schema_runtime_controller,
+            external_proxy=ExternalProxyConfig(
+                allowed_hosts=("monitor.example.test",),
+                trusted_proxy_addresses=("127.0.0.1",),
+            ),
         ).openapi()
     if not isinstance(document, dict):
         raise TypeError("OpenAPI schema must be an object")

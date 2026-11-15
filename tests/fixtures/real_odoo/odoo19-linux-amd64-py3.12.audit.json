@@ -3,7 +3,7 @@
   "source_commit": "cd992ceebbaf343c03e1941d39cfe423d35ba6c6",
   "python": "3.12.13",
   "platform": "x86_64-manylinux_2_17",
-  "lock_sha256": "7453ea85977d6837e7d9e2ab229d5120e1ac16bd6a230582c6cc4813d335148c",
+  "lock_sha256": "7821660a7d4fb03d1fe648d00721f9a00f674064484966a4507ffabb1de26862",
   "scanner": "pip-audit 2.10.1",
   "reviewed_overrides": {
     "cbor2": "5.9.0",
@@ -19,7 +19,8 @@
     "urllib3": "2.8.0",
     "werkzeug": "3.1.9",
     "zeep": "4.3.3",
-    "certifi": "2026.10.19"
+    "certifi": "2026.10.23",
+    "pyasn1": "0.6.5"
   },
   "exceptions": [
     {
