@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import types
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -66,17 +67,17 @@ INSTALL_HINT = (
 
 def load_catalog_fill() -> CatalogFiller:
     """Import catalog filling from the extension, or raise an install hint."""
-    return cast("CatalogFiller", _extension_attribute("fill_exported_catalogs"))
+    return cast("CatalogFiller", _extension_module().fill_exported_catalogs)
 
 
 def load_commit_description() -> CommitDescriptionLoader:
     """Import description generation from the extension, or raise an install hint."""
-    return cast("CommitDescriptionLoader", _extension_attribute("generate_commit_description"))
+    return cast("CommitDescriptionLoader", _extension_module().generate_commit_description)
 
 
 def load_commit_description_command() -> CommitDescriptionPlanner:
     """Import description planning from the extension, or raise an install hint."""
-    return cast("CommitDescriptionPlanner", _extension_attribute("commit_description_command"))
+    return cast("CommitDescriptionPlanner", _extension_module().commit_description_command)
 
 
 def generated_description(
@@ -95,10 +96,9 @@ def generated_description(
     )
 
 
-def _extension_attribute(name: str) -> object:
-    """Return one extension attribute, or raise the shared install hint."""
+def _extension_module() -> types.ModuleType:
+    """Import the optional extension, or raise the shared install hint."""
     try:
-        module = importlib.import_module("odcli_codex.integration")
+        return importlib.import_module("odcli_codex.integration")
     except ImportError as exc:
         raise ConfigError(INSTALL_HINT) from exc
-    return cast("object", getattr(module, name))

@@ -41,7 +41,7 @@ from odoo_instance_sdk.internal.project_env import ProjectEnvironmentError, load
 from odoo_instance_sdk.internal.secret_store import SecretStore
 from odoo_instance_sdk.internal.transport.gitlab import GitLabHttpClient
 from odoo_instance_sdk.models import GitLabCredentialContext, GitMergeRequestResult
-from odoo_instance_sdk.resources.git import _command_result
+from odoo_instance_sdk.resources.git_runtime import command_result
 
 MEMBER_A = "11111111-1111-4111-8111-111111111111"
 MEMBER_B = "22222222-2222-4222-8222-222222222222"
@@ -806,7 +806,7 @@ def test_credential_secret_is_redacted_from_child_projection_and_gitlab_failure(
     assert secret not in repr(projection)
     assert secret not in str(projection)
     process = SubprocessExecutor().execute(step)
-    result = _command_result(process, step)
+    result = command_result(process, step)
     assert result.returncode == 3
     assert secret not in result.stdout
     assert secret not in result.stderr
