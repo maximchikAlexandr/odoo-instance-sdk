@@ -20,7 +20,10 @@ def test_reconcile_reuses_matching_owned_container_without_recreate(
 ) -> None:
     preparation = pgadmin_files.prepare_files(
         paths=local_paths,
-        servers_json='{"Servers":{"1":{"MaintenanceDB":"demo","DBRestriction":"demo"}}}',
+        servers_json=(
+            '{"Servers":{"1":{"Host":"db","Port":5432,"Username":"odoo",'
+            '"MaintenanceDB":"demo","DBRestriction":"demo"}}}'
+        ),
         pgpass="*:*:*:*:secret\n",
         fingerprint="f" * 64,
         port=5050,
@@ -33,6 +36,7 @@ def test_reconcile_reuses_matching_owned_container_without_recreate(
             "Env": [
                 "PATH=/usr/local/bin:/usr/bin",
                 "PGADMIN_CONFIG_SERVER_MODE=False",
+                "PGADMIN_CONFIG_USE_OS_SECRET_STORAGE=False",
                 "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
                 f"PGADMIN_DEFAULT_EMAIL={pgadmin_files.PGADMIN_DEFAULT_EMAIL}",
                 f"PGADMIN_DEFAULT_PASSWORD_FILE={pgadmin_files.PGADMIN_PASSWORD_DESTINATION}",
@@ -75,7 +79,9 @@ def test_reconcile_reuses_matching_owned_container_without_recreate(
             cwd: Path | None = None,
             timeout: float | None = None,
         ) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(list(args), 0, "", "")
+            script = next((arg for arg in args if "masterpass_check" in arg), "")
+            stdout = "0\n" if script else ""
+            return subprocess.CompletedProcess(list(args), 0, stdout, "")
 
     result = pgadmin_container.reconcile_container(
         preparation,
@@ -104,6 +110,7 @@ def test_matching_container_rejects_conflicting_duplicate_sdk_environment(
             "User": str(pgadmin_files.PGADMIN_RUNTIME_UID),
             "Env": [
                 "PGADMIN_CONFIG_SERVER_MODE=False",
+                "PGADMIN_CONFIG_USE_OS_SECRET_STORAGE=False",
                 "PGADMIN_CONFIG_SERVER_MODE=True",
                 "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
                 f"PGADMIN_DEFAULT_EMAIL={pgadmin_files.PGADMIN_DEFAULT_EMAIL}",
@@ -187,6 +194,11 @@ def test_reconcile_reconfigures_owned_container_when_fingerprint_changes(
         ) -> subprocess.CompletedProcess[str]:
             assert args[1:2] in (["rm"], ["exec"])
             if args[1:2] == ["exec"]:
+                script = " ".join(args)
+                if "masterpass_check" in script:
+                    return subprocess.CompletedProcess(list(args), 0, "0\n", "")
+                if "SELECT 1" in script:
+                    return subprocess.CompletedProcess(list(args), 0, "", "")
                 return subprocess.CompletedProcess(
                     args,
                     0,
@@ -421,7 +433,8 @@ def test_same_backend_password_rotation_recreates_and_refreshes_active_passfile(
             timeout: float | None = None,
         ) -> subprocess.CompletedProcess[str]:
             calls.append(list(args))
-            return subprocess.CompletedProcess(args, 0, "", "")
+            stdout = "0\n" if "masterpass_check" in " ".join(args) else ""
+            return subprocess.CompletedProcess(args, 0, stdout, "")
 
     result = pgadmin_container.reconcile_container(
         new_preparation,

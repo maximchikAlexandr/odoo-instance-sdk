@@ -41,6 +41,8 @@ PGADMIN_DATA_DESTINATION = "/var/lib/pgadmin"
 PGADMIN_IMAGE = "docker.io/dpage/pgadmin4@sha256:cefc4cc6b7d9d71a9e81e76fb9d7e14038ab5661b539a190eea1b63fa612589a"
 PGADMIN_DEFAULT_PORT = 5050
 PGADMIN_DEFAULT_EMAIL = "odoo-instance-sdk@example.com"
+PGADMIN_MASTER_ENV_NAME = "master.env"
+PGADMIN_MASTER_PASSWORD_KEY = "PGADMIN_MASTER_PASSWORD"
 PGADMIN_LABEL_MANAGED = "io.odoo-instance-sdk.managed"
 PGADMIN_LABEL_FINGERPRINT = "io.odoo-instance-sdk.fingerprint"
 PGADMIN_LABEL_NETWORK = "io.odoo-instance-sdk.network"
@@ -49,6 +51,7 @@ _PRIVATE_DIRECTORY_MODE = 0o710
 _DATA_DIRECTORY_MODE = 0o770
 _PRIVATE_FILE_MODE = 0o640
 _FINGERPRINT_KEY_MODE = 0o600
+_MASTER_ENV_MODE = 0o600
 _FINGERPRINT_KEY_NAME = ".fingerprint-key"
 _FINGERPRINT_KEY_BYTES = 32
 _ACL_TOOLS = ("getfacl", "setfacl")
@@ -310,6 +313,7 @@ def prepare_files(
         root=paths.private_dir,
         acl_step_id="pgadmin.acl.metadata.final",
     )
+    load_master_password(paths)
     mounts = pgadmin_mounts(paths)
     _validate_mounts(mounts, paths)
     return PgAdminPreparation(
@@ -320,6 +324,72 @@ def prepare_files(
         mounts=mounts,
         file_digests=_preparation_file_digests(paths),
     )
+
+
+def master_password_path(paths: PgAdminPaths) -> Path:
+    """Return the unmounted owner-only pgAdmin master-password env file."""
+    return paths.root / PGADMIN_MASTER_ENV_NAME
+
+
+def load_master_password(paths: PgAdminPaths) -> str | None:
+    """Return a stored master password, or None when the file is absent.
+
+    Args:
+        paths: User-global pgAdmin paths.
+
+    Returns:
+        The stored password when the file meets the owner-only contract.
+
+    Raises:
+        PgAdminUnavailableError: The file exists but is unsafe or unreadable.
+    """
+    path = master_password_path(paths)
+    if not path.exists() and not path.is_symlink():
+        return None
+    _validate_path(path, root=paths.root, expected_type="file", mode=_MASTER_ENV_MODE)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        raise PgAdminUnavailableError() from None
+    return _parse_master_password(text)
+
+
+def store_new_master_password(paths: PgAdminPaths) -> str:
+    """Create the master-password file when the profile has none yet.
+
+    Args:
+        paths: User-global pgAdmin paths.
+
+    Returns:
+        The generated password.
+    """
+    path = master_password_path(paths)
+    if path.exists() or path.is_symlink():
+        raise PgAdminUnavailableError()
+    password = secrets.token_urlsafe(32)
+    content = f"{PGADMIN_MASTER_PASSWORD_KEY}={password}\n".encode()
+    _atomic_write(
+        path,
+        content,
+        mode=_MASTER_ENV_MODE,
+        validate_acl=False,
+    )
+    return password
+
+
+def _parse_master_password(text: str) -> str:
+    lines = [line for line in text.splitlines() if line]
+    if len(lines) != 1:
+        raise PgAdminUnavailableError()
+    key, separator, value = lines[0].partition("=")
+    if (
+        separator != "="
+        or key != PGADMIN_MASTER_PASSWORD_KEY
+        or not value
+        or any(character.isspace() for character in value)
+    ):
+        raise PgAdminUnavailableError()
+    return value
 
 
 def _fingerprint_key_path(paths: PgAdminPaths) -> Path:

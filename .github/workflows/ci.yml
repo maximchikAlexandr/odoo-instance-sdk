@@ -162,6 +162,20 @@ jobs:
       - run: uv sync --frozen --group test
       - run: uv run pytest -q -o addopts='' -o timeout_method=thread tests/unit/project/test_prepare_venv.py tests/unit/test_integrated_init_venv.py -k 'real_platform_backend or integrated or init_help'
 
+  pgadmin-docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y acl
+      - run: uv sync --frozen --group test
+      - run: ODCLI_PGADMIN_DOCKER_SMOKE=1 uv run pytest -q -o addopts='' tests/integration/test_pgadmin_docker_smoke.py
+
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 15

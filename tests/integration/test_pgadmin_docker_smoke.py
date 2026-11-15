@@ -14,6 +14,7 @@ import os
 import shutil
 import socket
 import subprocess
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -134,6 +135,13 @@ def _active_pgpass(container_id: str) -> tuple[str, str]:
     )
     assert content.returncode == 0, content.stderr
     return mode.stdout.strip(), content.stdout
+
+
+def _master_password_present(root_url: str) -> bool:
+    """Return whether pgAdmin reports the desktop master password in memory."""
+    with urllib.request.urlopen(f"{root_url}browser/master_password", timeout=20) as response:
+        payload = json.loads(response.read())
+    return isinstance(payload, dict) and payload.get("data") is True
 
 
 def _pgadmin_passwordless_query(
@@ -341,6 +349,18 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
         )
         assert started.state is PgAdminOpenState.STARTED
         assert started.url.startswith("http://127.0.0.1:")
+        master_env = pgadmin_root / "master.env"
+        mode = master_env.stat().st_mode
+        assert master_env.is_file() and not master_env.is_symlink()
+        assert (mode & 0o777) == 0o600
+        assert master_env.read_text(encoding="utf-8").startswith("PGADMIN_MASTER_PASSWORD=")
+        inspected = _run(["docker", "inspect", pgadmin_files.PGADMIN_CONTAINER_NAME], timeout=20.0)
+        assert inspected.returncode == 0
+        assert "PGADMIN_MASTER_PASSWORD" not in inspected.stdout
+        assert "master.env" not in inspected.stdout
+        assert _master_password_present(started.url)
+        restarted = _run(["docker", "restart", pgadmin_files.PGADMIN_CONTAINER_NAME], timeout=90.0)
+        assert restarted.returncode == 0, restarted.stderr
         old_container_id = _pgadmin_container_id()
         old_mode, old_active_pgpass = _active_pgpass(old_container_id)
         assert old_mode == "600"
@@ -360,6 +380,7 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
             .run()
         )
         assert reused.state is PgAdminOpenState.REUSED
+        assert _master_password_present(reused.url)
         reconfigured = (
             pgadmin.open_pgadmin_phase(
                 instance=instances[1],

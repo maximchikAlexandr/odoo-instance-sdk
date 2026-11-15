@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
-from odoo_instance_sdk.internal import pgadmin_readiness
+from odoo_instance_sdk.internal import pgadmin_master_password, pgadmin_readiness
 from odoo_instance_sdk.internal.pgadmin_files import (
     PGADMIN_CONTAINER_NAME,
     PGADMIN_CONTAINER_PORT,
@@ -26,14 +26,16 @@ from odoo_instance_sdk.internal.pgadmin_files import (
     PgAdminPaths,
     PgAdminPreparation,
     PostgresIdentity,
+    load_master_password,
     pgadmin_mounts,
+    store_new_master_password,
 )
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, active_context
 from odoo_instance_sdk.models import PgAdminOpenResult, PgAdminOpenState
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.proc import PreparedStep
 
 
 class PostgresIdentityCluster(Protocol):
@@ -59,6 +61,32 @@ _ACTIVE_PGPASS_REFRESH = (
     'chmod 0600 "$temporary"; '
     f'mv -f "$temporary" {PGADMIN_DATA_DESTINATION}/.pgpass'
 )
+_PROFILE_PROBE = (
+    "import sqlite3\n"
+    "from pathlib import Path\n"
+    'path=Path("/var/lib/pgadmin/pgadmin4.db")\n'
+    "if not path.is_file():\n"
+    '    print("0")\n'
+    "else:\n"
+    "    try:\n"
+    '        db=sqlite3.connect("file:" + path.as_posix() + "?mode=ro", uri=True)\n'
+    '        row=db.execute("SELECT masterpass_check FROM user LIMIT 1").fetchone()\n'
+    "    except sqlite3.Error:\n"
+    "        raise SystemExit(1)\n"
+    "    else:\n"
+    '        print("1" if row is not None and row[0] not in (None, "") else "0")\n'
+)
+_SELECT_ONE = (
+    "import sys,psycopg\n"
+    "connection=psycopg.connect(host=sys.argv[1],port=int(sys.argv[2]),user=sys.argv[3],"
+    "dbname=sys.argv[4],passfile='/var/lib/pgadmin/.pgpass')\n"
+    "cursor=connection.cursor()\n"
+    "cursor.execute('SELECT 1')\n"
+    "row=cursor.fetchone()\n"
+    "cursor.close()\n"
+    "connection.close()\n"
+    "raise SystemExit(0 if row == (1,) else 1)\n"
+)
 _PGADMIN_EFFECTIVE_SERVER_QUERY = (
     "import json,sqlite3;"
     "db=sqlite3.connect('/var/lib/pgadmin/pgadmin4.db');"
@@ -68,14 +96,30 @@ _PGADMIN_EFFECTIVE_SERVER_QUERY = (
 )
 
 
+def required_pgadmin_environment() -> tuple[str, ...]:
+    """Return the non-secret environment contract for one pgAdmin container."""
+    return (
+        "PGADMIN_CONFIG_SERVER_MODE=False",
+        "PGADMIN_CONFIG_USE_OS_SECRET_STORAGE=False",
+        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
+        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
+        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
+        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
+    )
+
+
 def reconciliation_steps(
     *,
     paths: PgAdminPaths,
     port: int,
     network: str,
     fingerprint: str,
+    database: str,
+    postgres_host: str,
+    postgres_port: int,
+    postgres_user: str,
     secret_values: tuple[str, ...] = (),
-) -> tuple[PreparedStep, ...]:
+) -> tuple[PreparedStep | PreparedAction, ...]:
     """Capture the post-preparation Docker phase for one exact command.
 
     The phase creates this second immutable instance with the real HMAC only
@@ -83,8 +127,6 @@ def reconciliation_steps(
     Keeping this manifest in one place prevents the phase boundary from
     drifting between preview and execution.
     """
-    from odoo_instance_sdk.internal.proc import PreparedStep
-
     return (
         PreparedStep(
             step_id="pgadmin.container.inspect.1",
@@ -127,6 +169,28 @@ def reconciliation_steps(
             read_only=True,
         ),
         PreparedStep(
+            step_id="pgadmin.master_password.probe",
+            argv=_docker_probe_argv(PGADMIN_CONTAINER_NAME),
+            read_only=True,
+        ),
+        PreparedAction(
+            step_id="pgadmin.master_password.unlock",
+            action="pgadmin_master_password_unlock",
+            description="Unlock the pgAdmin desktop master password over loopback",
+            mutating=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.authenticate",
+            argv=_docker_authenticate_argv(
+                PGADMIN_CONTAINER_NAME,
+                postgres_host,
+                postgres_port,
+                postgres_user,
+                database,
+            ),
+            read_only=True,
+        ),
+        PreparedStep(
             step_id="pgadmin.container.inspect.2",
             argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
             read_only=True,
@@ -141,8 +205,6 @@ def reconciliation_steps(
 
 def reconciliation_inspect_step() -> PreparedStep:
     """Capture the lock-adjacent inspection that starts reconciliation."""
-    from odoo_instance_sdk.internal.proc import PreparedStep
-
     return PreparedStep(
         step_id="pgadmin.reconciliation.inspect.0",
         argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
@@ -169,17 +231,9 @@ def _docker_run_argv(preparation: PgAdminPreparation, *, network: str) -> tuple[
         f"{PGADMIN_LABEL_FINGERPRINT}={preparation.fingerprint}",
         "--label",
         f"{PGADMIN_LABEL_NETWORK}={network}",
-        "--env",
-        "PGADMIN_CONFIG_SERVER_MODE=False",
-        "--env",
-        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
-        "--env",
-        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
-        "--env",
-        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
-        "--env",
-        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
     ]
+    for item in required_pgadmin_environment():
+        args.extend(("--env", item))
     for mount in preparation.mounts:
         args.extend(
             (
@@ -205,6 +259,34 @@ def _docker_refresh_argv(container: str) -> tuple[str, ...]:
     )
 
 
+def _docker_probe_argv(container: str) -> tuple[str, ...]:
+    return (
+        "docker",
+        "exec",
+        container,
+        "/venv/bin/python3",
+        "-c",
+        _PROFILE_PROBE,
+    )
+
+
+def _docker_authenticate_argv(
+    container: str, host: str, port: int, user: str, database: str
+) -> tuple[str, ...]:
+    return (
+        "docker",
+        "exec",
+        container,
+        "/venv/bin/python3",
+        "-c",
+        _SELECT_ONE,
+        host,
+        str(port),
+        user,
+        database,
+    )
+
+
 def _docker_verify_argv(container: str) -> tuple[str, ...]:
     return (
         "docker",
@@ -218,8 +300,6 @@ def _docker_verify_argv(container: str) -> tuple[str, ...]:
 
 def _skip_reconciliation_steps(*step_ids: str) -> None:
     """Record an explicit branch omission in the active phase ledger."""
-    from odoo_instance_sdk.internal.proc import active_context
-
     context = active_context()
     if context is None:
         return
@@ -425,6 +505,13 @@ def reconcile_container(
                 planned=planned,
                 step_id="pgadmin.container.verify",
             )
+            _authorize_selected_database(
+                preparation,
+                database,
+                runner=runner,
+                deadline=deadline,
+                planned=planned,
+            )
             _skip_reconciliation_steps(
                 "pgadmin.container.inspect.2",
                 "pgadmin.container.cleanup.remove",
@@ -487,6 +574,13 @@ def reconcile_container(
             deadline=deadline,
             planned=planned,
             step_id="pgadmin.container.verify",
+        )
+        _authorize_selected_database(
+            preparation,
+            database,
+            runner=runner,
+            deadline=deadline,
+            planned=planned,
         )
         _skip_reconciliation_steps(
             "pgadmin.container.inspect.2", "pgadmin.container.cleanup.remove"
@@ -586,8 +680,6 @@ def run_docker(
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise PgAdminUnavailableError()
-    from odoo_instance_sdk.internal.proc import active_context
-
     context = active_context()
     if context is not None and step_id is not None:
         from odoo_instance_sdk.exceptions import UnplannedStepError
@@ -693,13 +785,7 @@ def container_matches(
         return False
     if labels.get(PGADMIN_LABEL_NETWORK) != network:
         return False
-    expected_env = {
-        "PGADMIN_CONFIG_SERVER_MODE=False",
-        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
-        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
-        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
-        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
-    }
+    expected_env = set(required_pgadmin_environment())
     env = config.get("Env")
     if not isinstance(env, list) or not all(isinstance(item, str) for item in env):
         return False
@@ -838,6 +924,80 @@ def refresh_active_pgpass(
     )
     if result.returncode != 0:
         raise PgAdminUnavailableError()
+
+
+def _authorize_selected_database(
+    preparation: PgAdminPreparation,
+    database: str,
+    *,
+    runner: ComposeRunner,
+    deadline: float,
+    planned: bool,
+) -> None:
+    """Unlock the desktop master password and prove the selected database."""
+    container = PGADMIN_CONTAINER_NAME if planned else preparation.container_name
+    established = _profile_has_master_password(runner, container, deadline=deadline)
+    password = load_master_password(preparation.paths)
+    if password is None and established:
+        raise PgAdminUnavailableError()
+    if password is None:
+        password = store_new_master_password(preparation.paths)
+    context = active_context()
+    if context is not None and context.planned("pgadmin.master_password.unlock"):
+        context.action("pgadmin.master_password.unlock")
+    elif planned:
+        raise PgAdminUnavailableError()
+    pgadmin_master_password.unlock_master_password(preparation.port, password, deadline=deadline)
+    host, port, user = _selected_connection(preparation, database)
+    result = run_docker(
+        runner,
+        list(_docker_authenticate_argv(container, host, port, user, database)),
+        deadline=deadline,
+        step_id="pgadmin.container.authenticate",
+    )
+    if result.returncode != 0:
+        raise PgAdminUnavailableError()
+
+
+def _profile_has_master_password(runner: ComposeRunner, container: str, *, deadline: float) -> bool:
+    result = run_docker(
+        runner,
+        list(_docker_probe_argv(container)),
+        deadline=deadline,
+        step_id="pgadmin.master_password.probe",
+    )
+    if result.returncode != 0:
+        raise PgAdminUnavailableError()
+    token = result.stdout.strip()
+    if token == "1":
+        return True
+    if token == "0":
+        return False
+    raise PgAdminUnavailableError()
+
+
+def _selected_connection(preparation: PgAdminPreparation, database: str) -> tuple[str, int, str]:
+    try:
+        payload = json.loads(preparation.paths.servers_json.read_text(encoding="utf-8"))
+        server = payload["Servers"]["1"]
+    except (OSError, KeyError, TypeError, ValueError):
+        raise PgAdminUnavailableError() from None
+    if not isinstance(server, dict):
+        raise PgAdminUnavailableError()
+    host = server.get("Host")
+    port = server.get("Port")
+    user = server.get("Username")
+    if (
+        not isinstance(host, str)
+        or not host
+        or isinstance(port, bool)
+        or not isinstance(port, int)
+        or not isinstance(user, str)
+        or not user
+        or server.get("MaintenanceDB") != database
+    ):
+        raise PgAdminUnavailableError()
+    return host, port, user
 
 
 def verify_server(

@@ -191,8 +191,10 @@ describe("App", () => {
     for (const card of [...projects, ...environments]) {
       expect(card.className).toContain("instance-card");
       expect(card.querySelectorAll(".instance-status")).toHaveLength(1);
-      expect(card.textContent).not.toMatch(/pgAdmin|publication:|port:|container:|PID|disk:|venv|git:/);
+      expect(card.textContent).not.toMatch(/publication:|port:|container:|PID|disk:|venv|git:/);
     }
+    for (const card of projects) expect(card.textContent).not.toMatch(/pgAdmin/);
+    for (const card of environments) expect(card.textContent).toContain("Open pgAdmin");
 
     const projectButtons = screen.getAllByTestId("open-project-odoo") as HTMLButtonElement[];
     expect(projectButtons[0].disabled).toBe(true);
@@ -232,14 +234,30 @@ describe("App", () => {
     expect(getMonitorSnapshot).toHaveBeenCalledTimes(1);
   });
 
-  it.each(Object.values(PgAdminEligibilityState))("hides pgAdmin for eligibility %s", async (state) => {
+  it.each(Object.values(PgAdminEligibilityState))("opens pgAdmin only when eligibility is %s", async (state) => {
     vi.mocked(getMonitorSnapshot).mockResolvedValue(snapshotResponse(snapshotForState(state)) as never);
+    vi.mocked(openPgAdmin).mockResolvedValue({
+      data: { state: "started", url: "http://127.0.0.1:5050" },
+    } as never);
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
     render(<MantineProvider><App /></MantineProvider>);
-    await screen.findByTestId("environment-card");
-    expect(screen.queryByTestId("open-pgadmin")).toBeNull();
-    expect(screen.queryByTestId("pgadmin-state")).toBeNull();
+    const button = await screen.findByTestId("open-pgadmin") as HTMLButtonElement;
     expect(screen.queryByTestId("pgadmin-error")).toBeNull();
-    expect(openPgAdmin).not.toHaveBeenCalled();
+    expect(button.disabled).toBe(state !== PgAdminEligibilityState.ELIGIBLE);
+    fireEvent.click(button);
+    if (state === PgAdminEligibilityState.ELIGIBLE) {
+      await waitFor(() => expect(openPgAdmin).toHaveBeenCalledWith(expect.objectContaining({
+        body: { environment_id: `environment-${state}` },
+        throwOnError: true,
+      })));
+      await waitFor(() => expect(open).toHaveBeenCalledWith(
+        "http://127.0.0.1:5050",
+        "_blank",
+        "noopener,noreferrer",
+      ));
+    } else {
+      expect(openPgAdmin).not.toHaveBeenCalled();
+    }
   });
 
   it("does not render empty metrics or technical storage fields", async () => {
