@@ -85,6 +85,8 @@ class RootCreatorContext(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     root_issue_id: str
     root_creator_id: str
     workspace_id: str
+    member_id: str | None = None
+    source: Literal["root_creator", "explicit"] = "root_creator"
 
 
 class ContextVerificationError(ValueError):

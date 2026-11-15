@@ -36,13 +36,18 @@ _SECRET_TEXT: Final[re.Pattern[str]] = re.compile(
     r"(?i)((?:private-token|password|token|authorization)\s*[:=]\s*)[^\s,}]+"
 )
 _SHA: Final[re.Pattern[str]] = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
+_URL: Final[re.Pattern[str]] = re.compile(r"(?:https?://|git@)[^\s,}]+", re.IGNORECASE)
+_UUID: Final[re.Pattern[str]] = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("all", "clone", "commit", "sync", "mr"),
+        choices=("all", "clone", "commit", "sync", "mr", "multica-cache"),
         default="all",
         help="workflow phase to execute (default: all)",
     )
@@ -76,6 +81,53 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repository-independent",
         default=os.environ.get("TEST_REPOSITORY_INDEPENDENT_URL"),
+    )
+    parser.add_argument("--odcli-multica", default="odcli-multica")
+    parser.add_argument("--multica", default="multica")
+    parser.add_argument("--profile", default=os.environ.get("TEST_MULTICA_PROFILE"))
+    parser.add_argument("--helper-dir", type=Path, default=os.environ.get("TEST_GIT_HELPER_DIR"))
+    parser.add_argument("--core-project", type=Path, default=os.environ.get("TEST_CORE_PROJECT"))
+    parser.add_argument("--sdk-sha", default=os.environ.get("TEST_SDK_SHA"))
+    parser.add_argument("--multica-project", default=os.environ.get("TEST_MULTICA_PROJECT"))
+    parser.add_argument("--workspace-id", default=os.environ.get("TEST_MULTICA_WORKSPACE"))
+    parser.add_argument("--cache-member-id", default=os.environ.get("TEST_GITLAB_CACHE_MEMBER"))
+    parser.add_argument(
+        "--cache-owner-mismatch-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_OWNER_MISMATCH_MEMBER"),
+    )
+    parser.add_argument(
+        "--cache-inactive-member", default=os.environ.get("TEST_GITLAB_CACHE_INACTIVE_MEMBER")
+    )
+    parser.add_argument(
+        "--cache-broader-scope-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_BROADER_SCOPE_MEMBER"),
+    )
+    parser.add_argument(
+        "--cache-granular-scope-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_GRANULAR_SCOPE_MEMBER"),
+    )
+    parser.add_argument(
+        "--cache-incompatible-member",
+        default=os.environ.get("TEST_GITLAB_CACHE_INCOMPATIBLE_MEMBER"),
+    )
+    parser.add_argument("--member-b", default=os.environ.get("TEST_GITLAB_MEMBER_B"))
+    parser.add_argument("--member-missing", default=os.environ.get("TEST_GITLAB_MEMBER_MISSING"))
+    parser.add_argument("--member-invalid", default=os.environ.get("TEST_MULTICA_MEMBER_INVALID"))
+    parser.add_argument("--member-nonhuman", default=os.environ.get("TEST_MULTICA_MEMBER_NONHUMAN"))
+    parser.add_argument(
+        "--member-cross-workspace", default=os.environ.get("TEST_MULTICA_MEMBER_CROSS_WORKSPACE")
+    )
+    parser.add_argument("--member-stale", default=os.environ.get("TEST_MULTICA_MEMBER_STALE"))
+    parser.add_argument("--cache-host", default=os.environ.get("TEST_GITLAB_CACHE_HOST"))
+    parser.add_argument("--issue-a", default=os.environ.get("TEST_MULTICA_ISSUE_A"))
+    parser.add_argument("--run-a", default=os.environ.get("TEST_MULTICA_RUN_A"))
+    parser.add_argument("--issue-b", default=os.environ.get("TEST_MULTICA_ISSUE_B"))
+    parser.add_argument("--run-b", default=os.environ.get("TEST_MULTICA_RUN_B"))
+    parser.add_argument(
+        "--checkout-a", type=Path, default=os.environ.get("TEST_MULTICA_CHECKOUT_A")
+    )
+    parser.add_argument(
+        "--checkout-b", type=Path, default=os.environ.get("TEST_MULTICA_CHECKOUT_B")
     )
     return parser
 
@@ -138,6 +190,8 @@ def _sanitize(text: str, *, secrets: tuple[str, ...] = ()) -> str:
     for secret in secrets:
         text = text.replace(secret, "<redacted>")
     text = _SECRET_TEXT.sub(r"\1<redacted>", text)
+    text = _URL.sub("<repository-url>", text)
+    text = _UUID.sub("<member-id>", text)
     return _SHA.sub("<sha>", text)
 
 
@@ -407,54 +461,129 @@ def _mr(
         raise RuntimeError("MR assets entered tracked/index files")
 
 
+def _member_observation(value: object) -> tuple[str, str] | None:
+    if isinstance(value, dict):
+        member_id = value.get("member_id")
+        source = value.get("member_source")
+        if isinstance(member_id, str) and source in {"root_creator", "explicit"}:
+            return member_id, source
+        for child in value.values():
+            found = _member_observation(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _member_observation(child)
+            if found is not None:
+                return found
+    return None
+
+
+def _multica_sync_command(
+    args: argparse.Namespace,
+    *,
+    checkout: Path,
+    issue: str,
+    run_id: str,
+    member_id: str | None,
+    dry_run: bool,
+) -> list[str]:
+    command = [
+        args.odcli_multica,
+        "git",
+        "sync",
+        "--project",
+        str(args.core_project),
+        "--multica-project",
+        args.multica_project,
+        "--issue",
+        issue,
+        "--run",
+        run_id,
+        "--repository-url",
+        args.repository_a,
+        "--profile",
+        args.profile,
+        "--workspace-id",
+        args.workspace_id,
+    ]
+    if member_id is not None:
+        command.extend(("--member-id", member_id))
+    command.extend((str(checkout), "--format", "json"))
+    if dry_run:
+        command.append("--dry-run")
+    return command
+
+
+def _integrated_multica_cache(
+    args: argparse.Namespace,
+    root: Path,
+    evidence: list[dict[str, str | int | bool]],
+) -> tuple[str, ...]:
+    from scripts._gitlab_member_cache import integrated_multica_cache
+
+    return integrated_multica_cache(args, root, evidence)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     secrets: tuple[str, ...] = ()
     root = (
         args.work_root.expanduser().resolve()
         if args.work_root
-        else Path(tempfile.mkdtemp(prefix="odcli-gitlab-e2e-"))
+        else Path(
+            tempfile.mkdtemp(
+                prefix="odcli-gitlab-e2e-",
+                dir=Path.cwd() if args.mode == "multica-cache" else None,
+            )
+        )
     )
     root.mkdir(parents=True, exist_ok=True)
     evidence: list[dict[str, str | int | bool]] = []
     try:
-        member = _selected_member(args)
-        secrets = _secret_corpus(member)
-        checkouts = _clone(args, root, evidence, secrets)
-        if args.mode in {"all", "commit"}:
-            for role in ("A", "B/ours", "Independent"):
-                _commit(
-                    args,
-                    checkouts[role],
-                    member,
-                    label=role.replace("/", "-"),
-                    ticket=args.ticket_a if role == "A" else None,
-                    evidence=evidence,
-                    secrets=secrets,
+        if args.mode == "multica-cache":
+            from scripts._gitlab_member_provenance import pin_trusted_executables
+
+            pin_trusted_executables(args)
+            secrets = _integrated_multica_cache(args, root, evidence)
+        else:
+            member = _selected_member(args)
+            secrets = _secret_corpus(member)
+            checkouts = _clone(args, root, evidence, secrets)
+            if args.mode in {"all", "commit"}:
+                for role in ("A", "B/ours", "Independent"):
+                    _commit(
+                        args,
+                        checkouts[role],
+                        member,
+                        label=role.replace("/", "-"),
+                        ticket=args.ticket_a if role == "A" else None,
+                        evidence=evidence,
+                        secrets=secrets,
+                    )
+            if args.mode in {"all", "sync"}:
+                parent_gitlink_before = _git(
+                    args.git, checkouts["B"], "ls-files", "-s", secrets=secrets
                 )
-        if args.mode in {"all", "sync"}:
-            parent_gitlink_before = _git(
-                args.git, checkouts["B"], "ls-files", "-s", secrets=secrets
-            )
-            _sync(args, checkouts["A"], member, evidence, secrets, publish=True)
-            _sync(args, checkouts["B/ours"], member, evidence, secrets, publish=True)
-            _sync(args, checkouts["Independent"], member, evidence, secrets, publish=True)
-            _sync(args, checkouts["B"], member, evidence, secrets, publish=False)
-            _require(
-                _git(args.git, checkouts["B"], "ls-files", "-s", secrets=secrets)
-                == parent_gitlink_before,
-                "recursive sync changed the B superproject gitlink",
-            )
-        if args.mode in {"all", "mr"}:
-            for role in ("A", "B/ours"):
-                _mr(
-                    args,
-                    checkouts[role],
-                    member,
-                    label=role.replace("/", "-"),
-                    evidence=evidence,
-                    secrets=secrets,
+                _sync(args, checkouts["A"], member, evidence, secrets, publish=True)
+                _sync(args, checkouts["B/ours"], member, evidence, secrets, publish=True)
+                _sync(args, checkouts["Independent"], member, evidence, secrets, publish=True)
+                _sync(args, checkouts["B"], member, evidence, secrets, publish=False)
+                _require(
+                    _git(args.git, checkouts["B"], "ls-files", "-s", secrets=secrets)
+                    == parent_gitlink_before,
+                    "recursive sync changed the B superproject gitlink",
                 )
+            if args.mode in {"all", "mr"}:
+                for role in ("A", "B/ours"):
+                    _mr(
+                        args,
+                        checkouts[role],
+                        member,
+                        label=role.replace("/", "-"),
+                        evidence=evidence,
+                        secrets=secrets,
+                    )
     except (OSError, RuntimeError, ValueError) as exc:
         print(
             json.dumps(
@@ -468,10 +597,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     else:
-        product_shas = {
-            role: _git(args.git, checkout, "rev-parse", "HEAD", secrets=secrets)
-            for role, checkout in checkouts.items()
-        }
+        product_shas = (
+            {
+                "task_a": _git(
+                    args.git,
+                    args.checkout_a.expanduser().resolve(),
+                    "rev-parse",
+                    "HEAD",
+                    secrets=secrets,
+                ),
+                "task_b": _git(
+                    args.git,
+                    args.checkout_b.expanduser().resolve(),
+                    "rev-parse",
+                    "HEAD",
+                    secrets=secrets,
+                ),
+            }
+            if args.mode == "multica-cache"
+            else {
+                role: _git(args.git, checkout, "rev-parse", "HEAD", secrets=secrets)
+                for role, checkout in checkouts.items()
+            }
+        )
         print(
             json.dumps(
                 {

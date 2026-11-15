@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import traceback
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -25,13 +26,52 @@ from odoo_instance_sdk.resources.environment.checkout_planning import _CheckoutS
 from tests.unit.resources.adoption_test_support import _external_checkout, _process_result
 
 
-@pytest.mark.parametrize("base_kind", ["branch", "pinned", "planning"])
+def _branch_base(_checkout: Path) -> str:
+    return "main"
+
+
+def _pinned_base(checkout: Path) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+
+def _planning_base(checkout: Path) -> str:
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "planning",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return _pinned_base(checkout)
+
+
+@pytest.mark.parametrize(
+    "base_ref_factory",
+    [
+        pytest.param(_branch_base, id="branch"),
+        pytest.param(_pinned_base, id="pinned"),
+        pytest.param(_planning_base, id="planning"),
+    ],
+)
 def test_adopt_command_captures_external_checkout_without_git_creation(
     env_client: object,
     project_manifest: Path,
     fake_python: Path,
     tmp_path: Path,
-    base_kind: str,
+    base_ref_factory: Callable[[Path], str],
 ) -> None:
     subprocess.run(
         ["git", "-C", str(project_manifest), "remote", "add", "origin", str(project_manifest)],
@@ -54,35 +94,7 @@ def test_adopt_command_captures_external_checkout_without_git_creation(
         + 'database = "comerta"\n'
         + 'git_branch = "main"\n'
     )
-    if base_kind == "planning":
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(checkout),
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "planning",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    base_ref = (
-        "main"
-        if base_kind == "branch"
-        else subprocess.run(
-            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    )
+    base_ref = base_ref_factory(checkout)
     command = env_client.environments.adopt_command(  # type: ignore[attr-defined]
         project_manifest,
         checkout,
