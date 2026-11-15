@@ -139,7 +139,9 @@ def _active_pgpass(container_id: str) -> tuple[str, str]:
 
 def _master_password_present(root_url: str) -> bool:
     """Return whether pgAdmin reports the desktop master password in memory."""
-    with urllib.request.urlopen(f"{root_url}browser/master_password", timeout=20) as response:
+    with urllib.request.urlopen(
+        f"{root_url.rstrip('/')}/browser/master_password", timeout=20
+    ) as response:
         payload = json.loads(response.read())
     return isinstance(payload, dict) and payload.get("data") is True
 
