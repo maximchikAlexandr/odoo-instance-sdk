@@ -67,7 +67,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/git_credential_helper.py", 44),
         ("src/odoo_instance_sdk/internal/git_credential_helper.py", 45),
         ("src/odoo_instance_sdk/internal/git_askpass.py", 72),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 548),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 511),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 980),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 982),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 984),
@@ -140,7 +140,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/internal/git_askpass.py", 72): "Git askpass child transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        548,
+        511,
     ): "lifecycle cleanup diagnostic transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 980): "alternate lifecycle JSON transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 982): "alternate lifecycle JSON transport",

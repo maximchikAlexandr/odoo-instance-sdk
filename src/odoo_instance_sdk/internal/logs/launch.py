@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import uuid
@@ -9,15 +10,94 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError, ProjectManifestNotFoundError
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.logs.store import finish_pid, write_run_meta
+from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, ProcessHandle
+from odoo_instance_sdk.internal.server import wait_foreground_process
 from odoo_instance_sdk.project import OdooLoggingConfig, ProjectConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+class _ActionContext(Protocol):
+    """The action calls a structured run needs from the command context."""
+
+    def action(self, step_id: str) -> PreparedAction:
+        """Start one planned action."""
+        ...
+
+    def complete_action(self, step_id: str) -> None:
+        """Complete one started action."""
+        ...
+
+
+@dataclass(slots=True)
+class ForegroundRun:
+    """Structured-log binding captured once for a foreground command."""
+
+    instance: OdooInstance
+    launch: StructuredLaunch | None
+    argv: tuple[str, ...]
+    opened: bool = False
+    exit_code: int | None = None
+
+    @staticmethod
+    def bind(instance: OdooInstance) -> ForegroundRun:
+        """Choose the run logfile and logging argv for one foreground snapshot."""
+        launch = structured_launch(instance, action_id="instance.foreground.runlog")
+        argv = logging_argv(instance)
+        if launch is not None:
+            argv = ("--logfile", str(launch.logfile), *argv)
+        return ForegroundRun(instance, launch, argv)
+
+    def prefix(
+        self, *steps: PreparedStep | PreparedAction
+    ) -> tuple[PreparedStep | PreparedAction, ...]:
+        """Prepend the run-log action when this launch owns a structured file."""
+        if self.launch is None:
+            return steps
+        return (
+            PreparedAction(
+                step_id=self.launch.action_id,
+                action=self.launch.action_id,
+                description="Create the private Odoo run logfile",
+                details={"run_id": self.launch.run_id, "logfile": str(self.launch.logfile)},
+                mutating=True,
+            ),
+            *steps,
+        )
+
+    def open(self, context: _ActionContext) -> None:
+        """Create the run directory while the planned action is active."""
+        if self.launch is None:
+            return
+        context.action(self.launch.action_id)
+        prepare_structured_run(self.launch)
+        self.opened = True
+        context.complete_action(self.launch.action_id)
+
+    def record(self, pid: int | None) -> None:
+        """Attach the spawned process when a structured run was opened."""
+        if self.launch is None or pid is None:
+            return
+        self.instance._record_structured_process(self.launch, pid)
+
+    def wait(self, handle: ProcessHandle) -> int:
+        """Wait for the foreground process and remember its exit code."""
+        self.exit_code = wait_foreground_process(handle)
+        return self.exit_code
+
+    def close(self) -> None:
+        """Record a terminal state once, and only while the run is still running."""
+        if self.launch is None or not self.opened:
+            return
+        state = "finished" if self.exit_code == 0 else "interrupted"
+        with contextlib.suppress(BaseException):
+            finish_structured_run(self.launch, state=state, exit_code=self.exit_code)
 
 
 @dataclass(frozen=True, slots=True)

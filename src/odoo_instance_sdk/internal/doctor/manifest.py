@@ -4,7 +4,6 @@ import configparser
 import shutil
 import sqlite3
 import sys
-import tomllib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -27,6 +26,7 @@ from odoo_instance_sdk.internal.doctor.components import (
     paired_component as _paired_component,
     python_artifact_available as _python_artifact_available,
 )
+from odoo_instance_sdk.internal.doctor.logging import odoo_logging_check
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
 from odoo_instance_sdk.internal.generated_config import _rebase_path
 from odoo_instance_sdk.internal.git_worktree import rev_parse_verify
@@ -674,24 +674,11 @@ def _resolve_project_root(project_path: Path | None) -> Path | None:
 
 def _check_odoo_logging(report: DoctorReport, project_root: Path) -> None:
     """Report Odoo logging settings without failing the doctor run."""
-    try:
-        project = ProjectConfig.load(project_root)
-    except (ProjectManifestNotFoundError, ConfigError, tomllib.TOMLDecodeError):
+    loaded = odoo_logging_check(project_root)
+    if loaded is None:
         return
-    config = project.odoo_logging
-    structured = config is not None and config.structured
-    report.checks.append(
-        CheckResult(
-            "logging",
-            STATUS_OK,
-            "structured Odoo logging" if structured else "structured Odoo logging disabled",
-            facts={
-                "structured": structured,
-                "level": None if config is None else config.level,
-                "handlers": [] if config is None else list(config.handlers),
-            },
-        )
-    )
+    detail, facts = loaded
+    report.checks.append(CheckResult("logging", STATUS_OK, detail, facts=facts))
 
 
 def _check_manifest(report: DoctorReport, project_root: Path) -> None:
