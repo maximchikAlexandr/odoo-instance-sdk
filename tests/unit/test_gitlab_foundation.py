@@ -292,10 +292,18 @@ def test_dotenv_loader_detects_inode_swap_without_nofollow(
     ) -> int:
         nonlocal swapped
         if path == target and dir_fd is None and not swapped:
-            target.unlink()
-            target.write_text("ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n", encoding="utf-8")
-            target.chmod(0o600)
             swapped = True
+            target.unlink()
+            hold = target.with_name(f"{target.name}.inode-hold")
+            hold_fd = original_open(
+                hold, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+            )
+            os.close(hold_fd)
+            replacement = original_open(
+                target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+            )
+            os.write(replacement, b"ODCLI_GITLAB_TOKEN_ALICE=attacker-token\n")
+            os.close(replacement)
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "O_NOFOLLOW", 0)
