@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError, ProjectManifestNotFoundError
 from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal import server as runtime_server
 from odoo_instance_sdk.internal.logs.store import finish_pid, write_run_meta
 from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, ProcessHandle
-from odoo_instance_sdk.internal.server import wait_foreground_process
 from odoo_instance_sdk.project import OdooLoggingConfig, ProjectConfig
 
 if TYPE_CHECKING:
@@ -88,7 +88,7 @@ class ForegroundRun:
 
     def wait(self, handle: ProcessHandle) -> int:
         """Wait for the foreground process and remember its exit code."""
-        self.exit_code = wait_foreground_process(handle)
+        self.exit_code = runtime_server.wait_foreground_process(handle)
         return self.exit_code
 
     def close(self) -> None:
