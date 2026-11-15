@@ -242,6 +242,26 @@ def test_context_verifies_typed_membership_and_containment(tmp_path: Path) -> No
     assert result.checkout_path == str((tmp_path / "task" / "checkout").resolve())
 
 
+def test_agent_created_root_allows_context_but_not_personal_credentials(tmp_path: Path) -> None:
+    client, request, _, _ = _fixture(tmp_path)
+    multica = cast("_FakeMultica", client.multica)
+    multica.issues.issue = Issue(
+        "issue",
+        "Agent-created implementation",
+        "in_progress",
+        project_id="project",
+        creator_type="agent",
+        creator_id="agent",
+    )
+
+    context = client.context(request)
+
+    assert context.checkout_path == str(request.checkout_path)
+    assert context.root_creator_id is None
+    with pytest.raises(ContextVerificationError, match="human creator evidence"):
+        client.root_creator(context)
+
+
 def test_context_accepts_task_run_without_duplicate_project_snapshot(tmp_path: Path) -> None:
     client, request, _, _ = _fixture(tmp_path)
     fake_multica = cast("_FakeMultica", client.multica)
