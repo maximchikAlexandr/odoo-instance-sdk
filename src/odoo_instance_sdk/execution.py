@@ -170,13 +170,50 @@ def canonical_plan_bytes(plan: ExecutionPlan, *, secrets: Sequence[str] = ()) ->
     ).encode("utf-8")
 
 
+T = TypeVar("T")
+
+
+def action_command(
+    steps: Sequence[ActionStep],
+    effects: Sequence[Callable[[], None]],
+    result: Callable[[], T],
+) -> Command[T]:
+    """Capture ordered in-process actions and run those same effects on ``run``."""
+    from odoo_instance_sdk.internal.proc import PreparedAction, PrivateJsonValue
+
+    if len(steps) != len(effects):
+        raise PlanValidationError("each action requires one effect")
+    prepared = tuple(
+        PreparedAction(
+            step_id=step.step_id,
+            action=step.action,
+            description=step.description,
+            details=cast("PrivateJsonValue", step.details),
+            read_only=step.read_only,
+            mutating=step.mutating,
+        )
+        for step in steps
+    )
+    frozen_effects = tuple(effects)
+
+    def callback(context: RunContext[T]) -> T:
+        for step, effect in zip(steps, frozen_effects, strict=True):
+            context.action(step.step_id)
+            effect()
+            context.complete_action(step.step_id)
+        return result()
+
+    return Command.create(
+        ExecutionPlan(steps=tuple(steps)).with_fingerprint(),
+        callback,
+        prepared,
+    )
+
+
 def fingerprint_plan(plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> str:
     """Hash only canonical redacted plan data, excluding ``fingerprint`` itself."""
 
     return hashlib.sha256(canonical_plan_bytes(plan, secrets=secrets)).hexdigest()
-
-
-T = TypeVar("T")
 
 
 class _StoredCommand(Protocol):
@@ -302,6 +339,7 @@ __all__ = [
     "SemanticPlanObservation",
     "StalePlanError",
     "UnplannedStepError",
+    "action_command",
     "canonical_plan_bytes",
     "canonical_plan_projection",
     "fingerprint_plan",

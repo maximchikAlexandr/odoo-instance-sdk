@@ -56,7 +56,7 @@ ignore = [
 
 [lint.isort]
 combine-as-imports = true
-known-first-party = ["odoo_instance_sdk"]
+known-first-party = ["odcli_codex", "odoo_instance_sdk"]
 
 [format]
 docstring-code-format = true

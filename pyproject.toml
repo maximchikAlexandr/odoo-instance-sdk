@@ -51,7 +51,7 @@ build-backend = "build_backend"
 backend-path = ["."]
 
 [tool.uv.workspace]
-members = ["packages/odcli-multica"]
+members = ["packages/odcli-multica", "packages/odcli-codex"]
 
 [tool.uv.build-backend]
 # Built React assets (web/dist/) live under the module root and are included
@@ -200,6 +200,11 @@ exclude = ["tests/fixtures/addons"]
 
 [[tool.mypy.overrides]]
 module = ["fastapi", "fastapi.*", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = ["openai_codex", "openai_codex.*"]
 ignore_missing_imports = true
 follow_imports = "silent"
 

@@ -184,3 +184,37 @@ jobs:
           name: dist
           path: dist/
           retention-days: 14
+
+  odcli-codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --all-packages --group lint --group type-check --group test
+      - run: uv run ruff check packages/odcli-codex src/odoo_instance_sdk/codex_integration.py src/odoo_instance_sdk/catalog_validation.py src/odoo_instance_sdk/commands/plain_line.py
+      - run: uv run ruff format --check packages/odcli-codex src/odoo_instance_sdk/codex_integration.py src/odoo_instance_sdk/catalog_validation.py src/odoo_instance_sdk/commands/plain_line.py
+      - run: uv run mypy --strict packages/odcli-codex/src
+      - run: uv run pytest -q -o addopts='' packages/odcli-codex/tests
+      - run: uv run pytest -q -o addopts='' tests/unit/test_odcli_codex.py
+      - run: uv build --package odoo-instance-sdk --no-sources --out-dir dist/core
+      - run: uv build --package odcli-codex --no-sources --out-dir dist/odcli-codex
+      - name: Compare core-only and core-plus-extension help
+        run: |
+          set -euo pipefail
+          uv venv --python 3.12 /tmp/odcli-core
+          uv pip install --python /tmp/odcli-core/bin/python dist/core/*.whl
+          /tmp/odcli-core/bin/odcli git commit --help | grep -F -- '--generate'
+          /tmp/odcli-core/bin/odcli translations export --help | grep -F -- '--auto-translate'
+          if /tmp/odcli-core/bin/python -c "import odcli_codex"; then
+            echo "core-only install imported odcli_codex" >&2
+            exit 1
+          fi
+          uv venv --python 3.12 /tmp/odcli-both
+          uv pip install --python /tmp/odcli-both/bin/python dist/core/*.whl dist/odcli-codex/*.whl
+          /tmp/odcli-both/bin/odcli-codex --help
+          /tmp/odcli-both/bin/odcli git commit --help | grep -F -- '--generate'

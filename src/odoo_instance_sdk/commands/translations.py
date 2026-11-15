@@ -27,16 +27,19 @@ else:
     import rich_click as click
 from rich.console import Group
 
+from odoo_instance_sdk.codex_integration import load_catalog_fill
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
     bordered_table,
+    emit,
     fail,
     output_options,
     render_rich_text,
     resolve_output_mode,
     run_or_preview,
+    success_document,
 )
 from odoo_instance_sdk.internal.cli_format import (
     human_bytes as _human_bytes,
@@ -395,6 +398,14 @@ def _translations_group() -> None:
 @_translations_group.command("export", help="Export selected module translations.")
 @click.option("--module", "modules", multiple=True, required=True, help="Module name.")
 @click.option("--language", "languages", multiple=True, required=True, help="Language code.")
+@click.option(
+    "--auto-translate",
+    is_flag=True,
+    default=False,
+    help="Fill empty entries with odcli-codex after a successful export.",
+)
+@click.option("--context", "contexts", multiple=True, help="Tracked context for --auto-translate.")
+@click.option("--model", default=None, help="Codex model. Valid only with --auto-translate.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
@@ -402,14 +413,21 @@ def translations_export(
     ctx: CliContext,
     modules: tuple[str, ...],
     languages: tuple[str, ...],
+    auto_translate: bool,
+    contexts: tuple[str, ...],
+    model: str | None,
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
+    if (contexts or model) and not auto_translate:
+        raise click.UsageError("--context and --model require --auto-translate")
     output_mode = resolve_output_mode(output_format, json_output)
+    fill_after_export = auto_translate and not dry_run
     try:
+        filler = load_catalog_fill() if auto_translate else None
         runtime_context = cli_context.ready_instance(ctx)
-        status, _results = run_or_preview(
+        status, results = run_or_preview(
             lambda: export_translations_command(
                 runtime_context.instance,
                 tuple(modules),
@@ -419,38 +437,56 @@ def translations_export(
             command_name="translations.export",
             mode=output_mode,
             dry_run=dry_run,
-            result=lambda value: {
-                "exports": [
-                    {
-                        "module": item.module,
-                        "requested_lang": item.requested_lang,
-                        "actual_filename": item.actual_filename,
-                        "path": str(item.path),
-                        "bytes_written": item.bytes_written,
-                        **(
-                            {
-                                "validation": {
-                                    "tool": item.validation.tool,
-                                    "status": item.validation.status,
-                                    "output": item.validation.output,
-                                    "returncode": item.validation.returncode,
-                                }
-                            }
-                            if item.validation is not None
-                            else {}
-                        ),
-                    }
-                    for item in cast("list[TranslationExportResult]", value or [])
-                ]
-            },
+            emit_normal=not fill_after_export,
+            result=lambda value: _export_payload(
+                cast("list[TranslationExportResult]", value or [])
+            ),
             rich=_rich_translation_export,
             progress=True,
         )
+        if fill_after_export and status == 0:
+            exports = cast("list[TranslationExportResult]", results or [])
+            if filler is not None:
+                filler(
+                    tuple(item.path for item in exports),
+                    contexts=contexts,
+                    model=model,
+                    project_root=runtime_context.worktree_path(),
+                )
+            status = emit(
+                success_document(
+                    command="translations.export",
+                    result=_export_payload(exports),
+                ),
+                output_mode,
+                rich=_rich_translation_export,
+            )
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "translations.export", e, dry_run=dry_run)
     raise click.exceptions.Exit(status)
+
+
+def _export_payload(exports: list[TranslationExportResult]) -> dict[str, JsonValue]:
+    rows: list[JsonValue] = []
+    for item in exports:
+        row: dict[str, JsonValue] = {
+            "module": item.module,
+            "requested_lang": item.requested_lang,
+            "actual_filename": item.actual_filename,
+            "path": str(item.path),
+            "bytes_written": item.bytes_written,
+        }
+        if item.validation is not None:
+            row["validation"] = {
+                "tool": item.validation.tool,
+                "status": item.validation.status,
+                "output": item.validation.output,
+                "returncode": item.validation.returncode,
+            }
+        rows.append(row)
+    return {"exports": rows}
 
 
 def register_translation_commands(group: click.Group) -> None:

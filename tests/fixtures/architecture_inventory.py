@@ -70,6 +70,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 984),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 990),
         ("src/odoo_instance_sdk/internal/alternate_tool.py", 993),
+        ("src/odoo_instance_sdk/commands/plain_line.py", 10),
     }
 )
 
@@ -132,6 +133,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 984): "alternate lifecycle JSON transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 990): "alternate lifecycle JSON transport",
     ("src/odoo_instance_sdk/internal/alternate_tool.py", 993): "alternate lifecycle JSON transport",
+    ("src/odoo_instance_sdk/commands/plain_line.py", 10): "documented plain-stdout pipe exception",
 }
 
 
