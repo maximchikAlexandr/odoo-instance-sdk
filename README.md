@@ -896,7 +896,11 @@ sentence; use the entry's `--help` for exact options.
 - `odcli publish` — Publish a ready project or environment through the owned Caddy route.
 - `odcli unpublish` — Remove an owned Caddy publication idempotently.
 - `odcli ps` — Show process and resource inventory from one monitor snapshot.
-- `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
+- `odcli monitor start` — Start the observability monitor in headless or dashboard mode.
+- `odcli monitor stop` — Stop the supervised monitor without stopping Odoo.
+- `odcli monitor restart` — Restart the supervised monitor without rereading its command.
+- `odcli monitor status` — Show Supervisor status for the monitor.
+- `odcli monitor logs` — Show the captured monitor log.
 - `odcli update` — Self-upgrade an OdCLI uv-tool install.
 <!-- cli-command-inventory:end -->
 

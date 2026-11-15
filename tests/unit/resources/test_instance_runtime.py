@@ -638,7 +638,7 @@ class TestInstancePrefix:
                 return_value=executor,
             ),
             patch(
-                "odoo_instance_sdk.resources.instance.identity._process_create_time",
+                "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
                 return_value=1.0,
             ),
         ):
@@ -918,7 +918,7 @@ class TestRunForeground:
                 return_value=executor,
             ),
             patch(
-                "odoo_instance_sdk.resources.instance.identity._process_create_time",
+                "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
                 return_value=1.0,
             ),
         ):

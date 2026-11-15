@@ -6,7 +6,6 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -60,18 +59,18 @@ from odoo_instance_sdk.resources.instance.auxiliary_restore import (
     _command_plan,
     _command_result,
     _http_port_observation,
-    _process_create_time,
-    _runtime_owner,
     _snapshot_start_inputs,
     _validate_runtime_args,
-    _worktree_ref,
     resolve_runtime_argv_extra,
+)
+from odoo_instance_sdk.resources.instance.foreground_runtime import (
+    clear_foreground_runtime,
+    persist_foreground_runtime,
 )
 from odoo_instance_sdk.resources.instance.runtime import (
     T,
     _canonical_runtime_path,
     _decode_launch_identity,
-    _encode_launch_identity,
     _iter_logfile,
     _project_runtime_argv,
     _runtime_argv_mismatch_components,
@@ -545,18 +544,8 @@ class _IdentityMixin:
         )
 
     def _clear_runtime_identity(self) -> None:
-        """Best-effort cleanup of the persisted runtime identity.
-        Catalog cleanup failures are diagnostic only."""
-        binding = self._runtime_binding
-        environment_id = self._environment_id
-        if binding is None and environment_id is None:
-            return
-        try:
-            catalog = cast("_RuntimeCatalog", self._client.get_catalog())
-            owner = _runtime_owner(binding, environment_id)
-            catalog._clear_runtime(*owner)
-        except Exception as e:
-            print(f"failed to clear environment runtime: {e}", file=sys.stderr)
+        """Best-effort cleanup of the persisted runtime identity."""
+        clear_foreground_runtime(cast("OdooInstance", self))
 
     def _persist_runtime_identity(
         self,
@@ -567,49 +556,14 @@ class _IdentityMixin:
         executable_prefix_length: int,
         context: RunContext[T] | None = None,
     ) -> None:
-        """Persist the exact runtime identity before foreground waiting begins."""
-        binding = self._runtime_binding
-        environment_id = self._environment_id
-        if binding is None and environment_id is None:
-            return
-        create_time = _process_create_time(root_pid)
-        launch_identity_json = _encode_launch_identity(
-            step, executable_prefix_length=executable_prefix_length
-        )
-        checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
-        http_url = f"http://{config.http_interface}:{config.http_port}"
-        catalog = cast("_RuntimeCatalog", self._client.get_catalog())
-        if binding is not None:
-            catalog._register_project(
-                binding.project_id, binding.repository_root, binding.git_common_dir
-            )
-            catalog._upsert_runtime(
-                binding.owner_kind,
-                binding.owner_id,
-                root_pid=root_pid,
-                create_time=create_time,
-                started_at=datetime.now(UTC).isoformat(),
-                checkout_branch=checkout_branch,
-                commit_sha=commit_sha,
-                http_url=http_url,
-                http_port=config.http_port,
-                database_name=config.db_name or "",
-                launch_identity_json=launch_identity_json,
-            )
-            return
-        assert environment_id is not None
-        catalog._upsert_runtime(
-            "environment",
-            environment_id,
-            root_pid=root_pid,
-            create_time=create_time,
-            started_at=datetime.now(UTC).isoformat(),
-            checkout_branch=checkout_branch,
-            commit_sha=commit_sha,
-            http_url=http_url,
-            http_port=config.http_port,
-            database_name=config.db_name or "",
-            launch_identity_json=launch_identity_json,
+        persist_foreground_runtime(
+            cast("OdooInstance", self),
+            root_pid,
+            config,
+            cwd,
+            step,
+            executable_prefix_length,
+            context,
         )
 
     def iter_logs(self, *, tail: int = 100, follow: bool = False) -> Iterator[str]:

@@ -244,7 +244,8 @@ def test_persist_called_with_expected_fields(
         http_port=http_port,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.identity._process_create_time", lambda _: 1.0
+        "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+        lambda _: 1.0,
     )
 
     exit_code = inst.run_foreground(args=("--stop-after-init",))
@@ -301,7 +302,8 @@ def test_foreground_persists_identity_from_exact_executed_step(
         ),
         patch("odoo_instance_sdk.internal.server.wait_foreground_process", return_value=0),
         patch(
-            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+            "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+            return_value=1.0,
         ),
     ):
         assert inst.run_foreground(config) == 0
@@ -596,7 +598,8 @@ def test_core_psutil_persists_exact_identity(
     )
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.identity._process_create_time", lambda _: 123.0
+        "odoo_instance_sdk.resources.instance.foreground_runtime._process_create_time",
+        lambda _: 123.0,
     )
     assert inst.run_foreground() == 0
     assert fake.upsert_calls[0][1]["create_time"] == 123.0

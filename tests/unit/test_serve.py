@@ -179,8 +179,7 @@ def test_monitor_child_external_mode_registers_panel_and_disables_uvicorn_proxy_
         lambda **kwargs: captured.update(app=kwargs) or object(),
     )
     monkeypatch.setattr(
-        monitor_program.PublicationSettings,
-        "load",
+        "odoo_instance_sdk.resources.publication.PublicationSettings.load",
         classmethod(lambda cls, path=None: settings),
     )
     monkeypatch.setattr(
