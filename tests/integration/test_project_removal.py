@@ -25,7 +25,11 @@ import pytest
 import odoo_instance_sdk.internal.project_removal as project_removal
 import odoo_instance_sdk.internal.project_removal_coordinator as project_removal_coordinator
 import odoo_instance_sdk.resources.publication as publication_resource
-from odoo_instance_sdk.exceptions import LockConflictError, ProjectRemovalError
+from odoo_instance_sdk.exceptions import (
+    InstanceConfigurationError,
+    LockConflictError,
+    ProjectRemovalError,
+)
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal import (
     locks as lock_paths,
@@ -2098,10 +2102,50 @@ def _capture_missing_source_purge(  # noqa: C901
     real_children: bool = False,
     observed_oids: Mapping[str, int] | None = None,
     recovery_password: str | None = None,
+    missing_primary_venv: bool = False,
+    runtime_probe_counter: list[bool] | None = None,
+    metadata_symlink: str | None = None,
+    attempted_processes: list[tuple[str, bool]] | None = None,
 ) -> tuple[BackupCatalog, Command[ProjectRemovalResult], RecordingExecutor, str]:
     root = tmp_path / "source"
     common = root / ".git"
-    common.mkdir(parents=True)
+    if missing_primary_venv:
+        root.mkdir(parents=True)
+        subprocess.run(("git", "init", str(root)), check=True, capture_output=True)
+        metadata = root / ".odcli"
+        metadata.mkdir()
+        (metadata / "project.toml").write_text(
+            '[project]\npython = ".venv/bin/python"\n'
+            'default_source_database = "owned_db"\n'
+            'managed_filestore = ".odcli/filestore"\n\n'
+            '[postgres]\nmode = "compose"\nimage = "pgvector/pgvector:pg16"\n'
+            'port = 15432\nuser = "odoo"\n',
+            encoding="utf-8",
+        )
+        (metadata / "odoo.conf").write_text(
+            "[options]\ndb_host = 127.0.0.1\ndb_port = 15432\ndb_user = odoo\ndb_name = owned_db\n",
+            encoding="utf-8",
+        )
+        (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        subprocess.run(("git", "-C", str(root), "add", "-A"), check=True)
+        subprocess.run(
+            (
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "baseline",
+            ),
+            check=True,
+            capture_output=True,
+        )
+    else:
+        common.mkdir(parents=True)
     project_id = f"project_{repo_key(root, common)}"
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     catalog._register_project(project_id, root, common)
@@ -2148,9 +2192,13 @@ def _capture_missing_source_purge(  # noqa: C901
             )
         else:
             publish_observed(catalog, claim, root)
-    shutil.rmtree(root)
-    assert not root.exists()
-    assert not common.exists()
+    if not missing_primary_venv:
+        shutil.rmtree(root)
+        assert not root.exists()
+        assert not common.exists()
+    else:
+        assert root.exists()
+        assert not (root / ".venv").exists()
     assert catalog._get_postgres_cluster_for_project(project_id, root, common) is not None
     full_container_id = "b" * 64
     compose_project = f"odcli_pg_{claim_project_id}"
@@ -2253,6 +2301,8 @@ def _capture_missing_source_purge(  # noqa: C901
             _executor: SubprocessExecutor, step: PreparedStep, **_kwargs: object
         ) -> ProcessResult:
             step_id = step.step_id
+            if attempted_processes is not None:
+                attempted_processes.append((step_id, step.mutating))
             if recovery_password is not None and step_id.startswith("database.drop"):
                 assert dict(step.environment_snapshot).get("PGPASSWORD") == recovery_password
             if "verify-volume" in step_id or "verify-container" in step_id:
@@ -2328,7 +2378,33 @@ def _capture_missing_source_purge(  # noqa: C901
     else:
         monkeypatch.setattr(DatabasePurgeAdapter, "capture", capture_child)
         monkeypatch.setattr(ComposeClusterPurgeAdapter, "capture", capture_child)
-    client = cast("OdooClient", SimpleNamespace(get_catalog=lambda: catalog))
+    runtime_probes = [] if runtime_probe_counter is None else runtime_probe_counter
+
+    def fail_runtime(_project: ProjectConfig) -> None:
+        runtime_probes.append(True)
+        raise InstanceConfigurationError("project interpreter missing")
+
+    client = cast(
+        "OdooClient",
+        SimpleNamespace(
+            get_catalog=lambda: catalog,
+            instance=SimpleNamespace(from_project=fail_runtime),
+        ),
+    )
+
+    if metadata_symlink is not None:
+        external_metadata = tmp_path / "external-metadata"
+        external_metadata.mkdir()
+        if metadata_symlink == "odcli-directory":
+            shutil.copytree(root / ".odcli", external_metadata, dirs_exist_ok=True)
+            shutil.rmtree(root / ".odcli")
+            (root / ".odcli").symlink_to(external_metadata, target_is_directory=True)
+        else:
+            metadata_name = "project.toml" if metadata_symlink == "manifest" else "odoo.conf"
+            metadata_path = root / ".odcli" / metadata_name
+            external_path = external_metadata / metadata_name
+            metadata_path.replace(external_path)
+            metadata_path.symlink_to(external_path)
 
     command = ProjectResource(_client=client).remove_command(
         ProjectSelector.from_project_id(project_id),
@@ -2336,6 +2412,174 @@ def _capture_missing_source_purge(  # noqa: C901
         confirmation=f"{root.name}:{project_id}",
     )
     return catalog, command, executor, project_id
+
+
+def _filesystem_snapshot(root: Path) -> dict[Path, tuple[str, bytes | str | None]]:
+    snapshot: dict[Path, tuple[str, bytes | str | None]] = {}
+    for path in (root, *root.rglob("*")):
+        relative = path.relative_to(root)
+        if path.is_symlink():
+            snapshot[relative] = ("symlink", os.readlink(path))
+        elif path.is_file():
+            snapshot[relative] = ("file", path.read_bytes())
+        elif path.is_dir():
+            snapshot[relative] = ("directory", None)
+    return snapshot
+
+
+def test_public_purge_retries_by_full_id_when_primary_venv_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_probes: list[bool] = []
+    catalog, command, _executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        f"project_{repo_key(tmp_path / 'source', tmp_path / 'source' / '.git')}",
+        ("owned_db",),
+        _seed_exact_restore,
+        real_children=True,
+        recovery_password="test-recovery-password",
+        missing_primary_venv=True,
+        runtime_probe_counter=runtime_probes,
+    )
+    root = tmp_path / "source"
+    assert not (root / ".venv").exists()
+    assert catalog._project_bound_database_records(
+        project_id,
+        catalog._get_postgres_cluster(project_id).cluster_id,  # type: ignore[union-attr]
+        "127.0.0.1",
+        15432,
+    ) == (("owned_db", 102),)
+
+    result = command.run()
+
+    assert result.registration_state == "forgotten"
+    assert runtime_probes == []
+    completed_types = tuple(item.resource_type for item in result.completed)
+    assert completed_types[0] == "database"
+    assert "volume" in completed_types
+    assert completed_types[-1] == "project"
+    assert not root.exists()
+    assert not (root / ".venv").exists()
+    assert catalog.get_project(project_id)["registration_state"] == "forgotten"  # type: ignore[index]
+    catalog.close()
+
+
+@pytest.mark.parametrize(
+    ("recovery_password", "observed_oids"),
+    ((None, None), ("test-recovery-password", {"owned_db": 202})),
+    ids=("missing-credential", "changed-database-identity"),
+)
+def test_public_purge_keeps_missing_venv_retry_inert_without_durable_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_password: str | None,
+    observed_oids: Mapping[str, int] | None,
+) -> None:
+    attempted_processes: list[tuple[str, bool]] = []
+    catalog, command, _executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        f"project_{repo_key(tmp_path / 'source', tmp_path / 'source' / '.git')}",
+        ("owned_db",),
+        _seed_exact_restore,
+        real_children=True,
+        observed_oids=observed_oids,
+        recovery_password=recovery_password,
+        missing_primary_venv=True,
+        attempted_processes=attempted_processes,
+    )
+    root = tmp_path / "source"
+    filesystem_before = {
+        "project": _filesystem_snapshot(root),
+        "database-config": _filesystem_snapshot(tmp_path / "postgres"),
+        "backup": (tmp_path / "owned.zip").read_bytes(),
+    }
+    claim_before = catalog._get_postgres_cluster(project_id)
+    assert claim_before is not None
+    binding_before = catalog._project_bound_database_records(
+        project_id, claim_before.cluster_id, "127.0.0.1", 15432
+    )
+    registration_before = catalog.get_project(project_id)
+
+    with pytest.raises(ProjectRemovalError, match="observation"):
+        command.run()
+
+    assert attempted_processes
+    assert all(not mutating for _step_id, mutating in attempted_processes)
+    assert _executor.executed == []
+    assert filesystem_before == {
+        "project": _filesystem_snapshot(root),
+        "database-config": _filesystem_snapshot(tmp_path / "postgres"),
+        "backup": (tmp_path / "owned.zip").read_bytes(),
+    }
+    assert not (root / ".venv").exists()
+    assert root.exists()
+    assert catalog.get_project(project_id) == registration_before
+    assert catalog._get_postgres_cluster(project_id) == claim_before
+    assert (
+        catalog._project_bound_database_records(
+            project_id, claim_before.cluster_id, "127.0.0.1", 15432
+        )
+        == binding_before
+    )
+    catalog.close()
+
+
+@pytest.mark.parametrize("metadata_symlink", ("odcli-directory", "manifest", "generated-config"))
+def test_public_purge_keeps_symlinked_recovery_metadata_inert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata_symlink: str
+) -> None:
+    attempted_processes: list[tuple[str, bool]] = []
+    catalog, command, executor, project_id = _capture_missing_source_purge(
+        tmp_path,
+        monkeypatch,
+        f"project_{repo_key(tmp_path / 'source', tmp_path / 'source' / '.git')}",
+        ("owned_db",),
+        _seed_exact_restore,
+        observed_oids={"owned_db": 102},
+        recovery_password="test-recovery-password",
+        missing_primary_venv=True,
+        metadata_symlink=metadata_symlink,
+        attempted_processes=attempted_processes,
+    )
+    root = tmp_path / "source"
+    external = tmp_path / "external-metadata"
+    filesystem_before = {
+        "project": _filesystem_snapshot(root),
+        "external-metadata": _filesystem_snapshot(external),
+        "database-config": _filesystem_snapshot(tmp_path / "postgres"),
+        "backup": (tmp_path / "owned.zip").read_bytes(),
+    }
+    claim_before = catalog._get_postgres_cluster(project_id)
+    assert claim_before is not None
+    registration_before = catalog.get_project(project_id)
+    binding_before = catalog._project_bound_database_records(
+        project_id, claim_before.cluster_id, "127.0.0.1", 15432
+    )
+
+    with pytest.raises(ProjectRemovalError, match="observation"):
+        command.run()
+
+    assert attempted_processes == []
+    assert executor.executed == []
+    assert catalog.get_project(project_id) == registration_before
+    assert catalog._get_postgres_cluster(project_id) == claim_before
+    assert (
+        catalog._project_bound_database_records(
+            project_id, claim_before.cluster_id, "127.0.0.1", 15432
+        )
+        == binding_before
+    )
+    assert filesystem_before == {
+        "project": _filesystem_snapshot(root),
+        "external-metadata": _filesystem_snapshot(external),
+        "database-config": _filesystem_snapshot(tmp_path / "postgres"),
+        "backup": (tmp_path / "owned.zip").read_bytes(),
+    }
+    assert root.exists()
+    assert not (root / ".venv").exists()
+    catalog.close()
 
 
 def _seed_exact_restore(
@@ -3753,7 +3997,6 @@ def test_public_remove_command_refuses_manifest_drift_before_mutation(
             instance=SimpleNamespace(from_project=lambda _project: None),
         ),
     )
-
     command = ProjectResource(_client=client).remove_command(
         ProjectSelector.from_project_id(project_id),
         purge=True,
@@ -3787,6 +4030,7 @@ def test_public_remove_command_refuses_manifest_drift_when_unreadable(
             instance=SimpleNamespace(from_project=lambda _project: None),
         ),
     )
+
     command = ProjectResource(_client=client).remove_command(
         ProjectSelector.from_project_id(project_id),
         purge=True,

@@ -90,6 +90,16 @@ jobs:
           uv run --no-project --python 3.12.13 python -c 'import platform,sys; assert sys.version_info[:3] == (3,12,13); assert platform.machine() == "x86_64"'
           echo "odoo_source_commit=cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
           echo "python_version=$(uv run --no-project --python 3.12.13 python --version)"
+      - name: Validate the public full-tier bootstrap without provisioning a scenario
+        env:
+          ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source-refresh
+        run: |
+          set -euo pipefail
+          uv run --no-project --python 3.12.13 python scripts/real_odoo_bootstrap.py \
+            --tier full \
+            --output .artifacts/real-odoo-dependency-refresh/bootstrap.json \
+            --artifact-root .artifacts/real-odoo-dependency-refresh/bootstrap-artifacts \
+            --run-id dependency-refresh-bootstrap
       - name: Regenerate pinned locks and run the real pinned audit scanner
         run: |
           set -euo pipefail
@@ -104,6 +114,8 @@ jobs:
             --no-header \
             --upgrade-package certifi \
             --upgrade-package pillow \
+            --upgrade-package pyasn1 \
+            --upgrade-package soupsieve \
             --upgrade-package urllib3 \
             --upgrade-package werkzeug
           generated_lock="$output/odoo19-linux-amd64-py3.12.lock"
@@ -114,7 +126,7 @@ jobs:
             cat "$generated_lock"
           } > "$generated_lock.with-header"
           mv "$generated_lock.with-header" "$generated_lock"
-          uv lock --upgrade-package certifi
+          uv lock --check
           cp uv.lock "$output/uv.lock"
           cp /tmp/odoo19-overrides.txt "$output/odoo19-overrides.txt"
           set +e
@@ -136,7 +148,7 @@ jobs:
 
           root = Path(".artifacts/real-odoo-dependency-refresh")
           lock = (root / "odoo19-linux-amd64-py3.12.lock").read_text()
-          expected = {"certifi": "2026.10.19", "pillow": "13.0.0", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
+          expected = {"certifi": "2026.10.19", "pillow": "13.0.0", "pyasn1": "0.6.5", "soupsieve": "4.0", "urllib3": "2.8.0", "werkzeug": "3.1.9"}
           actual = {name: version for name, version in re.findall(r"(?m)^([A-Za-z0-9_.-]+)==([^\s\\]+)", lock)}
           assert {name: actual.get(name) for name in expected} == expected
           project_lock = tomllib.loads((root / "uv.lock").read_text())
