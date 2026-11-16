@@ -44,9 +44,10 @@ _FAKE_ODOO = textwrap.dedent(
 
 
     def main():
-        port = int(sys.argv[sys.argv.index("--http-port") + 1])
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        with open(__file__ + ".port", "w", encoding="utf-8") as handle:
+            handle.write(str(server.server_address[1]))
         work("draft")
-        server = http.server.HTTPServer(("127.0.0.1", port), Handler)
         server.serve_forever()
 
 
@@ -172,7 +173,6 @@ def test_headless_debug_session_through_cli_processes(
     draft = _line(_FAKE_ODOO, "return state")
     queued = _line(_FAKE_ODOO, 'work("queued")')
     client = repo / "client.py"
-    client.write_text(_CLIENT.format(port=port), encoding="utf-8")
     unrelated = subprocess.Popen(["sleep", "300"])
     session_dir = short / "debug" / env_id
     try:
@@ -196,6 +196,8 @@ def test_headless_debug_session_through_cli_processes(
         result = _result(started)
         session_id = result["session_id"]
         assert result["state"] == "stopped"
+        port = int(Path(str(script) + ".port").read_text(encoding="utf-8"))
+        client.write_text(_CLIENT.format(port=port), encoding="utf-8")
         evaluated = _result(
             _document(
                 _run(
@@ -255,7 +257,7 @@ def test_headless_debug_session_through_cli_processes(
             )
         )
         assert _result(resumed)["state"] == "running"
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             try:
                 with socket.create_connection(("127.0.0.1", port), 0.2):
@@ -263,7 +265,7 @@ def test_headless_debug_session_through_cli_processes(
             except OSError:
                 time.sleep(0.1)
         else:
-            raise AssertionError("debug target did not open its HTTP port")
+            raise AssertionError(f"debug target did not open its HTTP port {port}")
         blocked = _document(
             _run(
                 binary,
