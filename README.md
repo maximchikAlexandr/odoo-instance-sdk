@@ -813,7 +813,65 @@ context, and truncation flag.  Startup failures use a command-specific
 startup code and do not invent user-code details.  All result, output, source,
 and diagnostic fields are secret-redacted.
 
-## Complete CLI command reference
+## Shared GreenMail mail tests
+
+`odcli mail` runs one GreenMail service for the current OS user. It publishes SMTP, IMAP, and the HTTP API on `127.0.0.1` only. A Dockerized Odoo reaches it as `odcli-greenmail` on ports `3025` and `3143`. `mail up` and `mail down` do not write an Odoo database. `mail down` stops the shared service for every test, so project cleanup must not call it. Repeat `mail up` reuses the running service.
+
+`mail configure` selects the same project or environment as `odcli run`. It creates one mailbox, writes `ir.mail_server` and `fetchmail.server` in that database only, and deactivates other mail servers so mail cannot leave through a previous SMTP. Repeat configuration does not add a second managed server. `mail configure --undo` restores the saved active flags and removes the managed rows. It leaves GreenMail running. If `fetchmail` is not installed, configure stops before any write.
+
+Read addresses from `odcli mail status --format json`. Do not hard-code ports. The mailbox password stays in an owner-only file and is never printed. Parallel tests use a distinct recipient and check that address plus the run id. Remove only that mailbox with `DELETE /api/user/{email}`. Do not purge or reset GreenMail. SMTP success means Odoo mail arrived in GreenMail. IMAP success means Odoo fetched the message and created a message, alias, or record. A message that only sits in GreenMail is not success. GreenMail accepts mail locally and does not validate provider delivery, SPF, DKIM, or DMARC.
+
+```bash
+odcli mail up
+odcli mail status --format json
+odcli mail configure
+odcli mail configure --undo
+```
+
+```python
+import json
+import smtplib
+from email.message import EmailMessage
+from subprocess import check_output
+
+from odoo_instance_sdk.resources.mail import mail_recipient
+
+status = json.loads(check_output(["odcli", "mail", "status", "--format", "json"], text=True))
+smtp = status["result"]["smtp"]
+recipient = mail_recipient("demo", "run-1")
+message = EmailMessage()
+message["To"] = recipient
+message["From"] = recipient
+message["Subject"] = "run-1"
+message.set_content("run-1")
+with smtplib.SMTP(smtp["host"], smtp["port"], timeout=10) as client:
+    client.send_message(message)
+```
+
+```python
+import json
+import smtplib
+from email.message import EmailMessage
+from subprocess import check_output
+
+status = json.loads(check_output(["odcli", "mail", "status", "--format", "json"], text=True))
+configured = json.loads(check_output(["odcli", "mail", "configure", "--format", "json"], text=True))
+mailbox = configured["result"]["mailbox"]
+imap = status["result"]["imap"]
+message = EmailMessage()
+message["To"] = mailbox
+message["From"] = mailbox
+message["Subject"] = "fetch-me"
+message.set_content(f"fetch-me via {imap['host']}:{imap['port']}")
+smtp = status["result"]["smtp"]
+with smtplib.SMTP(smtp["host"], smtp["port"], timeout=10) as client:
+    client.send_message(message)
+check_output(["odcli", "exec", 'env["fetchmail.server"].search([])[0].fetch_mail()'])
+```
+
+The second example is complete only after a separate check finds the fetched message in `mail.message`, an alias, or the destination record.
+
+
 
 This is the complete shipped command-path inventory. The Click object
 `odoo_instance_sdk.cli:cli` is its source of truth. Every entry has one purpose
@@ -871,6 +929,10 @@ sentence; use the entry's `--help` for exact options.
 - `odcli translations export` — Export translations for a selected module and languages.
 - `odcli deps verify` — Verify Python and add-on dependency readiness.
 - `odcli vscode generate` — Generate VS Code launch configuration from project settings.
+- `odcli mail up` — Start or reuse this user's shared GreenMail service.
+- `odcli mail status` — Show loopback GreenMail endpoints without secrets.
+- `odcli mail down` — Stop only this user's shared GreenMail service.
+- `odcli mail configure` — Point the selected database at GreenMail or restore its previous mail settings.
 - `odcli postgres approve-image` — Pin trust to the resolved PostgreSQL image digest.
 - `odcli postgres ps` — Report the configured PostgreSQL cluster state and endpoint.
 - `odcli postgres up` — Start or verify the configured PostgreSQL cluster.
