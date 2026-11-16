@@ -346,7 +346,9 @@ def test_marker_failure_stays_pending_and_success_records_no_backup(tmp_path: Pa
     assert journal["stage"] == CopyJournalStage.RESTORED.value
     assert journal["backup_id"] is None
     assert ready.skipped == []
-    env = _row_to_env(catalog.get_environment(str(plan.env_id)))
+    row = catalog.get_environment(str(plan.env_id))
+    assert row is not None
+    env = _row_to_env(row)
     assert env.db_copy_strategy is DatabaseCopyStrategy.TEMPLATE
     assert env.target_filestore_path == recorded
     assert env.backup_id is None
@@ -439,4 +441,6 @@ def _environment_row(tmp_path: Path, plan: _CheckoutPlan, **overrides: str) -> s
     )
     values.update(overrides)
     seed_env(catalog, values)
-    return catalog.get_environment(str(plan.env_id))
+    row = catalog.get_environment(str(plan.env_id))
+    assert row is not None
+    return row
