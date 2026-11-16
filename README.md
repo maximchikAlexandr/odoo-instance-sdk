@@ -294,8 +294,14 @@ odcli vscode generate
 
 `test --changed` selects add-ons from the Git diff. Module commands provide an
 explicit module-oriented path; dependency verification, translation export,
-and VS Code generation remain separate inspectable operations. When a module
-update fails behind a long startup log, `module update` prioritizes a valid
+and VS Code generation remain separate inspectable operations. `odcli debug`
+attaches one headless debugpy session to a ready environment whose recorded
+interpreter already has debugpy installed. The session requires `workers = 0`
+and no reload, keeps running after the command returns, and is removed by
+`odcli debug stop`. Ctrl+C cancels only the current wait. `odcli debug eval`
+executes arbitrary code in that trusted local Odoo process.
+
+When a module update fails behind a long startup log, `module update` prioritizes a valid
 nonce-framed `user_error` or `finalization_error` payload and otherwise falls
 back to a bounded redacted tail of `stderr`, not the first characters. Rich,
 JSON, and TOON return the same stable error code and safe details.
@@ -871,6 +877,14 @@ sentence; use the entry's `--help` for exact options.
 - `odcli translations export` — Export translations for a selected module and languages.
 - `odcli deps verify` — Verify Python and add-on dependency readiness.
 - `odcli vscode generate` — Generate VS Code launch configuration from project settings.
+- `odcli debug start` — Start one headless debug session for the selected environment.
+- `odcli debug context` — Show the current debug snapshot without resuming.
+- `odcli debug continue` — Resume a stopped target and optionally wait.
+- `odcli debug step` — Step over, into, or out of the stopped target.
+- `odcli debug pause` — Pause the running target and wait for the stop.
+- `odcli debug eval` — Evaluate one expression in the stopped trusted process.
+- `odcli debug restart` — Relaunch the target and keep session breakpoints.
+- `odcli debug stop` — Stop the session and remove its private files.
 - `odcli postgres approve-image` — Pin trust to the resolved PostgreSQL image digest.
 - `odcli postgres ps` — Report the configured PostgreSQL cluster state and endpoint.
 - `odcli postgres up` — Start or verify the configured PostgreSQL cluster.

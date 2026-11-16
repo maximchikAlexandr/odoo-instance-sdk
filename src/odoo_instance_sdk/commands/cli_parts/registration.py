@@ -413,6 +413,12 @@ def _load_git_group() -> click.Group:
     return git_group
 
 
+def _load_debug_group() -> click.Group:
+    from odoo_instance_sdk.commands.debug import debug_group
+
+    return debug_group
+
+
 def _load_ps_command() -> click.Command:
     from odoo_instance_sdk.commands.ps import ps_command
 
@@ -547,6 +553,7 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
                         "translations",
                         "deps",
                         "vscode",
+                        "debug",
                         "eval",
                         "exec",
                     ],
@@ -665,6 +672,19 @@ cli.add_command(
         loader=_load_git_group,
     ),
     name="git",
+)
+cli.add_command(
+    _LazyGroup(
+        name="debug",
+        help=(
+            "Debug a local Odoo process. The session keeps running after the "
+            "command returns; Ctrl+C cancels only the current wait. Requires "
+            "workers = 0, no reload, and debugpy in the recorded environment. "
+            "eval executes arbitrary code in that trusted local process."
+        ),
+        loader=_load_debug_group,
+    ),
+    name="debug",
 )
 cli.add_command(bug_report_group, name="bug-report")
 cli.add_command(_publish, name="publish")

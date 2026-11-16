@@ -1,0 +1,14 @@
+"""Fixed bounds for debug snapshots and waits."""
+
+from __future__ import annotations
+
+MAX_LOCALS = 32
+MAX_STACK = 20
+MAX_SOURCE_LINES = 15
+MAX_STRING = 240
+MAX_OUTPUT_BYTES = 65536
+MAX_EVAL_DEPTH = 3
+MAX_CHILDREN = 16
+MAX_WAIT_SECONDS = 300.0
+STARTUP_TIMEOUT_SECONDS = 60.0
+PROTOCOL_VERSION = 1
