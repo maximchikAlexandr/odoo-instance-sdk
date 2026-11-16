@@ -24,6 +24,7 @@ from odoo_instance_sdk.commands.cli_parts.registration import (
     _ShellCommandFailure,
     cli,
 )
+from odoo_instance_sdk.commands.cli_parts.vscode import launch_generate_command
 from odoo_instance_sdk.commands.context import (
     CliContext,
     ResolvedContext,
@@ -34,7 +35,6 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
-    action_command,
     bordered_table,
     command_options,
     emit,
@@ -59,7 +59,6 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LogfileAccessError,
 )
-from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.internal.automation import (
     eval_expression_command,
     exec_script_command,
@@ -76,7 +75,6 @@ from odoo_instance_sdk.internal.project_init import (
     write_project_generated_config,
 )
 from odoo_instance_sdk.internal.vscode_generate import build_launch_profile
-from odoo_instance_sdk.internal.vscode_jsonc import apply_profile_change, plan_profile_change
 from odoo_instance_sdk.models import (
     DepsVerifyResult,
 )
@@ -852,43 +850,14 @@ def vscode_generate(
         runtime_context = _ready_instance(ctx)
         runtime = runtime_context.runtime
 
-        def build_command() -> Command[dict[str, JsonValue]]:
-            profile = build_launch_profile(runtime)
-            change = (
-                plan_profile_change(
-                    runtime.repository_root / ".vscode" / "launch.json",
-                    profile,
-                    runtime.owner_kind,
-                    runtime.owner_id,
-                )
-                if write_file
-                else None
-            )
-
-            def operation() -> dict[str, JsonValue]:
-                if change is None:
-                    return {"profile": profile}
-                written = apply_profile_change(change)
-                return {
-                    "profile": profile,
-                    "written": str(written),
-                    "change": change.kind,
-                    "fields": list(change.fields),
-                }
-
-            details: JsonValue = None
-            if change is not None:
-                details = {"change": change.kind, "fields": list(change.fields)}
-            return action_command(
-                "vscode.generate",
-                operation,
-                description="Generate VS Code launch configuration",
-                mutating=write_file,
-                details=details,
-            )
-
         status, _result = run_or_preview(
-            build_command,
+            lambda: launch_generate_command(
+                build_launch_profile(runtime),
+                runtime.repository_root / ".vscode" / "launch.json",
+                runtime.owner_kind,
+                runtime.owner_id,
+                write_file,
+            ),
             command_name="vscode.generate",
             mode=output_mode,
             dry_run=dry_run,
