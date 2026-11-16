@@ -857,15 +857,16 @@ from subprocess import check_output
 status = json.loads(check_output(["odcli", "mail", "status", "--format", "json"], text=True))
 configured = json.loads(check_output(["odcli", "mail", "configure", "--format", "json"], text=True))
 mailbox = configured["result"]["mailbox"]
+imap = status["result"]["imap"]
 message = EmailMessage()
 message["To"] = mailbox
 message["From"] = mailbox
 message["Subject"] = "fetch-me"
-message.set_content("fetch-me")
+message.set_content(f"fetch-me via {imap['host']}:{imap['port']}")
 smtp = status["result"]["smtp"]
 with smtplib.SMTP(smtp["host"], smtp["port"], timeout=10) as client:
     client.send_message(message)
-check_output(["odcli", "exec", "env['fetchmail.server'].search([])[0].fetch_mail()"])
+check_output(["odcli", "exec", 'env["fetchmail.server"].search([])[0].fetch_mail()'])
 ```
 
 The second example is complete only after a separate check finds the fetched message in `mail.message`, an alias, or the destination record.

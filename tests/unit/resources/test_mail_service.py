@@ -172,6 +172,7 @@ def test_parallel_recipients_and_secret_files(
 ) -> None:
     _user_root(monkeypatch, tmp_path)
     assert mail_recipient("demo", "one") != mail_recipient("demo", "two")
+    assert mail_recipient("demo", "run_1") != mail_recipient("demo", "run-1")
     email = "odcli-demo@example.test"
     password = mailbox_password(email)
     assert password == mailbox_password(email)

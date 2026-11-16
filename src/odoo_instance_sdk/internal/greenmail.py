@@ -26,8 +26,6 @@ from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.paths import get_mail_root
 
 IMAGE = "greenmail/standalone:2.1.15"
-CONTAINER_NAME = "odcli-greenmail"
-NETWORK_NAME = "odcli-greenmail"
 DOCKER_HOSTNAME = "odcli-greenmail"
 BIND_HOST = "127.0.0.1"
 SMTP_CONTAINER_PORT = 3025
@@ -69,6 +67,16 @@ def owner_token() -> str:
     return str(os.environ.get("USERNAME", "windows"))
 
 
+def container_name() -> str:
+    """Return the GreenMail container name reserved for this OS user."""
+    return f"odcli-greenmail-{owner_token()}"
+
+
+def network_name() -> str:
+    """Return the Docker network reserved for this OS user."""
+    return f"odcli-greenmail-{owner_token()}"
+
+
 def slug(value: str) -> str:
     """Return a mailbox-local token made only of lowercase letters, digits, and dashes."""
     cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value.strip())
@@ -88,7 +96,8 @@ def mail_recipient(project: str, run_id: str) -> str:
         project: Project slug used in the local part.
         run_id: Run identifier that keeps parallel tests apart.
     """
-    return f"{slug(project)}-{slug(run_id)}@example.test"
+    token = hashlib.sha256(f"{project}\n{run_id}".encode()).hexdigest()[:8]
+    return f"{slug(project)}-{slug(run_id)[:24]}-{token}@example.test"
 
 
 def _identity(value: str) -> str:
@@ -96,30 +105,31 @@ def _identity(value: str) -> str:
 
 
 def secret_path() -> Path:
-    """Return the owner-only HMAC key path."""
-    return get_mail_root(ensure_exists=True) / "secret"
+    """Return the owner-only HMAC key path without creating it."""
+    return get_mail_root(ensure_exists=False) / "secret"
 
 
 def credentials_path(email: str) -> Path:
     """Return the owner-only credential file for one mailbox."""
-    return get_mail_root(ensure_exists=True) / "mailboxes" / f"{_identity(email)}.json"
+    return get_mail_root(ensure_exists=False) / "mailboxes" / f"{_identity(email)}.json"
 
 
-def snapshot_path(database: str) -> Path:
-    """Return the active-flag snapshot for one database."""
-    return get_mail_root(ensure_exists=True) / "snapshots" / f"{_identity(database)}.json"
+def snapshot_path(database: str, host: str | None, port: int) -> Path:
+    """Return the active-flag snapshot for one database on one server."""
+    identity = _identity(f"{host or ''}:{port}:{database}")
+    return get_mail_root(ensure_exists=False) / "snapshots" / f"{identity}.json"
 
 
 def request_path(database: str, operation: str) -> Path:
     """Return the shell request path for one database operation."""
     return (
-        get_mail_root(ensure_exists=True) / "requests" / f"{_identity(database)}-{operation}.json"
+        get_mail_root(ensure_exists=False) / "requests" / f"{_identity(database)}-{operation}.json"
     )
 
 
 def service_path() -> Path:
     """Return the secret-free published-port record."""
-    return get_mail_root(ensure_exists=True) / "service.json"
+    return get_mail_root(ensure_exists=False) / "service.json"
 
 
 def write_private(path: Path, text: str) -> None:
@@ -222,22 +232,22 @@ def _labels() -> tuple[str, ...]:
 
 def inspect_argv() -> tuple[str, ...]:
     """Return the read-only container inspect argv."""
-    return ("docker", "inspect", CONTAINER_NAME)
+    return ("docker", "inspect", container_name())
 
 
 def network_inspect_argv() -> tuple[str, ...]:
     """Return the read-only network inspect argv."""
-    return ("docker", "network", "inspect", NETWORK_NAME)
+    return ("docker", "network", "inspect", network_name())
 
 
 def network_create_argv() -> tuple[str, ...]:
     """Return the argv that creates the user-owned GreenMail network."""
-    return ("docker", "network", "create", *_labels(), NETWORK_NAME)
+    return ("docker", "network", "create", *_labels(), network_name())
 
 
 def remove_argv() -> tuple[str, ...]:
     """Return the argv that removes only the named GreenMail container."""
-    return ("docker", "rm", "--force", CONTAINER_NAME)
+    return ("docker", "rm", "--force", container_name())
 
 
 def run_argv(ports: PublishedPorts) -> tuple[str, ...]:
@@ -247,13 +257,13 @@ def run_argv(ports: PublishedPorts) -> tuple[str, ...]:
         "run",
         "--detach",
         "--name",
-        CONTAINER_NAME,
+        container_name(),
         "--restart",
         "no",
         "--memory",
         "512m",
         "--network",
-        NETWORK_NAME,
+        network_name(),
         "--network-alias",
         DOCKER_HOSTNAME,
         "--publish",
@@ -377,10 +387,9 @@ def odoo_container_ids(stdout: str) -> tuple[str, ...]:
         item = json.loads(line)
         if not isinstance(item, dict):
             continue
-        blob = " ".join(str(item.get(key, "")) for key in ("Image", "Command", "Names")).lower()
-        name = str(item.get("Names", ""))
+        name = str(item.get("Names", "")).lower()
         identifier = item.get("ID", item.get("Id"))
-        if "odoo" in blob and CONTAINER_NAME not in name and isinstance(identifier, str):
+        if "odcli-greenmail" not in name and isinstance(identifier, str) and identifier:
             found.append(identifier)
     return tuple(found)
 

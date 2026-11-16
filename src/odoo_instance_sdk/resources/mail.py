@@ -22,15 +22,14 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.greenmail import (
     BIND_HOST,
-    CONTAINER_NAME,
     DOCKER_HOSTNAME,
     IMAGE,
     IMAP_CONTAINER_PORT,
     LIMITATION,
-    NETWORK_NAME,
     SMTP_CONTAINER_PORT,
     PublishedPorts,
     allocate_ports,
+    container_name,
     create_mailbox,
     docker_ps_argv,
     host_database_running,
@@ -41,6 +40,7 @@ from odoo_instance_sdk.internal.greenmail import (
     mailbox_password,
     network_create_argv,
     network_inspect_argv,
+    network_name,
     odoo_container_ids,
     owner_token,
     parse_inspect,
@@ -257,14 +257,14 @@ def _status(
     return MailStatus(
         state=state,
         reused=reused,
-        container_name=CONTAINER_NAME,
+        container_name=container_name(),
         owner=owner_token(),
         bind_host=BIND_HOST,
         smtp=_endpoint(ports.smtp if visible and ports else None),
         imap=_endpoint(ports.imap if visible and ports else None),
         api=_endpoint(ports.api if visible and ports else None),
         docker_hostname=DOCKER_HOSTNAME,
-        docker_network=NETWORK_NAME,
+        docker_network=network_name(),
         image=IMAGE,
         limitation=LIMITATION,
     )
@@ -458,7 +458,7 @@ def _attach(context: RunContext[MailConfigureResult], container_id: str) -> None
     result = context.process_dynamic(
         PreparedStep(
             step_id="mail.runtime.connect.dynamic",
-            argv=("docker", "network", "connect", NETWORK_NAME, container_id),
+            argv=("docker", "network", "connect", network_name(), container_id),
             mutating=True,
             timeout=30,
         )
@@ -497,6 +497,9 @@ def _placement(
     ports: PublishedPorts,
 ) -> tuple[MailPlacementKind, str, int, int, bool]:
     code, stdout, _stderr = _output(context.process("mail.runtime.docker"))
+    context.action("mail.runtime.host")
+    on_host = host_database_running(database) or code != 0
+    context.complete_action("mail.runtime.host")
     host: tuple[MailPlacementKind, str, int, int, bool] = (
         "host",
         BIND_HOST,
@@ -504,16 +507,17 @@ def _placement(
         ports.imap,
         True,
     )
-    if host_database_running(database) or code != 0:
-        return host
-    identifiers = odoo_container_ids(stdout)
+    identifiers = () if on_host else odoo_container_ids(stdout)
     if len(identifiers) > 1:
         raise MailRuntimeAmbiguousError("more than one Odoo container publishes this HTTP port")
-    if not identifiers:
-        return host
-    _attach(context, identifiers[0])
-    _probe_container(context, identifiers[0])
-    return ("docker", DOCKER_HOSTNAME, SMTP_CONTAINER_PORT, IMAP_CONTAINER_PORT, False)
+    if len(identifiers) == 1:
+        context.action("mail.runtime.attach")
+        _attach(context, identifiers[0])
+        _probe_container(context, identifiers[0])
+        context.complete_action("mail.runtime.attach")
+        return ("docker", DOCKER_HOSTNAME, SMTP_CONTAINER_PORT, IMAP_CONTAINER_PORT, False)
+    context.skip("mail.runtime.attach")
+    return host
 
 
 def _configure_steps(ports: PublishedPorts, http_port: int, *, undo: bool) -> tuple[Prepared, ...]:
@@ -534,6 +538,19 @@ def _configure_steps(ports: PublishedPorts, http_port: int, *, undo: bool) -> tu
             mutating=False,
             read_only=True,
             timeout=30,
+        ),
+        PreparedAction(
+            step_id="mail.runtime.host",
+            action="read",
+            description="Check for a host Odoo process for this database",
+            mutating=False,
+            read_only=True,
+        ),
+        PreparedAction(
+            step_id="mail.runtime.attach",
+            action="connect",
+            description="Attach the discovered Odoo container to the GreenMail network",
+            mutating=True,
         ),
         PreparedAction(
             step_id="mail.mailbox.ensure",
@@ -563,7 +580,8 @@ def mail_configure_command(
         undo: Restore the saved active flags and remove managed mail rows.
         executor: Optional process executor used by tests.
     """
-    database = resolve_database_context(instance).database
+    selected = resolve_database_context(instance)
+    database = selected.database
     if instance.config.start_config is None:
         raise InstanceConfigurationError("mail configure requires an Odoo start configuration")
     http_port = int(instance.config.start_config.http_port)
@@ -590,7 +608,7 @@ def mail_configure_command(
                     "placement": "host",
                     "probe": False,
                     "operation": operation,
-                    "snapshot_path": str(snapshot_path(database)),
+                    "snapshot_path": str(snapshot_path(database, selected.host, selected.port)),
                 },
             )
             return
@@ -618,7 +636,7 @@ def mail_configure_command(
                     "placement": kind,
                     "probe": probe,
                     "operation": operation,
-                    "snapshot_path": str(snapshot_path(database)),
+                    "snapshot_path": str(snapshot_path(database, selected.host, selected.port)),
                 },
             )
 

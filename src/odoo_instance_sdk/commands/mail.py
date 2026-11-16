@@ -43,15 +43,20 @@ def _rich_mail(document: OutputDocument) -> str:
     if value.get("undone") is True:
         return f"Restored mail settings for {value.get('database')}."
     if "mailbox" in value:
+        database = value.get("database")
+        mailbox = value.get("mailbox")
+        smtp_host = value.get("smtp_host")
+        credentials_path = value.get("credentials_path")
         return (
-            f"Configured {value.get('database')} for {value.get('mailbox')} "
-            f"via {value.get('smtp_host')}. Credentials remain in {value.get('credentials_path')}."
+            f"Configured {database} for {mailbox} "
+            f"via {smtp_host}. Credentials remain in {credentials_path}."
         )
     state = str(value.get("state", "unknown"))
     if state != "running":
         return f"GreenMail is {state}."
+    bind_host = value.get("bind_host")
     return (
-        f"GreenMail running on {value.get('bind_host')} "
+        f"GreenMail running on {bind_host} "
         f"SMTP {_endpoint_port(value.get('smtp'))} "
         f"IMAP {_endpoint_port(value.get('imap'))} "
         f"API {_endpoint_port(value.get('api'))}"
