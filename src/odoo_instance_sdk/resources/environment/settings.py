@@ -328,7 +328,16 @@ class _SettingsMixin(_CheckoutInventoryMixin):
             row = catalog.get_environment(str(env_id))
             if row is not None and row["backup_id"] is not None:
                 backup_id = uuid.UUID(str(row["backup_id"]))
-        cleanup_failed = self._rollback_copy_checkout(catalog, env_id, backup_id)
+        from odoo_instance_sdk.resources.environment.checkout_template import (
+            rollback_template_checkout,
+        )
+
+        template_cleanup = rollback_template_checkout(catalog, env_id, context=context)
+        cleanup_failed = (
+            template_cleanup
+            if template_cleanup is not None
+            else self._rollback_copy_checkout(catalog, env_id, backup_id)
+        )
         # A restored copy must remain diagnosable when compensation cannot prove
         # that the target database is gone.  In particular, do not delete the
         # generated config (the cluster identity) or its owned backup first.

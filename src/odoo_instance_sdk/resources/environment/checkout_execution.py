@@ -17,11 +17,10 @@ from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import exclusive_lock, python_env_lock_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
-from odoo_instance_sdk.models import Backup
+from odoo_instance_sdk.models import Backup, DatabaseCopyStrategy, EnvironmentDatabaseMode
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment.checkout_artifacts import _checkout_applied_settings
 from odoo_instance_sdk.resources.environment.checkout_planning import (
-    EnvironmentDatabaseMode,
     EnvironmentState,
     _CheckoutPlan,
     _encode_runtime_json,
@@ -75,6 +74,19 @@ def do_checkout(  # noqa: C901
     *,
     context: RunContext[DevelopmentEnvironment],
 ) -> DevelopmentEnvironment:
+    template = (
+        plan.db_mode is EnvironmentDatabaseMode.COPY
+        and plan.options.db_copy_strategy is DatabaseCopyStrategy.TEMPLATE
+    )
+    cluster_identity = None
+    if template:
+        from odoo_instance_sdk.resources.environment.checkout_template import (
+            consume_template_preflight,
+            recorded_template_filestore,
+        )
+
+        recorded_template_filestore(plan)
+        cluster_identity = consume_template_preflight(context, plan)
     runtime_json = _encode_runtime_json(plan.odoo_bin, plan.runtime_cwd)
     env_row: dict[str, CatalogValue] = {
         "id": str(plan.env_id),
@@ -90,9 +102,15 @@ def do_checkout(  # noqa: C901
         "python_environment_path": plan.python_path,
         "python_environment_owned": plan.python_owned,
         "dependency_lock_path": str(plan.dependency_lock),
-        "db_mode": plan.db_mode,
+        "db_mode": plan.db_mode.value,
+        "db_copy_strategy": (
+            plan.options.db_copy_strategy.value
+            if template or plan.db_mode is EnvironmentDatabaseMode.COPY
+            else None
+        ),
         "source_db_name": plan.source_database,
         "target_db_name": plan.target_database,
+        "target_filestore_path": None,
         "backup_id": None,
         "runtime_json": runtime_json,
         "state": EnvironmentState.CREATING,
@@ -108,7 +126,6 @@ def do_checkout(  # noqa: C901
         "artifact_root": str(plan.artifact_root or plan.env_root),
         "adoption_input_fingerprint": plan.adoption_input_fingerprint,
     }
-
     cat = catalog
     cat.create_environment(env_row)
     cat.add_environment_event(str(plan.env_id), "checkout", "started")
@@ -202,24 +219,34 @@ def do_checkout(  # noqa: C901
         context.action("checkout.database")
 
         if (
-            plan.db_mode == EnvironmentDatabaseMode.COPY
+            plan.db_mode is EnvironmentDatabaseMode.COPY
             and plan.source_database is not None
             and plan.target_database is not None
         ):
-            backup_id = self._do_copy_restore(
-                context=context,
-                cat=cat,
-                env_id=plan.env_id,
-                source_config=plan.source_config,
-                cfg_dict=plan.config_values,
-                source_db=plan.source_database,
-                target_db=plan.target_database,
-                data_dir=plan.data_dir,
-                repo_root=(plan.project_root or plan.repo_root) if plan.adopted else plan.repo_root,
-                project=plan.project,
-                remote_name=plan.options.remote_name,
-                selected_backup=plan.selected_backup,
-            )
+            if template:
+                from odoo_instance_sdk.resources.environment.checkout_template import (
+                    run_template_clone,
+                )
+
+                assert cluster_identity is not None
+                run_template_clone(context, cat, plan, cluster_identity=cluster_identity)
+            else:
+                backup_id = self._do_copy_restore(
+                    context=context,
+                    cat=cat,
+                    env_id=plan.env_id,
+                    source_config=plan.source_config,
+                    cfg_dict=plan.config_values,
+                    source_db=plan.source_database,
+                    target_db=plan.target_database,
+                    data_dir=plan.data_dir,
+                    repo_root=(plan.project_root or plan.repo_root)
+                    if plan.adopted
+                    else plan.repo_root,
+                    project=plan.project,
+                    remote_name=plan.options.remote_name,
+                    selected_backup=plan.selected_backup,
+                )
 
         cat._finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))
         context.action("checkout.cleanup")
@@ -227,6 +254,8 @@ def do_checkout(  # noqa: C901
             context.skip("checkout.cleanup.worktree")
         context.complete_action("checkout.cleanup")
         context.complete_action("checkout.database")
+        if template and context.planned("checkout.template.drop"):
+            context.skip("checkout.template.drop")
         return self._get_env_row(cat, plan.env_id)
 
     except BaseException as exc:

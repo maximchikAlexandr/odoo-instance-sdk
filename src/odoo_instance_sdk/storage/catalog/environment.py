@@ -55,7 +55,8 @@ class _EnvironmentMixin:
                 runtime_json, applied_settings_json, state, created_at, last_used_at,
                 removed_at, last_error, project_id, checkout_repository_root,
                 recovery_json, checkout_git_common_dir, checkout_commit_sha, code_ownership,
-                artifact_root, adoption_input_fingerprint
+                artifact_root, adoption_input_fingerprint, db_copy_strategy,
+                target_filestore_path
             ) VALUES (
                 :id, :name, :repository_root, :git_common_dir, :branch, :base_ref,
                 :worktree_path, :generated_config_path, :python_environment_path,
@@ -64,7 +65,8 @@ class _EnvironmentMixin:
                 :runtime_json, :applied_settings_json, :state, :created_at, :last_used_at,
                 :removed_at, :last_error, :project_id, :checkout_repository_root,
                 :recovery_json, :checkout_git_common_dir, :checkout_commit_sha, :code_ownership,
-                :artifact_root, :adoption_input_fingerprint
+                :artifact_root, :adoption_input_fingerprint, :db_copy_strategy,
+                :target_filestore_path
             )""",
             {
                 "id": env["id"],
@@ -82,6 +84,8 @@ class _EnvironmentMixin:
                 "source_db_name": env.get("source_db_name"),
                 "target_db_name": env.get("target_db_name"),
                 "backup_id": env.get("backup_id"),
+                "db_copy_strategy": env.get("db_copy_strategy"),
+                "target_filestore_path": env.get("target_filestore_path"),
                 "runtime_json": env["runtime_json"],
                 "applied_settings_json": applied_settings,
                 "state": env["state"],

@@ -60,6 +60,7 @@ from odoo_instance_sdk.internal import git_worktree
 from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.models.backup import (
+    DatabaseCopyStrategy,
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
     EnvironmentCheckoutResult,
@@ -375,6 +376,14 @@ def env_group() -> None:
     default="shared",
     help="Database mode.",
 )
+@click.option(
+    "--db-copy-strategy",
+    "db_copy_strategy",
+    type=click.Choice(["backup", "template"]),
+    default="backup",
+    show_default=True,
+    help="COPY database strategy. Template is local and same-cluster only.",
+)
 @click.option("--source-db", "source_database", default=None, help="Source database name.")
 @click.option("--remote", "remote_name", default=None, help="Named remote source for COPY.")
 @click.option("--backup", "backup_id", default=None, help="Retained backup UUID for COPY.")
@@ -407,6 +416,7 @@ def env_checkout(
     base_ref: str | None,
     config_path: str | None,
     db_mode: str,
+    db_copy_strategy: str,
     source_database: str | None,
     remote_name: str | None,
     backup_id: str | None,
@@ -435,6 +445,7 @@ def env_checkout(
             base_ref=base_ref,
             config_path=Path(config_path) if config_path else None,
             db_mode=EnvironmentDatabaseMode(db_mode),
+            db_copy_strategy=DatabaseCopyStrategy(db_copy_strategy),
             source_database=source_database,
             remote_name=remote_name,
             backup_id=backup_id,

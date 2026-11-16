@@ -216,6 +216,9 @@ class _PgadminMixin:
         branch: str,
         repo_root: Path,
     ) -> tuple[str | None, str | None]:
+        from odoo_instance_sdk.resources.environment.checkout_template import validate_copy_strategy
+
+        validate_copy_strategy(options, cfg.get("db_host"))
         if options.remote_name is not None or options.backup_id is not None:
             if db_mode != EnvironmentDatabaseMode.COPY:
                 raise ConfigError("remote_name and backup_id are valid only for COPY checkout")

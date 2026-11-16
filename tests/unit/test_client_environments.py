@@ -35,6 +35,7 @@ def test_types_importable() -> None:
 def test_checkout_options_defaults() -> None:
     opts = EnvironmentCheckoutOptions()
     assert opts.db_mode == EnvironmentDatabaseMode.SHARED
+    assert opts.db_copy_strategy.value == "backup"
     assert opts.create_venv is False
 
 

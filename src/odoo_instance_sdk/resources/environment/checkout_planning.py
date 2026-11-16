@@ -36,6 +36,7 @@ from odoo_instance_sdk.models import (
     EnvironmentPythonMode,
     EnvironmentCodeOwnership,
     DevelopmentEnvironment as _DevelopmentEnvironment,
+    DatabaseCopyStrategy as _DatabaseCopyStrategy,
     EnvironmentDatabaseMode as _EnvironmentDatabaseMode,
     EnvironmentState as _EnvironmentState,
 )
@@ -62,6 +63,7 @@ type _PlanningError = PlanError | ConfigError | EnvironmentConflictError
 T = TypeVar("T")
 EnvironmentState = _EnvironmentState
 DevelopmentEnvironment = _DevelopmentEnvironment
+DatabaseCopyStrategy = _DatabaseCopyStrategy
 EnvironmentDatabaseMode = _EnvironmentDatabaseMode
 type _EnvironmentList = list[DevelopmentEnvironment]
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -99,6 +101,7 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
     name: str | None = None
     config_path: Path | None = None
     db_mode: EnvironmentDatabaseMode = EnvironmentDatabaseMode.SHARED
+    db_copy_strategy: DatabaseCopyStrategy = DatabaseCopyStrategy.BACKUP
     source_database: str | None = None
     target_database: str | None = None
     odoo_bin: Path | None = None
@@ -605,6 +608,7 @@ def _public_checkout_plan(
         branch=plan.branch,
         effective_base_ref=plan.base_ref,
         db_mode=plan.db_mode,
+        db_copy_strategy=plan.options.db_copy_strategy,
         source_database=plan.source_database,
         target_database=plan.target_database,
         python_mode=(

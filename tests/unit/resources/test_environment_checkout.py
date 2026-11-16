@@ -640,6 +640,7 @@ class TestCheckoutPreflight:
 
         assert plan.source_database == "comerta"
         assert plan.target_database == target_database
+        assert plan.db_copy_strategy.value == "backup"
         assert plan.provenance.status is BackupProvenanceStatus.UNKNOWN
         assert plan.freshness.value == "missing"
         fields = {field.name for field in msgspec.structs.fields(plan)}
@@ -648,6 +649,7 @@ class TestCheckoutPreflight:
             "branch",
             "effective_base_ref",
             "db_mode",
+            "db_copy_strategy",
             "source_database",
             "target_database",
             "python_mode",

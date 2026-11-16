@@ -277,6 +277,8 @@ environments = Table(
         nullable=False,
         server_default=LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     ),
+    Column("db_copy_strategy", Text),
+    Column("target_filestore_path", Text),
     Index("environments_active_idx", "git_common_dir", "branch", "state"),
     Index(
         "environments_project_checkout_idx",

@@ -21,7 +21,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0015"
+CATALOG_REVISION = "0016"
 
 type _DdlFingerprint = tuple[
     tuple[
@@ -413,6 +413,8 @@ _HISTORICAL_COMMON_OMISSIONS: dict[str, frozenset[str]] = {
             "artifact_root",
             "adoption_input_fingerprint",
             "recovery_json",
+            "db_copy_strategy",
+            "target_filestore_path",
         }
     ),
     "backups": frozenset({"source_name", "pinned"}),

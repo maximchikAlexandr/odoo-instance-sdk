@@ -78,6 +78,13 @@ class EnvironmentDatabaseMode(enum.StrEnum):
     COPY = "copy"
 
 
+class DatabaseCopyStrategy(enum.StrEnum):
+    """How a COPY checkout duplicates the source database."""
+
+    BACKUP = "backup"
+    TEMPLATE = "template"
+
+
 class EnvironmentPythonMode(enum.StrEnum):
     CREATE = "create"
     REUSE = "reuse"
@@ -185,8 +192,10 @@ class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=
     http_interface: str
     http_port: int
     db_mode: EnvironmentDatabaseMode
+    db_copy_strategy: DatabaseCopyStrategy | None = None
     source_db_name: str | None = None
     target_db_name: str | None = None
+    target_filestore_path: str | None = None
     backup_id: uuid.UUID | None = None
     state: EnvironmentState
     created_at: datetime
@@ -264,6 +273,7 @@ class EnvironmentCheckoutPlan(
     branch: str
     effective_base_ref: str
     db_mode: EnvironmentDatabaseMode
+    db_copy_strategy: DatabaseCopyStrategy = DatabaseCopyStrategy.BACKUP
     source_database: str | None
     target_database: str | None
     python_mode: EnvironmentPythonMode

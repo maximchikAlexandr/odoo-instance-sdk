@@ -729,7 +729,7 @@ class _CheckoutMixin(_CheckoutApiMixin):
         )
 
     def _copy_auxiliary_session(self, plan: _CheckoutPlan) -> AuxiliaryRestoreSession | None:
-        if plan.source_config is None:
+        if plan.source_config is None or plan.options.db_copy_strategy.value == "template":
             return None
         from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
         from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
@@ -810,7 +810,10 @@ class _CheckoutMixin(_CheckoutApiMixin):
             auxiliary_session = active_auxiliary_restore_session()
             if auxiliary_session is not None:
                 auxiliary_session.ensure_started(context)
-            if plan.db_mode is EnvironmentDatabaseMode.COPY:
+            if (
+                plan.db_mode is EnvironmentDatabaseMode.COPY
+                and plan.options.db_copy_strategy.value != "template"
+            ):
                 self._preflight_copy_checkout(plan)
             if plan.adopted:
                 assert catalog is not None
@@ -868,9 +871,6 @@ class _CheckoutMixin(_CheckoutApiMixin):
             top_dir = Path(output("checkout.validate.git.toplevel").strip()).resolve()
             common_dir = Path(output("checkout.validate.git.common-dir").strip())
             if not common_dir.is_absolute():
-                # Match ``rev_parse_git_common_dir``'s normalization used
-                # while capturing the plan. Git reports this path relative
-                # to the directory supplied through ``git -C``.
                 common_dir = plan.repo_root / common_dir
             actual_base = output("checkout.validate.git.base").strip()
             actual_identity = (
