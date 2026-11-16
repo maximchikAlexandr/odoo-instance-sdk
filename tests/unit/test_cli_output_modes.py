@@ -2501,7 +2501,7 @@ def _patch_leaf_external(  # noqa: C901
             ("mail", "status"): "mail_status_command",
             ("mail", "down"): "mail_down_command",
             ("mail", "configure"): "mail_configure_command",
-        }[path]
+        }[(path[0], path[1])]
         value = configured if path == ("mail", "configure") else status
         if path == ("mail", "configure"):
             monkeypatch.setattr(
