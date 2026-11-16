@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import json5
 import pytest
 
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.vscode_jsonc import apply_profile_change, plan_profile_change
 
 
-def _profile(program: str = "/odoo/odoo-bin"):
+def _profile(program: str = "/odoo/odoo-bin") -> dict[str, JsonValue]:
     return {
         "name": "Odoo demo",
         "type": "python",
@@ -20,7 +22,7 @@ def _profile(program: str = "/odoo/odoo-bin"):
     }
 
 
-def test_create_update_noop_and_conflict(tmp_path) -> None:
+def test_create_update_noop_and_conflict(tmp_path: Path) -> None:
     path = tmp_path / "launch.json"
     created = plan_profile_change(path, _profile(), "environment", "env-1")
     assert created.kind == "create"
@@ -50,7 +52,7 @@ def test_create_update_noop_and_conflict(tmp_path) -> None:
     assert path.read_text() == text
 
 
-def test_apply_refuses_a_changed_source(tmp_path) -> None:
+def test_apply_refuses_a_changed_source(tmp_path: Path) -> None:
     path = tmp_path / "launch.json"
     change = plan_profile_change(path, _profile(), "project", "demo")
     path.write_text("{}\n")
@@ -59,7 +61,7 @@ def test_apply_refuses_a_changed_source(tmp_path) -> None:
     assert path.read_text() == "{}\n"
 
 
-def test_invalid_jsonc_is_not_modified(tmp_path) -> None:
+def test_invalid_jsonc_is_not_modified(tmp_path: Path) -> None:
     path = tmp_path / "launch.json"
     path.write_text("{ this is not jsonc\n")
     original = path.read_text()
@@ -68,7 +70,7 @@ def test_invalid_jsonc_is_not_modified(tmp_path) -> None:
     assert path.read_text() == original
 
 
-def test_duplicate_identity_is_rejected(tmp_path) -> None:
+def test_duplicate_identity_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "launch.json"
     created = plan_profile_change(path, _profile(), "environment", "env-1")
     apply_profile_change(created)
@@ -80,7 +82,7 @@ def test_duplicate_identity_is_rejected(tmp_path) -> None:
     assert path.read_text() == original
 
 
-def test_trailing_comma_stays_valid(tmp_path) -> None:
+def test_trailing_comma_stays_valid(tmp_path: Path) -> None:
     path = tmp_path / "launch.json"
     path.write_text(
         '{\n  "configurations": [\n    { "name": "foreign", "type": "python" },\n  ]\n}\n'

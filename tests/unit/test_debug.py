@@ -7,6 +7,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -17,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.exceptions import DebugError
 from odoo_instance_sdk.execution import JsonValue, ProcessStep
@@ -39,10 +41,11 @@ from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.proc.redaction import REDACTION_MARKER
 from odoo_instance_sdk.internal.proc.run import ProcessHandle
 from odoo_instance_sdk.models.config import StartConfig
-from odoo_instance_sdk.models.debug import DebugSnapshot, DebugValue
+from odoo_instance_sdk.models.debug import DebugChild, DebugSnapshot, DebugValue
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.debug import DebugResource, debug_target_argv
 from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def test_snapshot_json_round_trip_has_no_adapter_ids() -> None:
@@ -174,7 +177,7 @@ def test_rpc_version_mismatch_changes_nothing(monkeypatch: pytest.MonkeyPatch) -
     deadline = time.monotonic() + 2
     while not socket_path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    raw = {"protocol": 99, "id": "1", "method": "context", "params": {}}
+    raw: dict[str, JsonValue] = {"protocol": 99, "id": "1", "method": "context", "params": {}}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.connect(str(socket_path))
         client.sendall(json.dumps(raw).encode() + b"\n")
@@ -247,7 +250,7 @@ def test_start_plan_dry_run_does_not_spawn_and_delegates_once(
         return SimpleNamespace(run=lambda: "snapshot")
 
     monkeypatch.setattr(DebugResource, "start_command", fake_start)
-    assert resource.start() == "snapshot"
+    assert cast("object", resource.start()) == "snapshot"
     assert calls == ["start_command"]
 
 
@@ -255,7 +258,7 @@ def test_start_plan_dry_run_does_not_spawn_and_delegates_once(
     ("config", "argv", "code"),
     [
         (StartConfig(workers=2, config_path="odoo.conf"), (), "workers-unsupported"),
-        (StartConfig(dev_mode="reload", config_path="odoo.conf"), (), "reload-unsupported"),
+        (StartConfig(dev_mode=["reload"], config_path="odoo.conf"), (), "reload-unsupported"),
         (StartConfig(config_path="odoo.conf"), ("--dev", "all"), "reload-unsupported"),
     ],
 )
@@ -359,7 +362,7 @@ class _Adapter(DebugAdapter):
         del port
 
     def set_breakpoints(
-        self, groups: dict[str, tuple[tuple[int, str | None], ...]]
+        self, groups: Mapping[str, tuple[tuple[int, str | None], ...]]
     ) -> tuple[tuple[str, int, bool, str | None], ...]:
         if self.fail:
             raise DebugError("protocol-failure", "adapter rejected breakpoints")
@@ -391,7 +394,7 @@ class _Adapter(DebugAdapter):
 
     def evaluate(
         self, expression: str, frame: int, depth: int
-    ) -> tuple[str, str, tuple[object, ...], bool]:
+    ) -> tuple[str, str, tuple[DebugChild, ...], bool]:
         del expression, frame, depth
         return ("1", "int", (), False)
 
@@ -479,10 +482,9 @@ def test_stop_does_not_signal_an_unrelated_pid(tmp_path: Path) -> None:
     launcher = _Launcher()
     controller = _controller(tmp_path, adapter, launcher)
     controller.bootstrap()
-    unrelated = 424242
     controller.handle({"method": "stop", "params": {}}, threading.Event())
     assert launcher.stopped == 2
-    assert unrelated not in {item for started in launcher.started for item in started}
+    assert "424242" not in {item for started in launcher.started for item in started}
 
 
 def test_value_model_round_trip() -> None:
@@ -499,8 +501,8 @@ def test_project_context_fails_before_a_session_file(
         odoo_bin=tmp_path / "odoo-bin",
     )
     resolved = ResolvedContext(
-        client=cast("object", SimpleNamespace()),
-        instance=cast("object", SimpleNamespace()),
+        client=cast("OdooClient", SimpleNamespace()),
+        instance=cast("OdooInstance", SimpleNamespace()),
         source=project,
         provenance="explicit",
     )

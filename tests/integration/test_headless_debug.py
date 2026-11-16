@@ -244,7 +244,8 @@ def test_headless_debug_session_through_cli_processes(
             )
         )
         breakpoints = _result(current)["breakpoints"]
-        assert any(item["line"] == draft for item in breakpoints)
+        assert isinstance(breakpoints, list)
+        assert any(isinstance(item, dict) and item.get("line") == draft for item in breakpoints)
         resumed = _document(
             _run(
                 binary,
