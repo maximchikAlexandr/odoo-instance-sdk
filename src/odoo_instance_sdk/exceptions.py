@@ -706,3 +706,63 @@ class UpdateIncompleteError(UpdateError):
 
 class UpdateRolledBackError(UpdateError):
     """The update failed and the previous revision was restored."""
+
+
+class MailError(OdooInstanceSdkError):
+    """Base for shared GreenMail and database mail setup failures."""
+
+    code = "mail_failed"
+
+
+class MailConnectionError(MailError):
+    """GreenMail or the selected runtime could not be reached."""
+
+    code = "mail_connection"
+
+
+class MailTimeoutError(MailError):
+    """GreenMail stayed unready until the deadline."""
+
+    code = "mail_timeout"
+
+
+class MailNotOwnedError(MailError):
+    """The named container or network belongs to someone else."""
+
+    code = "mail_not_owned"
+
+
+class MailRuntimeAmbiguousError(MailError):
+    """More than one Odoo container matches the selected HTTP port."""
+
+    code = "mail_runtime_ambiguous"
+
+
+class MailFetchmailMissingError(MailError):
+    """The selected database does not have fetchmail installed."""
+
+    code = "mail_fetchmail_missing"
+
+
+class MailInboundModelError(MailError):
+    """No concrete inbound model is available for the fetchmail server."""
+
+    code = "mail_inbound_model_missing"
+
+
+class MailSnapshotMissingError(MailError):
+    """Undo was requested before this database was configured."""
+
+    code = "mail_snapshot_missing"
+
+
+class MailCredentialsError(MailError):
+    """The owner-only mailbox credential file is missing or empty."""
+
+    code = "mail_credentials_missing"
+
+
+class MailConfigureError(MailError):
+    """The Odoo mail transaction failed without a more specific mail code."""
+
+    code = "mail_configure_failed"

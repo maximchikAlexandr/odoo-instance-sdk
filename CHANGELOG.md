@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Shared user-level GreenMail service with `odcli mail up`, `status`, `down`, and per-database `configure` / `--undo`
 - CLI-first project and environment workflows, including changed-test selection,
   module operations, dependency verification, translation export, and VS Code generation
 - Manifest-safe module discovery, deterministic dependency planning, optional `msgfmt`

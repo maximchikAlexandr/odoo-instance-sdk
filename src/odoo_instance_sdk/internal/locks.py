@@ -155,6 +155,13 @@ def pgadmin_lock_path() -> Path:
     return get_locks_dir() / "pgadmin.lock"
 
 
+def mail_lock_path() -> Path:
+    """Return the one user-global lock for GreenMail lifecycle."""
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    return get_locks_dir() / "mail.lock"
+
+
 def publication_lock_path() -> Path:
     """Return the one user-global lock for the owned Caddy route file."""
     from odoo_instance_sdk.internal.paths import get_locks_dir

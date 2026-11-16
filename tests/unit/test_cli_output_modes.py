@@ -949,6 +949,42 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture",
     ),
     PublicLeafCase(
+        ("mail", "up"),
+        ("mail", "up", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="mail_up_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="GreenMail is an optional local Docker fixture covered by unit tests and is outside the disposable Odoo lifecycle",
+    ),
+    PublicLeafCase(
+        ("mail", "status"),
+        ("mail", "status", "--dry-run"),
+        classification="process-previewable-read-only",
+        requires_dry_run=True,
+        sdk_primitive="mail_status_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="GreenMail status only inspects the optional local Docker fixture and is outside the disposable Odoo lifecycle",
+    ),
+    PublicLeafCase(
+        ("mail", "down"),
+        ("mail", "down", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="mail_down_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Stopping GreenMail is an optional local Docker fixture covered by unit tests and is outside the disposable Odoo lifecycle",
+    ),
+    PublicLeafCase(
+        ("mail", "configure"),
+        ("mail", "configure", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="mail_configure_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Database mail setup targets the optional GreenMail fixture and is covered by unit tests outside the disposable Odoo lifecycle",
+    ),
+    PublicLeafCase(
         ("update",),
         ("update", "--dry-run"),
         variants=("process-previewable-read-only",),
@@ -2428,6 +2464,53 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.bug_report.bug_report_submit_preview",
             fail_operation if failing else lambda _report_id: preview,
+        )
+        return
+
+    if path[0] == "mail":
+        from odoo_instance_sdk.models.mail import MailConfigureResult, MailStatus
+
+        status = MailStatus(
+            state="running",
+            reused=True,
+            container_name="odcli-greenmail",
+            owner="matrix",
+            bind_host="127.0.0.1",
+            smtp=None,
+            imap=None,
+            api=None,
+            docker_hostname="odcli-greenmail",
+            docker_network="odcli-greenmail",
+            image="greenmail/standalone:2.1.15",
+            limitation="GreenMail accepts mail locally and does not validate provider delivery, SPF, DKIM, or DMARC.",
+        )
+        configured = MailConfigureResult(
+            database="demo",
+            mailbox="odcli-demo@example.test",
+            credentials_path="/tmp/odcli-mail.json",
+            smtp_host="127.0.0.1",
+            smtp_port=13025,
+            imap_host="127.0.0.1",
+            imap_port=13143,
+            placement="host",
+            undone=False,
+            limitation=status.limitation,
+        )
+        primitive = {
+            ("mail", "up"): "mail_up_command",
+            ("mail", "status"): "mail_status_command",
+            ("mail", "down"): "mail_down_command",
+            ("mail", "configure"): "mail_configure_command",
+        }[path]
+        value = configured if path == ("mail", "configure") else status
+        if path == ("mail", "configure"):
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.mail.ready_instance",
+                lambda _ctx: SimpleNamespace(instance=MagicMock()),
+            )
+        monkeypatch.setattr(
+            f"odoo_instance_sdk.commands.mail.{primitive}",
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_command(value),
         )
         return
 

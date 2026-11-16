@@ -17,6 +17,7 @@ from odoo_instance_sdk.commands.backup import (  # noqa: I001 -- keep command re
     configure_catalog_path_provider,
 )
 from odoo_instance_sdk.commands.bug_report import bug_report_group
+from odoo_instance_sdk.commands.mail import mail_group
 from odoo_instance_sdk.commands.context import CliContext
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.output import (
@@ -549,6 +550,7 @@ class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
                         "vscode",
                         "eval",
                         "exec",
+                        "mail",
                     ],
                 },
             ]
@@ -667,6 +669,7 @@ cli.add_command(
     name="git",
 )
 cli.add_command(bug_report_group, name="bug-report")
+cli.add_command(mail_group, name="mail")
 cli.add_command(_publish, name="publish")
 cli.add_command(_unpublish, name="unpublish")
 cli.add_command(_remove, name="remove")

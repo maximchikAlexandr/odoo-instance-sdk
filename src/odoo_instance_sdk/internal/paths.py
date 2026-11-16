@@ -177,6 +177,15 @@ def get_project_postgres_dir(project_id: str) -> Path:
     return get_data_root(ensure_exists=False) / "projects" / project_id / "postgres"
 
 
+def get_mail_root(*, ensure_exists: bool = False) -> Path:
+    """Return the user-global GreenMail state root."""
+    root = get_data_root(ensure_exists=ensure_exists) / "mail"
+    if ensure_exists:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+    return root
+
+
 def get_pgadmin_root(*, ensure_exists: bool = False) -> Path:
     """Return the user-global pgAdmin state root without creating it by default."""
     root = get_data_root(ensure_exists=ensure_exists) / "pgadmin"
