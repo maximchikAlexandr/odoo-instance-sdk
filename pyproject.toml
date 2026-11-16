@@ -72,6 +72,7 @@ test = [
     "pytest-xdist>=3,<4",
     "pytest-timeout>=2.4,<3",
     "httpx2>=2.12.0",
+    "debugpy>=1.8,<2",
 ]
 mutation = ["mutmut>=3,<4"]
 dev = [

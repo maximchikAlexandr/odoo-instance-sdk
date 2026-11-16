@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 69-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 77-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -50,6 +50,14 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `translations export` | mutating-or-spawning | yes | not-applicable | Browser/localization/business behavior is outside the `base`-only fixture; existing command-plan tests remain authoritative |
 | `deps verify` | process-previewable-read-only | yes | critical | E2E-CP-04: owned Python/Odoo dependency preflight |
 | `vscode generate` | mutating-or-spawning | yes | not-applicable | Editor artifact generation is orthogonal to the server/database lifecycle and remains covered offline |
+| `debug start` | mutating-or-spawning | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
+| `debug context` | bounded-read-only | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
+| `debug continue` | mutating-or-spawning | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
+| `debug step` | mutating-or-spawning | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
+| `debug pause` | mutating-or-spawning | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
+| `debug eval` | mutating-or-spawning | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
+| `debug restart` | mutating-or-spawning | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
+| `debug stop` | mutating-or-spawning | yes | not-applicable | real Odoo is optional manual smoke; serial integration covers debugpy offline |
 | `postgres approve-image` | mutating-or-spawning | yes | critical | E2E-CP-01: exact trusted image digest |
 | `postgres ps` | bounded-read-only | no | critical | E2E-CP-01: health/ownership snapshot |
 | `postgres up` | mutating-or-spawning | yes | critical | E2E-CP-01: public owned cluster start |

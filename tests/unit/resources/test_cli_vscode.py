@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
+import json5
 import pytest
 from click.testing import CliRunner
 
@@ -273,11 +274,12 @@ class TestVscodeGenerateWrite:
         assert result_write.exit_code == 0
         written_path = project_manifest / ".vscode" / "launch.json"
         assert written_path.is_file()
-        written = json.loads(written_path.read_text())
+        written = json5.loads(written_path.read_text())
         assert written["configurations"][0]["name"] == f"Odoo {env.name}"
         assert written["configurations"][0]["program"] == str(fake_python.parent / "odoo-bin")
+        assert f"// odcli-profile: environment:{env.id}" in written_path.read_text()
 
-    def test_write_on_existing_errors(
+    def test_write_on_existing_preserves_jsonc(
         self,
         env_client: OdooClient,
         project_manifest: Path,
@@ -289,12 +291,16 @@ class TestVscodeGenerateWrite:
         vscode_dir = project_manifest / ".vscode"
         vscode_dir.mkdir(parents=True, exist_ok=True)
         target = vscode_dir / "launch.json"
-        original = textwrap.dedent("""\
+        original = textwrap.dedent(f"""\
             // existing jsonc
-            {
+            {{
               "version": "0.2.0",
-              "configurations": []
-            }
+              "compounds": [{{ "name": "stack", "configurations": ["foreign"] }}],
+              "configurations": [
+                // foreign profile
+                {{ "name": "Odoo {env.name}", "type": "python", "request": "launch" }}
+              ]
+            }}
         """)
         target.write_text(original)
         runner = CliRunner()
@@ -311,9 +317,17 @@ class TestVscodeGenerateWrite:
                 "--write",
             ],
         )
-        assert result.exit_code == 1
-        assert "refuses merge/rewrite" in result.output
-        assert target.read_text() == original
+        assert result.exit_code == 0, result.output
+        updated = target.read_text()
+        assert "// existing jsonc" in updated
+        assert "// foreign profile" in updated
+        assert '"compounds"' in updated
+        foreign_line = f'{{ "name": "Odoo {env.name}", "type": "python", "request": "launch" }}'
+        assert foreign_line in updated
+        assert f"// odcli-profile: environment:{env.id}" in updated
+        parsed = json5.loads(updated)
+        assert parsed["compounds"][0]["name"] == "stack"
+        assert len(parsed["configurations"]) == 2
 
     def test_default_does_not_write(
         self,

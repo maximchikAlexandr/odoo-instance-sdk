@@ -21,6 +21,7 @@ from scripts.real_odoo_pins import (
 )
 from tests.integration.real_odoo.contracts import (
     CANONICAL_INVENTORY_BASE,
+    CANONICAL_LEAF_COUNT,
     ORIGINAL_AUDIT_BASE,
     ContractError,
     check_matrix_document,
@@ -33,7 +34,7 @@ def test_generated_matrix_matches_canonical_inventory() -> None:
     actual = path.read_bytes()
     check_matrix_document(str(path), PUBLIC_LEAF_CASES)
     assert actual == path.read_bytes()
-    assert actual.count(b"| `") == 69
+    assert actual.count(b"| `") == CANONICAL_LEAF_COUNT
 
 
 def test_new_leaf_without_metadata_fails_closed() -> None:

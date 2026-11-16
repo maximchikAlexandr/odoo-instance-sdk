@@ -24,6 +24,7 @@ from odoo_instance_sdk.commands.cli_parts.registration import (
     _ShellCommandFailure,
     cli,
 )
+from odoo_instance_sdk.commands.cli_parts.vscode import launch_generate_command
 from odoo_instance_sdk.commands.context import (
     CliContext,
     ResolvedContext,
@@ -34,7 +35,6 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
-    action_command,
     bordered_table,
     command_options,
     emit,
@@ -74,11 +74,7 @@ from odoo_instance_sdk.internal.project_init import (
     validate_generated_config_target,
     write_project_generated_config,
 )
-from odoo_instance_sdk.internal.vscode_generate import (
-    build_launch_profile,
-    launch_json,
-    write_launch_json,
-)
+from odoo_instance_sdk.internal.vscode_generate import build_launch_profile
 from odoo_instance_sdk.models import (
     DepsVerifyResult,
 )
@@ -854,20 +850,13 @@ def vscode_generate(
         runtime_context = _ready_instance(ctx)
         runtime = runtime_context.runtime
 
-        def operation() -> dict[str, JsonValue]:
-            profile = build_launch_profile(runtime)
-            if write_file:
-                project_path = runtime.repository_root
-                written = write_launch_json(project_path, launch_json(profile))
-                return {"profile": profile, "written": str(written)}
-            return {"profile": profile}
-
         status, _result = run_or_preview(
-            lambda: action_command(
-                "vscode.generate",
-                operation,
-                description="Generate VS Code launch configuration",
-                mutating=write_file,
+            lambda: launch_generate_command(
+                build_launch_profile(runtime),
+                runtime.repository_root / ".vscode" / "launch.json",
+                runtime.owner_kind,
+                runtime.owner_id,
+                write_file,
             ),
             command_name="vscode.generate",
             mode=output_mode,

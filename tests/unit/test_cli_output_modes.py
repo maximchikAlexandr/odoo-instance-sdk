@@ -691,6 +691,78 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="Editor artifact generation is orthogonal to the server/database lifecycle and remains covered offline",
     ),
     PublicLeafCase(
+        ("debug", "start"),
+        ("debug", "start", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.start_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
+        ("debug", "context"),
+        ("debug", "context", "--dry-run"),
+        classification="bounded-read-only",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.context_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
+        ("debug", "continue"),
+        ("debug", "continue", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.continue_session_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
+        ("debug", "step"),
+        ("debug", "step", "over", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.step_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
+        ("debug", "pause"),
+        ("debug", "pause", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.pause_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
+        ("debug", "eval"),
+        ("debug", "eval", "1", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.eval_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
+        ("debug", "restart"),
+        ("debug", "restart", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.restart_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
+        ("debug", "stop"),
+        ("debug", "stop", "--dry-run"),
+        classification="mutating-or-spawning",
+        requires_dry_run=True,
+        sdk_primitive="DebugResource.stop_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="real Odoo is optional manual smoke; serial integration covers debugpy offline",
+    ),
+    PublicLeafCase(
         ("postgres", "approve-image"),
         (
             "postgres",
@@ -2181,6 +2253,42 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.cli_parts.callbacks.build_launch_profile",
             fail_operation if failing else lambda *_args, **_kwargs: {"name": "demo"},
+        )
+        return
+
+    if path[:1] == ("debug",):
+        from odoo_instance_sdk.models.debug import DebugSnapshot, DebugValue
+
+        payload: DebugSnapshot | DebugValue = (
+            DebugValue(expression="1", value="1", type="int")
+            if path == ("debug", "eval")
+            else DebugSnapshot(session_id="session-1", environment_id="env-1", state="stopped")
+        )
+
+        def debug_command(*_args: object, **_kwargs: object) -> Command[DebugSnapshot | DebugValue]:
+            if failing:
+                raise RuntimeError("isolated external operation failed")
+            return _matrix_command(payload)
+
+        resource = MagicMock()
+        for method in (
+            "start_command",
+            "context_command",
+            "continue_session_command",
+            "step_command",
+            "pause_command",
+            "eval_command",
+            "restart_command",
+            "stop_command",
+        ):
+            setattr(resource, method, debug_command)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.debug.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), MagicMock()),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.debug.DebugResource",
+            lambda *_args, **_kwargs: resource,
         )
         return
 

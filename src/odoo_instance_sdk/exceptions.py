@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.models.debug import DebugSnapshot
 
 type PlanJsonValue = (
     bool | int | float | str | list[PlanJsonValue] | dict[str, PlanJsonValue] | None
@@ -706,3 +707,22 @@ class UpdateIncompleteError(UpdateError):
 
 class UpdateRolledBackError(UpdateError):
     """The update failed and the previous revision was restored."""
+
+
+class DebugError(OdooInstanceSdkError):
+    """One stable debug failure, with the latest snapshot when one exists."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        hint: str | None = None,
+        state: str | None = None,
+        snapshot: DebugSnapshot | None = None,
+    ) -> None:
+        self.code = code
+        self.hint = hint
+        self.state = state
+        self.snapshot = snapshot
+        super().__init__(message)
