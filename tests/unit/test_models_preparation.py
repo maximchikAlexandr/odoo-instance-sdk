@@ -78,6 +78,7 @@ def test_checkout_plan_has_only_secret_free_public_fields() -> None:
         "branch",
         "effective_base_ref",
         "db_mode",
+        "db_copy_strategy",
         "source_database",
         "target_database",
         "python_mode",

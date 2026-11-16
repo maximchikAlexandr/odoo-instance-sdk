@@ -38,6 +38,7 @@ from odoo_instance_sdk.internal.paths import (
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
+    DatabaseCopyStrategy,
     DevelopmentEnvironment,
     EnvironmentDatabaseMode,
     EnvironmentCodeOwnership,
@@ -64,7 +65,6 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     _PlanningOutcome as _PlanningOutcome,
 )
 from odoo_instance_sdk.resources.environment import checkout_stages as _checkout_stages
-from odoo_instance_sdk.resources.environment.checkout_filestore import copy_attachment_probe
 from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
 
 _normalize_checkout_stage = _checkout_stages.normalize_checkout_stage
@@ -254,8 +254,12 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
         http_interface=http_interface,
         http_port=http_port,
         db_mode=EnvironmentDatabaseMode(str(_get("db_mode"))),
+        db_copy_strategy=(
+            DatabaseCopyStrategy(strategy) if (strategy := _opt("db_copy_strategy")) else None
+        ),
         source_db_name=_opt("source_db_name"),
         target_db_name=_opt("target_db_name"),
+        target_filestore_path=_opt("target_filestore_path"),
         backup_id=uuid.UUID(str(backup_raw)) if backup_raw is not None else None,
         state=EnvironmentState(str(_get("state"))),
         created_at=datetime.fromisoformat(str(_get("created_at"))),
@@ -452,7 +456,6 @@ def _restore_audit_backup_from_sqlite(
 
 
 def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
-    from odoo_instance_sdk.internal.pg.builder import build_psql_specification
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
     steps: list[Step] = [
@@ -634,52 +637,9 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
             )
         )
     if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is not None:
-        if plan.options.remote_name is not None:
-            steps.extend(
-                (
-                    PreparedAction(
-                        step_id="database.backup.wait",
-                        action="database.backup.wait",
-                        description="Wait for named remote backup response",
-                        mutating=True,
-                    ),
-                    PreparedAction(
-                        step_id="database.backup.transfer",
-                        action="database.backup.transfer",
-                        description="Transfer named remote backup bytes",
-                        mutating=True,
-                    ),
-                )
-            )
-        raw_port = plan.config_values.get("db_port")
-        try:
-            db_port = int(raw_port) if raw_port else 5432
-        except ValueError:
-            db_port = 5432
-        import odoo_instance_sdk.resources.database.backup_restore_parts.backup as restore
+        from odoo_instance_sdk.resources.environment.checkout_template import database_copy_steps
 
-        steps.extend(
-            restore._protect_restore_oid_probe(
-                build_psql_specification(
-                    step_id=step_id,
-                    host=plan.config_values.get("db_host"),
-                    port=db_port,
-                    user=plan.config_values.get("db_user"),
-                    password=plan.config_values.get("db_password"),
-                    database="postgres",
-                    args=("-c", restore._restore_probe_query(plan.target_database, step_id)),
-                    _trusted_args=("-t", "-A"),
-                    timeout=30.0,
-                    _require_binary=False,
-                ).prepared_step,
-                step_id,
-            )
-            for step_id in (
-                "database.restore.exists-before",
-                "database.restore.exists-after",
-            )
-        )
-        steps.append(copy_attachment_probe(plan))
+        steps.extend(database_copy_steps(plan))
     steps.extend(
         (
             PreparedAction(
@@ -688,6 +648,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
                 description="Prepare the selected checkout database",
                 details={
                     "mode": plan.db_mode.value,
+                    "strategy": plan.options.db_copy_strategy.value,
                     "database": plan.target_database or plan.source_database,
                 },
                 mutating=True,

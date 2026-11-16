@@ -66,6 +66,95 @@ def test_runtime_launch_identity_migration_is_idempotent_and_reversible(
     conn.close()
 
 
+def test_template_clone_migration_0015_to_0016_preserves_rows_and_blocks_downgrade(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "catalog-template-clone.sqlite3"
+    config = _alembic_config(db)
+    command.upgrade(config, "0015")
+    conn = sqlite3.connect(str(db))
+    conn.executemany(
+        "INSERT INTO environments "
+        "(id, name, repository_root, git_common_dir, branch, base_ref, worktree_path, "
+        "generated_config_path, python_environment_path, python_environment_owned, "
+        "dependency_lock_path, db_mode, runtime_json, state, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "shared-env",
+                "shared",
+                "/repo",
+                "/repo/.git",
+                "main",
+                "main",
+                "/wt",
+                "/wt/odoo.conf",
+                "/venv",
+                0,
+                "/lock",
+                "shared",
+                "{}",
+                "ready",
+                "2026-11-16",
+            ),
+            (
+                "copy-env",
+                "copy",
+                "/repo",
+                "/repo/.git",
+                "copy",
+                "main",
+                "/wt-copy",
+                "/wt-copy/odoo.conf",
+                "/venv",
+                0,
+                "/lock",
+                "copy",
+                "{}",
+                "ready",
+                "2026-11-16",
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    command.upgrade(config, "0016")
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT db_copy_strategy, target_filestore_path FROM environments WHERE id='shared-env'"
+    ).fetchone() == (None, None)
+    assert conn.execute(
+        "SELECT db_copy_strategy, target_filestore_path FROM environments WHERE id='copy-env'"
+    ).fetchone() == ("backup", None)
+    conn.execute(
+        "UPDATE environments SET db_copy_strategy='template', "
+        "target_filestore_path='/data/filestore/beta' WHERE id='copy-env'"
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(RuntimeError, match="cannot downgrade while a template environment exists"):
+        command.downgrade(config, "0015")
+
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE environments SET db_copy_strategy='backup' WHERE id='copy-env'")
+    conn.commit()
+    conn.close()
+    command.downgrade(config, "0015")
+    conn = sqlite3.connect(str(db))
+    names = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
+    assert "db_copy_strategy" not in names
+    assert "target_filestore_path" not in names
+    assert (
+        conn.execute("SELECT db_mode FROM environments WHERE id='copy-env'").fetchone()[0] == "copy"
+    )
+    conn.close()
+    command.upgrade(config, "head")
+    conn = sqlite3.connect(str(db))
+    verify_schema_equivalence(conn)
+    conn.close()
+
+
 def test_catalog_settings_migration_0014_to_0015_is_reversible_and_preserves_rows(
     tmp_path: Path,
 ) -> None:

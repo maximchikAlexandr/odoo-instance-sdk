@@ -9,9 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from odoo_instance_sdk.exceptions import (
-    EnvironmentConflictError,
-)
+from odoo_instance_sdk.exceptions import EnvironmentConflictError
 from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.db_name import validate_filestore_containment
 from odoo_instance_sdk.internal.dbreplace_recovery import recovery_values
@@ -46,6 +44,10 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
     EnvironmentState,
     T,
     _validate_retained_removal_evidence,
+)
+from odoo_instance_sdk.resources.environment.checkout_template import (
+    template_cleanup_plan,
+    template_database_drop_command,
 )
 from odoo_instance_sdk.resources.environment.failed_copy_recovery import (
     failed_copy_absence_probe_steps,
@@ -272,9 +274,6 @@ class _CleanupMixin:
                 force_connections=force_connections,
             )
         failed_copy_probes = failed_copy_absence_probe_steps(self, env, step_prefix=step_prefix)
-        # Existence checks are part of the preflight.  They must finish before
-        # publication or worktree cleanup can make a failed removal harder to
-        # recover.
         steps = (*preflight_steps, *failed_copy_probes, *publication_steps, *artifact_steps)
         if copy_drop is not None:
             steps = (*steps, *copy_drop.steps)
@@ -297,9 +296,13 @@ class _CleanupMixin:
         force_connections: bool = False,
         step_prefix: str = "",
     ) -> PreparedCommand[None] | None:
-        """Capture the guarded direct COPY database cleanup before removal starts."""
         if env.db_mode is not EnvironmentDatabaseMode.COPY or env.target_db_name is None:
             return None
+        template_drop = template_database_drop_command(
+            env, executor=executor, force_connections=force_connections, step_prefix=step_prefix
+        )
+        if template_drop is not None:
+            return template_drop
         config_path = Path(env.generated_config_path)
         if not config_path.is_file():
             return None
@@ -762,8 +765,6 @@ class _CleanupMixin:
             and preflight_failed_copy_without_config(self, catalog, env)
         ):
             return None
-        # The durable journal is authoritative after a crash; never let the
-        # mere presence of a generated config downgrade a terminal stage.
         if (
             not config_path.is_file()
             and journal is not None
@@ -920,9 +921,7 @@ class _CleanupMixin:
             if stage in (CopyJournalStage.RESTORE_PENDING, CopyJournalStage.RESTORED):
                 journal_backup_id = journal["backup_id"]
                 if journal_backup_id is None:
-                    raise EnvironmentConflictError(
-                        "copy_backup_missing", "journal backup is absent"
-                    )
+                    return template_cleanup_plan(env, instance, journal)
                 backup_row = catalog.get_by_id(str(journal_backup_id))
                 backup = _row_to_backup(backup_row) if backup_row is not None else None
                 if stage is CopyJournalStage.RESTORED and instance.config.db_host is not None:
