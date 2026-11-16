@@ -7,6 +7,7 @@ import signal
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from types import FrameType
 from typing import cast
 
 import msgspec
@@ -52,7 +53,7 @@ def _reopen_stdio(path: Path) -> None:
 
 
 def _install_signals(controller: DebugController) -> None:
-    def _exit(signum: int, _frame: object) -> None:
+    def _exit(signum: int, _frame: FrameType | None) -> None:
         controller.cleanup()
         raise SystemExit(128 + signum)
 
